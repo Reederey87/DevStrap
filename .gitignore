@@ -1,0 +1,28 @@
+# Build output
+bin/
+dist/
+coverage/
+
+# Go
+*.test
+*.out
+
+# Local DevStrap state
+.devstrap/
+state.db
+state.db-*
+promt.md
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Secrets
+.env
+.env.*
+!.env.example
+!.env.template
+!.env.schema
