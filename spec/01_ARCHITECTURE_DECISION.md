@@ -1,3 +1,7 @@
+---
+last_reviewed: 2026-06-26
+tracks_code: [cmd/**, internal/**, spec/**]
+---
 # Architecture Decision: Mac-First Managed Code Namespace
 
 ## Decision
@@ -77,10 +81,10 @@ DevStrap does **not** own:
 The user pain is not only remote file sync. It is:
 
 - inconsistent project paths;
-- stale branches;
+- stale local default branches;
 - missing env variables;
 - scattered worktrees;
-- agent work starting from stale main;
+- agent work starting from stale local default branches;
 - different machines having different readiness states.
 
 A managed namespace + daemon solves those without waiting for a kernel/filesystem-level implementation.
@@ -124,7 +128,7 @@ Problems:
 - OS-specific native dependencies differ;
 - `.env` files expose secrets;
 - generated folders explode sync volume;
-- stale main and bad agent worktrees remain unsolved.
+- stale local default branches and bad agent worktrees remain unsolved.
 
 ### Alternative B — Another manifest Git repo
 
@@ -156,18 +160,17 @@ Build in this order:
 
 ```text
 1. CLI proof: scan, adopt, hydrate, open, worktree, env.
-2. Local daemon: watcher, reconciler, skeletons, LaunchAgent.
-3. Multi-device hub: event sync, device status, encrypted blobs.
-4. Agent workspaces: branch/worktree per task, policy, logs, PR.
+2. Thin agent runner: branch/worktree per task, scoped env, logs, diff summary, PR gate.
+3. Local daemon: watcher, reconciler, skeletons, LaunchAgent.
+4. Multi-device hub: event sync, device status, encrypted blobs.
 5. StrapFS: optional virtual filesystem layer.
 ```
 
 ## Non-negotiable architecture rules
 
-1. **Never branch agents from local main.** Always fetch and branch from `origin/main` or configured upstream ref.
+1. **Never branch agents from a local default branch.** Always resolve the remote default branch, fetch it, and branch from `origin/<default_branch>` or an explicitly configured upstream ref.
 2. **Never sync plaintext secrets by default.** Use secret references or encrypted bundles.
 3. **Never sync dependency folders.** Recreate `.venv`, `node_modules`, build output locally.
 4. **Never silently overwrite dirty worktrees.** Detect, warn, branch, stash, or skip.
 5. **Always maintain one canonical project path.** The namespace path is the product.
 6. **Keep platform-specific code behind adapters.** Mac and Linux should share the core.
-

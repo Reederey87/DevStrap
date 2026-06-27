@@ -1,3 +1,7 @@
+---
+last_reviewed: 2026-06-26
+tracks_code: [cmd/**, internal/**]
+---
 # Challenge Matrix and Viable Approaches
 
 This document lists the hard problems and practical ways to solve each one.
@@ -40,29 +44,30 @@ Important constraint:
 
 - IDE indexers can accidentally trigger hydration of many repos. Lazy-on-access needs hydration thresholds and indexer detection.
 
-## 3. Stale main before agent work
+## 3. Stale default branch before agent work
 
-Problem: agent worktrees are created from outdated local main.
+Problem: agent worktrees are created from outdated local default branch.
 
 Recommended solution:
 
-- agent/worktree commands never branch from local main;
+- agent/worktree commands never branch from local default branch;
 - always `git fetch origin <default_branch> --prune` first;
-- resolve `origin/main` SHA;
+- resolve `origin/<default_branch>` SHA;
 - create worktree from that SHA;
 - record `base_ref` and `base_sha`.
 
 Command pattern:
 
 ```bash
-git fetch origin main --prune
-BASE=$(git rev-parse origin/main)
+DEFAULT=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@')
+git fetch origin "$DEFAULT" --prune
+BASE=$(git rev-parse "origin/$DEFAULT")
 git worktree add ~/.devstrap/worktrees/repo/task -b agent/task "$BASE"
 ```
 
 Extra protection:
 
-- before PR, check whether origin/main moved;
+- before PR, check whether origin/<default_branch> moved;
 - warn or auto-rebase;
 - never auto-push without showing diff/test result.
 
@@ -415,4 +420,3 @@ Recommended solution:
 - never destructive by default;
 - quarantine deletes;
 - `devstrap doctor` and `devstrap explain <path>`.
-

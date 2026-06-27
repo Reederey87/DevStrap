@@ -6,16 +6,27 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/Reederey87/DevStrap/internal/config"
+	dsgit "github.com/Reederey87/DevStrap/internal/git"
+	"github.com/Reederey87/DevStrap/internal/logging"
+	"github.com/Reederey87/DevStrap/internal/redact"
 	"github.com/Reederey87/DevStrap/internal/state"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
 
 const (
-	exitGeneric       = 1
-	exitInvalidConfig = 2
+	exitGeneric           = 1
+	exitInvalidConfig     = 2
+	exitDaemonUnavailable = 3
+	exitConflict          = 4
+	exitDirtyWorktree     = 5
+	exitAuth              = 6
+	exitGit               = 7
+	exitNetwork           = 8
+	exitPolicy            = 9
 )
 
 type appError struct {
@@ -31,6 +42,9 @@ type options struct {
 	json    bool
 	home    string
 	root    string
+	quiet   bool
+	verbose int
+	v       *viper.Viper
 }
 
 func Execute(ctx context.Context) error {
@@ -40,14 +54,18 @@ func Execute(ctx context.Context) error {
 }
 
 func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
-	opts := &options{}
+	opts := &options{v: viper.New()}
 	cmd := &cobra.Command{
 		Use:           "devstrap",
 		Short:         "Manage a local-first developer workspace namespace",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			return initConfig(opts)
+			if err := initConfig(opts); err != nil {
+				return err
+			}
+			logging.Configure(cmd.ErrOrStderr(), opts.v.GetBool("json"), opts.quiet, opts.verbose)
+			return nil
 		},
 	}
 
@@ -57,39 +75,53 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&opts.json, "json", false, "print machine-readable JSON")
 	cmd.PersistentFlags().StringVar(&opts.home, "home", "", "DevStrap state directory")
 	cmd.PersistentFlags().StringVar(&opts.root, "root", "", "managed code root")
+	cmd.PersistentFlags().BoolVar(&opts.quiet, "quiet", false, "only print errors")
+	cmd.PersistentFlags().CountVarP(&opts.verbose, "verbose", "v", "increase log verbosity")
 
-	_ = viper.BindPFlag("home", cmd.PersistentFlags().Lookup("home"))
-	_ = viper.BindPFlag("root", cmd.PersistentFlags().Lookup("root"))
-	_ = viper.BindPFlag("json", cmd.PersistentFlags().Lookup("json"))
+	_ = opts.v.BindPFlag("home", cmd.PersistentFlags().Lookup("home"))
+	_ = opts.v.BindPFlag("root", cmd.PersistentFlags().Lookup("root"))
+	_ = opts.v.BindPFlag("json", cmd.PersistentFlags().Lookup("json"))
 
 	cmd.AddCommand(newVersionCommand(stdout))
-	cmd.AddCommand(newInitCommand(stdout))
-	cmd.AddCommand(newStatusCommand(stdout))
-	cmd.AddCommand(newDoctorCommand(stdout))
+	cmd.AddCommand(newInitCommand(stdout, opts))
+	cmd.AddCommand(newStatusCommand(stdout, opts))
+	cmd.AddCommand(newDoctorCommand(stdout, opts))
+	cmd.AddCommand(newDBCommand(stdout, opts))
+	cmd.AddCommand(newScanCommand(stdout, opts))
+	cmd.AddCommand(newAddCommand(stdout, opts))
+	cmd.AddCommand(newHydrateCommand(stdout, opts))
+	cmd.AddCommand(newOpenCommand(stdout, opts))
+	cmd.AddCommand(newWorktreeCommand(stdout, opts))
+	cmd.AddCommand(newSyncCommand(stdout, opts))
+	cmd.AddCommand(newEnvCommand(stdout, opts))
+	cmd.AddCommand(newRunCommand(stdout, opts))
+	cmd.AddCommand(newAgentCommand(stdout, opts))
+	cmd.AddCommand(newDevicesCommand(stdout, opts))
 
 	return cmd
 }
 
 func initConfig(opts *options) error {
-	viper.SetConfigType("yaml")
-	viper.SetEnvPrefix("DEVSTRAP")
-	viper.AutomaticEnv()
+	opts.v.SetConfigType("yaml")
+	opts.v.SetEnvPrefix("DEVSTRAP")
+	opts.v.SetEnvKeyReplacer(strings.NewReplacer("-", "_", ".", "_"))
+	opts.v.AutomaticEnv()
 
 	defaults, err := config.DefaultPaths()
 	if err != nil {
 		return appError{code: exitInvalidConfig, err: err}
 	}
-	viper.SetDefault("home", defaults.Home)
-	viper.SetDefault("root", defaults.Root)
+	opts.v.SetDefault("home", defaults.Home)
+	opts.v.SetDefault("root", defaults.Root)
 
 	if opts.cfgFile != "" {
-		viper.SetConfigFile(opts.cfgFile)
+		opts.v.SetConfigFile(opts.cfgFile)
 	} else {
-		viper.SetConfigName("config")
-		viper.AddConfigPath(defaults.Home)
+		opts.v.SetConfigName("config")
+		opts.v.AddConfigPath(opts.v.GetString("home"))
 	}
 
-	if err := viper.ReadInConfig(); err != nil {
+	if err := opts.v.ReadInConfig(); err != nil {
 		var notFound viper.ConfigFileNotFoundError
 		if !errors.As(err, &notFound) {
 			return appError{code: exitInvalidConfig, err: fmt.Errorf("read config: %w", err)}
@@ -99,22 +131,48 @@ func initConfig(opts *options) error {
 	return nil
 }
 
-func openState() (*state.Store, error) {
+func (o *options) paths() config.Paths {
+	return config.Paths{
+		Home: o.v.GetString("home"),
+		Root: o.v.GetString("root"),
+	}
+}
+
+func (o *options) openState() (*state.Store, error) {
 	paths := config.Paths{
-		Home: viper.GetString("home"),
-		Root: viper.GetString("root"),
+		Home: o.v.GetString("home"),
+		Root: o.v.GetString("root"),
 	}
 	return state.Open(paths.StateDB())
 }
 
+func closeStore(store *state.Store) {
+	_ = store.Close()
+}
+
 func ExitCode(err error) int {
+	return ExitCodeWithWriter(err, os.Stderr)
+}
+
+func ExitCodeWithWriter(err error, stderr io.Writer) int {
 	if err == nil {
 		return 0
 	}
+	// Scrub token-shaped secrets and URL credentials from the final error text
+	// so a leaked value never reaches the terminal/CI logs (ENV-2/SEC-3).
+	_, _ = fmt.Fprintln(stderr, redact.Scrub(err.Error()))
 	var app appError
 	if errors.As(err, &app) {
 		return app.code
 	}
-	_, _ = fmt.Fprintln(os.Stderr, err)
+	if errors.Is(err, dsgit.ErrAuth) {
+		return exitAuth
+	}
+	if errors.Is(err, dsgit.ErrNetwork) {
+		return exitNetwork
+	}
+	if errors.Is(err, dsgit.ErrBranchNotFound) || errors.Is(err, dsgit.ErrRemoteMissing) {
+		return exitGit
+	}
 	return exitGeneric
 }

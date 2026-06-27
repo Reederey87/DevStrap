@@ -1,3 +1,7 @@
+---
+last_reviewed: 2026-06-26
+tracks_code: [internal/childenv/**, internal/cli/env.go, internal/devicekeys/**, internal/envbundle/**, internal/envfile/**, internal/platform/**]
+---
 # Secrets and Environment Design
 
 ## Principle
@@ -21,11 +25,13 @@ devstrap run work/acme/api -- npm test
 Behavior:
 
 - reads local `.env` once;
-- parses variables;
+- parses variables with DevStrap's non-interpolating grammar;
 - encrypts values for approved devices;
 - syncs encrypted bundle through Hub;
 - hydrates on another device only after device approval;
 - can write local `.env.local` or inject at runtime.
+
+Current implementation covers local capture, hydrate, provider binding, runtime injection, local OS-backed device private-key storage, manual remote-device enrollment, and local device trust-state commands: `devstrap env capture` parses without mutating process env, rejects dangerous variable names and interpolation-looking values unless `--literal` is explicit, encrypts the parsed bundle to the local device plus approved device age recipients, writes a `0600` ciphertext blob under `~/.devstrap/blobs`, records only `age_blob:<sha256>` references in SQLite, and adds the captured file to `.gitignore` when it is inside the project. `devstrap env hydrate --write <file>` decrypts local encrypted blobs with the local device age identity or resolves 1Password `op://` refs through `op inject`, writes the requested env file atomically with mode `0600`, refuses overwrites unless `--force`, and gitignores the hydrated target when it is inside the project. `devstrap run` injects encrypted local profiles into subprocess env or delegates 1Password refs to `op run`. `devstrap devices enroll/list/approve/revoke/lost/rename` exposes local device registration and trust-state management and refuses revocation of the current local device. Hub sync, out-of-band fingerprint confirmation, and automatic remote enrollment remain future work.
 
 ### Mode B — Secret-manager references
 
@@ -49,10 +55,10 @@ Behavior:
 
 MVP provider priority:
 
-1. DevStrap encrypted personal store;
-2. 1Password CLI;
-3. Doppler CLI;
-4. Infisical CLI;
+1. 1Password CLI for team/company projects and runtime-only policies;
+2. Doppler CLI;
+3. Infisical CLI;
+4. DevStrap encrypted personal store for solo/homelab projects;
 5. generic `.env.template` + shell command adapter.
 
 ## Env profile
@@ -95,12 +101,14 @@ Algorithm:
 ```text
 1. Resolve project.
 2. Resolve env profile.
-3. Load secrets from provider or encrypted bundle.
-4. Build child environment.
-5. Redact logs.
+3. For provider refs, write a temporary `0600` refs file and delegate to the provider CLI.
+4. For encrypted local bundles, decrypt into an in-memory child env map only.
+5. Build child environment with the shared sanitizer.
 6. Run command as subprocess.
-7. Clear process-local secret map.
+7. Remove temporary refs files and clear process-local secret maps.
 ```
+
+Current implementation supports `devstrap run` for encrypted local profiles and 1Password reference profiles. `devstrap env bind <path> <refs-file> --provider 1password` parses a refs file, stores only `op://` references in SQLite, and gitignores the refs file when it is inside the project. Provider runs execute `op run --env-file <temp-refs-file> -- <command>` with only the basic child-process allowlist plus `OP_*` authentication variables. Provider file hydration uses `op inject --in-file <temp-refs-file> --out-file <temp-output> --file-mode 0600 --force`, then atomically installs the resolved file through the same overwrite guard as encrypted hydration. Encrypted runs decrypt the local age blob and inject plaintext only into the subprocess environment.
 
 ## Hydration to file
 
@@ -158,14 +166,18 @@ Output:
 
 ## Device trust
 
-Each device has a key pair.
+Each device has an age X25519 identity for encrypted bundle recipients and an Ed25519 identity for event signing.
 
 ```text
-device public key → registered in Hub
-device private key → local OS keychain or encrypted local key file
+device age public key → devices.public_key and Hub enrollment record
+device age private identity → local protected secret storage
+device signing public key → devices.signing_public_key and Hub enrollment record
+device signing private identity → local protected secret storage
 ```
 
 Env bundles are encrypted for approved device public keys.
+
+Current implementation generates age X25519 and Ed25519 identities during `devstrap init`, stores only public keys in SQLite, and stores private identities through the platform keychain adapter. Darwin uses macOS Keychain through the Go keyring backend; Linux uses Secret Service/keyring through the same backend. If the system keyring is unavailable, DevStrap falls back to `~/.devstrap/keys` with mode `0600` so headless/CI systems remain usable. Manual `devices enroll --approve` records an approved device age recipient so future captures include that recipient. Production synced env blobs still require automatic remote enrollment and fingerprint confirmation.
 
 Device states:
 
@@ -182,9 +194,15 @@ New device approval:
 devstrap devices approve dev_gmk_ubuntu
 ```
 
+Approval requires out-of-band fingerprint verification. The approving device shows the public key fingerprint advertised by the Hub, and the user must confirm that it matches the new device before the new key can receive bundles. A mismatch means the Hub may be substituting keys and approval must fail.
+
+Device add, revoke, lost, or rotate events trigger re-encryption of affected bundles to the current approved-recipient set. Re-encryption removes future access to stored bundle ciphertext but does not make previously exposed secret values safe; revocation workflows must also mark affected values as requiring provider-side or service-side value rotation. At least one approved device must retain recoverable plaintext for every bundle before revocation completes.
+
 ## Secret redaction
 
-Redact:
+Secrets are represented in code as a capability, not as ordinary log-bound strings. A secret type must render as `***` for `String`, `GoString`, and JSON marshaling; plaintext is available only through an explicit audited reveal path at the subprocess boundary.
+
+Redaction is a backstop for:
 
 - exact secret values;
 - common token formats;
@@ -198,6 +216,8 @@ Log output should show:
 SNOWFLAKE_ACCOUNT=***
 OPENAI_API_KEY=***
 ```
+
+If a subprocess receives secrets, raw stdout/stderr persistence is disabled unless the log stream is scrubbed and marked as tainted. Tests must assert that a loaded secret value cannot be found in logs, event payloads, or `state.db`.
 
 ## Agent secret policy
 
@@ -222,6 +242,19 @@ Agent default:
 No secrets unless explicitly allowed by project agent policy.
 ```
 
+Child process environments start empty; DevStrap must not inherit `os.Environ()` by default. Allowed names are resolved from the bound env profile, denied names are removed, and dangerous names are stripped last and unconditionally:
+
+```text
+LD_PRELOAD
+DYLD_INSERT_LIBRARIES
+BASH_ENV
+NODE_OPTIONS
+PYTHONPATH
+GIT_SSH_COMMAND
+```
+
+Current implementation provides `internal/childenv`, a shared allowlist-based child environment builder. Git subprocesses and editor launches use it to avoid wholesale inheritance, and dangerous names are non-overridable even when allowlisted. Env-profile resolution, provider injection, and agent policy binding remain future work.
+
 ## Secret scanning
 
 During scan, detect dangerous files:
@@ -244,21 +277,19 @@ Behavior:
 - add ignore rules;
 - never upload as draft content.
 
-## Encryption choice
+## Encryption
 
-For the first version, use established libraries rather than inventing crypto.
+Decision: use age v1 (`filippo.io/age`) for encrypted env and draft bundles.
 
-Viable choices:
+Rules:
 
-- age file encryption for bundle export/import;
-- libsodium sealed boxes;
-- cloud KMS later for teams.
-
-MVP recommendation:
-
-```text
-Use age-compatible encryption or libsodium sealed boxes for encrypted env/draft bundles.
-```
+- one recipient stanza per approved device X25519 public key;
+- payload encryption uses age defaults, currently ChaCha20-Poly1305;
+- bundle metadata binds `bundle_id` and `workspace_id` in a signed manifest header;
+- device private identities are stored in OS keychain/Secret Service when available with a `0600` file fallback for unsupported/headless systems;
+- adding, removing, revoking, or rotating devices re-encrypts affected bundles to the new recipient set and creates explicit value-rotation follow-up work for any secret that may have been exposed to a revoked/lost device;
+- `encrypted_value_ref` stores a content-addressed pointer such as `age_blob:<sha256>`, never a plaintext value;
+- passphrase-only encryption is not acceptable for Hub-synced personal bundles because the Hub must not be able to decrypt and recipients are per device.
 
 ## Policy examples
 
@@ -292,4 +323,3 @@ secrets:
   agent_allow:
     - GITHUB_TOKEN_REPO_SCOPED
 ```
-

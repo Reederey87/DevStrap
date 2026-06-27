@@ -1,0 +1,28 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - gosec
+    - govet
+    - ineffassign
+    - staticcheck
+    - unconvert
+  settings:
+    gosec:
+      includes:
+        - G104
+        - G204
+        - G301
+        - G302
+        - G304
+        - G306
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec

@@ -1,0 +1,352 @@
+package sync
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sort"
+	"time"
+
+	"github.com/Reederey87/DevStrap/internal/id"
+	"github.com/Reederey87/DevStrap/internal/logging"
+	"github.com/Reederey87/DevStrap/internal/redact"
+	"github.com/Reederey87/DevStrap/internal/state"
+)
+
+const (
+	EventProjectAdded    = "project.added"
+	EventProjectUpdated  = "project.updated"
+	EventProjectDeleted  = "project.deleted"
+	EventProjectRenamed  = "project.renamed"
+	EventConflictCreated = "conflict.created"
+)
+
+// defaultReceiveMaxSkew bounds how far ahead of local physical time a remote
+// event's HLC may be before it is quarantined instead of applied.
+const defaultReceiveMaxSkew = 5 * time.Minute
+
+type ProjectPayload struct {
+	Path          string `json:"path"`
+	Type          string `json:"type"`
+	RemoteURL     string `json:"remote_url,omitempty"`
+	RemoteKey     string `json:"remote_key,omitempty"`
+	DefaultBranch string `json:"default_branch,omitempty"`
+}
+
+// RenamePayload carries a project.renamed event's source and destination paths.
+type RenamePayload struct {
+	OldPath string `json:"old_path"`
+	NewPath string `json:"new_path"`
+}
+
+type skewConflictDetails struct {
+	EventID  string `json:"event_id"`
+	DeviceID string `json:"device_id"`
+	HLC      int64  `json:"hlc"`
+	OffsetMS int64  `json:"offset_ms"`
+}
+
+type renameConflictDetails struct {
+	OldPath  string `json:"old_path"`
+	NewPath  string `json:"new_path"`
+	EventID  string `json:"event_id"`
+	DeviceID string `json:"device_id"`
+}
+
+type pendingDeleteConflictDetails struct {
+	Path     string `json:"path"`
+	EventID  string `json:"event_id"`
+	DeviceID string `json:"device_id"`
+	HLC      int64  `json:"hlc"`
+}
+
+type samePathCandidate struct {
+	payload  ProjectPayload
+	hlc      int64
+	deviceID string
+	eventID  string
+}
+
+type samePathConflictDetails struct {
+	Path           string `json:"path"`
+	RemoteKeyA     string `json:"remote_key_a"`
+	RemoteKeyB     string `json:"remote_key_b"`
+	WinnerKey      string `json:"winner_key"`
+	WinnerHLC      int64  `json:"winner_hlc,omitempty"`
+	WinnerDeviceID string `json:"winner_device_id,omitempty"`
+	WinnerEventID  string `json:"winner_event_id,omitempty"`
+	LoserKey       string `json:"loser_key"`
+	LoserHLC       int64  `json:"loser_hlc,omitempty"`
+	LoserDeviceID  string `json:"loser_device_id,omitempty"`
+	LoserEventID   string `json:"loser_event_id,omitempty"`
+}
+
+type eventHashChainConflictDetails struct {
+	EventID       string `json:"event_id"`
+	DeviceID      string `json:"device_id"`
+	HLC           int64  `json:"hlc,omitempty"`
+	Seq           int64  `json:"seq,omitempty"`
+	PrevEventHash string `json:"prev_event_hash"`
+	Error         string `json:"error"`
+}
+
+func NewProjectEvent(deviceID, typ string, hlc int64, payload ProjectPayload) (state.Event, error) {
+	eventID, err := id.New("evt")
+	if err != nil {
+		return state.Event{}, err
+	}
+	payload.RemoteURL = redact.StripURLUserinfo(payload.RemoteURL)
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return state.Event{}, err
+	}
+	return state.Event{
+		ID:          eventID,
+		DeviceID:    deviceID,
+		HLC:         hlc,
+		Type:        typ,
+		PayloadJSON: string(raw),
+		ContentHash: state.ContentHash(string(raw)),
+	}, nil
+}
+
+func CreateProjectEvent(ctx context.Context, st *state.Store, typ string, payload ProjectPayload) (state.Event, error) {
+	payload.RemoteURL = redact.StripURLUserinfo(payload.RemoteURL)
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return state.Event{}, err
+	}
+	return st.InsertLocalEvent(ctx, state.Event{
+		Type:        typ,
+		PayloadJSON: string(raw),
+		ContentHash: state.ContentHash(string(raw)),
+	})
+}
+
+func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) error {
+	sort.Slice(events, func(i, j int) bool {
+		if events[i].HLC == events[j].HLC {
+			if events[i].DeviceID == events[j].DeviceID {
+				return events[i].ID < events[j].ID
+			}
+			return events[i].DeviceID < events[j].DeviceID
+		}
+		return events[i].HLC < events[j].HLC
+	})
+	now := time.Now().UnixMilli()
+	maxSkewMS := defaultReceiveMaxSkew.Milliseconds()
+	for _, event := range events {
+		// SYNC-3: quarantine remote events whose physical timestamp is beyond
+		// the trusted skew so one bad/malicious peer cannot poison ordering.
+		// Skipping (not aborting) keeps the rest of the batch converging.
+		if offset := (event.HLC >> hlcLogicalBits) - now; offset > maxSkewMS {
+			if err := quarantineSkewedEvent(ctx, st, event, offset); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := st.WithTx(ctx, func(tx *state.Tx) error {
+			inserted, err := tx.InsertEvent(ctx, event)
+			if err != nil {
+				return err
+			}
+			if !inserted {
+				return nil
+			}
+			if err := tx.ReceiveRemoteHLC(ctx, event.HLC); err != nil {
+				return err
+			}
+			return applyEventTx(ctx, tx, event)
+		}); err != nil {
+			if errors.Is(err, state.ErrEventHashChain) {
+				if conflictErr := insertEventHashChainConflict(ctx, st, event, err); conflictErr != nil {
+					return errors.Join(err, conflictErr)
+				}
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func quarantineSkewedEvent(ctx context.Context, st *state.Store, event state.Event, offsetMS int64) error {
+	logging.Logger(ctx).Warn("quarantined remote event with untrustworthy time",
+		"device_id", event.DeviceID, "event_id", event.ID, "offset_ms", offsetMS)
+	raw, err := json.Marshal(skewConflictDetails{
+		EventID:  event.ID,
+		DeviceID: event.DeviceID,
+		HLC:      event.HLC,
+		OffsetMS: offsetMS,
+	})
+	if err != nil {
+		return err
+	}
+	return st.InsertConflict(ctx, "", "untrustworthy_remote_time", string(raw))
+}
+
+func insertEventHashChainConflict(ctx context.Context, st *state.Store, event state.Event, cause error) error {
+	raw, err := json.Marshal(eventHashChainConflictDetails{
+		EventID:       event.ID,
+		DeviceID:      event.DeviceID,
+		HLC:           event.HLC,
+		Seq:           event.Seq,
+		PrevEventHash: event.PrevEventHash,
+		Error:         cause.Error(),
+	})
+	if err != nil {
+		return err
+	}
+	return st.InsertConflict(ctx, "", "event_hash_chain_break", string(raw))
+}
+
+func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
+	switch event.Type {
+	case EventProjectAdded, EventProjectUpdated:
+		var payload ProjectPayload
+		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+			return fmt.Errorf("decode event %s: %w", event.ID, err)
+		}
+		if tombstoneHLC, ok, err := tx.TombstoneHLC(ctx, payload.Path); err != nil {
+			return err
+		} else if ok && event.HLC <= tombstoneHLC {
+			return nil
+		}
+		existing, err := tx.ProjectByPath(ctx, payload.Path)
+		if err == nil && existing.RemoteKey != "" && payload.RemoteKey != "" && existing.RemoteKey != payload.RemoteKey {
+			winner, incomingWins, details, err := reconcileSamePath(existing, payload, event)
+			if err != nil {
+				return err
+			}
+			if incomingWins {
+				if _, err := tx.UpsertProject(ctx, upsertParamsForEvent(winner, event)); err != nil {
+					return err
+				}
+			}
+			return tx.InsertConflict(ctx, existing.ID, "same_path_different_remote", details)
+		}
+		_, err = tx.UpsertProject(ctx, upsertParamsForEvent(payload, event))
+		return err
+	case EventProjectDeleted:
+		var payload ProjectPayload
+		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+			return fmt.Errorf("decode event %s: %w", event.ID, err)
+		}
+		// SYNC-5: never destroy a dirty local checkout on a remote delete;
+		// surface a conflict for the user to resolve instead.
+		if existing, err := tx.ProjectByPath(ctx, payload.Path); err == nil && existing.DirtyState == dirtyStateDirty {
+			raw, err := json.Marshal(pendingDeleteConflictDetails{
+				Path:     payload.Path,
+				EventID:  event.ID,
+				DeviceID: event.DeviceID,
+				HLC:      event.HLC,
+			})
+			if err != nil {
+				return err
+			}
+			return tx.InsertConflict(ctx, existing.ID, "pending_delete_conflict", string(raw))
+		}
+		return tx.TombstoneProject(ctx, payload.Path, event.HLC)
+	case EventProjectRenamed:
+		var payload RenamePayload
+		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+			return fmt.Errorf("decode event %s: %w", event.ID, err)
+		}
+		outcome, err := tx.RenameProject(ctx, payload.OldPath, payload.NewPath, event)
+		if err != nil {
+			return err
+		}
+		if outcome == state.RenameTargetConflict {
+			raw, err := json.Marshal(renameConflictDetails{
+				OldPath:  payload.OldPath,
+				NewPath:  payload.NewPath,
+				EventID:  event.ID,
+				DeviceID: event.DeviceID,
+			})
+			if err != nil {
+				return err
+			}
+			return tx.InsertConflict(ctx, "", "rename_target_exists", string(raw))
+		}
+		return nil
+	case EventConflictCreated:
+		return tx.InsertConflict(ctx, "", "remote_conflict", event.PayloadJSON)
+	default:
+		return nil
+	}
+}
+
+// dirtyStateDirty mirrors git.DirtyDirty without importing the git package into
+// the sync layer.
+const dirtyStateDirty = "dirty"
+
+func upsertParamsForEvent(payload ProjectPayload, event state.Event) state.UpsertProjectParams {
+	return state.UpsertProjectParams{
+		Path:                  payload.Path,
+		Type:                  payload.Type,
+		RemoteURL:             payload.RemoteURL,
+		RemoteKey:             payload.RemoteKey,
+		DefaultBranch:         payload.DefaultBranch,
+		MaterializationPolicy: "lazy",
+		MaterializationState:  "skeleton",
+		SourceEventHLC:        event.HLC,
+		SourceEventDeviceID:   event.DeviceID,
+		SourceEventID:         event.ID,
+	}
+}
+
+func reconcileSamePath(existing state.ProjectStatus, incoming ProjectPayload, event state.Event) (ProjectPayload, bool, string, error) {
+	current := samePathCandidate{
+		payload: ProjectPayload{
+			Path:          existing.Path,
+			Type:          existing.Type,
+			RemoteURL:     existing.RemoteURL,
+			RemoteKey:     existing.RemoteKey,
+			DefaultBranch: existing.DefaultBranch,
+		},
+		hlc:      existing.SourceEventHLC,
+		deviceID: existing.SourceEventDeviceID,
+		eventID:  existing.SourceEventID,
+	}
+	next := samePathCandidate{
+		payload:  incoming,
+		hlc:      event.HLC,
+		deviceID: event.DeviceID,
+		eventID:  event.ID,
+	}
+	winner, loser, incomingWins := current, next, false
+	if samePathLess(next, current) {
+		winner, loser, incomingWins = next, current, true
+	}
+	remoteA, remoteB := current.payload.RemoteKey, next.payload.RemoteKey
+	if remoteB < remoteA {
+		remoteA, remoteB = remoteB, remoteA
+	}
+	raw, err := json.Marshal(samePathConflictDetails{
+		Path:           incoming.Path,
+		RemoteKeyA:     remoteA,
+		RemoteKeyB:     remoteB,
+		WinnerKey:      winner.payload.RemoteKey,
+		WinnerHLC:      winner.hlc,
+		WinnerDeviceID: winner.deviceID,
+		WinnerEventID:  winner.eventID,
+		LoserKey:       loser.payload.RemoteKey,
+		LoserHLC:       loser.hlc,
+		LoserDeviceID:  loser.deviceID,
+		LoserEventID:   loser.eventID,
+	})
+	if err != nil {
+		return ProjectPayload{}, false, "", err
+	}
+	return winner.payload, incomingWins, string(raw), nil
+}
+
+func samePathLess(a, b samePathCandidate) bool {
+	if a.hlc != b.hlc {
+		return a.hlc < b.hlc
+	}
+	if a.deviceID != b.deviceID {
+		return a.deviceID < b.deviceID
+	}
+	return a.eventID < b.eventID
+}

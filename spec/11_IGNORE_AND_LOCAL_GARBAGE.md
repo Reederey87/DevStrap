@@ -1,3 +1,7 @@
+---
+last_reviewed: 2026-06-26
+tracks_code: [internal/scan/**, .gitignore]
+---
 # Ignore Rules and Local Garbage
 
 ## Problem
@@ -161,6 +165,21 @@ pnpm install
 cargo build
 ```
 
+## Scan scale rules
+
+`devstrap scan --adopt` must prune ignored and generated trees during the filesystem walk, not after collecting all paths.
+
+Rules:
+
+- never descend into `.git` internals, `node_modules`, `.venv`, `dist`, `build`, `target`, `.gradle`, or configured ignored directories;
+- bound parallelism to `GOMAXPROCS`;
+- batch namespace writes in one short `BEGIN IMMEDIATE` transaction per scan batch;
+- use mtime/inode markers for incremental rescans;
+- treat watcher events as hints and periodic scan as the source of truth;
+- benchmark against a large `~/Code` fixture and keep the first visible tree target under 5 minutes.
+
+Current implementation prunes the default generated directories before descent, warns on secret-looking filenames, reports symlink escapes, detects duplicate remotes, and has direct scanner coverage plus CLI integration coverage for generated-folder pruning during scan/adopt. Incremental mtime/inode markers, configured ignore files, parallel walking, and large benchmark fixtures remain future hardening work.
+
 ## Large artifact strategy
 
 Rules:
@@ -218,4 +237,3 @@ Loose:
 
 - less enforcement;
 - still block private keys by default.
-

@@ -1,3 +1,7 @@
+---
+last_reviewed: 2026-06-26
+tracks_code: [cmd/**, internal/**, .github/**]
+---
 # System Architecture
 
 ## Overview
@@ -31,7 +35,7 @@ Sync layer:
 ```text
 ┌────────────────────────────────────────────────────────────────────┐
 │                              User                                  │
-│  terminal, Cursor, VS Code, agents, Finder, scripts                 │
+│  terminal, Claude Code, Cursor, VS Code, agents, Finder, scripts                 │
 └───────────────┬────────────────────────────────────────────────────┘
                 │
                 ▼
@@ -134,6 +138,10 @@ Responsibilities:
 
 MVP hub can be self-hosted on a Mac Mini, Linux box, or small VPS. Later it can become a hosted SaaS.
 
+### No-daemon mode (correctness guarantee)
+
+Every `devstrap` CLI command works correctly without the daemon. State is materialized on demand and the managed tree is reconciled by periodic scans, so no command depends on `devstrapd` being installed or running. The daemon is purely a performance/UX optimization — its filesystem watcher is a hint, not the source of truth — and is never a correctness dependency. If the daemon is absent, stopped, or behind, results stay correct; only freshness and latency degrade until the next on-demand materialization or periodic-scan reconciliation.
+
 ## Data flows
 
 ### New project created locally
@@ -164,14 +172,15 @@ MVP hub can be self-hosted on a Mac Mini, Linux box, or small VPS. Later it can 
 
 ```text
 1. User runs devstrap agent run repo --task "...".
-2. Daemon fetches configured upstream ref.
-3. Daemon resolves origin/main SHA.
-4. Worktree is created from that SHA.
-5. New branch is created.
-6. Env is injected according to policy.
-7. Agent process is launched.
-8. Logs, diff, and test result are captured.
-9. Optional PR is created.
+2. Daemon resolves the remote default branch from `origin/HEAD` or stored repo metadata.
+3. Daemon fetches that upstream ref.
+4. Daemon resolves `origin/<default_branch>` SHA.
+5. Worktree is created from that SHA.
+6. New branch is created.
+7. Env is injected according to policy.
+8. Agent process is launched.
+9. Logs, diff, and test result are captured.
+10. Optional PR is created.
 ```
 
 ## State model
@@ -260,13 +269,29 @@ Needs user decision:
 Keep these behind interfaces:
 
 ```go
-type Watcher interface {}
-type ServiceManager interface {}
-type Keychain interface {}
-type FileMaterializer interface {}
-type EditorAdapter interface {}
-type SecretProvider interface {}
-type AgentRunner interface {}
+type Watcher interface {
+    Name() string
+    Watch(ctx context.Context, root string, events chan<- FSEvent) error
+}
+
+type ServiceManager interface {
+    Name() string
+    Install(ctx context.Context, spec ServiceSpec) error
+    Uninstall(ctx context.Context, label string) error
+    Status(ctx context.Context, label string) (ServiceStatus, error)
+}
+
+type Keychain interface {
+    Name() string
+    Store(ctx context.Context, service, account string, secret []byte) error
+    Load(ctx context.Context, service, account string) ([]byte, error)
+    Delete(ctx context.Context, service, account string) error
+}
+
+type EditorAdapter interface {
+    Name() string
+    Open(ctx context.Context, dir, editor string) error
+}
 ```
 
 Mac implementation:
@@ -297,12 +322,15 @@ That keeps Mac-first work from painting Linux into a corner.
 
 ## Implementation status
 
-As of `2026-06-24`, the repository contains the Phase 0 Go workspace:
+As of `2026-06-25`, the repository contains the Phase 0 Go workspace:
 
 - `cmd/devstrap` main package;
 - `internal/cli` command skeleton;
 - `internal/config` path defaults;
-- `internal/state` SQLite store and embedded Goose migration;
-- CI for macOS/Linux Go tests.
+- `internal/state` SQLite store, embedded Goose migrations, HLC/event-ordering tables, and database backup/status helpers;
+- `internal/platform` adapter contracts for watcher, service manager, keychain, and editor launch, with build-tagged platform detection, fsnotify-backed Darwin/Linux watchers that debounce bursts into reconciliation hints, an advisory polling watcher fallback for unsupported platforms, system keyring-backed Darwin/Linux keychain adapters with explicit fallback handling, unsupported service placeholders, `devstrap open` routed through the editor adapter, and a test guard keeping `runtime.GOOS` checks inside `internal/platform`;
+- a thin generic agent runner that creates fresh worktrees, runs explicit argv commands with sanitized no-secret env, applies wrapper-level command and file path policy, records `agent_runs`, captures logs/diff summaries, and gates `agent pr` on stale-base detection;
+- CI for macOS/Linux Go tests, race tests, vet, build, vuln scanning, and module hygiene;
+- focused tests for the implemented CLI/config/state/platform packages.
 
-The daemon and adapter interfaces are still design targets. They should be introduced before implementing platform-specific watcher or service-manager code.
+The daemon, FSEvents-specific Mac watcher, and service installers are still design targets. Native platform-specific watcher or service-manager code must implement the `internal/platform` interfaces instead of branching through the core.

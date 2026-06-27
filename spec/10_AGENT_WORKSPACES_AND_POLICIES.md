@@ -1,3 +1,7 @@
+---
+last_reviewed: 2026-06-26
+tracks_code: [internal/cli/agent.go, internal/cli/worktree.go, internal/git/**]
+---
 # Agent Workspaces and Policies
 
 ## Goal
@@ -8,7 +12,7 @@ Make AI-agent development safe, reproducible, and fresh by default.
 
 ```text
 Agents never work in the user's primary working tree.
-Agents never branch from stale local main.
+Agents never branch from stale local default branch.
 ```
 
 ## Agent run lifecycle
@@ -31,10 +35,9 @@ Agents never branch from stale local main.
 
 ```bash
 devstrap agent run work/acme/api \
-  --engine cursor \
+  --engine generic \
   --task "fix failing tests" \
-  --fresh-main \
-  --policy guarded
+  -- npm test
 ```
 
 ## Agent worktree metadata
@@ -45,10 +48,10 @@ repo_id: repo_01jz...
 project_path: work/acme/api
 engine: cursor
 task: fix failing tests
-base_ref: origin/main
+base_ref: origin/<default_branch>
 base_sha: abc123
-branch: agent/fix-failing-tests-20260623-a13f
-worktree_path: ~/.devstrap/worktrees/acme-api/agent-fix-failing-tests-20260623-a13f
+branch: agent/fix-failing-tests-20260623-120405-a13f92c0b31d
+worktree_path: ~/.devstrap/worktrees/acme-api/agent-fix-failing-tests-20260623-120405-a13f92c0b31d
 status: running
 created_at: 2026-06-23T12:00:00Z
 ```
@@ -84,11 +87,12 @@ filesystem:
     - "**/*service-account*.json"
 ```
 
-MVP enforcement can be wrapper-level, not perfect sandboxing:
+MVP enforcement is wrapper-level, not perfect sandboxing:
 
 - don't pass denied env;
 - scan diffs and logs;
 - block DevStrap-provided file reads;
+- deny non-`yolo-local` command arguments that explicitly reference sensitive paths or paths outside the fresh worktree;
 - launch agents in isolated cwd;
 - later add container or OS sandbox.
 
@@ -122,6 +126,8 @@ MVP enforcement options:
 3. agent-specific policy config;
 4. terminal/session recording;
 5. later: sandbox/container.
+
+Current implementation has the shared `internal/childenv` environment sanitizer used by Git/editor/agent subprocesses. `devstrap agent run` supports the `generic` engine: it creates a fresh upstream worktree, runs explicit argv commands in that isolated cwd with a sanitized no-secret default environment, applies a wrapper-level command policy (`readonly`, `cautious`, `guarded`, or explicit `yolo-local`) plus a wrapper-level file path policy that denies explicit sensitive-path and outside-worktree references for non-`yolo-local` runs, records an `agent_runs` row, captures a `0600` log under `~/.devstrap/logs/agent-runs`, and stores a Git status/diff summary. `devstrap agent pr` reuses the stale-base gate before pushing and calling `gh pr create`. OS-enforced sandboxing, project-env allowlists for agents, `agent cleanup`, and non-generic engine adapters remain future work.
 
 ## Secret policy
 
@@ -190,7 +196,7 @@ Algorithm:
 1. ensure agent run status is complete or reviewable
 2. show diff summary
 3. run configured validation
-4. fetch origin/main
+4. fetch origin/<default_branch>
 5. rebase if needed/approved
 6. push branch
 7. create PR using gh/GitHub API
@@ -204,12 +210,13 @@ Commands:
 devstrap agent list
 devstrap agent cleanup --merged
 devstrap agent cleanup --older-than 14d
-devstrap worktree remove <id>
+devstrap worktree remove <id> [--force]
 ```
 
 Safety:
 
 - never remove dirty worktree without explicit force;
+- missing manually deleted worktrees require explicit force and run `git worktree prune`;
 - if branch unpushed, warn;
 - quarantine before destructive delete.
 
@@ -235,4 +242,3 @@ arun_c11  ui         agent/refactor-c11        old       stale     failed
 - diff summary is available;
 - cleanup avoids deleting dirty/unpushed work;
 - stale base is detected before PR.
-

@@ -36,7 +36,7 @@ CREATE TABLE namespace_entries (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(workspace_id, path_key),
-  FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+  FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
 );
 
 CREATE TABLE git_repos (
@@ -49,7 +49,7 @@ CREATE TABLE git_repos (
   lfs_policy TEXT NOT NULL DEFAULT 'auto',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id)
+  FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id) ON DELETE CASCADE
 );
 
 CREATE TABLE draft_projects (
@@ -59,7 +59,7 @@ CREATE TABLE draft_projects (
   max_files INTEGER NOT NULL DEFAULT 5000,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id)
+  FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id) ON DELETE CASCADE
 );
 
 CREATE TABLE device_project_state (
@@ -78,8 +78,8 @@ CREATE TABLE device_project_state (
   last_error TEXT,
   updated_at TEXT NOT NULL,
   PRIMARY KEY(device_id, namespace_id),
-  FOREIGN KEY(device_id) REFERENCES devices(id),
-  FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id)
+  FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE,
+  FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id) ON DELETE CASCADE
 );
 
 CREATE TABLE env_profiles (
@@ -90,7 +90,7 @@ CREATE TABLE env_profiles (
   mode TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+  FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
 );
 
 CREATE TABLE secret_bindings (
@@ -103,7 +103,9 @@ CREATE TABLE secret_bindings (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(env_profile_id, var_name),
-  FOREIGN KEY(env_profile_id) REFERENCES env_profiles(id)
+  CHECK ((provider_ref IS NOT NULL) <> (encrypted_value_ref IS NOT NULL)),
+  CHECK (encrypted_value_ref IS NULL OR encrypted_value_ref LIKE 'age_blob:%'),
+  FOREIGN KEY(env_profile_id) REFERENCES env_profiles(id) ON DELETE CASCADE
 );
 
 CREATE TABLE worktrees (
@@ -120,8 +122,8 @@ CREATE TABLE worktrees (
   dirty_state TEXT NOT NULL DEFAULT 'unknown',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id),
-  FOREIGN KEY(device_id) REFERENCES devices(id)
+  FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id) ON DELETE CASCADE,
+  FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE
 );
 
 CREATE TABLE agent_runs (
@@ -140,8 +142,8 @@ CREATE TABLE agent_runs (
   test_summary TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id),
-  FOREIGN KEY(worktree_id) REFERENCES worktrees(id)
+  FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id) ON DELETE CASCADE,
+  FOREIGN KEY(worktree_id) REFERENCES worktrees(id) ON DELETE SET NULL
 );
 
 CREATE TABLE events (
@@ -151,11 +153,9 @@ CREATE TABLE events (
   seq INTEGER,
   type TEXT NOT NULL,
   payload_json TEXT NOT NULL,
-  applied_at TEXT,
   created_at TEXT NOT NULL,
-  sync_state TEXT NOT NULL DEFAULT 'pending',
-  FOREIGN KEY(workspace_id) REFERENCES workspaces(id),
-  FOREIGN KEY(device_id) REFERENCES devices(id)
+  FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+  FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE
 );
 
 CREATE TABLE jobs (
@@ -170,7 +170,7 @@ CREATE TABLE jobs (
   run_after TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id)
+  FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id) ON DELETE SET NULL
 );
 
 CREATE TABLE conflicts (
@@ -183,17 +183,21 @@ CREATE TABLE conflicts (
   resolution_json TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  FOREIGN KEY(workspace_id) REFERENCES workspaces(id),
-  FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id)
+  FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE,
+  FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id) ON DELETE SET NULL
 );
 
-CREATE INDEX idx_namespace_path_key ON namespace_entries(workspace_id, path_key);
 CREATE INDEX idx_git_remote_key ON git_repos(remote_key);
 CREATE INDEX idx_device_state_namespace ON device_project_state(namespace_id);
-CREATE INDEX idx_events_sync_state ON events(sync_state);
 CREATE INDEX idx_jobs_status_priority ON jobs(status, priority, run_after);
 CREATE INDEX idx_worktrees_namespace ON worktrees(namespace_id);
 CREATE INDEX idx_agent_runs_status ON agent_runs(status);
+CREATE INDEX idx_secret_bindings_profile ON secret_bindings(env_profile_id);
+CREATE INDEX idx_env_profiles_workspace ON env_profiles(workspace_id);
+CREATE INDEX idx_worktrees_device ON worktrees(device_id);
+CREATE INDEX idx_agent_runs_namespace ON agent_runs(namespace_id);
+CREATE INDEX idx_jobs_namespace ON jobs(namespace_id);
+CREATE INDEX idx_conflicts_namespace ON conflicts(namespace_id);
 
 -- +goose Down
 DROP TABLE conflicts;

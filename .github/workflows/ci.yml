@@ -6,7 +6,40 @@ on:
       - "**"
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
+  spec-drift:
+    name: Spec drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+      - name: Fetch default branch
+        run: git fetch origin main --prune
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check spec drift
+        run: go run ./cmd/spec-drift --base origin/main --head HEAD
+
+  lint:
+    name: Go lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@db582008a42febd596419635a5abc9d9815daa9c # v9.2.1
+        with:
+          version: v2.12
+
   test:
     name: Go tests
     runs-on: ${{ matrix.os }}
@@ -14,14 +47,35 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+    env:
+      # Headless CI runners have no usable OS keychain / Secret Service; force
+      # the file-backed device-key store so key operations do not block or fail.
+      DEVSTRAP_NO_KEYCHAIN: "1"
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: true
       - name: Check formatting
         run: |
           test -z "$(gofmt -l cmd internal)"
+      - name: Guard against vacuous package tests
+        run: |
+          for pkg in internal/state internal/config internal/cli; do
+            test -n "$(find "$pkg" -maxdepth 1 -name '*_test.go')"
+          done
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: go build ./...
       - name: Test
-        run: go test ./...
+        run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+      - name: Vulnerability check
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+      - name: Module hygiene
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum

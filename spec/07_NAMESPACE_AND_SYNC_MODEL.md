@@ -1,3 +1,7 @@
+---
+last_reviewed: 2026-06-26
+tracks_code: [internal/pathkey/**, internal/scan/**, internal/state/**, internal/sync/**]
+---
 # Namespace and Sync Model
 
 ## Core abstraction
@@ -111,15 +115,25 @@ last_seen_at: 2026-06-23T12:03:00Z
 
 ## Materialization states
 
+DevStrap stores readiness as an orthogonal tuple, not one overloaded string:
+
 ```text
-skeleton      path exists, repo/draft not hydrated
-hydrating     job in progress
-available     files exist locally
-current       Git remote fetched and branch current
-ready         env/tooling validation passed
-dirty         local uncommitted changes exist
-conflicted    requires user decision
-failed        last hydration/sync job failed
+materialization_state: skeleton | hydrating | available | failed
+dirty_state:           unknown | clean | dirty | ahead | behind | diverged | conflicted
+env_ready:             true | false
+tooling_ready:         true | false
+```
+
+Display status is derived from that tuple:
+
+```text
+conflicted  dirty_state=conflicted
+failed      materialization_state=failed
+skeleton    materialization_state=skeleton
+hydrating   materialization_state=hydrating
+dirty       dirty_state=dirty|ahead|diverged
+current     materialization_state=available && dirty_state=clean
+ready       current && env_ready && tooling_ready
 ```
 
 ## Event log
@@ -134,12 +148,48 @@ Event fields:
   "workspace_id": "ws_01jz...",
   "device_id": "dev_macmini_upstairs",
   "seq": 42,
+  "hlc": 115763879690240001,
   "type": "project.added",
   "payload": {},
-  "created_at": "2026-06-23T12:00:00Z",
-  "signature": "optional-later"
+  "content_hash": "sha256:...",
+  "device_sig": "ed25519:...",
+  "prev_event_hash": "sha256:...",
+  "created_at": "2026-06-23T12:00:00Z"
 }
 ```
+
+Rows in `events` are insert-only. Delivery/apply state lives in `event_delivery`, and per-peer progress lives in `sync_cursors`; implementations must not update event payload, HLC, signatures, or hashes in place. Local event creation links each sequential same-device event to the previous event content hash before signing. Incoming events with a non-empty `prev_event_hash` must match the previous same-device event already present locally; a missing or mismatched predecessor is treated as a hash-chain break and recorded as an `event_hash_chain_break` conflict.
+
+## Clock and ordering
+
+Events are ordered by a Hybrid Logical Clock (HLC), not by wall-clock timestamps.
+
+Rules:
+
+```text
+1. created_at is display-only and MUST NOT resolve conflicts.
+2. seq is per-device monotonic and used for gap detection.
+3. Global replay order is ORDER BY hlc ASC, device_id ASC, id ASC.
+4. Apply is idempotent on event_id; duplicate deliveries are no-ops.
+5. Incoming events whose causal marker does not descend from the local version are concurrent.
+6. Dangerous concurrent events create conflicts instead of overwriting local state.
+```
+
+HLC update:
+
+```text
+send:
+  if physical_now_ms > last_physical_ms: counter = 0
+  else counter++
+  if counter overflows 16 bits: physical_ms++, counter = 0
+
+receive:
+  reject remote timestamps beyond the configured max clock skew
+  physical_ms = max(local_physical_ms, remote_physical_ms, physical_now_ms)
+  counter follows the standard HLC max/tie rule, with the same overflow guard
+```
+
+The HLC implementation is mutex-protected for concurrent daemon/agent use. Local outgoing events are stamped through the state store, which persists `(last_hlc, next_seq)` per device in the same SQLite transaction that inserts the event. If the persisted clock row is missing, startup/event creation seeds from `MAX(hlc)` and `MAX(seq)` for the local device so restarts cannot regress or reuse local timestamps. The `(hlc, device_id)` pair is the deterministic tiebreaker. The device id and workspace id are stable generated identifiers created during `devstrap init`, not hardcoded local rows. Phase 0 enforces one local workspace row, but all workspace-scoped tables still carry `workspace_id` so future pairing can provision the same logical `ws_...` id across devices.
 
 Event types:
 
@@ -167,19 +217,54 @@ conflict.resolved
 Each device maintains a cursor:
 
 ```text
-last_event_seq_applied
+sync_cursors(workspace_id, peer_id, last_hlc_applied, last_seq_applied)
 ```
 
 Sync loop:
 
 ```text
 1. push local queued events to Hub
-2. pull remote events after cursor
+2. pull remote events after the peer cursor
 3. verify/decrypt where needed
-4. apply events to local SQLite
+4. apply events to local SQLite in (hlc, device_id) order
 5. reconcile local filesystem
-6. update device heartbeat
+6. write event_delivery and sync_cursors transactionally
+7. update device heartbeat
 ```
+
+If the hub no longer retains events after a cursor, the device must fall back to a full-state snapshot plus cursor reset. Silent divergence is not allowed.
+
+Current implementation includes the local HLC type, persisted local event stamping with per-device sequence numbers, project event constructors, `add`/`scan --adopt` project-event emission, local previous-event hash linking, content-hash and previous-hash verification, transactional event claim plus side-effect apply, hash-chain break conflict recording, HLC-gated project delete tombstones/restores, deterministic replay order, exact duplicate no-ops, divergent duplicate rejection, order-independent same-path/different-remote conflict reconciliation, a file-backed hub adapter, and a user-facing `devstrap sync --hub-file <path>` command for the file-backed test hub. Production peer authentication, remote device registration, encrypted payload handling, tombstone garbage collection, full snapshot exchange, and real cross-root skeleton reconciliation remain future work.
+
+## Tombstones and deletes
+
+Deletes create HLC-stamped tombstones instead of immediate purges:
+
+```text
+project.deleted -> namespace_entries.status=deleted, tombstone_hlc=<event hlc>
+```
+
+Incoming `project.added` or `project.restored` events older than the tombstone are ignored. Tombstones can be garbage-collected only after every approved device cursor has advanced beyond the tombstone HLC and the local filesystem is clean or quarantined.
+
+## Conflict detection
+
+Conflict handling is a pure reconciliation function:
+
+```text
+Reconcile(local, incoming) -> updated entry OR conflict record
+```
+
+The MVP assumes a single writer per path: for the primary persona (one developer with multiple owned devices) a given namespace path is normally mutated on one device at a time. Under that assumption the path/remote conflict class is detect-only — DevStrap surfaces it and never auto-merges — while the safe-automatic class defined in `spec/03` (duplicate skeleton creation, heartbeat latest-wins, recreate-missing-skeleton) may still be resolved without prompting.
+
+Detectors:
+
+- same normalized path with different remotes;
+- concurrent renames from the same source;
+- delete event against a dirty local checkout;
+- add/restore older than a tombstone;
+- remote/default-branch changes concurrent with local edits.
+
+On dangerous conflicts, write a `conflicts` row and never auto-overwrite local files. For same-path/different-remote namespace events, the active entry is selected by the canonical event order `(hlc, device_id, event_id)` and the conflict identity is keyed by `path + sorted(remote_key_a, remote_key_b)`. `created_at` is display-only and must not affect the winner.
 
 ## Hub storage
 
@@ -294,6 +379,8 @@ rename one project
 mark one unmanaged
 ```
 
+Current sync replay records the source event coordinates on the active namespace entry. If a competing same-path remote arrives in a later pull window, replay re-evaluates the pair and promotes the lowest `(hlc, device_id, event_id)` winner, then writes the same stable conflict details regardless of arrival order. This is an interim deterministic default; the conflict remains open until a user chooses the final resolution.
+
 ### Conflict: same remote multiple paths
 
 Example:
@@ -395,4 +482,3 @@ Contains:
 - ignore rules;
 - encrypted env bundles if requested;
 - draft snapshots if requested.
-

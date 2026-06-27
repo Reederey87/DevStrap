@@ -1,3 +1,7 @@
+---
+last_reviewed: 2026-06-26
+tracks_code: [internal/platform/**, .github/**]
+---
 # Linux Compatibility Plan
 
 ## Goal
@@ -36,31 +40,40 @@ These parts must be identical on Mac and Linux:
 ## Platform adapters
 
 ```go
-type Platform interface {
-    Watcher(root string) (Watcher, error)
-    ServiceManager() ServiceManager
-    KeyStore() KeyStore
-    OpenEditor(editor string, path string) error
-    DefaultCodeRoot() string
-    Paths() PlatformPaths
+type Watcher interface {
+    Watch(ctx context.Context, root string, events chan<- FSEvent) error
+}
+
+type ServiceManager interface {
+    Install(ctx context.Context, spec ServiceSpec) error
+    Status(ctx context.Context, label string) (ServiceStatus, error)
+}
+
+type Keychain interface {
+    Store(ctx context.Context, service, account string, secret []byte) error
+    Load(ctx context.Context, service, account string) ([]byte, error)
+}
+
+type EditorAdapter interface {
+    Open(ctx context.Context, dir, editor string) error
 }
 ```
 
 Mac adapter:
 
 ```text
-Watcher: FSEvents
-Service: launchd LaunchAgent
-Secrets: Keychain
+Watcher: fsnotify/kqueue now; native FSEvents target
+Service: unsupported placeholder now; launchd LaunchAgent target
+Secrets: system keyring-backed age and Ed25519 identities with file fallback
 Paths: ~/.devstrap, ~/Code
 ```
 
 Linux adapter:
 
 ```text
-Watcher: inotify
-Service: systemd --user
-Secrets: libsecret/keyring or encrypted file protected by OS user permissions
+Watcher: fsnotify/inotify now
+Service: unsupported placeholder now; systemd --user target
+Secrets: Secret Service/keyring-backed age and Ed25519 identities with file fallback
 Paths: ~/.devstrap, ~/Code, XDG optional
 ```
 
@@ -78,6 +91,8 @@ Type=simple
 ExecStart=%h/.local/bin/devstrapd serve
 Restart=on-failure
 RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
 Environment=DEVSTRAP_HOME=%h/.devstrap
 
 [Install]
@@ -93,25 +108,33 @@ systemctl --user daemon-reload
 systemctl --user enable --now devstrapd.service
 ```
 
+Headless machines that need the user service active without an interactive login may require:
+
+```bash
+loginctl enable-linger "$USER"
+```
+
 ## Linux watcher
 
-Use inotify through the same watcher abstraction.
+Use inotify through the same watcher abstraction. The current Linux adapter uses fsnotify, recursively adds directory watches below the managed root, skips generated trees, and emits debounced reconciliation hints.
 
 Caveats:
 
 - inotify watches can hit system limits;
 - deep trees with many folders need careful watch management;
 - dependency folders should be ignored aggressively;
-- periodic scan is still required.
+- periodic scan is still required because watcher events are hints, not truth.
 
 Recommended behavior:
 
 ```text
 watch managed root
 ignore generated/dependency paths
-coalesce events
+coalesce events for 500-1000 ms
 periodically reconcile namespace and filesystem
 ```
+
+If inotify returns `ENOSPC` or `EMFILE`, `doctor` must report the limit condition with remediation guidance and the daemon must fall back to periodic polling rather than silently missing changes.
 
 ## Linux future virtual filesystem
 
@@ -153,6 +176,8 @@ Rules:
 - `~/.devstrap` mode `0700`;
 - encrypted cache files mode `0600`;
 - socket mode restricted to user.
+
+The Unix socket is created under a `umask(077)` path, checked for stale instances by dialing before unlink, and removed on SIGTERM/SIGINT. CLI commands that require the daemon exit with code 3 when the socket is unavailable.
 
 ## Secret handling on Linux
 
@@ -205,7 +230,8 @@ Recommended:
 - daemon creates skeleton directories.
 - Git hydration works.
 - fresh worktree creation works.
-- env capture/hydrate works with encrypted store.
+- env capture/hydrate works with encrypted local blobs, and runtime injection is added before Linux packaging is called complete.
 - watcher detects new folders and Git repos.
 - same namespace event stream syncs with Mac.
 
+Current repository implementation covers the portable CLI pieces for init, scan/adopt, add, hydrate, env capture/hydrate/bind, provider-backed env runtime injection through `op run`, provider file hydration through `op inject`, status, fresh worktree creation, platform adapter interfaces, build-tagged platform detection, and a polling watcher fallback. The systemd service, native inotify watcher, and cross-device sync command remain future Linux work.
