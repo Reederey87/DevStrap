@@ -70,6 +70,14 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			if err := enforceAgentFilePolicy(policy, agentCommand, wt.Path); err != nil {
+				// M2: clean up the just-created worktree so a policy denial
+				// does not leak an orphan git worktree + DB row.
+				repoPath := project.LocalPath
+				if repoPath == "" {
+					repoPath = filepath.Join(opts.paths().Root, filepath.FromSlash(project.Path))
+				}
+				_ = dsgit.NewRunner().WorktreeRemove(cmd.Context(), repoPath, wt.Path, true)
+				_ = store.MarkWorktreeRemoved(cmd.Context(), wt.ID)
 				return err
 			}
 			runID, err := id.New("arun")
@@ -433,6 +441,7 @@ func runAgentProcess(ctx context.Context, wt state.Worktree, run state.AgentRun,
 	env, err := childenv.FromOS(childenv.AgentAllowlist(), map[string]string{
 		"DEVSTRAP_AGENT_RUN_ID": run.ID,
 		"DEVSTRAP_WORKTREE_ID":  wt.ID,
+		"HOME":                  wt.Path, // SECU-02: repoint HOME to worktree so agent tooling cannot reach user dotfiles.
 	})
 	if err != nil {
 		return err

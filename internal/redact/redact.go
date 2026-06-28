@@ -124,7 +124,7 @@ func StripURLUserinfo(s string) string {
 var pemEnd = regexp.MustCompile(`-----END (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----`)
 
 // pemBegin matches the BEGIN line of a PEM private key block.
-var pemBegin = tokenPatterns[7]
+var pemBegin = regexp.MustCompile(`-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----`)
 
 // Scrub applies only the built-in token-shape patterns. Use it when no
 // instance-specific secret values are known.

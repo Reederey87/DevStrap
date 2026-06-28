@@ -55,9 +55,9 @@ func forgeHost(remoteURL string) string {
 	// Fall back to scp-like: git@host:owner/repo
 	if idx := strings.Index(remoteURL, ":"); idx > 0 {
 		if at := strings.Index(remoteURL[:idx], "@"); at >= 0 {
-			return remoteURL[at+1 : idx]
+			return strings.ToLower(remoteURL[at+1 : idx])
 		}
-		return remoteURL[:idx]
+		return strings.ToLower(remoteURL[:idx])
 	}
 	return ""
 }

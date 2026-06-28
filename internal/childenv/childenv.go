@@ -83,9 +83,12 @@ func BasicAllowlist() []string {
 // AgentAllowlist returns the environment allowlist for agent subprocesses.
 // It excludes SSH_AUTH_SOCK (and SSH_ASKPASS) so a semi-trusted agent command
 // cannot use the user's ssh-agent to authenticate as the user (AGEN-02/SECU-02).
+// HOME is also excluded from inheritance; the caller must set HOME to the
+// worktree path so agent tooling that needs $HOME does not reach the user's
+// real dotfiles (~/.ssh, ~/.aws, ~/.config/gh, etc.) (SECU-02).
 // Git/editor/gh launches continue to use BasicAllowlist for legitimate SSH auth.
 func AgentAllowlist() []string {
-	return []string{"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM"}
+	return []string{"PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM"}
 }
 
 func Dangerous(name string) bool {

@@ -260,7 +260,7 @@ arun_c11  ui         agent/refactor-c11        old       stale     failed
 ## Audit implementation notes (2026-06-28)
 
 - **AGEN-01**: `enforceAgentCommandPolicy` blocks known interpreters/shells/downloaders (sh, bash, python*, node, curl, etc.) under non-yolo policies; `--policy` help text disclaims advisory-only scope.
-- **AGEN-02**: `runAgentProcess` uses `childenv.AgentAllowlist()` which excludes `SSH_AUTH_SOCK`, stripping the live SSH credential capability from agent subprocesses.
+- **AGEN-02**: `runAgentProcess` uses `childenv.AgentAllowlist()` which excludes `SSH_AUTH_SOCK` and `HOME` from inheritance; HOME is repointed to the worktree path so agent tooling cannot reach user dotfiles (`~/.ssh`, `~/.aws`, `~/.config/gh`).
 - **AGEN-04**: Added `ephemeral-ci` to accepted policy profiles; replaced `>` substring check with argv-aware redirection detection.
 - **AGEN-05**: `agentTokenLooksSensitive` now includes `credentials.json`, `service-account*.json`, `*.pem`, `*.key`; deny list expanded with `/.kube`, `/.docker`.
 - **AGEN-06**: Agent PR body scrubbed through `redact.Scrub` before forge submission.

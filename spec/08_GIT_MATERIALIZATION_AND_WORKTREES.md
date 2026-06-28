@@ -343,3 +343,4 @@ Later:
 - **GIT-01**: `repoLockIsStale` treats same-host liveness as authoritative over age; a live PID is never declared stale regardless of `acquired_at`.
 - **NOVCS-01**: Scanner classifies no-remote/unvalidated-remote repos as `local_git` instead of `git_repo`.
 - **NOVCS-04**: `createFreshWorktree` preflights `project.RemoteKey == ""` with an actionable error.
+- **M2 (review fix)**: Agent run cleans up the just-created worktree when `enforceAgentFilePolicy` denies the command, preventing orphan git worktrees and DB rows.

@@ -163,3 +163,47 @@ func TestRedactorScrubsRegisteredValues(t *testing.T) {
 		t.Fatalf("short value mangled text: %q", out)
 	}
 }
+
+func TestWriterSuppressesMultilinePEMBlock(t *testing.T) {
+	// SECU-04: multi-line PEM private key blocks must be suppressed so base64
+	// key material never reaches the destination.
+	pemBody := "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAkEAQWJjZGVmZ2hpamts" +
+		"bW5vcHFyc3R1dnd4eXoxMjM0NTY3ODkwQUIvQWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4"
+	input := strings.Join([]string{
+		"Starting deploy...",
+		"-----BEGIN RSA PRIVATE KEY-----",
+		pemBody,
+		"-----END RSA PRIVATE KEY-----",
+		"Deploy complete.",
+		"", // trailing newline
+	}, "\n")
+
+	var dst strings.Builder
+	w := NewWriter(&dst, nil)
+	if _, err := w.Write([]byte(input)); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	out := dst.String()
+	if strings.Contains(out, pemBody) {
+		t.Fatalf("PEM base64 body leaked to destination: %q", out)
+	}
+	if strings.Contains(out, "BEGIN RSA PRIVATE KEY") {
+		t.Fatalf("PEM BEGIN header leaked to destination: %q", out)
+	}
+	if strings.Contains(out, "END RSA PRIVATE KEY") {
+		t.Fatalf("PEM END header leaked to destination: %q", out)
+	}
+	if !strings.Contains(out, "[REDACTED PRIVATE KEY]") {
+		t.Fatalf("expected [REDACTED PRIVATE KEY] placeholder, got: %q", out)
+	}
+	if !strings.Contains(out, "Starting deploy...") {
+		t.Fatalf("text before PEM block was lost: %q", out)
+	}
+	if !strings.Contains(out, "Deploy complete.") {
+		t.Fatalf("text after PEM block was lost: %q", out)
+	}
+}

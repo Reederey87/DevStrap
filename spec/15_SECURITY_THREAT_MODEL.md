@@ -288,7 +288,7 @@ Key-custody caveat (`SECR-04`/`SECU-01`): the keychain→file fallback currently
 ## Audit implementation notes (2026-06-28)
 
 - **SECU-01**: Key custody fallback now gated on `IsKeychainUnavailable(err)`; present-but-failing keychain fails closed.
-- **SECU-02**: `SSH_AUTH_SOCK` excluded from agent subprocess environment via `AgentAllowlist`.
+- **SECU-02**: `SSH_AUTH_SOCK` excluded from agent subprocess environment via `AgentAllowlist`; HOME repointed to worktree path so `~/.ssh`, `~/.aws`, `~/.config/gh` are not reachable.
 - **SECU-03**: `verifyEventSignature` requires valid signatures from known approved devices for destructive event types (`project.deleted`, `project.renamed`).
-- **SECU-04**: `redact.Writer` suppresses multi-line PEM private key blocks across line boundaries.
+- **SECU-04**: `redact.Writer` suppresses multi-line PEM private key blocks across line boundaries. Fixed `pemBegin` pattern indexing bug (was pointing to age-key pattern instead of PEM header). Added test coverage.
 - **SECU-05**: `devices enroll --approve` now requires `--signing-public-key`.
