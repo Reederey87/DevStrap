@@ -27,6 +27,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-06-28 — README rebuild with brand banner + app icon
+
+Changed:
+- Rewrote `README.md` to modern open-source conventions: a centered `repo_image2.png` brand banner in the header, a badge row (CI, Go Report Card, Go 1.26, platform, MIT, alpha status), a table of contents, and clear sections (What is it / Why / How it works / Features / Status / Requirements / Install / Quickstart / Command reference / Architecture / Roadmap / Security / Contributing / License).
+- Added the brand assets `repo_image2.png` (header banner) and `icon.png` (app icon for the forthcoming desktop/menu-bar app, referenced in the footer) at the repo root.
+- Corrected stale content: the old README still described a `dev` integration branch; the Contributing section now states the canonical **trunk-based** model (single protected `main`, no `dev`) per `AGENTS.md`. Updated the status/feature/command sections to reflect the now-shipped cloud-sync workstreams (eager `materialize`, `draft`, the pluggable `Hub` + R2/S3 backend, portable `run-loop`) and the full 19-command surface; linked the latest audit (`AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md`).
+
+Validated:
+- Command table cross-checked against `internal/cli/root.go` `AddCommand` registrations and each command's cobra `Short` string; Go version against `go.mod` (1.26); install story against the GoReleaser pipeline (binaries; no Homebrew tap yet — flagged as roadmap `PROD-05`).
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+- None. A Homebrew tap / `curl | sh` installer (audit `PROD-05`) and the brand assets' use in the future app remain future work.
+
 ## 2026-06-28 — Fourth-pass design & implementation audit (post-PR-#16)
 
 Changed:
