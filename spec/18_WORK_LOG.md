@@ -27,6 +27,23 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-06-28 — Release pipeline (GoReleaser + RC flow)
+
+Changed:
+- CI/release tooling + docs; no `cmd/`/`internal/` code modified.
+- Added `.goreleaser.yaml` — cross-compiles macOS + Linux (amd64/arm64) DevStrap binaries, CGO-free (pure-Go `modernc.org/sqlite`), injects `version`/`commit`/`date` into `internal/cli` via `-ldflags`, emits `checksums.txt`, and marks `-rc`/`-beta`/`-alpha` tags as GitHub pre-releases (`release.prerelease: auto`).
+- Added `.github/workflows/release.yml` — triggered on `v*` tags, runs GoReleaser (`contents: write`), SHA-pinned checkout/setup-go matching `ci.yml`.
+- Added `RELEASING.md` — the release runbook: trunk-based release-candidate → stable flow (`vX.Y.Z-rc.N` pre-release → test the candidate binaries → promote to `vX.Y.Z`), optional `release/vX.Y` branch for stabilization/back-ports, edge install via `@main`, and keeping `main` releasable.
+- Updated `spec/14` "Release and upgrade gates" to reference the automated pipeline and the RC pre-release flow.
+
+Validated:
+- `GOCACHE=/tmp/devstrap-gocache go run ./cmd/spec-drift --base origin/main --head HEAD`
+- The release workflow runs only on `v*` tag pushes; it does not affect PR CI. No release is cut by merging this — releasing is a manual `v*` tag the maintainer pushes when ready.
+
+Follow-ups:
+- Pin `goreleaser/goreleaser-action` to a SHA on the next Dependabot bump (currently `@v6`).
+- Optional later: Homebrew tap (already in the V1 backlog) and an edge/nightly pre-release channel.
+
 ## 2026-06-28 — Trunk-based open-source governance (branch protection + OSS files)
 
 Changed:

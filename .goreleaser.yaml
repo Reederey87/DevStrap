@@ -1,0 +1,53 @@
+# GoReleaser configuration — https://goreleaser.com
+# Builds cross-platform DevStrap binaries and publishes a GitHub Release on `v*` tags.
+version: 2
+project_name: devstrap
+
+builds:
+  - id: devstrap
+    main: ./cmd/devstrap
+    binary: devstrap
+    env:
+      # modernc.org/sqlite is pure Go, so no cgo is needed and cross-compilation is clean.
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    ldflags:
+      - -s -w
+      - -X github.com/Reederey87/DevStrap/internal/cli.version={{ .Version }}
+      - -X github.com/Reederey87/DevStrap/internal/cli.commit={{ .Commit }}
+      - -X github.com/Reederey87/DevStrap/internal/cli.date={{ .CommitDate }}
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^test:"
+      - "^ci:"
+      - "Merge pull request"
+
+release:
+  # Tags like v1.2.0-rc.1 / -beta.N / -alpha.N are published as GitHub pre-releases.
+  prerelease: auto
+  draft: false
+  name_template: "{{ .Tag }}"
+  footer: |
+    ---
+    Built with GoReleaser. Verify downloads against `checksums.txt`.
