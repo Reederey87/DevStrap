@@ -1,0 +1,32 @@
+# XP-01: end-to-end sync + eager materialization loop through the real binary.
+# Simulates two devices (A and B) sharing a file-backed hub, proving device B
+# gets a real blobless clone after sync — the "same tree everywhere" promise.
+
+# Force the file-backed key store for headless CI (XP-03).
+env DEVSTRAP_NO_KEYCHAIN=1
+
+# Set up a bare git remote with one commit.
+exec git init --bare $WORK/remote.git
+exec git clone $WORK/remote.git $WORK/src
+exec sh -c 'echo hello > $WORK/src/README.md'
+exec sh -c 'cd $WORK/src && git add README.md && git commit -m init && git branch -M main && git push origin main'
+
+# Device A: init, add the project, sync to the shared hub file.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA init
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/proj $WORK/remote.git
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+stdout 'pushed 1'
+
+# Device B: init, sync from the same hub file, verify the repo materialized.
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB init
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
+stdout 'materialized'
+
+# The repo must be present on disk — not just a skeleton.
+exec sh -c 'test -d $WORK/CodeB/work/proj/.git'
+exec sh -c 'cat $WORK/CodeB/work/proj/README.md'
+stdout 'hello'
+
+# A second sync with no new events pulls zero (EAGER-02 cursor).
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
+stdout 'pulled 0'

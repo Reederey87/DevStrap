@@ -71,3 +71,49 @@ func Decrypt(ciphertext []byte, identity string) (Plaintext, error) {
 	}
 	return plaintext, nil
 }
+
+// Rewrap decrypts an age-encrypted blob with the local identity and re-encrypts
+// it to the given recipient set (HUB-04). It is generic: it operates at the age
+// layer and works for any age-encrypted blob (env or draft), because age has no
+// native revocation — re-encryption to the reduced recipient set is the only way
+// to limit a revoked device's future access. Returns the new ciphertext and its
+// content-addressed age_blob:<sha256> ref.
+func Rewrap(ciphertext []byte, identity string, recipients []string) ([]byte, string, error) {
+	ageIdentity, err := age.ParseX25519Identity(identity)
+	if err != nil {
+		return nil, "", fmt.Errorf("parse age identity: %w", err)
+	}
+	reader, err := age.Decrypt(bytes.NewReader(ciphertext), ageIdentity)
+	if err != nil {
+		return nil, "", fmt.Errorf("decrypt blob for rewrap: %w", err)
+	}
+	plaintext, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, "", fmt.Errorf("read blob plaintext for rewrap: %w", err)
+	}
+	ageRecipients := make([]age.Recipient, 0, len(recipients))
+	for _, raw := range recipients {
+		recipient, err := age.ParseX25519Recipient(raw)
+		if err != nil {
+			return nil, "", fmt.Errorf("parse age recipient: %w", err)
+		}
+		ageRecipients = append(ageRecipients, recipient)
+	}
+	if len(ageRecipients) == 0 {
+		return nil, "", fmt.Errorf("at least one age recipient is required")
+	}
+	var buf bytes.Buffer
+	writer, err := age.Encrypt(&buf, ageRecipients...)
+	if err != nil {
+		return nil, "", fmt.Errorf("encrypt blob for rewrap: %w", err)
+	}
+	if _, err := writer.Write(plaintext); err != nil {
+		return nil, "", fmt.Errorf("write blob for rewrap: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return nil, "", fmt.Errorf("close blob for rewrap: %w", err)
+	}
+	newCiphertext := buf.Bytes()
+	sum := sha256.Sum256(newCiphertext)
+	return newCiphertext, "age_blob:" + hex.EncodeToString(sum[:]), nil
+}

@@ -133,3 +133,46 @@ func TestVerifyWithinRoot(t *testing.T) {
 		t.Fatalf("target via escaping symlink should return ErrEscape, got %v", err)
 	}
 }
+
+// XP-04: cross-filesystem case-fold + NFC invariant. A path that is a single
+// directory on case-insensitive APFS (macOS) can be two real directories on
+// case-sensitive ext4 (Ubuntu) or a networked NAS mount. The case-folded
+// path_key must collide so the namespace detects the conflict regardless of
+// the filesystem it materializes on. This test locks down that invariant.
+func TestCrossFilesystemCaseFoldNFCInvariant(t *testing.T) {
+	tests := []struct {
+		name           string
+		a, b           string
+		expectConflict bool // true when Display differs but Key collides (case-only)
+	}{
+		{"case-only on ext4", "work/MyRepo", "work/myrepo", true},
+		{"case-only nested", "work/Org/Repo", "work/org/repo", true},
+		{"NFC vs NFD", "work/café", "work/cafe\u0301", false}, // same path after NFC normalization
+		{"case + NFC combined", "Work/Café", "work/café", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pa, err := Clean(tt.a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pb, err := Clean(tt.b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The case-folded key must collide on every filesystem.
+			if pa.Key != pb.Key {
+				t.Errorf("path_key mismatch: %q vs %q — must collide on every filesystem", pa.Key, pb.Key)
+			}
+			// DetectCaseConflicts flags only when the Display differs but the
+			// Key collides (a real two-file situation on case-sensitive ext4).
+			err = DetectCaseConflicts([]Path{pa, pb})
+			if tt.expectConflict && !errors.Is(err, ErrPathConflict) {
+				t.Errorf("DetectCaseConflicts did not flag collision for %q vs %q: %v", tt.a, tt.b, err)
+			}
+			if !tt.expectConflict && err != nil {
+				t.Errorf("DetectCaseConflicts unexpectedly flagged %q vs %q: %v", tt.a, tt.b, err)
+			}
+		})
+	}
+}

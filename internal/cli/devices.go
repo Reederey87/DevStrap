@@ -135,6 +135,16 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 					_, err = fmt.Fprintf(stdout, "warning: %d secret value(s) must be rotated at their source; rewrapping recipients does not revoke %s's historical access\n", flagged, args[0])
 					return err
 				}
+				// HUB-04: re-encrypt affected blobs to the reduced recipient
+				// set (age has no native revocation). Limits future exposure;
+				// historical access by the revoked key is irreversible, hence
+				// the mandatory rotation flag above.
+				rewrapped, err := rewrapBlobsOnRevoke(cmd.Context(), store, opts)
+				if err != nil {
+					_, _ = fmt.Fprintf(stdout, "warning: blob re-encryption incomplete: %v\n", err)
+				} else if rewrapped > 0 {
+					_, _ = fmt.Fprintf(stdout, "Re-encrypted %d blob(s) to the reduced recipient set\n", rewrapped)
+				}
 			}
 			return nil
 		},

@@ -276,7 +276,7 @@ If the hub no longer retains events after a cursor, the device must fall back to
 - env profiles → decrypt `age_blob:<sha256>` env blobs / resolve provider refs and hydrate the bound env files (see `09_SECRETS_AND_ENVIRONMENT.md`).
 - `node_modules` / build artifacts → **never synced**; rebuilt on hydrate from the tooling profile (`npm`/`pnpm`/`uv install`).
 
-After a completed sync the entire tree is present on disk; `materialization_state=skeleton` is only the transient pre-clone state before the first sync finishes, and the `materialization_policy` field is retained for a future opt-in lazy mode (`StrapFS`, `spec/00_START_HERE.md` Phase 4) — it is not the shipped/target default. There is no FUSE/File-Provider materialization in this design. Status today: the apply path lands namespace events, but the eager full-tree clone/fetch/bundle/env pass is not yet wired (`EAGER-01`); see `AUDIT_RECOMMENDATIONS_2026-06-28.md`.
+After a completed sync the entire tree is present on disk; `materialization_state=skeleton` is only the transient pre-clone state before the first sync finishes, and the `materialization_policy` field is retained for a future opt-in lazy mode (`StrapFS`, `spec/00_START_HERE.md` Phase 4) — it is not the shipped/target default. There is no FUSE/File-Provider materialization in this design. Status today: the eager full-tree clone/fetch/bundle/env pass **is now wired** (`EAGER-01/03/04`); `devstrap sync` blobless-clones every skeleton `git_repo`, hydrates env profiles, and extracts draft bundles with bounded concurrency and per-project failure isolation. See `AUDIT_RECOMMENDATIONS_2026-06-28.md`.
 
 ### Wire protocol (Phase 2 hub)
 
@@ -292,7 +292,7 @@ PUT/GET /v1/{ws}/blobs/{sha256}   # encrypted bundles, content-addressed (age_bl
 
 The HLC int64 is simultaneously the ordering key, the resume cursor, and the SSE `Last-Event-ID`. SSE is a freshness hint only; correctness rests on cursor-based pull, preserving the no-daemon guarantee. WebSocket/gRPC/QUIC/P2P/mobile-push are deferred. See `03_SYSTEM_ARCHITECTURE.md` and `AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 6.
 
-**Cursor-wiring status (`ARCH2-02`):** `sync_cursors` and `event_delivery` exist but are not yet wired — `devstrap sync` currently pushes all local events and pulls from HLC 0 every run (full-history replay). Wiring `last_hlc_applied` (push only events past the peer cursor; `Pull(ctx, cursor)`) and setting hub retention so the `410`→snapshot path is reachable is the first Phase-2 step. Build the full-state snapshot exchange **before** enabling hub retention GC.
+**Cursor-wiring status (`ARCH2-02`/`EAGER-02`):** `hub_cursors` (migration 00008) is now wired — `devstrap sync` reads `last_hlc_applied` before `Pull`, passes it as `afterHLC`, and advances it after `ApplyEvents`. A second sync with no new events pulls zero. The `sync_cursors`/`event_delivery` tables remain available for per-peer tracking. Build the full-state snapshot exchange **before** enabling hub retention GC.
 
 Current implementation includes the local HLC type, persisted local event stamping with per-device sequence numbers, project event constructors, `add`/`scan --adopt` project-event emission, local previous-event hash linking, content-hash and previous-hash verification, transactional event claim plus side-effect apply, hash-chain break conflict recording, HLC-gated project delete tombstones/restores, deterministic replay order, exact duplicate no-ops, divergent duplicate rejection, order-independent same-path/different-remote conflict reconciliation, a file-backed hub adapter, and a user-facing `devstrap sync --hub-file <path>` command for the file-backed test hub. Production peer authentication, remote device registration, encrypted payload handling, tombstone garbage collection, full snapshot exchange, and real cross-root skeleton reconciliation remain future work.
 
@@ -552,7 +552,7 @@ Devices are enrolled and approved per-device (`devstrap devices`, `15_SECURITY_T
 
 Re-encryption shrinks the recipient set for new pulls; **rotation is what actually invalidates already-exposed secret values**, so both steps are required. Status: the `needs_rotation` flag on revoke/lost is shipped; the blob re-encryption pass is planned (`HUB-*`, `DRAFT-*`).
 
-**Fail-closed verification:** once any device enrollment exists, signed-event verification MUST fail closed — an event whose signing key is unknown or not approved is rejected, not applied. Today `SECU-03` fails *open* (an unknown-key event is applied when the key is simply not yet known); closing this is a Phase-2 prerequisite before the hub relay can be trusted. See `AUDIT_RECOMMENDATIONS_2026-06-28.md`.
+**Fail-closed verification (`HUB-03`):** once any approved device enrollment exists, signed-event verification fails CLOSED — an event whose signing key is unknown or not approved is rejected, not applied. Before enrollment (the bootstrap window), only destructive event types (`project.deleted`, `project.renamed`) require verification. The local device is always exempt from the signing-key requirement (pre-enrollment grace). See `AUDIT_RECOMMENDATIONS_2026-06-28.md`.
 
 ## Namespace snapshot export
 

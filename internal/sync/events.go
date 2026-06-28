@@ -10,16 +10,18 @@ import (
 
 	"github.com/Reederey87/DevStrap/internal/id"
 	"github.com/Reederey87/DevStrap/internal/logging"
+	"github.com/Reederey87/DevStrap/internal/pathkey"
 	"github.com/Reederey87/DevStrap/internal/redact"
 	"github.com/Reederey87/DevStrap/internal/state"
 )
 
 const (
-	EventProjectAdded    = "project.added"
-	EventProjectUpdated  = "project.updated"
-	EventProjectDeleted  = "project.deleted"
-	EventProjectRenamed  = "project.renamed"
-	EventConflictCreated = "conflict.created"
+	EventProjectAdded         = "project.added"
+	EventProjectUpdated       = "project.updated"
+	EventProjectDeleted       = "project.deleted"
+	EventProjectRenamed       = "project.renamed"
+	EventConflictCreated      = "conflict.created"
+	EventDraftSnapshotCreated = "draft.snapshot.created" // DRAFT-02
 )
 
 // defaultReceiveMaxSkew bounds how far ahead of local physical time a remote
@@ -47,6 +49,15 @@ type ProjectPayload struct {
 type RenamePayload struct {
 	OldPath string `json:"old_path"`
 	NewPath string `json:"new_path"`
+}
+
+// DraftSnapshotPayload carries a draft.snapshot.created event's content-addressed
+// blob reference and limits (DRAFT-02).
+type DraftSnapshotPayload struct {
+	Path      string `json:"path"`
+	BlobRef   string `json:"blob_ref"`
+	ByteSize  int64  `json:"byte_size"`
+	FileCount int64  `json:"file_count"`
 }
 
 type skewConflictDetails struct {
@@ -132,6 +143,17 @@ func CreateProjectEvent(ctx context.Context, st *state.Store, typ string, payloa
 	})
 }
 
+// NewDraftSnapshotEvent builds an unsigned draft.snapshot.created event from a
+// pre-marshaled payload (DRAFT-02). The store stamps HLC, seq, device id, and
+// the device signature on InsertLocalEvent.
+func NewDraftSnapshotEvent(typ, payloadJSON string) state.Event {
+	return state.Event{
+		Type:        typ,
+		PayloadJSON: payloadJSON,
+		ContentHash: state.ContentHash(payloadJSON),
+	}
+}
+
 func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) error {
 	sort.Slice(events, func(i, j int) bool {
 		if events[i].HLC == events[j].HLC {
@@ -165,6 +187,19 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) err
 			continue
 		}
 		if err := st.WithTx(ctx, func(tx *state.Tx) error {
+			// Re-stamp the workspace_id with the local workspace so the events
+			// FK constraint is satisfied. Remote events carry the origin
+			// device's workspace_id; each device has its own workspace row but
+			// shares the same logical namespace. The signature payload does
+			// not include workspace_id, so this does not invalidate it.
+			event.WorkspaceID = ""
+			// Ensure the source device exists locally as a placeholder so the
+			// events FK constraint is satisfied. Remote devices appear as
+			// 'pending' until enrolled; their events are accepted during the
+			// bootstrap window (HUB-03).
+			if err := tx.EnsureRemoteDeviceTx(ctx, event.DeviceID); err != nil {
+				return err
+			}
 			inserted, err := tx.InsertEvent(ctx, event)
 			if err != nil {
 				return err
@@ -309,6 +344,23 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 		return nil
 	case EventConflictCreated:
 		return tx.InsertConflict(ctx, "", "remote_conflict", event.PayloadJSON)
+	case EventDraftSnapshotCreated:
+		var payload DraftSnapshotPayload
+		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+			return fmt.Errorf("decode event %s: %w", event.ID, err)
+		}
+		// DRAFT-02: record the content-addressed blob reference against the
+		// project. The blob content is fetched from the hub during sync and
+		// extracted during materialization.
+		pk, err := pathkey.Clean(payload.Path)
+		if err != nil {
+			return fmt.Errorf("draft snapshot path %q: %w", payload.Path, err)
+		}
+		project, err := tx.ProjectByPath(ctx, pk.Display)
+		if err != nil {
+			return fmt.Errorf("draft snapshot for unknown project %q: %w", payload.Path, err)
+		}
+		return tx.RecordDraftSnapshotTx(ctx, project.ID, payload.BlobRef, payload.ByteSize, payload.FileCount, event)
 	default:
 		return nil
 	}

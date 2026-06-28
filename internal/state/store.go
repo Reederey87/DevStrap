@@ -1094,6 +1094,46 @@ ON CONFLICT(device_id) DO UPDATE SET last_hlc = excluded.last_hlc, updated_at = 
 	return nil
 }
 
+// RecordDraftSnapshotTx records a draft bundle snapshot within the current
+// transaction (DRAFT-02). It ensures a draft_projects row exists, inserts the
+// snapshot (idempotent on source_event_id), and points
+// draft_projects.current_snapshot_id at it.
+func (tx *Tx) RecordDraftSnapshotTx(ctx context.Context, namespaceID, blobRef string, byteSize, fileCount int64, event Event) error {
+	if !strings.HasPrefix(blobRef, "age_blob:") {
+		return fmt.Errorf("draft blob ref must use age_blob: prefix")
+	}
+	now := timestampNow()
+	if _, err := tx.tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO draft_projects (namespace_id, max_bytes, max_files, created_at, updated_at)
+VALUES (?, 104857600, 5000, ?, ?);
+`, namespaceID, now, now); err != nil {
+		return fmt.Errorf("ensure draft project: %w", err)
+	}
+	var existing string
+	_ = tx.tx.QueryRowContext(ctx, `
+SELECT id FROM draft_snapshots WHERE namespace_id = ? AND source_event_id = ?;
+`, namespaceID, event.ID).Scan(&existing)
+	if existing != "" {
+		return nil // idempotent
+	}
+	snapID, err := id.New("snap")
+	if err != nil {
+		return err
+	}
+	if _, err := tx.tx.ExecContext(ctx, `
+INSERT INTO draft_snapshots (id, namespace_id, blob_ref, byte_size, file_count, source_event_hlc, source_event_device_id, source_event_id, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+`, snapID, namespaceID, blobRef, byteSize, fileCount, event.HLC, event.DeviceID, event.ID, now); err != nil {
+		return fmt.Errorf("insert draft snapshot: %w", err)
+	}
+	if _, err := tx.tx.ExecContext(ctx, `
+UPDATE draft_projects SET current_snapshot_id = ?, updated_at = ? WHERE namespace_id = ?;
+`, snapID, now, namespaceID); err != nil {
+		return fmt.Errorf("update draft current snapshot: %w", err)
+	}
+	return nil
+}
+
 // GCTombstones permanently removes deleted namespace entries whose tombstone
 // HLC is strictly below beforeHLC. Callers must pass the minimum HLC that every
 // approved sync cursor has already passed, so no peer can still resurrect the
@@ -1551,6 +1591,195 @@ SELECT COUNT(*) FROM secret_bindings WHERE needs_rotation = 1;
 	return count, nil
 }
 
+// DraftSnapshot records a content-addressed age_blob bundle for a non-git
+// project (DRAFT-02).
+type DraftSnapshot struct {
+	ID                  string
+	NamespaceID         string
+	BlobRef             string
+	ByteSize            int64
+	FileCount           int64
+	SourceEventHLC      int64
+	SourceEventDeviceID string
+	SourceEventID       string
+}
+
+// LatestDraftSnapshot returns the most recent draft bundle snapshot for a
+// project, or nil with no error when no snapshot exists (DRAFT-02).
+func (s *Store) LatestDraftSnapshot(ctx context.Context, namespaceID string) (*DraftSnapshot, error) {
+	var snap DraftSnapshot
+	err := s.db.QueryRowContext(ctx, `
+SELECT id, namespace_id, blob_ref, byte_size, file_count,
+       COALESCE(source_event_hlc, 0), COALESCE(source_event_device_id, ''), COALESCE(source_event_id, '')
+FROM draft_snapshots
+WHERE namespace_id = ?
+ORDER BY created_at DESC, id DESC
+LIMIT 1;
+`, namespaceID).Scan(&snap.ID, &snap.NamespaceID, &snap.BlobRef, &snap.ByteSize, &snap.FileCount,
+		&snap.SourceEventHLC, &snap.SourceEventDeviceID, &snap.SourceEventID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read latest draft snapshot: %w", err)
+	}
+	return &snap, nil
+}
+
+// RecordDraftSnapshot inserts a draft bundle snapshot and points the project's
+// current_snapshot_id at it (DRAFT-02). It is idempotent on source_event_id:
+// re-applying the same event does not create a duplicate.
+func (s *Store) RecordDraftSnapshot(ctx context.Context, namespaceID, blobRef string, byteSize, fileCount int64, event Event) error {
+	if !strings.HasPrefix(blobRef, "age_blob:") {
+		return fmt.Errorf("draft blob ref must use age_blob: prefix")
+	}
+	snapID, err := id.New("snap")
+	if err != nil {
+		return err
+	}
+	now := timestampNow()
+	return s.WithTx(ctx, func(tx *Tx) error {
+		var existing string
+		_ = tx.tx.QueryRowContext(ctx, `
+SELECT id FROM draft_snapshots WHERE namespace_id = ? AND source_event_id = ?;
+`, namespaceID, event.ID).Scan(&existing)
+		if existing != "" {
+			return nil // idempotent: this event's snapshot is already recorded
+		}
+		if _, err := tx.tx.ExecContext(ctx, `
+INSERT INTO draft_snapshots (id, namespace_id, blob_ref, byte_size, file_count, source_event_hlc, source_event_device_id, source_event_id, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+`, snapID, namespaceID, blobRef, byteSize, fileCount, event.HLC, event.DeviceID, event.ID, now); err != nil {
+			return fmt.Errorf("insert draft snapshot: %w", err)
+		}
+		if _, err := tx.tx.ExecContext(ctx, `
+UPDATE draft_projects SET current_snapshot_id = ?, updated_at = ? WHERE namespace_id = ?;
+`, snapID, now, namespaceID); err != nil {
+			return fmt.Errorf("update draft current snapshot: %w", err)
+		}
+		return nil
+	})
+}
+
+// DraftProjectLimits returns the per-project max_bytes and max_files for a
+// draft project (DRAFT-04). Defaults are applied when no row exists.
+func (s *Store) DraftProjectLimits(ctx context.Context, namespaceID string) (int64, int64, error) {
+	var maxBytes, maxFiles int64
+	err := s.db.QueryRowContext(ctx, `
+SELECT max_bytes, max_files FROM draft_projects WHERE namespace_id = ?;
+`, namespaceID).Scan(&maxBytes, &maxFiles)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 104857600, 5000, nil // schema defaults
+	}
+	if err != nil {
+		return 0, 0, fmt.Errorf("read draft project limits: %w", err)
+	}
+	return maxBytes, maxFiles, nil
+}
+
+// EnsureDraftProject creates a draft_projects row for a namespace if one does
+// not exist, so limits and snapshot pointers are available (DRAFT-02/04).
+func (s *Store) EnsureDraftProject(ctx context.Context, namespaceID string) error {
+	now := timestampNow()
+	_, err := s.db.ExecContext(ctx, `
+INSERT OR IGNORE INTO draft_projects (namespace_id, max_bytes, max_files, created_at, updated_at)
+VALUES (?, 104857600, 5000, ?, ?);
+`, namespaceID, now, now)
+	if err != nil {
+		return fmt.Errorf("ensure draft project: %w", err)
+	}
+	return nil
+}
+
+// ApprovedRecipients returns the age recipient public keys for the local device
+// plus all approved remote devices (HUB-04 re-encryption recipient set).
+func (s *Store) ApprovedRecipients(ctx context.Context) ([]string, error) {
+	local, err := s.CurrentDevice(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if local.PublicKey == "" {
+		return nil, fmt.Errorf("local device has no age recipient; run devstrap init")
+	}
+	seen := map[string]bool{local.PublicKey: true}
+	recipients := []string{local.PublicKey}
+	devices, err := s.ListDevices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range devices {
+		if d.ID == local.ID || d.PublicKey == "" || d.TrustState != "approved" {
+			continue
+		}
+		if !seen[d.PublicKey] {
+			recipients = append(recipients, d.PublicKey)
+			seen[d.PublicKey] = true
+		}
+	}
+	return recipients, nil
+}
+
+// AllBlobRefs returns every distinct age_blob:<sha256> reference in the store
+// (env bindings + draft snapshots) (HUB-04/HUB-05). These are the blobs that
+// may need rewrapping on device revoke or GC when unreferenced.
+func (s *Store) AllBlobRefs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT DISTINCT encrypted_value_ref FROM secret_bindings WHERE encrypted_value_ref IS NOT NULL AND encrypted_value_ref LIKE 'age_blob:%'
+UNION
+SELECT DISTINCT blob_ref FROM draft_snapshots WHERE blob_ref LIKE 'age_blob:%';
+`)
+	if err != nil {
+		return nil, fmt.Errorf("list blob refs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var refs []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, fmt.Errorf("scan blob ref: %w", err)
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
+}
+
+// UpdateBlobRef repoints every reference from oldRef to newRef across
+// secret_bindings and draft_snapshots (HUB-04 re-encryption).
+func (s *Store) UpdateBlobRef(ctx context.Context, oldRef, newRef string) error {
+	if !strings.HasPrefix(oldRef, "age_blob:") || !strings.HasPrefix(newRef, "age_blob:") {
+		return fmt.Errorf("blob refs must use age_blob: prefix")
+	}
+	return s.WithTx(ctx, func(tx *Tx) error {
+		if _, err := tx.tx.ExecContext(ctx, `
+UPDATE secret_bindings SET encrypted_value_ref = ?, updated_at = ? WHERE encrypted_value_ref = ?;
+`, newRef, timestampNow(), oldRef); err != nil {
+			return fmt.Errorf("update env blob refs: %w", err)
+		}
+		if _, err := tx.tx.ExecContext(ctx, `
+UPDATE draft_snapshots SET blob_ref = ? WHERE blob_ref = ?;
+`, newRef, oldRef); err != nil {
+			return fmt.Errorf("update draft blob refs: %w", err)
+		}
+		return nil
+	})
+}
+
+// BlobRefCount returns a map of age_blob ref → reference count (HUB-05). A blob
+// is safe to GC only when its count is zero and it is older than the
+// retention/snapshot horizon (the latter gate is deferred until full-state
+// snapshot exchange exists).
+func (s *Store) BlobRefCount(ctx context.Context) (map[string]int, error) {
+	refs, err := s.AllBlobRefs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	counts := make(map[string]int)
+	for _, ref := range refs {
+		counts[ref]++
+	}
+	return counts, nil
+}
+
 func (s *Store) InsertConflict(ctx context.Context, namespaceID, typ, detailsJSON string) error {
 	workspaceID, err := s.WorkspaceID(ctx)
 	if err != nil {
@@ -1645,6 +1874,41 @@ func (s *Store) InsertEvent(ctx context.Context, event Event) error {
 	}
 	_, err = insertEvent(ctx, s.db, workspaceID, normalizeEvent(event))
 	return err
+}
+
+// EnsureRemoteDevice creates a placeholder device row for a remote device if it
+// does not exist, so events from that device can satisfy the events FK
+// constraint. The placeholder has trust_state='pending' and no keys; it is
+// enriched via `devices enroll` before its events are signature-verified.
+func (s *Store) EnsureRemoteDevice(ctx context.Context, deviceID string) error {
+	if deviceID == "" {
+		return fmt.Errorf("device id must not be empty")
+	}
+	now := timestampNow()
+	_, err := s.db.ExecContext(ctx, `
+INSERT OR IGNORE INTO devices (id, name, os, arch, trust_state, created_at, updated_at)
+VALUES (?, ?, 'unknown', 'unknown', 'pending', ?, ?);
+`, deviceID, "remote-"+deviceID[:min(len(deviceID), 8)], now, now)
+	if err != nil {
+		return fmt.Errorf("ensure remote device: %w", err)
+	}
+	return nil
+}
+
+// EnsureRemoteDeviceTx is the transaction-scoped version of EnsureRemoteDevice.
+func (tx *Tx) EnsureRemoteDeviceTx(ctx context.Context, deviceID string) error {
+	if deviceID == "" {
+		return fmt.Errorf("device id must not be empty")
+	}
+	now := timestampNow()
+	_, err := tx.tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO devices (id, name, os, arch, trust_state, created_at, updated_at)
+VALUES (?, ?, 'unknown', 'unknown', 'pending', ?, ?);
+`, deviceID, "remote", now, now)
+	if err != nil {
+		return fmt.Errorf("ensure remote device: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) InsertLocalEvent(ctx context.Context, event Event) (Event, error) {
@@ -1941,9 +2205,19 @@ SELECT COALESCE(signing_public_key, ''), trust_state
 FROM devices
 WHERE id = ?;
 `, event.DeviceID).Scan(&signingPublicKey, &trustState)
+	// HUB-03: once the workspace has any enrolled (approved, non-local) device,
+	// event verification fails CLOSED for ALL event types from non-local
+	// devices. Before enrollment, only destructive event types require
+	// verification (the bootstrap window). The local device is always exempt
+	// from the signing-key requirement (pre-enrollment grace).
+	enrolled, enrollErr := hasEnrolledDevices(ctx, exec)
+	if enrollErr != nil {
+		return fmt.Errorf("check enrolled devices: %w", enrollErr)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
-		// SECU-03: unknown devices must not inject destructive events.
-		if mustVerifyEvent(event.Type) {
+		// Unknown device. Once enrolled, reject everything from unknown devices.
+		// Before enrollment, reject only destructive events.
+		if mustVerifyEvent(event.Type) || enrolled {
 			return fmt.Errorf("event %s of type %s requires a signature from a known approved device", event.ID, event.Type)
 		}
 		return nil
@@ -1951,11 +2225,13 @@ WHERE id = ?;
 	if err != nil {
 		return fmt.Errorf("read device signing public key: %w", err)
 	}
+	isLocal := trustState == "local"
 	if signingPublicKey == "" {
-		// SECU-03: a known device with no signing key may not inject
-		// destructive events unless it is the local device (which may not
-		// have set up signing yet).
-		if mustVerifyEvent(event.Type) && trustState != "local" {
+		// A device with no signing key may not inject events that require
+		// verification, EXCEPT the local device (which may not have signing
+		// set up yet). Before enrollment, non-destructive events from any
+		// known device are accepted.
+		if !isLocal && (mustVerifyEvent(event.Type) || enrolled) {
 			return fmt.Errorf("event %s of type %s requires a signature from a device with a signing key", event.ID, event.Type)
 		}
 		return nil
@@ -1966,14 +2242,31 @@ WHERE id = ?;
 		}
 		return fmt.Errorf("event %s missing device signature", event.ID)
 	}
-	// SECU-03: for must-verify events, also require the device to be approved.
-	if mustVerifyEvent(event.Type) && trustState != "approved" && trustState != "local" {
+	// HUB-03: for must-verify events, require the device to be approved (the
+	// local device is exempt). For non-must-verify events once enrolled,
+	// require non-local devices to be approved too (fail-closed).
+	if !isLocal && trustState != "approved" && (mustVerifyEvent(event.Type) || enrolled) {
 		return fmt.Errorf("event %s of type %s requires a signature from an approved device (current: %s)", event.ID, event.Type, trustState)
 	}
 	if err := devicekeys.Verify(signingPublicKey, event.DeviceSig, eventSignatureDomain, EventSignaturePayload(event)); err != nil {
 		return fmt.Errorf("event %s device signature invalid: %w", event.ID, err)
 	}
 	return nil
+}
+
+// hasEnrolledDevices reports whether the workspace has any approved, non-local
+// device (HUB-03). Once true, event verification fails closed for all non-local
+// event types.
+func hasEnrolledDevices(ctx context.Context, exec sqlExecutor) (bool, error) {
+	var count int
+	if err := exec.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM devices WHERE trust_state = 'approved';
+`).Scan(&count); err != nil {
+		// The devices table may not exist yet during early bootstrap; treat
+		// that as "not enrolled".
+		return false, nil
+	}
+	return count > 0, nil
 }
 
 // mustVerifyEvent reports whether an event type is destructive or
@@ -2035,6 +2328,68 @@ ORDER BY hlc ASC, device_id ASC, id ASC;
 		events = append(events, e)
 	}
 	return events, rows.Err()
+}
+
+// HubCursor returns the last HLC applied from the given hub source (EAGER-02).
+// Returns 0 when no cursor exists yet (a fresh device pulls from the beginning).
+func (s *Store) HubCursor(ctx context.Context, hubID string) (int64, error) {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return 0, err
+	}
+	var last int64
+	err = s.db.QueryRowContext(ctx, `
+SELECT last_hlc_applied FROM hub_cursors WHERE workspace_id = ? AND hub_id = ?;
+`, workspaceID, hubID).Scan(&last)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read hub cursor: %w", err)
+	}
+	return last, nil
+}
+
+// AdvanceHubCursor records that all events up to hlc have been applied from the
+// given hub source (EAGER-02). It only moves the cursor forward: a smaller hlc
+// than the stored value is ignored so a re-pull of stale events cannot regress
+// the cursor.
+func (s *Store) AdvanceHubCursor(ctx context.Context, hubID string, hlc int64) error {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return err
+	}
+	now := timestampNow()
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO hub_cursors (workspace_id, hub_id, last_hlc_applied, updated_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(workspace_id, hub_id) DO UPDATE SET
+  last_hlc_applied = MAX(excluded.last_hlc_applied, hub_cursors.last_hlc_applied),
+  updated_at = excluded.updated_at
+WHERE excluded.last_hlc_applied > hub_cursors.last_hlc_applied;
+`, workspaceID, hubID, hlc, now)
+	if err != nil {
+		return fmt.Errorf("advance hub cursor: %w", err)
+	}
+	return nil
+}
+
+// SkeletonProjects returns all active projects whose local materialization state
+// is "skeleton" or "failed" — the set the eager materialization pass (EAGER-01)
+// must touch. A re-run only revisits projects that still need work, making the
+// pass idempotent and resumable (EAGER-04).
+func (s *Store) SkeletonProjects(ctx context.Context) ([]ProjectStatus, error) {
+	all, err := s.ListProjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var out []ProjectStatus
+	for _, p := range all {
+		if p.MaterializationState == "" || p.MaterializationState == "skeleton" || p.MaterializationState == "failed" {
+			out = append(out, p)
+		}
+	}
+	return out, nil
 }
 
 func (s *Store) InsertWorktree(ctx context.Context, wt Worktree) (Worktree, error) {

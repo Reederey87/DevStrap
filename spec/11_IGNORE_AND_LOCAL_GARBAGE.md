@@ -250,7 +250,7 @@ Loose:
 
 ## Audit follow-ups (2026-06-27)
 
-**The single `.devstrapignore` compiler described here does not exist yet** (audit coverage gap). Prune/secret lists are hardcoded and divergent across three places — `internal/scan` (`shouldPruneDir`/`isSecretName`), the platform watcher, and the agent deny list — which is the root cause of `PLAT-01`, `PLAT-04`, and `AGEN-05`; OS junk (`.DS_Store`, `.AppleDouble`, `Thumbs.db`) is filtered nowhere. Build one canonical compiler that emits the `.gitignore` managed block, the draft-sync ignore set, the watcher exclusion set, and the agent denylist from a single source.
+**The single `.devstrapignore` compiler is now built** as `internal/ignore` (DRAFT-03). It compiles gitignore-compatible patterns from a project's `.devstrapignore` file plus a canonical default OS-junk/build-artifact table, and feeds the scanner prune predicate, the draft-bundle allow-list, and generated `.gitignore` fragments from one source. The watcher and agent deny-list still carry some hardcoded entries to be folded in as follow-up.
 
 ## Audit follow-ups (2026-06-28)
 

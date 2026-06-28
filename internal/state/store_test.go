@@ -205,8 +205,8 @@ func TestMigrateEnsureSummaryAndVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 7 {
-		t.Fatalf("schema version = %d, want 7", version)
+	if version != 9 {
+		t.Fatalf("schema version = %d, want 9", version)
 	}
 
 	var tableCount int
@@ -216,12 +216,13 @@ FROM sqlite_master
 WHERE type = 'table' AND name IN (
   'workspaces', 'devices', 'namespace_entries', 'git_repos', 'draft_projects',
   'device_project_state', 'env_profiles', 'secret_bindings', 'worktrees',
-  'agent_runs', 'events', 'jobs', 'conflicts', 'sync_cursors', 'event_delivery'
+  'agent_runs', 'events', 'jobs', 'conflicts', 'sync_cursors', 'event_delivery',
+  'hub_cursors', 'draft_snapshots'
 )`).Scan(&tableCount); err != nil {
 		t.Fatal(err)
 	}
-	if tableCount != 15 {
-		t.Fatalf("table count = %d, want 15", tableCount)
+	if tableCount != 17 {
+		t.Fatalf("table count = %d, want 17", tableCount)
 	}
 
 	ctx := context.Background()
@@ -345,8 +346,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 6 {
-		t.Fatalf("schema version after down = %d, want 6", version)
+	if version != 8 {
+		t.Fatalf("schema version after down = %d, want 8", version)
 	}
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
@@ -355,8 +356,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 7 {
-		t.Fatalf("schema version after re-migrate = %d, want 7", version)
+	if version != 9 {
+		t.Fatalf("schema version after re-migrate = %d, want 9", version)
 	}
 }
 

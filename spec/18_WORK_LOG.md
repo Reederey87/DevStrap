@@ -27,6 +27,42 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-06-28 — Cloud-sync audit implementation: EAGER/DRAFT/HUB/XP workstreams
+
+Changed:
+- **HUB-01**: Extracted a pluggable `Hub` interface (`Push`/`Pull`/`PutBlob`/`GetBlob`) in `internal/sync/hub.go` with typed errors (`ErrSnapshotRequired`, `ErrBlobNotFound`, `ErrInvalidBlobKey`); `FileHub` now satisfies it and gains a file-backed blob plane.
+- **HUB-02/HUB-06**: Added `internal/hub/r2.go` — the Cloudflare R2 zero-knowledge backend with the HUB-06 immutable object-keying scheme (`workspaces/<ws>/events/<hlc-padded>/<device>/<seq>/<id>.json`, `workspaces/<ws>/blobs/<sha256>`), conditional put, bounded `ListObjectsV2` pagination, and cursor-based pulls. S3 operations are abstracted behind an `S3Client` interface with an in-memory conformance double (`internal/hub/mems3_test.go`).
+- **HUB-07/HUB-08**: Added `R2Config` with self-hosted vs hosted credential scoping (prefix-scoped temporary credentials for SaaS/runners) and explicit backend naming (file/s3-r2/http-sse) in `internal/hub/doc.go`.
+- **HUB-03**: Made event verification fail-closed once enrollment exists — `verifyEventSignature` now requires valid signatures from approved devices for ALL non-local event types when any approved device is enrolled, while preserving the local device's pre-enrollment grace and the bootstrap window.
+- **HUB-04**: Added `envbundle.Rewrap` (generic age re-encryption) and `rewrapBlobsOnRevoke` — on device revoke/lost, all referenced blobs are re-encrypted to the reduced recipient set and references repointed; secrets are already flagged `needs_rotation`.
+- **HUB-05**: Added `gcUnreferencedBlobs` (local blob cache GC for zero-ref-count blobs) and `store.BlobRefCount`/`AllBlobRefs`/`UpdateBlobRef` methods; retention/snapshot-horizon gating noted as deferred until full-state snapshot exchange exists.
+- **EAGER-01/EAGER-04**: Added eager materialization to `sync` (and a standalone `materialize` command) — after applying namespace events, bounded-concurrency (`errgroup.SetLimit(min(4, NumCPU))`) worker pool blobless-clones every skeleton `git_repo` with per-project failure isolation (mark `failed`, continue). New `internal/cli/materialize.go`.
+- **EAGER-02**: Wired cursor-based incremental pull — `sync` reads `hub_cursors.last_hlc_applied` before `Pull`, passes it as `afterHLC`, and advances it after `ApplyEvents`. New migration `00008_sync_hub_cursor.sql`. Second sync with no new events pulls zero.
+- **EAGER-03**: After materializing a `git_repo`, sync hydrates the project's bound env profile into `.env` (best-effort, no clobber).
+- **DRAFT-01**: Added type-dispatch materialization: `git_repo` → blobless clone; `local_git`/`draft_project` → decrypt-and-extract draft bundle (or honest interim error); `plain_folder` → create skeleton directory.
+- **DRAFT-02**: Added `internal/draftbundle` (tar+gzip+age pack/unpack with `.devstrapignore` allow-list, size/file-count limits, secret-file refusal, dual-copy-on-conflict extract), `draft.snapshot.created` event type + apply handler, `draft snapshot create` CLI command, blob plane push/pull in sync, and `00009_draft_snapshots.sql` migration.
+- **DRAFT-03**: Added `internal/ignore` — the canonical `.devstrapignore` compiler (gitignore-compatible semantics) with one default OS-junk/build-artifact table feeding the scanner prune predicate, bundle walker, and generated `.gitignore` fragments. Scanner's `shouldPruneDir` now delegates to it.
+- **DRAFT-04**: Enforced `draft_projects.max_bytes`/`max_files` during `draftbundle.Pack` with actionable error messages.
+- **DRAFT-05**: Excluded `node_modules`/build artifacts from bundles via the ignore compiler; added opt-in (`DEVSTRAP_NO_KEYCHAIN`-gated) post-hydrate dependency rebuild (`npm ci`/`pnpm install`/`uv sync`/`go mod download`/`cargo fetch`).
+- **XP-02**: Added `devstrap run-loop` — a portable foreground ticker (scan → sync → materialize) with jittered backoff and `--once` for cron; explicitly not a daemon.
+- **XP-01**: Added `sync_materialize.txtar` testscript — two-device e2e proving device B gets a real blobless clone after sync and the cursor pulls zero on a second sync.
+- **XP-03**: Added `headless_keycustody.txtar` testscript — init + env capture + env hydrate with `DEVSTRAP_NO_KEYCHAIN=1` and file-backed device identity.
+- **XP-04**: Added `TestCrossFilesystemCaseFoldNFCInvariant` — locks down the cross-filesystem case-fold + NFC path-key collision invariant (case-only paths collide on every filesystem; NFC vs NFD normalize to the same path).
+- Applied remote events now re-stamp `workspace_id` to the local workspace and create placeholder `pending` device rows so the events FK constraint is satisfied across devices.
+
+Validated:
+- `gofmt -w cmd internal`
+- `golangci-lint run` (v2.12.0) — 0 issues
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` — (after spec updates)
+- `DEVSTRAP_NO_KEYCHAIN=1 go test ./...` — all packages pass
+- `DEVSTRAP_NO_KEYCHAIN=1 go test -race ./internal/...` — all pass
+
+Follow-ups:
+- Wire the R2 backend to a real AWS SDK v2 S3 client (the `S3Client` interface is ready; the in-memory double proves the contract).
+- Build the full-state snapshot export/import wired to `ErrSnapshotRequired` before enabling retention GC.
+- Add Ubuntu CI runner for the XP-01 e2e test (currently runs on macOS; the testscript is platform-portable).
+- Re-enable the env blob plane push/pull for env profiles (currently only draft bundles use the blob plane in sync).
+
 ## 2026-06-28 — Solo-maintainer OSS branch policy
 
 Changed:
