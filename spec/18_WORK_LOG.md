@@ -27,6 +27,24 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-06-28 — Solo-maintainer OSS branch policy
+
+Changed:
+- Updated `AGENTS.md` and `CONTRIBUTING.md` so the trunk-based workflow keeps required PRs, green CI, resolved conversations, linear history, and blocked force-push/deletion while removing branch-gated 1-approval and required CODEOWNERS review until a second active write-access maintainer exists.
+- Kept CODEOWNERS advisory for OSS review routing, with external-contributor PRs still requiring maintainer review before merge and maintainer-authored PRs allowed to merge after green CI.
+- Updated live GitHub branch protection for `main`: required status checks, strict up-to-date checks, resolved conversations, linear history, and blocked force-push/deletion remain enabled; required approval count is now 0 and required CODEOWNERS review is disabled.
+
+Validated:
+- `gh api repos/Reederey87/DevStrap/branches/main/protection` verified required checks and safety gates stayed enabled after the review-policy change.
+- `gofmt -w cmd internal`
+- `git diff --check`
+- `golangci-lint run`
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `go test -race ./...` was attempted exactly and failed only in `internal/sync` because the local macOS keychain returned exit status 152 while storing test signing keys; `DEVSTRAP_NO_KEYCHAIN=1 go test -race ./...` passed, matching CI's headless setting.
+
+Follow-ups:
+- Re-enable 1 approving review and required CODEOWNERS review after another active maintainer with write access is available.
+
 ## 2026-06-28 — Spec/cloud architecture audit rebaseline
 
 Changed:
