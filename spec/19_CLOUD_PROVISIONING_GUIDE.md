@@ -275,7 +275,7 @@ chosen for serverless Postgres, scale-to-zero, and branchable databases for prev
 
 ### C.1 Sign up and create the project
 
-1. Sign up at `https://neon.com` (Neon console).
+1. Sign up at `https://neon.tech` (Neon console).
 2. **Create project** — choose the Postgres version and a region near the Fly control-plane
    app (co-locate to minimize latency). Neon provisions a default database and an owner role.
 
@@ -331,7 +331,7 @@ control-plane secret and follows the same custody rules as every other credentia
 
 ### C.6 Cost note
 
-Neon's free tier (one project, generous storage and compute-hour allowance, scale-to-zero)
+Neon's free tier (generous storage and compute-hour allowance, scale-to-zero)
 covers a solo control plane; paid tiers add more branches, larger compute, and longer
 history when the SaaS direction is built.
 

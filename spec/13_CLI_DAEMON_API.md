@@ -140,7 +140,7 @@ work/acme/data                  this       skeleton   mapped   unknown  not hydr
 
 ```bash
 devstrap sync --hub-file ~/.devstrap/test-hub/events.json
-devstrap sync --hub-s3 r2://devstrap-<workspace_id>   # planned: Cloudflare R2 / S3 hub
+devstrap sync --hub-s3 devstrap-hub                  # planned: one bucket, tenants separated by key prefix
 ```
 
 Does:
@@ -157,7 +157,7 @@ Options:
 --hub-file <path>     # file-backed test hub (current)
 --hub-s3 <bucket>     # planned: Cloudflare R2 / S3 zero-knowledge hub backend
 --namespace-only
---fetch
+--fetch               # planned
 --hydrate-eager       # planned default: eager blobless clone of the whole tree
 --dry-run
 ```

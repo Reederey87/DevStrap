@@ -276,7 +276,7 @@ If the hub no longer retains events after a cursor, the device must fall back to
 - env profiles → decrypt `age_blob:<sha256>` env blobs / resolve provider refs and hydrate the bound env files (see `09_SECRETS_AND_ENVIRONMENT.md`).
 - `node_modules` / build artifacts → **never synced**; rebuilt on hydrate from the tooling profile (`npm`/`pnpm`/`uv install`).
 
-After a completed sync the entire tree is present on disk; `materialization_state=skeleton` is only the transient pre-clone state before the first sync finishes, and the `materialization_policy` field is retained for a future opt-in lazy mode (`StrapFS`, `spec/00_START_HERE.md` Phase 4) — it is not the shipped/target default. There is no FUSE/File-Provider materialization in this design. Status today: the apply path lands namespace events, but the eager full-tree clone/fetch/bundle/env pass is not yet wired (`ARCH2-02`, `EAGER-*`); see `AUDIT_RECOMMENDATIONS_2026-06-28.md`.
+After a completed sync the entire tree is present on disk; `materialization_state=skeleton` is only the transient pre-clone state before the first sync finishes, and the `materialization_policy` field is retained for a future opt-in lazy mode (`StrapFS`, `spec/00_START_HERE.md` Phase 4) — it is not the shipped/target default. There is no FUSE/File-Provider materialization in this design. Status today: the apply path lands namespace events, but the eager full-tree clone/fetch/bundle/env pass is not yet wired (`EAGER-01`); see `AUDIT_RECOMMENDATIONS_2026-06-28.md`.
 
 ### Wire protocol (Phase 2 hub)
 

@@ -128,7 +128,7 @@ CREATE TABLE draft_projects (
 );
 ```
 
-`draft_projects` backs the non-git / draft folder content sync (`DRAFT-*`, see `07_NAMESPACE_AND_SYNC_MODEL.md` and `09_SECRETS_AND_ENVIRONMENT.md`). Draft content is captured via a `.devstrapignore` compiler (node_modules / build artifacts excluded, rebuilt on hydrate), packed into age-encrypted content-addressed bundles, and referenced by `current_snapshot_id` — never blanket file-synced and never carried as `.git`. `max_bytes`/`max_files` are intended caps but are **not yet enforced** (`DRAFT-02`): nothing rejects an oversized draft capture today. Enforce them at capture time (refuse the snapshot when the packed tree exceeds the cap) or mark them deferred.
+`draft_projects` backs the non-git / draft folder content sync (`DRAFT-*`, see `07_NAMESPACE_AND_SYNC_MODEL.md` and `09_SECRETS_AND_ENVIRONMENT.md`). Draft content is captured via a `.devstrapignore` compiler (node_modules / build artifacts excluded, rebuilt on hydrate), packed into age-encrypted content-addressed bundles, and referenced by `current_snapshot_id` — never blanket file-synced and never carried as `.git`. `max_bytes`/`max_files` are intended caps but are **not yet enforced** (`DRAFT-04`): nothing rejects an oversized draft capture today. Enforce them at capture time (refuse the snapshot when the packed tree exceeds the cap) or mark them deferred.
 
 ### device_project_state
 
