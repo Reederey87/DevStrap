@@ -5,8 +5,16 @@
 # Force the file-backed key store for headless CI (XP-03).
 env DEVSTRAP_NO_KEYCHAIN=1
 
-# Set up a bare git remote with one commit.
-exec git init --bare $WORK/remote.git
+# Make git hermetic: CI runners have no global identity (commit would fail to
+# auto-detect on Linux) and default init.defaultBranch=master (so the bare HEAD
+# would point at a branch we never push, leaving device B with an empty tree).
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+# Set up a bare git remote (HEAD on main) with one commit.
+exec git init --bare -b main $WORK/remote.git
 exec git clone $WORK/remote.git $WORK/src
 exec sh -c 'echo hello > $WORK/src/README.md'
 exec sh -c 'cd $WORK/src && git add README.md && git commit -m init && git branch -M main && git push origin main'

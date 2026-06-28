@@ -27,6 +27,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-06-28 — Hermetic git in cloud-sync e2e testscripts (PR #16 CI fix)
+
+Changed:
+- Made `cmd/devstrap/testdata/script/sync_materialize.txtar` and `headless_keycustody.txtar` hermetic. They passed locally but failed on CI for two environment-dependent reasons:
+  - **Git identity**: CI runners have no global `user.name`/`user.email`. `git commit` auto-detects an identity on macOS but fails on Linux (`unable to auto-detect email address`), so Linux failed at the setup commit. Fixed by exporting `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL` in each script.
+  - **Default branch**: `git init --bare` uses `init.defaultBranch` (defaults to `master`), but the scripts push to `main`. On a clean runner the bare HEAD pointed at `master`, so device B's blobless clone checked out an empty tree (no `README.md`) — the macOS failure. Fixed by `git init --bare -b main`.
+
+Validated:
+- Reproduced both failures locally under `GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1` (CI-equivalent stripped git config); both pass after the fix.
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...` — all packages pass.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` — passed.
+
+Follow-ups:
+- Consider making devstrap materialization resolve the remote default branch authoritatively (`ls-remote --symref`) rather than trusting the cloned remote's HEAD, so a misconfigured remote HEAD never yields an empty working tree.
+
 ## 2026-06-28 — Code review fixes for cloud-sync PR (#16)
 
 Changed:
