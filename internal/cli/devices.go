@@ -39,11 +39,17 @@ func newDeviceEnrollCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if name == "" || osName == "" || arch == "" || ageRecipient == "" {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("--name, --os, --arch, and --age-recipient are required")}
 			}
+			// SECU-05: require a signing public key when --approve is set so
+			// an approved device can never silently combine with the fail-open
+			// event verification path (SECU-03).
+			if approve && strings.TrimSpace(signingPublicKey) == "" {
+				return appError{code: exitInvalidConfig, err: fmt.Errorf("--approve requires --signing-public-key so the device's events can be signature-verified")}
+			}
 			trustState := "pending"
 			if approve {
 				trustState = "approved"
 			}
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -78,7 +84,7 @@ func newDevicesListCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Use:   "list",
 		Short: "List devices",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -106,7 +112,7 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 		Short: "Mark a device as " + trustState,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -141,7 +147,7 @@ func newDeviceRenameCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Short: "Rename a device",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}

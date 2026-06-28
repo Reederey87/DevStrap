@@ -20,7 +20,7 @@ func newSyncCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if hubFile == "" {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("--hub-file is required until the production hub exists")}
 			}
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}

@@ -179,7 +179,21 @@ func trailingOnlyComment(raw string, lineNo int) error {
 }
 
 func looksInterpolated(value string) bool {
-	return strings.Contains(value, "$(") ||
+	if strings.Contains(value, "$(") ||
 		strings.Contains(value, "${") ||
-		strings.Contains(value, "`")
+		strings.Contains(value, "`") {
+		return true
+	}
+	// SECR-01: also flag a bare unescaped $ followed by a letter/{/( so
+	// $VAR values require explicit --literal, preventing silent truncation
+	// in dotenv loaders that interpolate double-quoted values.
+	for i := 0; i < len(value); i++ {
+		if value[i] == '$' && i+1 < len(value) {
+			next := value[i+1]
+			if (next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') || next == '{' || next == '(' {
+				return true
+			}
+		}
+	}
+	return false
 }

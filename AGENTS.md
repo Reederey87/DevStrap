@@ -9,3 +9,14 @@
 - At the end of each agent working cycle that modifies the codebase, append a concise summary of completed work, validation, and remaining follow-ups to `spec/18_WORK_LOG.md`.
 - After the last codebase modification in a session, review every file in `spec/` and update each file as needed so the specs remain accurate, complete, and current before handoff.
 - Make PR at the end of each agent working cycle that modifies the codebase, and assign it to the subagent for review. Fix all issues identified during the review. Merge PR only after green CI and review. Do not commit directly to `main` branch.
+
+
+## GitHub access
+Ensure the SSH agent is running and the enterprise key is loaded:
+
+```bash
+eval "$(ssh-agent -s)"
+ssh-add /Users/reederey/.ssh/id_ed25519 
+```
+
+Use `gh auth switch --user Reederey87`; remote `git@github.com:Reederey87/DevStrap.git`.

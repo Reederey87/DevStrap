@@ -41,7 +41,7 @@ func newDoctorCommand(stdout io.Writer, opts *options) *cobra.Command {
 				_, _ = fmt.Fprintf(stdout, "state home: error: %v\n", err)
 			}
 			if _, err := os.Stat(paths.StateDB()); err == nil {
-				store, err := opts.openState()
+				store, err := opts.openState(cmd.Context())
 				if err != nil {
 					return err
 				}

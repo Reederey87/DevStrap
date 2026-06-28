@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-26
+last_reviewed: 2026-06-28
 tracks_code: [internal/git/**, internal/cli/add.go, internal/cli/hydrate.go, internal/cli/open.go, internal/cli/repo_lock.go, internal/cli/worktree.go]
 ---
 # Git Materialization and Worktree Design
@@ -105,6 +105,7 @@ devstrap worktree new work/org/repo --fresh-upstream --name fix-tests
 Algorithm:
 
 ```text
+0. Preflight: the project MUST have a non-empty remote_key. A remote-less repo (local_git) cannot create a fresh-upstream worktree; return a typed, actionable error ("fresh-upstream worktrees require a git remote; add origin or use --base local:<branch>") before touching git, instead of failing deep in plumbing (NOVCS-04).
 1. Resolve namespace entry.
 2. Ensure repo object cache/local clone exists.
 3. Determine upstream default branch from refs/remotes/origin/HEAD.
@@ -133,7 +134,10 @@ Important:
 
 ```text
 Never use a local default branch as the base.
+Never resolve a base from refs/devstrap/wip/* (the working-state plane).
 ```
+
+The base resolver reads **only** `origin/<default_branch>` (or an explicitly configured upstream). The working-state plane's WIP refs (`refs/devstrap/wip/<device>/<path_key>`, see `07_NAMESPACE_AND_SYNC_MODEL.md`) are human-convenience recovery and must never become a worktree/agent base; add a test asserting this exclusion (an agent worktree created after a WIP push still bases from `origin/<default_branch>` and does not see the WIP content).
 
 Current implementation fetches `origin <default_branch>` before resolving `origin/<default_branch>` and records `base_ref`, `base_sha`, branch, path, creator, and dirty state in SQLite. It rejects unsupported/option-like remotes, disables interactive git prompts, applies a sanitized git environment with protocol policy, redacts URL credentials in git errors, classifies network/auth/branch/remote Git failures into typed sentinels, and retries transient network clone/fetch failures only. Worktree branches include UTC date/time plus a long random suffix, and branch-name collisions from `git worktree add -b` trigger bounded suffix regeneration before surfacing an error. `devstrap worktree status <id>` re-fetches the recorded base ref and reports `fresh` or `stale (behind N)`. Integration coverage proves the worktree base equals the advanced remote SHA while the hydrated local default branch is stale, then advances the remote again and proves stale-base detection reports the drift.
 
@@ -314,16 +318,28 @@ Lock timeout behavior:
 - a dead same-host owner or an over-age lock is reclaimed;
 - stale removal double-reads the file before deleting so a refreshed lock is not removed accidentally.
 
-## Git provider integration
+## Git provider integration (forge-agnostic)
+
+Clone/fetch/push are forge-neutral and work against any `origin` (GitHub, GitLab, Bitbucket, Gitea/Forgejo, self-hosted, Azure DevOps, SourceHut). Only **PR/MR creation** is forge-specific.
 
 MVP:
 
-- shell out to `git`;
-- shell out to `gh` for GitHub PRs if installed.
+- shell out to `git` for all materialization;
+- detect the forge from the `origin` host (`DetectForge`); for PR/MR creation shell out to the matching CLI — `gh` (GitHub), `glab` (GitLab), `tea` (Gitea/Forgejo);
+- on an unknown/unsupported forge, **fail gracefully**: the branch is already pushed, so print the branch + a constructed compare/MR URL and exit cleanly — never run `gh` unconditionally (`FORGE-01`).
+
+Status: today `agent pr` is hardcoded to `gh pr create` and fails post-push on any non-GitHub remote, and its child-env allowlist passes only GitHub tokens (`FORGE-01/02`). Introduce a small `Forge` interface (`CreatePR(ctx, dir, base, head, title, body)`) with `gh`/`glab`/`tea` implementations and a forge-aware token allowlist (`GITLAB_TOKEN`/`GLAB_*`, `GITEA_TOKEN`/`TEA_*`, `BITBUCKET_*`); add a `--forge` / `git_repos.forge_kind` override for self-hosted instances and SSH host-aliases. Remote-key normalization is generic but should add Azure DevOps SSH-vs-HTTPS folding (`FORGE-03`); `doctor` should mark `gh` optional and probe the relevant forge CLI per adopted remote (`FORGE-04`).
 
 Later:
 
-- GitHub API;
-- GitLab API;
-- Bitbucket API;
+- native GitHub / GitLab / Bitbucket REST clients behind the same `Forge` interface;
 - enterprise auth.
+
+## Audit implementation notes (2026-06-28)
+
+- **FORGE-01**: New `internal/cli/forge.go` with `DetectForge(remoteURL)`, `createForgePR` routing to `gh`/`glab`/`tea` based on detected forge; unknown forges get graceful degradation (branch pushed + compare URL).
+- **FORGE-02**: PR env allowlist is now forge-aware (GH_*/GITLAB_TOKEN/GLAB_*/GITEA_TOKEN/TEA_*/BITBUCKET_*/AZURE_DEVOPS_EXT_PAT).
+- **FORGE-03**: `normalizeHostPath` unifies Azure DevOps SSH (`ssh.dev.azure.com/v3/`) and HTTPS (`dev.azure.com/_git/`) forms to `dev.azure.com/org/proj/repo`.
+- **GIT-01**: `repoLockIsStale` treats same-host liveness as authoritative over age; a live PID is never declared stale regardless of `acquired_at`.
+- **NOVCS-01**: Scanner classifies no-remote/unvalidated-remote repos as `local_git` instead of `git_repo`.
+- **NOVCS-04**: `createFreshWorktree` preflights `project.RemoteKey == ""` with an actionable error.

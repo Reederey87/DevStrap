@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-26
+last_reviewed: 2026-06-28
 tracks_code: [internal/state/**]
 ---
 # SQLite Data Model
@@ -112,6 +112,8 @@ CREATE TABLE git_repos (
 );
 ```
 
+`remote_url`/`remote_key` are `NOT NULL`, but SQLite accepts `''` against `NOT NULL`. A `git_repo` MUST have a non-empty validated `remote_key`; a remote-less repo is the distinct `local_git` namespace type (see `07_NAMESPACE_AND_SYNC_MODEL.md`), never persisted here with an empty remote (`NOVCS-01`). Add `CHECK (remote_key <> '')`, and consider declaring enum/status tables `STRICT` with `CHECK` constraints generally (`DATA-04`).
+
 ### draft_projects
 
 ```sql
@@ -149,6 +151,35 @@ CREATE TABLE device_project_state (
   FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id) ON DELETE CASCADE
 );
 ```
+
+Note: `env_ready`/`tooling_ready` exist but are not yet written or read, and the derived display-status set is not computed (`PROD-01`). Either wire them or mark them deferred.
+
+### device_gitstate (working-state validation plane — sidecar)
+
+Mirror of each device's read-only git-state snapshot for the cross-machine "forgot to push" validation plane (`repo.gitstate.observed`, see `07_NAMESPACE_AND_SYNC_MODEL.md`, audit Section 5). Deliberately a **sidecar** with an **opaque `device_id` and NO FK to `devices`**: remote devices are not enrolled until Phase 2, so the `device_project_state.device_id → devices(id)` FK above is exactly why this cannot reuse that table.
+
+```sql
+CREATE TABLE device_gitstate (
+  device_id TEXT NOT NULL,              -- opaque; NOT a FK to devices(id)
+  namespace_id TEXT NOT NULL,
+  branch TEXT, head_sha TEXT, upstream_sha TEXT,
+  dirty_tracked INTEGER NOT NULL DEFAULT 0,
+  untracked INTEGER NOT NULL DEFAULT 0,
+  unmerged INTEGER NOT NULL DEFAULT 0,
+  ahead INTEGER NOT NULL DEFAULT 0,
+  behind INTEGER NOT NULL DEFAULT 0,
+  stash_count INTEGER NOT NULL DEFAULT 0,
+  no_upstream INTEGER NOT NULL DEFAULT 0,
+  source_event_hlc INTEGER NOT NULL,
+  attributed_unverified INTEGER NOT NULL DEFAULT 1,  -- 0 after Phase-2 pubkey enrollment
+  captured_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(device_id, namespace_id),
+  FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id) ON DELETE CASCADE
+);
+```
+
+(migration `00008_gitstate_mirror.sql`.) `sync_cursors`, `event_delivery`, `device_sync_state`, and `jobs` are defined but **not yet wired** — `sync` replays full history from HLC 0 (`ARCH2-02`, `DATA-02`); either wire cursor-based resume or mark them deferred.
 
 ### env_profiles
 
@@ -437,3 +468,9 @@ Workspace export:
 ```bash
 devstrap export --encrypted --output devstrap-snapshot.tar.age
 ```
+
+## Audit implementation notes (2026-06-28)
+
+- **DATA-01**: `Backup()` validates the backup with `PRAGMA quick_check` + `foreignKeyCheck` after `VACUUM INTO`; removes the partial backup on validation failure.
+- **CODE-03**: `Store.WithTx` uses `defer tx.Rollback()` so a panic inside the closure returns the connection to the single-connection pool.
+- **CODE-05**: `state.Open` takes `ctx context.Context`, uses `db.PingContext(ctx)`, passes `ctx` to `foreignKeyCheck`; all callers updated.

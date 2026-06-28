@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -105,9 +106,15 @@ func (s HybridStore) Ensure(ctx context.Context, deviceID string) (Identity, boo
 	if err != nil {
 		return Identity{}, false, err
 	}
+	// SECR-04/SECU-01: only fall back to the plaintext file store when the
+	// keychain is genuinely unavailable; a present-but-failing keychain must
+	// fail closed so a transient error never silently downgrades key custody.
 	if err := s.storeSecret(ctx, ageAccount(deviceID), identity.Private); err == nil {
 		return identity, true, nil
+	} else if !IsKeychainUnavailable(err) {
+		return Identity{}, false, fmt.Errorf("store device key in keychain: %w", err)
 	}
+	slog.Warn("keychain unavailable; writing device age key to file fallback", "device_id", deviceID)
 	if err := s.File.writeIdentity(deviceID, identity); err != nil {
 		return Identity{}, false, err
 	}
@@ -182,9 +189,14 @@ func (s HybridStore) EnsureSigning(ctx context.Context, deviceID string) (Signin
 	if err != nil {
 		return SigningIdentity{}, false, err
 	}
+	// SECR-04/SECU-01: only fall back to the plaintext file store when the
+	// keychain is genuinely unavailable; fail closed on other errors.
 	if err := s.storeSecret(ctx, signingAccount(deviceID), identity.Private); err == nil {
 		return identity, true, nil
+	} else if !IsKeychainUnavailable(err) {
+		return SigningIdentity{}, false, fmt.Errorf("store device signing key in keychain: %w", err)
 	}
+	slog.Warn("keychain unavailable; writing device signing key to file fallback", "device_id", deviceID)
 	if err := s.File.writeSigningIdentity(deviceID, identity); err != nil {
 		return SigningIdentity{}, false, err
 	}
@@ -306,6 +318,14 @@ func (s HybridStore) loadSecret(ctx context.Context, account string) (string, er
 		return "", err
 	}
 	return strings.TrimSpace(string(raw)), nil
+}
+
+// IsKeychainUnavailable reports whether a keychain error means the backend is
+// missing/not-present (so the file store should be used) rather than a genuine
+// failure. Covers macOS "not found", an unsupported platform, and a Linux
+// Secret Service / D-Bus that is not running (common on headless/CI hosts).
+func IsKeychainUnavailable(err error) bool {
+	return keychainUnavailable(err)
 }
 
 // keychainUnavailable reports whether a keychain error means the backend is

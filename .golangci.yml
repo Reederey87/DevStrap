@@ -11,18 +11,16 @@ linters:
     - ineffassign
     - staticcheck
     - unconvert
+    - errorlint
   settings:
-    gosec:
-      includes:
-        - G104
-        - G204
-        - G301
-        - G302
-        - G304
-        - G306
+    gosec: {} # TEST-04: no includes allowlist — run all default gosec rules
   exclusions:
     rules:
       - path: _test\.go
         linters:
           - errcheck
           - gosec
+
+issues:
+  max-same-issues: 0
+  max-issues-per-linter: 0

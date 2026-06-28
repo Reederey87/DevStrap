@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-26
+last_reviewed: 2026-06-28
 tracks_code: [cmd/**, internal/cli/**, internal/platform/**]
 ---
 # CLI and Daemon API
@@ -417,3 +417,36 @@ Rules:
 8 network/sync error
 9 policy violation
 ```
+
+## Audit follow-ups (2026-06-27)
+
+### CLI consistency (`CLI-01..04`)
+- `--json` is silently ignored by most commands and never applies to error output (`CLI-01`); route all machine-readable output (and errors) through one JSON path.
+- `scan --json --quarantine` interleaves human progress into the JSON stream, producing invalid JSON (`CLI-02`); send progress to stderr.
+- `run`/`agent run` collapse subprocess exit codes to a generic 1 (`CLI-03`); propagate the child's exit code.
+- Exit-code taxonomy is overloaded (`CLI-04`): usage errors and overwrite-conflicts both map to `exitInvalidConfig`, and Cobra arg errors map to 1. Disambiguate.
+
+### Daemon socket API (reserved for M5)
+The local Unix-socket API and job model are **design intent, not shipped** (`ARCH2-04`); `exitDaemonUnavailable=3` is reserved but never returned. The planned API still needs peer-credential checks / root rejection, message framing, and version negotiation (`CLI-05`).
+
+### Planned commands (not yet registered)
+Referenced by the new workstreams; intentionally absent from the live command tree the drift test checks until implemented:
+
+```text
+devstrap conflicts [--json]                            # inspect recorded conflicts (PROD-02)
+devstrap promote <path> --draft|--git-remote <url>     # plain -> draft -> git (NOVCS-03)
+devstrap gitstate capture [--fetch]                    # working-state validation plane (Section 5)
+devstrap status --all-devices                          # cross-device git-state view
+devstrap wip push|status|fetch|show|apply|drop <proj>  # WIP recovery (Phase 1)
+```
+
+PR creation becomes forge-agnostic (`gh`/`glab`/`tea`) with a `--forge` override (`FORGE-01`).
+
+## Audit implementation notes (2026-06-28)
+
+- **CLI-02**: `scan --quarantine` progress lines now go to stderr, preserving valid JSON on stdout.
+- **CLI-03**: `run` and `agent run` propagate child exit codes as `100+N` (new `childExitBase`).
+- **CLI-04**: Added `exitUsage = 10` for bad-flag/missing-flag/arg-count errors; `childExitBase = 100` for child process exit codes.
+- **PROD-01**: `deriveDisplayStatus` maps materialization+dirty states to user-facing labels; `status` output uses it.
+- **PROD-02**: New `devstrap conflicts` command lists open conflicts; `status` shows open-conflict count.
+- **ARCH2-04**: Reserved `exitDaemonUnavailable` code for M5 daemon.

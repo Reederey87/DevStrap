@@ -120,6 +120,12 @@ func StripURLUserinfo(s string) string {
 	return u.String()
 }
 
+// pemEnd matches the END line of a PEM private key block (SECU-04).
+var pemEnd = regexp.MustCompile(`-----END (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----`)
+
+// pemBegin matches the BEGIN line of a PEM private key block.
+var pemBegin = tokenPatterns[7]
+
 // Scrub applies only the built-in token-shape patterns. Use it when no
 // instance-specific secret values are known.
 func Scrub(s string) string {
@@ -183,11 +189,16 @@ func (r *Redactor) Scrub(s string) string {
 // never land on disk in cleartext. Writes are serialized so a single Writer is
 // safe to share between an stdout and stderr copier. Call Close to flush any
 // trailing partial line.
+//
+// SECU-04: PEM private key blocks span multiple lines. When a BEGIN PRIVATE
+// KEY header is detected, subsequent body lines are suppressed until the
+// matching END line, so base64 key material never reaches the destination.
 type Writer struct {
-	mu  sync.Mutex
-	dst io.Writer
-	r   *Redactor
-	buf bytes.Buffer
+	mu    sync.Mutex
+	dst   io.Writer
+	r     *Redactor
+	buf   bytes.Buffer
+	inPEM bool // SECU-04: currently inside a multi-line PEM block
 }
 
 // NewWriter returns a scrubbing Writer forwarding to dst. If r is nil, only the
@@ -205,6 +216,8 @@ func (w *Writer) scrub(s string) string {
 
 // Write accumulates input and flushes scrubbed complete lines to the
 // destination. It always reports len(p) consumed.
+// SECU-04: multi-line PEM private key blocks are suppressed across line
+// boundaries so base64 body lines never reach the destination.
 func (w *Writer) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -217,6 +230,19 @@ func (w *Writer) Write(p []byte) (int, error) {
 		}
 		line := string(data[:idx+1])
 		w.buf.Next(idx + 1)
+		if w.inPEM {
+			if pemEnd.MatchString(line) {
+				w.inPEM = false
+			}
+			continue // drop body lines inside a PEM block
+		}
+		if pemBegin.MatchString(line) {
+			w.inPEM = true
+			if _, err := io.WriteString(w.dst, "[REDACTED PRIVATE KEY]\n"); err != nil {
+				return len(p), err
+			}
+			continue
+		}
 		if _, err := io.WriteString(w.dst, w.scrub(line)); err != nil {
 			return len(p), err
 		}

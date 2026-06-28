@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-26
+last_reviewed: 2026-06-28
 tracks_code: [cmd/**, internal/**, .github/**, go.mod, go.sum]
 ---
 # Test Plan
@@ -410,3 +410,15 @@ End-to-end personal scenario:
 10. Push PR or show diff.
 11. Delete a project on Mac A and verify Ubuntu dirty clone is not deleted.
 ```
+
+## Audit follow-ups (2026-06-27)
+
+Testing gaps (`TEST-*`, from `AUDIT_RECOMMENDATIONS_2026-06-27.md`):
+
+- **No fuzz targets** for any untrusted-input parser, incl. the env parser, pathkey, and the secret scrubber (`TEST-01`); add `go test -fuzz`.
+- **e2e harness covers only `init`/`status`** (`TEST-02`); the riskiest flows (scan/hydrate/worktree/agent/env/sync) are tested in-process and bypass the real exit-code/`--json` contract. Extend the `rogpeppe/go-internal` testscript suite.
+- **Coverage profile is computed then discarded** and the vacuous-test guard checks only 3 packages; `internal/id` is untested (`TEST-03`).
+- **gosec is narrowed to a 6-rule allowlist** disabling hardcoded-credential and weak-crypto checks (`TEST-04`); widen it. **[Implemented 2026-06-28: removed `includes` allowlist, all gosec rules now run; added `errorlint`; set `max-same-issues: 0`.]**
+- **`govulncheck` is unpinned (`@latest`) and bundled into the "Go tests" job** (`TEST-05`/`CI-01`); pin it and split it into its own (non-blocking/scheduled) job. **[Implemented 2026-06-28: pinned `@v1.1.4`, split into own `vuln` CI job, `continue-on-error` on PRs, daily scheduled run.]**
+- **The fsnotify watcher has no tests and concurrent code has no goroutine-leak detection** (`TEST-06`).
+- **New coverage:** WIP-ref base-exclusion test, forge detection/routing, non-VCS classification, and a zero-knowledge hub test (server can decrypt nothing).

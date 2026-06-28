@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-26
+last_reviewed: 2026-06-28
 tracks_code: [internal/platform/**, internal/cli/open.go, .github/**]
 ---
 # Mac-First Implementation Guide
@@ -321,3 +321,13 @@ Production distribution should include:
 - Env capture/hydrate now stores and restores encrypted local blobs, provider ref hydration delegates to `op inject`, and runtime injection delegates encrypted profiles or 1Password refs through `devstrap run`.
 - Dirty repos are detected and not overwritten.
 - Logs are readable under `~/.devstrap/logs`.
+
+## Audit follow-ups (2026-06-27)
+
+Platform findings (`PLAT-*`, from `AUDIT_RECOMMENDATIONS_2026-06-27.md`):
+
+- **Watcher exclusion diverges from the scanner prune list (`PLAT-01`):** the fsnotify watcher would recursively register watches inside `.venv`/`dist`/`build`/`target`/`__pycache__`. Unify on the single `spec/11` ignore compiler.
+- **No ENOSPC/EMFILE handling (`PLAT-02`):** the watcher treats every Add/Errors failure as fatal with no fallback; add degraded polling + periodic reconciliation.
+- **Watcher/PollWatcher unwired; no periodic reconciliation backstop (`PLAT-03`).**
+- **No Chmod-only / OS-junk event filtering (`PLAT-04`).**
+- **`ServiceSpec` seam too thin to render the launchd plist (`PLAT-05`);** flesh out the adapter so installers can be generated. A native FSEvents watcher remains a follow-up.

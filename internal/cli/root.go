@@ -20,13 +20,15 @@ import (
 const (
 	exitGeneric           = 1
 	exitInvalidConfig     = 2
-	exitDaemonUnavailable = 3
+	exitDaemonUnavailable = 3 // reserved for M5 daemon (ARCH2-04); not yet returned.
 	exitConflict          = 4
 	exitDirtyWorktree     = 5
 	exitAuth              = 6
 	exitGit               = 7
 	exitNetwork           = 8
 	exitPolicy            = 9
+	exitUsage             = 10  // CLI-04: bad-flag/missing-flag/arg-count usage errors
+	childExitBase         = 100 // CLI-03: child exit codes propagated as 100+N to avoid collision with reserved 1-9.
 )
 
 type appError struct {
@@ -97,6 +99,7 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newRunCommand(stdout, opts))
 	cmd.AddCommand(newAgentCommand(stdout, opts))
 	cmd.AddCommand(newDevicesCommand(stdout, opts))
+	cmd.AddCommand(newConflictsCommand(stdout, opts))
 
 	return cmd
 }
@@ -138,12 +141,12 @@ func (o *options) paths() config.Paths {
 	}
 }
 
-func (o *options) openState() (*state.Store, error) {
+func (o *options) openState(ctx context.Context) (*state.Store, error) {
 	paths := config.Paths{
 		Home: o.v.GetString("home"),
 		Root: o.v.GetString("root"),
 	}
-	return state.Open(paths.StateDB())
+	return state.Open(ctx, paths.StateDB())
 }
 
 func closeStore(store *state.Store) {

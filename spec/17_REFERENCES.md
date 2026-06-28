@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-26
+last_reviewed: 2026-06-28
 tracks_code: [.github/**, go.mod, go.sum, AUDIT_RECOMMENDATIONS.md]
 ---
 # References
@@ -122,3 +122,16 @@ Exa MCP review on `2026-06-26` supported agent/watcher hardening behavior:
 - Default agent workspace access should be worktree-scoped, with explicit personal override for broad local access.
 - Watcher implementations should coalesce bursty editor/indexer events and feed reconciliation, not mutate state directly from low-level events.
 - `gh pr create` tests should be hermetic by using fake/stub executables or explicit command interfaces for non-dry command coverage.
+
+## Audit follow-ups (2026-06-27) — added references
+
+- Git FAQ — never sync a repository via a file-sync service: https://git-scm.com/docs/gitfaq
+- git-bundle: https://git-scm.com/docs/git-bundle
+- jujutsu (auto-committed working copy): https://github.com/martinvonz/jj
+- Mutagen: https://mutagen.io/documentation/synchronization/ ; Syncthing: https://docs.syncthing.net/users/syncing
+- age: https://github.com/FiloSottile/age ; SOPS: https://github.com/getsops/sops
+- govulncheck: https://go.dev/security/vuln/
+- git-town forge drivers: https://www.git-town.com/preferences/forge-type
+- Server-Sent Events: https://html.spec.whatwg.org/multipage/server-sent-events.html
+- Caddy automatic HTTPS: https://caddyserver.com/docs/automatic-https ; Tailscale: https://tailscale.com/
+- Full per-finding sources: `AUDIT_RECOMMENDATIONS_2026-06-27.md`.

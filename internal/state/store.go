@@ -200,7 +200,7 @@ type AgentRun struct {
 	TestSummary string `json:"test_summary,omitempty"`
 }
 
-func Open(path string) (*Store, error) {
+func Open(ctx context.Context, path string) (*Store, error) {
 	dsn := sqliteDSN(path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -209,7 +209,9 @@ func Open(path string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
-	if err := db.Ping(); err != nil {
+	// CODE-05: use PingContext so a Ctrl-C during a slow/locked open can be
+	// cancelled instead of blocking on context.Background().
+	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("configure sqlite state: %w", err)
 	}
@@ -217,7 +219,7 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	if err := foreignKeyCheck(context.Background(), db); err != nil {
+	if err := foreignKeyCheck(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -291,7 +293,33 @@ func (s *Store) Backup(ctx context.Context, outputPath string) error {
 	if err := os.Chmod(outputPath, 0o600); err != nil {
 		return fmt.Errorf("secure state backup: %w", err)
 	}
+	// DATA-01: validate the backup after VACUUM INTO so corruption is caught
+	// before a restore depends on it. Remove the partial backup on failure.
+	if err := validateBackup(ctx, outputPath); err != nil {
+		_ = os.Remove(outputPath)
+		return fmt.Errorf("backup failed validation: %w", err)
+	}
 	return nil
+}
+
+func validateBackup(ctx context.Context, path string) error {
+	dsn := sqliteDSN(path)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return fmt.Errorf("open backup for validation: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := db.PingContext(ctx); err != nil {
+		return fmt.Errorf("ping backup: %w", err)
+	}
+	var quickResult string
+	if err := db.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&quickResult); err != nil {
+		return fmt.Errorf("run quick_check on backup: %w", err)
+	}
+	if quickResult != "ok" {
+		return fmt.Errorf("backup quick_check failed: %s", quickResult)
+	}
+	return foreignKeyCheck(ctx, db)
 }
 
 func (s *Store) QuickCheck(ctx context.Context) (string, error) {
@@ -367,15 +395,15 @@ func (s *Store) WithTx(ctx context.Context, fn func(*Tx) error) error {
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
+	// CODE-03: defer rollback so a panic inside fn returns the connection to
+	// the single-connection pool. On success Commit makes the deferred
+	// Rollback a harmless no-op (sql.ErrTxDone).
+	defer func() { _ = tx.Rollback() }()
 	wrapped := &Tx{tx: tx, workspaceID: workspaceID}
 	if err := fn(wrapped); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit transaction: %w", err)
-	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *Store) WorkspaceID(ctx context.Context) (string, error) {
@@ -1907,24 +1935,58 @@ func EventSignaturePayload(event Event) []byte {
 
 func verifyEventSignature(ctx context.Context, exec sqlExecutor, event Event) error {
 	var signingPublicKey string
+	var trustState string
 	err := exec.QueryRowContext(ctx, `
-SELECT COALESCE(signing_public_key, '')
+SELECT COALESCE(signing_public_key, ''), trust_state
 FROM devices
 WHERE id = ?;
-`, event.DeviceID).Scan(&signingPublicKey)
-	if errors.Is(err, sql.ErrNoRows) || signingPublicKey == "" {
+`, event.DeviceID).Scan(&signingPublicKey, &trustState)
+	if errors.Is(err, sql.ErrNoRows) {
+		// SECU-03: unknown devices must not inject destructive events.
+		if mustVerifyEvent(event.Type) {
+			return fmt.Errorf("event %s of type %s requires a signature from a known approved device", event.ID, event.Type)
+		}
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("read device signing public key: %w", err)
 	}
+	if signingPublicKey == "" {
+		// SECU-03: a known device with no signing key may not inject
+		// destructive events unless it is the local device (which may not
+		// have set up signing yet).
+		if mustVerifyEvent(event.Type) && trustState != "local" {
+			return fmt.Errorf("event %s of type %s requires a signature from a device with a signing key", event.ID, event.Type)
+		}
+		return nil
+	}
 	if event.DeviceSig == "" {
+		if mustVerifyEvent(event.Type) {
+			return fmt.Errorf("event %s of type %s requires a device signature", event.ID, event.Type)
+		}
 		return fmt.Errorf("event %s missing device signature", event.ID)
+	}
+	// SECU-03: for must-verify events, also require the device to be approved.
+	if mustVerifyEvent(event.Type) && trustState != "approved" && trustState != "local" {
+		return fmt.Errorf("event %s of type %s requires a signature from an approved device (current: %s)", event.ID, event.Type, trustState)
 	}
 	if err := devicekeys.Verify(signingPublicKey, event.DeviceSig, eventSignatureDomain, EventSignaturePayload(event)); err != nil {
 		return fmt.Errorf("event %s device signature invalid: %w", event.ID, err)
 	}
 	return nil
+}
+
+// mustVerifyEvent reports whether an event type is destructive or
+// trust-affecting and therefore requires a valid signature from a known,
+// approved device (SECU-03). Unknown devices and devices with no signing key
+// must not be able to inject these events.
+func mustVerifyEvent(eventType string) bool {
+	switch eventType {
+	case "project.deleted", "project.renamed":
+		return true
+	default:
+		return false
+	}
 }
 
 func ContentHash(payloadJSON string) string {

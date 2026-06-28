@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -57,7 +56,7 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := enforceAgentCommandPolicy(policy, agentCommand); err != nil {
 				return err
 			}
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -107,6 +106,11 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 			}
 			_, _ = fmt.Fprintf(stdout, "\nAgent run %s %s\nworktree: %s\nlog: %s\ndiff:\n%s\n", run.ID, status, wt.Path, logPath, emptySummary(diffSummary))
 			if commandErr != nil {
+				// CLI-03: propagate the child's real exit code.
+				var ee *exec.ExitError
+				if errors.As(commandErr, &ee) {
+					return appError{code: childExitBase + ee.ExitCode(), err: fmt.Errorf("agent run %s failed: command exited %d", run.ID, ee.ExitCode())}
+				}
 				return fmt.Errorf("agent run %s failed: %w", run.ID, commandErr)
 			}
 			return nil
@@ -115,7 +119,7 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&engine, "engine", "generic", "agent engine")
 	cmd.Flags().StringVar(&taskName, "task", "", "task description")
 	cmd.Flags().StringVar(&commandFlag, "command", "", "generic command to run, split on whitespace; args after -- are preferred")
-	cmd.Flags().StringVar(&policy, "policy", "guarded", "agent command policy: readonly, cautious, guarded, or yolo-local")
+	cmd.Flags().StringVar(&policy, "policy", "guarded", "agent command policy: readonly, cautious, guarded, or yolo-local (advisory only — not a security boundary until OS sandboxing lands; AGEN-01)")
 	return cmd
 }
 
@@ -124,7 +128,7 @@ func newAgentListCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Use:   "list",
 		Short: "List agent runs",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -152,7 +156,7 @@ func newAgentShowCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Short: "Show an agent run",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -179,10 +183,10 @@ func newAgentPRCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var body string
 	cmd := &cobra.Command{
 		Use:   "pr <agent-run-id>",
-		Short: "Create a GitHub PR after the stale-base gate",
+		Short: "Create a PR/MR after the stale-base gate (forge-agnostic: gh/glab/tea)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -246,11 +250,25 @@ func enforceAgentCommandPolicy(policy string, args []string) error {
 		policy = "guarded"
 	}
 	switch policy {
-	case "readonly", "cautious", "guarded":
+	case "readonly", "cautious", "guarded", "ephemeral-ci":
 	case "yolo-local":
 		return nil
 	default:
 		return appError{code: exitInvalidConfig, err: fmt.Errorf("unsupported agent policy %q", policy)}
+	}
+	// AGEN-01: block known interpreters/shells/downloaders under non-yolo
+	// policies. argv-substring matching is bypassable by any interpreter, so
+	// refusing bare interpreters reduces the most obvious exfil vector. This
+	// is advisory, NOT a security boundary — only an OS sandbox (AGEN-03)
+	// can truly confine agent code.
+	interpreters := map[string]bool{
+		"sh": true, "bash": true, "zsh": true, "env": true,
+		"python": true, "python3": true, "python2": true,
+		"node": true, "perl": true, "ruby": true,
+		"wget": true, "curl": true,
+	}
+	if len(args) > 0 && interpreters[strings.ToLower(filepath.Base(args[0]))] {
+		return appError{code: exitPolicy, err: fmt.Errorf("agent policy %s denied interpreter/downloader %q; pass --policy yolo-local for explicit personal override", policy, args[0])}
 	}
 	joined := strings.ToLower(strings.Join(args, " "))
 	deny := []string{
@@ -269,7 +287,14 @@ func enforceAgentCommandPolicy(policy string, args []string) error {
 		}
 	}
 	if policy == "readonly" {
-		for _, token := range []string{" sh -c ", " tee ", ">", ">>", "git add", "git commit", "git push", "npm install"} {
+		// AGEN-04: use argv-aware redirection detection instead of substring
+		// matching so `grep 'a->b'` is not falsely denied.
+		for _, arg := range args {
+			if arg == ">" || arg == ">>" {
+				return appError{code: exitPolicy, err: fmt.Errorf("agent policy readonly denied redirection; use cautious, guarded, or yolo-local")}
+			}
+		}
+		for _, token := range []string{" sh -c ", " tee ", "git add", "git commit", "git push", "npm install"} {
 			if strings.Contains(" "+joined+" ", token) {
 				return appError{code: exitPolicy, err: fmt.Errorf("agent policy readonly denied mutating command; use cautious, guarded, or yolo-local")}
 			}
@@ -350,12 +375,20 @@ func agentTokenLooksSensitive(token string) bool {
 	if base == ".env" || strings.HasPrefix(base, ".env.") {
 		return true
 	}
+	// AGEN-05: match the scan detector's sensitive-file set so the agent
+	// deny list and the scanner cannot drift.
 	switch base {
-	case ".netrc", ".npmrc", ".pypirc", "id_rsa", "id_ed25519":
+	case ".netrc", ".npmrc", ".pypirc", "id_rsa", "id_ed25519",
+		"credentials.json", "service-account.json":
 		return true
-	default:
-		return false
 	}
+	if strings.Contains(base, "service-account") {
+		return true
+	}
+	if strings.HasSuffix(base, ".pem") || strings.HasSuffix(base, ".key") {
+		return true
+	}
+	return false
 }
 
 func agentPathLooksSensitive(root, path string) bool {
@@ -370,7 +403,8 @@ func agentPathLooksSensitive(root, path string) bool {
 		}
 	}
 	lower := strings.ToLower(filepath.ToSlash(path))
-	denyParts := []string{"/.ssh", "/.aws", "/.snowflake", "/.config/gh", "/.gnupg"}
+	// AGEN-05: expanded deny set to match the spec and scan detector.
+	denyParts := []string{"/.ssh", "/.aws", "/.snowflake", "/.config/gh", "/.gnupg", "/.kube", "/.docker"}
 	for _, part := range denyParts {
 		if strings.Contains(lower, part+"/") || strings.HasSuffix(lower, part) {
 			return true
@@ -396,7 +430,7 @@ func runAgentProcess(ctx context.Context, wt state.Worktree, run state.AgentRun,
 		return fmt.Errorf("create agent log: %w", err)
 	}
 	defer func() { _ = logFile.Close() }()
-	env, err := childenv.FromOS(childenv.BasicAllowlist(), map[string]string{
+	env, err := childenv.FromOS(childenv.AgentAllowlist(), map[string]string{
 		"DEVSTRAP_AGENT_RUN_ID": run.ID,
 		"DEVSTRAP_WORKTREE_ID":  wt.ID,
 	})
@@ -465,22 +499,13 @@ func pushAgentBranch(ctx context.Context, dir, branch string) error {
 }
 
 func createAgentPR(ctx context.Context, dir, baseBranch, headBranch, title, body string) (string, error) {
-	env, err := childenv.FromOS(append(childenv.BasicAllowlist(), "GH_*", "GITHUB_TOKEN"), nil)
+	// FORGE-01: detect the forge from the remote URL and route PR creation
+	// accordingly (gh/glab/tea), with graceful degradation for unknown forges.
+	remoteURL, err := dsgit.NewRunner().RemoteURL(ctx, dir)
 	if err != nil {
-		return "", err
+		remoteURL = ""
 	}
-	command := exec.CommandContext(ctx, "gh", "pr", "create", "--base", baseBranch, "--head", headBranch, "--title", title, "--body", body) //nolint:gosec // fixed GitHub CLI command with explicit argv, sanitized env, and user-authored title/body data.
-	command.Dir = dir
-	command.Env = env
-	var stdout, stderr bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = &stderr
-	if err := command.Run(); err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		return "", appError{code: exitGit, err: fmt.Errorf("gh pr create failed: %s", msg)}
-	}
-	return strings.TrimSpace(stdout.String()), nil
+	// AGEN-06: scrub the PR body so token-shaped secrets never reach the forge.
+	scrubbedBody := redact.Scrub(body)
+	return createForgePR(ctx, dir, remoteURL, baseBranch, headBranch, title, scrubbedBody)
 }

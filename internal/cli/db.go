@@ -18,7 +18,7 @@ func newDBCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Use:   "migrate",
 		Short: "Apply pending state database migrations",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -39,7 +39,7 @@ func newDBCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Use:   "status",
 		Short: "Show state database migration status",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -70,7 +70,7 @@ func newDBCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("resolve backup path: %w", err)}
 			}
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -87,7 +87,7 @@ func newDBCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Use:   "down",
 		Short: "Roll back one state database migration",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}

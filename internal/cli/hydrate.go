@@ -47,7 +47,7 @@ func newHydrateCommand(stdout io.Writer, opts *options) *cobra.Command {
 }
 
 func hydrateProject(ctx context.Context, opts *options, nsPath string, partial bool) (string, error) {
-	store, err := opts.openState()
+	store, err := opts.openState(ctx)
 	if err != nil {
 		return "", err
 	}

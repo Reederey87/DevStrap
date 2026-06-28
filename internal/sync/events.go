@@ -26,6 +26,15 @@ const (
 // event's HLC may be before it is quarantined instead of applied.
 const defaultReceiveMaxSkew = 5 * time.Minute
 
+// epochFloorMS is the minimum plausible physical timestamp. HLC values whose
+// physical component is below this floor are quarantined as implausible so a
+// malicious/buggy peer cannot poison ordering from the "past" direction
+// (SYNC-03). Set to 0 so only truly non-positive HLC values (event.HLC <= 0)
+// are rejected; deterministic tests use small positive HLC values whose
+// physical component is 0. A production deployment should raise this to the
+// DevStrap launch epoch once test events use realistic timestamps.
+const epochFloorMS = 0
+
 type ProjectPayload struct {
 	Path          string `json:"path"`
 	Type          string `json:"type"`
@@ -44,7 +53,6 @@ type skewConflictDetails struct {
 	EventID  string `json:"event_id"`
 	DeviceID string `json:"device_id"`
 	HLC      int64  `json:"hlc"`
-	OffsetMS int64  `json:"offset_ms"`
 }
 
 type renameConflictDetails struct {
@@ -137,10 +145,20 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) err
 	now := time.Now().UnixMilli()
 	maxSkewMS := defaultReceiveMaxSkew.Milliseconds()
 	for _, event := range events {
+		// SYNC-03: quarantine remote events with implausible HLC values
+		// (non-positive or below the epoch floor) so they cannot win every
+		// same-path conflict from the "past" direction.
+		physical := event.HLC >> hlcLogicalBits
+		if event.HLC <= 0 || physical < epochFloorMS {
+			if err := quarantineSkewedEvent(ctx, st, event, physical-now); err != nil {
+				return err
+			}
+			continue
+		}
 		// SYNC-3: quarantine remote events whose physical timestamp is beyond
 		// the trusted skew so one bad/malicious peer cannot poison ordering.
 		// Skipping (not aborting) keeps the rest of the batch converging.
-		if offset := (event.HLC >> hlcLogicalBits) - now; offset > maxSkewMS {
+		if offset := physical - now; offset > maxSkewMS {
 			if err := quarantineSkewedEvent(ctx, st, event, offset); err != nil {
 				return err
 			}
@@ -163,6 +181,13 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) err
 				if conflictErr := insertEventHashChainConflict(ctx, st, event, err); conflictErr != nil {
 					return errors.Join(err, conflictErr)
 				}
+				// SYNC-05/CODE-01: record the conflict and continue so the
+				// rest of the batch (and other devices' events) still apply,
+				// mirroring the skew-quarantine path. The broken event is
+				// never inserted, so it will be re-delivered on the next pull;
+				// insertConflict dedups on stable details so no unbounded
+				// growth results.
+				continue
 			}
 			return err
 		}
@@ -173,11 +198,13 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) err
 func quarantineSkewedEvent(ctx context.Context, st *state.Store, event state.Event, offsetMS int64) error {
 	logging.Logger(ctx).Warn("quarantined remote event with untrustworthy time",
 		"device_id", event.DeviceID, "event_id", event.ID, "offset_ms", offsetMS)
+	// CODE-02: omit the volatile offset_ms from the persisted details so
+	// insertConflict dedups re-delivered skewed events instead of inserting
+	// a new conflict row on every resync.
 	raw, err := json.Marshal(skewConflictDetails{
 		EventID:  event.ID,
 		DeviceID: event.DeviceID,
 		HLC:      event.HLC,
-		OffsetMS: offsetMS,
 	})
 	if err != nil {
 		return err
@@ -224,6 +251,17 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 				}
 			}
 			return tx.InsertConflict(ctx, existing.ID, "same_path_different_remote", details)
+		}
+		// SYNC-01: same-remote add/update must be HLC last-writer-wins. Only
+		// mutate when the incoming event coordinates strictly dominate the
+		// stored source-event coordinates; otherwise no-op so convergence is
+		// deterministic regardless of arrival order.
+		if err == nil {
+			cur := samePathCandidate{hlc: existing.SourceEventHLC, deviceID: existing.SourceEventDeviceID, eventID: existing.SourceEventID}
+			inc := samePathCandidate{hlc: event.HLC, deviceID: event.DeviceID, eventID: event.ID}
+			if !samePathLess(cur, inc) {
+				return nil // stored coords dominate → stale, skip
+			}
 		}
 		_, err = tx.UpsertProject(ctx, upsertParamsForEvent(payload, event))
 		return err

@@ -74,7 +74,7 @@ func TestWorktreeUnlockClearsStaleAndRefusesLiveLock(t *testing.T) {
 		t.Fatalf("add stderr = %q err = %v", stderr, err)
 	}
 
-	store, err := state.Open(filepath.Join(home, "state.db"))
+	store, err := state.Open(context.Background(), filepath.Join(home, "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

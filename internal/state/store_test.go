@@ -23,7 +23,7 @@ func TestMain(m *testing.M) {
 
 func TestOpenConfiguresSQLiteAndSecuresFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
-	st, err := Open(path)
+	st, err := Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +82,7 @@ func TestOpenRejectsExistingForeignKeyViolations(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	st, err := Open(path)
+	st, err := Open(context.Background(), path)
 	if err == nil {
 		_ = st.Close()
 		t.Fatal("expected Open to reject foreign key violations")
@@ -109,7 +109,7 @@ func TestTimestampFormatIsFixedWidthAndLexicallySortable(t *testing.T) {
 }
 
 func TestSummaryBeforeMigrateIsFriendly(t *testing.T) {
-	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestSummaryBeforeMigrateIsFriendly(t *testing.T) {
 
 func TestListWorktreesUsesDeterministicIDTieBreaker(t *testing.T) {
 	ctx := context.Background()
-	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ VALUES (?, ?, ?, ?, ?, 'origin/main', 'abc123', 'agent', 'active', 'clean', ?, ?
 }
 
 func TestMigrateEnsureSummaryAndVersion(t *testing.T) {
-	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +275,7 @@ VALUES ('ws_second', 'second', '/tmp/Other', ?, ?);
 }
 
 func TestListProjectsUsesActiveNamespaceIndex(t *testing.T) {
-	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +329,7 @@ ORDER BY n.path_key;
 }
 
 func TestMigrationDownAndUp(t *testing.T) {
-	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +362,7 @@ func TestMigrationDownAndUp(t *testing.T) {
 
 func TestUpsertProjectPreservesExistingLFSPolicyWhenUnspecified(t *testing.T) {
 	ctx := context.Background()
-	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +405,7 @@ func TestUpsertProjectPreservesExistingLFSPolicyWhenUnspecified(t *testing.T) {
 }
 
 func TestConcurrentWritesDoNotReturnBusy(t *testing.T) {
-	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +435,7 @@ func TestConcurrentWritesDoNotReturnBusy(t *testing.T) {
 func TestInsertLocalEventPersistsClockAndSequenceAcrossReopen(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "state.db")
-	st, err := Open(path)
+	st, err := Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -460,7 +460,7 @@ func TestInsertLocalEventPersistsClockAndSequenceAcrossReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	st, err = Open(path)
+	st, err = Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -482,7 +482,7 @@ func TestInsertLocalEventPersistsClockAndSequenceAcrossReopen(t *testing.T) {
 
 func TestInsertLocalEventSignsAndRejectsTampering(t *testing.T) {
 	ctx := context.Background()
-	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -533,7 +533,7 @@ func TestInsertLocalEventSignsAndRejectsTampering(t *testing.T) {
 
 func TestInsertLocalEventSeedsClockFromExistingEvents(t *testing.T) {
 	ctx := context.Background()
-	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -577,7 +577,7 @@ func packHLCForTest(physical, logical int64) int64 {
 
 func TestMarkEncryptedBindingsNeedingRotation(t *testing.T) {
 	ctx := context.Background()
-	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

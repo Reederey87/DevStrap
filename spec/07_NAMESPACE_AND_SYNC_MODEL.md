@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-26
+last_reviewed: 2026-06-28
 tracks_code: [internal/pathkey/**, internal/scan/**, internal/state/**, internal/sync/**]
 ---
 # Namespace and Sync Model
@@ -59,6 +59,12 @@ DevStrap does not sync:
 working tree bytes, .git internals, dependencies
 ```
 
+**Requirement:** a `git_repo` entry MUST have a non-empty, validated `remote_key`. A git repository with no usable remote is classified `local_git` (below) — never adopted as a clonable `git_repo`. Adopting a no-remote repo as `git_repo` silently breaks hydration on every other device (`NOVCS-01`). `scan --adopt` applies the same remote validation `add` does.
+
+### `local_git`
+
+A git repository with **no usable remote** (just ran `git init`, or the remote is not added yet). Tracked so the path appears everywhere, but its content syncs via an encrypted bundle (like `draft_project`), never via clone. Promote to `git_repo` once a remote is added (`devstrap promote <path> --git-remote <url>`).
+
 ### `draft_project`
 
 Small project without remote Git yet.
@@ -93,6 +99,19 @@ Use for:
 - grouping folders;
 - documentation buckets;
 - local-only areas.
+
+**Status:** `plain_folder` is a documented type but `scan` does not yet emit it; local-only folders without a recognized manifest are currently descended into and dropped (`NOVCS-03`).
+
+### Content-sync status (type ↔ content)
+
+| type | remote required | content sync | hydrate / open |
+|---|---|---|---|
+| `git_repo` | yes | git clone / fetch | yes |
+| `local_git` | no | encrypted bundle* | planned |
+| `draft_project` | no | encrypted bundle* | planned |
+| `plain_folder` | no | none (structure only) | n/a |
+
+*The encrypted working-tree bundle path (`draft.snapshot.created`, see Draft sync model) is specified but not yet implemented. Until then `hydrate`/`open` on a non-`git_repo` type must return an explicit "local-only; not yet syncable" message, not a misleading clone error (`NOVCS-02`).
 
 ## Device state
 
@@ -207,10 +226,22 @@ repo.remote.changed
 env.profile.bound
 tooling.profile.bound
 agent.policy.bound
-draft.snapshot.created
+draft.snapshot.created        # encrypted working-tree bundle (non-git / draft fallback — Layer C)
+repo.gitstate.observed        # signed read-only git-state snapshot (working-state validation plane — Layer A)
+repo.wip.pushed               # a WIP commit pushed to refs/devstrap/wip/<device>/<path_key> (recovery — Layer B)
 conflict.created
 conflict.resolved
 ```
+
+### Working-state plane (cross-machine "forgot to push")
+
+The human-convenience plane that answers "I forgot to push and I'm now on another machine." It is **strictly separate from the agent plane** — agents always base from `origin/<default_branch>` and the fresh-worktree resolver must never read `refs/devstrap/wip/*`. Three layers (see `AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 5):
+
+- **Layer A — validation (Phase 0):** each device emits `repo.gitstate.observed` (branch, HEAD sha, upstream sha, dirty/untracked/unmerged/ahead/behind/stash counts), captured with `git --no-optional-locks status --porcelain=v2 --branch` so capture never writes `.git/index`. Apply is mirror-only into a sidecar `device_gitstate` table (opaque `device_id`, **no FK** to `devices` since remote devices are not enrolled until Phase 2). `status --all-devices`/`doctor` warn on un-backed-up work and **always render snapshot age** ("never synced / last seen N ago"), never silent all-clear.
+- **Layer B — WIP recovery (Phase 1):** `git stash create` (no worktree/index mutation) → `git push origin <sha>:refs/devstrap/wip/<device_id>/<path_key>` over git's integrity-checked transport → emit `repo.wip.pushed`. Forge-agnostic. Machine B fetches into the same ref namespace; `wip apply` materializes into the worktree only on explicit command, never as a branch or base.
+- **Layer C — encrypted bundle (Phase 3, narrow):** only for `draft_project`/`local_git`/untracked-only where there is no remote to push a ref to — `draft.snapshot.created` with `internal/envbundle` age encryption.
+
+**Literal continuous file-sync of the working tree is rejected** (git-corruption + invariant violation); see `04_CHALLENGE_MATRIX.md`.
 
 ## Sync protocol
 
@@ -233,6 +264,22 @@ Sync loop:
 ```
 
 If the hub no longer retains events after a cursor, the device must fall back to a full-state snapshot plus cursor reset. Silent divergence is not allowed.
+
+### Wire protocol (Phase 2 hub)
+
+The production hub is a thin, zero-knowledge, store-and-forward relay over HTTPS; correctness lives **off the wire** (HLC ordering + content-hash + `prev_event_hash` chain + Ed25519 signatures), so the hub is never trusted to order or authenticate.
+
+```text
+POST /v1/{ws}/events              # push (idempotent on event id)
+GET  /v1/{ws}/events?after=<hlc>  # catch-up pull; <hlc> = sync_cursors.last_hlc_applied
+GET  /v1/{ws}/stream  (SSE)       # live notify only; Last-Event-ID=<hlc>; ': ping' heartbeats; long-poll fallback
+PUT/GET /v1/{ws}/blobs/{sha256}   # encrypted bundles, content-addressed (age_blob:<sha256>)
+410 Gone {snapshot_required:true} # cursor fell past retention -> full-state snapshot + cursor reset
+```
+
+The HLC int64 is simultaneously the ordering key, the resume cursor, and the SSE `Last-Event-ID`. SSE is a freshness hint only; correctness rests on cursor-based pull, preserving the no-daemon guarantee. WebSocket/gRPC/QUIC/P2P/mobile-push are deferred. See `03_SYSTEM_ARCHITECTURE.md` and `AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 6.
+
+**Cursor-wiring status (`ARCH2-02`):** `sync_cursors` and `event_delivery` exist but are not yet wired — `devstrap sync` currently pushes all local events and pulls from HLC 0 every run (full-history replay). Wiring `last_hlc_applied` (push only events past the peer cursor; `Pull(ctx, cursor)`) and setting hub retention so the `410`→snapshot path is reachable is the first Phase-2 step. Build the full-state snapshot exchange **before** enabling hub retention GC.
 
 Current implementation includes the local HLC type, persisted local event stamping with per-device sequence numbers, project event constructors, `add`/`scan --adopt` project-event emission, local previous-event hash linking, content-hash and previous-hash verification, transactional event claim plus side-effect apply, hash-chain break conflict recording, HLC-gated project delete tombstones/restores, deterministic replay order, exact duplicate no-ops, divergent duplicate rejection, order-independent same-path/different-remote conflict reconciliation, a file-backed hub adapter, and a user-facing `devstrap sync --hub-file <path>` command for the file-backed test hub. Production peer authentication, remote device registration, encrypted payload handling, tombstone garbage collection, full snapshot exchange, and real cross-root skeleton reconciliation remain future work.
 
@@ -440,6 +487,8 @@ On each device:
 
 ## Draft sync model
 
+This encrypted-bundle flow is **Layer C** of the working-state plane: the fallback for `draft_project`/`local_git`/non-git folders and untracked-only content where there is no remote ref to push to. For tracked content in a `git_repo`, the **WIP-ref path (Layer B) is strictly preferred** — git's own integrity-checked transport is safer and cheaper than re-bundling. This flow is specified but **not yet implemented** (no bundle/snapshot code exists today, `NOVCS-02`).
+
 Draft project snapshot:
 
 ```text
@@ -482,3 +531,10 @@ Contains:
 - ignore rules;
 - encrypted env bundles if requested;
 - draft snapshots if requested.
+
+## Audit implementation notes (2026-06-28)
+
+- **SYNC-01**: Same-remote `project.added`/`updated` now checks HLC-dominance before upserting; a stale event (stored coords dominate incoming) is a no-op, ensuring deterministic convergence.
+- **SYNC-03**: Added lower-bound HLC validation (`event.HLC <= 0` → quarantine) with `epochFloorMS` constant.
+- **SYNC-05/CODE-01**: `ApplyEvents` now `continue`s after recording a hash-chain-break conflict (was `return err`), so the rest of the batch converges.
+- **CODE-02**: Removed volatile `OffsetMS` from persisted `skewConflictDetails` so re-delivered skewed events dedup instead of inserting duplicate conflict rows.

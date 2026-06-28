@@ -106,7 +106,7 @@ func TestHLCSendIsRaceFreeAndStrictlyIncreasing(t *testing.T) {
 
 func TestApplyEventsIsIdempotentAndDetectsRemoteConflict(t *testing.T) {
 	ctx := context.Background()
-	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := state.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestReconcileSamePathIsCommutative(t *testing.T) {
 
 func TestApplyEventsSamePathDifferentRemoteUsesCanonicalWinnerAcrossPullWindows(t *testing.T) {
 	ctx := context.Background()
-	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := state.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +302,7 @@ func TestApplyEventsSamePathDifferentRemoteUsesCanonicalWinnerAcrossPullWindows(
 
 func TestApplyEventsRejectsDivergentDuplicateEventID(t *testing.T) {
 	ctx := context.Background()
-	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := state.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +341,7 @@ func TestApplyEventsRejectsDivergentDuplicateEventID(t *testing.T) {
 
 func TestApplyEventsRejectsBrokenPrevEventHashAndRecordsConflict(t *testing.T) {
 	ctx := context.Background()
-	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := state.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,8 +381,10 @@ func TestApplyEventsRejectsBrokenPrevEventHashAndRecordsConflict(t *testing.T) {
 	}
 	second.PrevEventHash = "sha256:broken"
 	err = ApplyEvents(ctx, st, []state.Event{second})
-	if !errors.Is(err, state.ErrEventHashChain) {
-		t.Fatalf("ApplyEvents broken chain error = %v, want ErrEventHashChain", err)
+	// SYNC-05/CODE-01: a hash-chain break records a conflict and continues
+	// (does not abort the batch), so ApplyEvents returns nil.
+	if err != nil {
+		t.Fatalf("ApplyEvents broken chain error = %v, want nil (conflict recorded, batch continues)", err)
 	}
 	conflicts, err := st.OpenConflicts(ctx)
 	if err != nil {
@@ -413,7 +415,7 @@ func TestApplyEventsRejectsBrokenPrevEventHashAndRecordsConflict(t *testing.T) {
 
 func TestApplyEventsHonorsProjectDeleteTombstoneHLC(t *testing.T) {
 	ctx := context.Background()
-	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := state.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -486,7 +488,7 @@ func TestApplyEventsHonorsProjectDeleteTombstoneHLC(t *testing.T) {
 
 func TestCreateProjectEventUsesPersistedLocalClock(t *testing.T) {
 	ctx := context.Background()
-	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := state.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

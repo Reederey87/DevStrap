@@ -504,8 +504,15 @@ func splitSCPLikeRemote(remote string) (string, string, bool) {
 func normalizeHostPath(host, path string) string {
 	host = strings.ToLower(strings.TrimSpace(host))
 	host = strings.TrimSuffix(host, ":22")
+	// FORGE-03: Azure DevOps uses divergent SSH/HTTPS shapes that produce
+	// different canonical keys. Unify both forms to dev.azure.com/org/proj/repo.
+	if host == "ssh.dev.azure.com" {
+		host = "dev.azure.com"
+		path = strings.TrimPrefix(path, "v3/")
+	}
 	path = strings.Trim(strings.TrimSpace(path), "/")
 	path = strings.TrimSuffix(path, ".git")
+	path = strings.Replace(path, "/_git/", "/", 1)
 	parts := strings.Split(path, "/")
 	for i := range parts {
 		parts[i] = strings.TrimSpace(parts[i])

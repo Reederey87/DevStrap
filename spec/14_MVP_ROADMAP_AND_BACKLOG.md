@@ -1,6 +1,6 @@
 ---
-last_reviewed: 2026-06-26
-tracks_code: [cmd/**, internal/**, .github/**, AUDIT_RECOMMENDATIONS.md]
+last_reviewed: 2026-06-28
+tracks_code: [cmd/**, internal/**, .github/**, AUDIT_RECOMMENDATIONS.md, AUDIT_RECOMMENDATIONS_2026-06-27.md]
 ---
 # MVP Roadmap and Backlog
 
@@ -433,3 +433,34 @@ Build these early:
 - Any future telemetry is opt-in per device and disabled by `DEVSTRAP_TELEMETRY=off`.
 - Daemon logs use `log/slog` with one redaction choke point.
 - Logs rotate under `~/.devstrap/logs/` and never include plaintext secrets.
+
+## Audit follow-ups (second pass, 2026-06-27)
+
+Workstreams added by the second-pass design & implementation audit (`AUDIT_RECOMMENDATIONS_2026-06-27.md`). Ordered by leverage; IDs reference that document.
+
+### P0 — security-relevant, do now
+- **Agent isolation is security theater** (`AGEN-01`, `AGEN-02`/`SECU-02`): argv-substring policy is bypassable by any interpreter, and `HOME`/`SSH_AUTH_SOCK` are forwarded into the agent subprocess. Strip credential env; move toward allowlist + OS sandbox.
+- **Secret hydration re-emits unescaped values** (`SECR-01`): escape `$`/backtick when writing env files.
+- **Key custody silent downgrade** (`SECR-04`/`SECU-01`): downgrades to a plaintext age key on ANY keychain error, not only unavailability.
+- **`agent pr` is GitHub-only** (`FORGE-01`): fails post-push on non-GitHub forges.
+- **No-remote repo corrupts the namespace** (`NOVCS-01`): classify as `local_git`, enforce non-empty `remote_key`.
+- **CI fragility** (`CI-01`): pin `govulncheck`, split it out of the "Go tests" job.
+
+### Cross-machine working-state sync (the "forgot to push" feature)
+- **Layer A — git-state validation plane** (Phase 0): `repo.gitstate.observed` events + `device_gitstate` sidecar table + `status --all-devices`/`doctor`.
+- **Layer B — WIP refs** (Phase 1): `git stash create` → `refs/devstrap/wip/*` push + `wip` subcommands; resolver-exclusion test.
+- **Layer C — encrypted bundles** (Phase 3): build out `draft.snapshot.created` for non-git/draft folders.
+
+### Non-VCS / forge support
+- Non-VCS/remote-less/multi-remote handling (`NOVCS-02..05`): `plain_folder` emission, `promote` command, remote preflight.
+- Forge-agnostic PR via a `Forge` interface (`FORGE-02..05`): `gh`/`glab`/`tea`, token allowlist, Azure key folding, `doctor` probe.
+
+### Sync hub (Phase 2)
+- HTTP/SSE zero-knowledge hub `cmd/devstraphub` + `HTTPHub` client; mTLS device certs; full-state snapshot exchange before retention GC (audit Section 6).
+- Wire the resume cursor (`ARCH2-02`): `sync` currently replays from HLC 0.
+
+### Architecture & hygiene epics
+- Extract `internal/engine` from `internal/cli` (`ARCH2-01`) before the daemon phase.
+- Signed **audit-log subsystem** (`spec/15`) — currently absent.
+- **`.devstrapignore` compiler** (`spec/11`) — currently absent; root cause of duplicated prune/secret/deny lists.
+- Daemon crash-recovery/reaper, observability/log-rotation, large-namespace scan benchmarks, cross-process `state.db` coordination, migration-rollback tests (audit coverage gaps).

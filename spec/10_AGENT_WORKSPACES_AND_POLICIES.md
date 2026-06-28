@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-26
+last_reviewed: 2026-06-28
 tracks_code: [internal/cli/agent.go, internal/cli/worktree.go, internal/git/**]
 ---
 # Agent Workspaces and Policies
@@ -127,7 +127,19 @@ MVP enforcement options:
 4. terminal/session recording;
 5. later: sandbox/container.
 
-Current implementation has the shared `internal/childenv` environment sanitizer used by Git/editor/agent subprocesses. `devstrap agent run` supports the `generic` engine: it creates a fresh upstream worktree, runs explicit argv commands in that isolated cwd with a sanitized no-secret default environment, applies a wrapper-level command policy (`readonly`, `cautious`, `guarded`, or explicit `yolo-local`) plus a wrapper-level file path policy that denies explicit sensitive-path and outside-worktree references for non-`yolo-local` runs, records an `agent_runs` row, captures a `0600` log under `~/.devstrap/logs/agent-runs`, and stores a Git status/diff summary. `devstrap agent pr` reuses the stale-base gate before pushing and calling `gh pr create`. OS-enforced sandboxing, project-env allowlists for agents, `agent cleanup`, and non-generic engine adapters remain future work.
+Current implementation has the shared `internal/childenv` environment sanitizer used by Git/editor/agent subprocesses. `devstrap agent run` supports the `generic` engine: it creates a fresh upstream worktree, runs explicit argv commands in that isolated cwd with a sanitized no-secret default environment, applies a wrapper-level command policy (`readonly`, `cautious`, `guarded`, or explicit `yolo-local`) plus a wrapper-level file path policy that denies explicit sensitive-path and outside-worktree references for non-`yolo-local` runs, records an `agent_runs` row, captures a `0600` log under `~/.devstrap/logs/agent-runs`, and stores a Git status/diff summary. `devstrap agent pr` reuses the stale-base gate before pushing and creating the PR — currently hardcoded to `gh pr create`, which fails post-push on non-GitHub remotes; it should route through a forge-agnostic `Forge` interface (`gh`/`glab`/`tea`) with graceful degradation (`FORGE-01`, see `08_GIT_MATERIALIZATION_AND_WORKTREES.md`). OS-enforced sandboxing, project-env allowlists for agents, `agent cleanup`, and non-generic engine adapters remain future work.
+
+## Enforcement reality (audit `AGEN-01..06`, `SECU-02`)
+
+The current wrapper-level enforcement oversells its safety and must not be presented as a sandbox:
+
+- **Command/file policy is argv-substring matching, trivially bypassed by any interpreter** (`AGEN-01`). `bash -c "…"`, `python -c`, base64-decode, `rm -fr /` (variant spacing), variable indirection, or a script file all evade the deny list, so the default `guarded` profile actually gives an agent full filesystem **read** and **network exfil**. Treat substring matching as a guardrail against accidents, not a security boundary.
+- **The agent subprocess forwards `HOME` and `SSH_AUTH_SOCK`** (`AGEN-02`/`SECU-02`), handing a live Git/SSH credential capability to semi-trusted code — contradicting "agents receive no secrets" and the `~/.ssh/**` deny. Strip both from the agent env unless an explicit, scoped opt-in is given.
+- **Profile semantics are misleading** (`AGEN-04`): `cautious` is currently identical to `guarded`, `readonly` is not actually read-only, and `ephemeral-ci` (listed above) is rejected by the code. Either implement the distinctions or rename/remove the profiles so names match behavior.
+- **There is no OS-enforced sandbox** under a profile literally named `guarded` (`AGEN-03`). Real isolation needs `sandbox-exec`/Seatbelt (macOS) or bubblewrap/landlock/seccomp (Linux); until then, say so plainly.
+- **The file-path deny list is narrower than this spec** and ignores the project's stronger sensitive-file detector (`AGEN-05`); unify on the single `spec/11` ignore/deny compiler.
+
+Direction: move to an **allowlist + OS sandbox** model, strip credential-bearing env by default, and make the default profile's true capability legible.
 
 ## Secret policy
 
@@ -136,6 +148,8 @@ Default:
 ```text
 Agents receive no secrets.
 ```
+
+In practice this is **not yet true**: the agent subprocess inherits `HOME` and `SSH_AUTH_SOCK` (`AGEN-02`/`SECU-02`), so an SSH-agent-backed Git credential is reachable. Strip both (and re-audit `internal/childenv`) so the default genuinely passes no secret capability.
 
 Project opt-in:
 
@@ -199,7 +213,7 @@ Algorithm:
 4. fetch origin/<default_branch>
 5. rebase if needed/approved
 6. push branch
-7. create PR using gh/GitHub API
+7. create PR/MR via the forge-agnostic Forge interface (gh/glab/tea); on an unknown forge, print the pushed branch + a compare/MR URL (FORGE-01)
 ```
 
 ## Cleanup
@@ -242,3 +256,12 @@ arun_c11  ui         agent/refactor-c11        old       stale     failed
 - diff summary is available;
 - cleanup avoids deleting dirty/unpushed work;
 - stale base is detected before PR.
+
+## Audit implementation notes (2026-06-28)
+
+- **AGEN-01**: `enforceAgentCommandPolicy` blocks known interpreters/shells/downloaders (sh, bash, python*, node, curl, etc.) under non-yolo policies; `--policy` help text disclaims advisory-only scope.
+- **AGEN-02**: `runAgentProcess` uses `childenv.AgentAllowlist()` which excludes `SSH_AUTH_SOCK`, stripping the live SSH credential capability from agent subprocesses.
+- **AGEN-04**: Added `ephemeral-ci` to accepted policy profiles; replaced `>` substring check with argv-aware redirection detection.
+- **AGEN-05**: `agentTokenLooksSensitive` now includes `credentials.json`, `service-account*.json`, `*.pem`, `*.key`; deny list expanded with `/.kube`, `/.docker`.
+- **AGEN-06**: Agent PR body scrubbed through `redact.Scrub` before forge submission.
+- **CLI-03**: `agent run` now propagates child exit codes as `100+N`.

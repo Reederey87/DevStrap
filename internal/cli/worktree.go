@@ -51,7 +51,7 @@ func newWorktreeUnlockCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Short: "Report and clear a stale repo operation lock for a project",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -114,7 +114,7 @@ func newWorktreeNewCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if taskName == "" {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("--name is required")}
 			}
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -137,6 +137,11 @@ func newWorktreeNewCommand(stdout io.Writer, opts *options) *cobra.Command {
 }
 
 func createFreshWorktree(ctx context.Context, stdout io.Writer, opts *options, store *state.Store, project state.ProjectStatus, taskName, createdBy string) (state.Worktree, error) {
+	// NOVCS-04: preflight — a remote-less repo cannot produce a fresh-upstream
+	// worktree; fail fast with an actionable message before touching git.
+	if strings.TrimSpace(project.RemoteKey) == "" {
+		return state.Worktree{}, appError{code: exitInvalidConfig, err: fmt.Errorf("%s has no git remote; fresh-upstream worktrees require one (add one with 'git remote add origin <url>')", project.Path)}
+	}
 	unlock, err := acquireRepoLock(opts.paths().Home, project.ID)
 	if err != nil {
 		return state.Worktree{}, err
@@ -261,7 +266,7 @@ func newWorktreeStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Short: "Check worktree freshness against its recorded upstream base",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -312,7 +317,7 @@ func newWorktreeFinalizeCommand(stdout io.Writer, opts *options) *cobra.Command 
 		Short: "Run final stale-base checks before PR or handoff",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -354,7 +359,7 @@ func newWorktreeListCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Use:   "list",
 		Short: "List active worktrees",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -383,7 +388,7 @@ func newWorktreeRemoveCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Short: "Mark a worktree removed",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -450,7 +455,7 @@ func newWorktreeCleanupCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if !merged {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("--merged is required")}
 			}
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}

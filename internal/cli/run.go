@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -25,7 +26,7 @@ func newRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Short: "Run a command with the project env profile",
 		Args:  cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -191,6 +192,12 @@ func runChildCommand(ctx context.Context, dir string, env []string, args []strin
 	command.Stderr = stderr
 	command.Stdin = os.Stdin
 	if err := command.Run(); err != nil {
+		// CLI-03: propagate the child's real exit code for passthrough wrappers
+		// so callers can distinguish test failures from transient errors.
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return appError{code: childExitBase + ee.ExitCode(), err: fmt.Errorf("run %s: command exited %d", strings.Join(args, " "), ee.ExitCode())}
+		}
 		return fmt.Errorf("run %s: %w", strings.Join(args, " "), err)
 	}
 	return nil

@@ -63,7 +63,7 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 
-			store, err := state.Open(paths.StateDB())
+			store, err := state.Open(cmd.Context(), paths.StateDB())
 			if err != nil {
 				return err
 			}

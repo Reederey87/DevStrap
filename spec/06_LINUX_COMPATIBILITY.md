@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-26
+last_reviewed: 2026-06-28
 tracks_code: [internal/platform/**, .github/**]
 ---
 # Linux Compatibility Plan
@@ -235,3 +235,7 @@ Recommended:
 - same namespace event stream syncs with Mac.
 
 Current repository implementation covers the portable CLI pieces for init, scan/adopt, add, hydrate, env capture/hydrate/bind, provider-backed env runtime injection through `op run`, provider file hydration through `op inject`, status, fresh worktree creation, platform adapter interfaces, build-tagged platform detection, and a polling watcher fallback. The systemd service, native inotify watcher, and cross-device sync command remain future Linux work.
+
+## Audit follow-ups (2026-06-27)
+
+The platform findings in `05_MAC_FIRST_IMPLEMENTATION.md` (`PLAT-01..05`) apply equally to the Linux adapters: unify watcher exclusions with the `spec/11` ignore compiler, add inotify `ENOSPC`/`max_user_watches` handling + polling fallback + periodic reconciliation, filter OS junk, and make the `ServiceSpec` seam rich enough to render the systemd user unit. Keep all Linux specifics behind `internal/platform` adapters.

@@ -204,10 +204,10 @@ func (k SystemKeychain) Delete(_ context.Context, service, account string) error
 
 func mapKeyringError(err error, name string) error {
 	if errors.Is(err, keyring.ErrUnsupportedPlatform) {
-		return fmt.Errorf("%w: %s keychain is not available: %v", ErrUnsupported, name, err)
+		return fmt.Errorf("%w: %s keychain is not available: %w", ErrUnsupported, name, err)
 	}
 	if errors.Is(err, keyring.ErrNotFound) {
-		return fmt.Errorf("%w: %s/%s", ErrSecretNotFound, name, err)
+		return fmt.Errorf("%w: %s/%w", ErrSecretNotFound, name, err)
 	}
 	return fmt.Errorf("%s keychain: %w", name, err)
 }

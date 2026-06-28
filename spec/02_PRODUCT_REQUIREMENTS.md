@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-26
+last_reviewed: 2026-06-28
 tracks_code: [cmd/**, internal/**, README.md]
 ---
 # Product Requirements
@@ -269,3 +269,13 @@ The MVP does not include a team admin UI or hosted SaaS console. If/when DevStra
 - API-first boundaries with stateless request handling, no sticky sessions, and horizontal scaling assumptions;
 - OpenTelemetry-compatible traces/metrics/logs, SLOs, error budgets, and rollback strategy before production launch;
 - no telemetry by default; opt-in product analytics only, with clear metadata disclosure.
+
+## Audit follow-ups (2026-06-27)
+
+From `AUDIT_RECOMMENDATIONS_2026-06-27.md`:
+
+- **Readiness model half-implemented (`PROD-01`):** `env_ready`/`tooling_ready` are never written and the derived 9-value display status is never computed; `status` shows only materialization + dirty. Implement a pure `deriveDisplayStatus`, or mark the extra states deferred.
+- **Conflicts are write-only (`PROD-02`):** rows are recorded but no `devstrap conflicts` command or status/doctor surface reads them. Add `conflicts [--json]` + a count in status/doctor.
+- **Draft limits unenforced (`PROD-03`):** invariant #8 (size/ignore limits) and draft lifecycle commands are unbuilt.
+- **MVP framing (`PROD-04`):** the "Must have"/MVP definition implies a multi-machine daemon MVP that is deliberately deferred; align with the re-ordered roadmap (agents before daemon).
+- **New requirements:** first-class non-VCS/remote-less projects (audit Section 2), forge-agnostic PR (Section 3), and cross-machine working-state sync (Section 5) — add personas/JTBD/invariants for each and make success metrics measurable.

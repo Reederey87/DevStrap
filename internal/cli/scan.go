@@ -37,7 +37,7 @@ func newScanCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			if adopt && !dryRun {
-				store, err := opts.openState()
+				store, err := opts.openState(cmd.Context())
 				if err != nil {
 					return err
 				}
@@ -91,7 +91,9 @@ func newScanCommand(stdout io.Writer, opts *options) *cobra.Command {
 					return err
 				}
 				for _, m := range moved {
-					_, _ = fmt.Fprintf(stdout, "quarantined secret file %s -> %s\n", m.from, m.to)
+					// CLI-02: route diagnostic/progress output to stderr so it
+					// never corrupts the JSON stdout stream.
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "quarantined secret file %s -> %s\n", m.from, m.to)
 				}
 			}
 			if opts.v.GetBool("json") {

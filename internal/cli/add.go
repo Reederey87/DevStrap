@@ -36,7 +36,7 @@ func newAddCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if !validLFSPolicy(lfsPolicy) {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("unsupported lfs policy %q", lfsPolicy)}
 			}
-			store, err := opts.openState()
+			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}

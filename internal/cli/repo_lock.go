@@ -147,8 +147,12 @@ func repoLockIsStale(lockPath string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("parse repo lock acquired_at: %w", err)
 	}
-	if info.Hostname == hostname() && info.PID > 0 && !repoLockProcessAlive(info.PID) {
-		return true, nil
+	// GIT-01: liveness is authoritative over age. A lock whose holder is
+	// provably alive on the same host must never be considered stale
+	// regardless of acquired_at. The age-based fallback applies only when
+	// liveness is indeterminate (cross-host) or the PID is confirmed dead.
+	if info.Hostname == hostname() && info.PID > 0 {
+		return !repoLockProcessAlive(info.PID), nil
 	}
 	return time.Since(acquiredAt) > repoLockStaleAfter, nil
 }

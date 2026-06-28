@@ -18,6 +18,7 @@ type Type string
 
 const (
 	TypeGitRepo     Type = "git_repo"
+	TypeLocalGit    Type = "local_git" // NOVCS-01: git repo with no usable remote; never synced as clonable.
 	TypeDraftFolder Type = "draft_project"
 	TypePlainFolder Type = "plain_folder"
 )
@@ -137,10 +138,17 @@ func Walk(ctx context.Context, root string, opts Options) (Result, error) {
 					f.RemoteKey = key
 					remotePaths[key] = append(remotePaths[key], pk.Display)
 				} else {
+					// NOVCS-01: unvalidated remote → treat as local-only so
+					// it is never adopted as a clonable git_repo that would
+					// be broken on every other device.
+					f.Type = TypeLocalGit
 					f.Warnings = append(f.Warnings, fmt.Sprintf("ignoring unvalidated git remote: %v", err))
 				}
 			} else {
-				f.Warnings = append(f.Warnings, "git remote origin not found")
+				// NOVCS-01: no origin → never a clonable git_repo; classify
+				// as local_git so the namespace entry is not broken off-device.
+				f.Type = TypeLocalGit
+				f.Warnings = append(f.Warnings, "git repo has no remote; add one with 'git remote add origin <url>'")
 			}
 			if branch, err := opts.Git.DefaultBranch(ctx, path, "main"); err == nil {
 				f.DefaultBranch = branch

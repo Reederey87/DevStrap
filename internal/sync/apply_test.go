@@ -13,7 +13,7 @@ import (
 
 func newSyncStore(t *testing.T) (*state.Store, state.Device) {
 	t.Helper()
-	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	st, err := state.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

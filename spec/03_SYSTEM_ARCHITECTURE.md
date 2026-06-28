@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-26
+last_reviewed: 2026-06-28
 tracks_code: [cmd/**, internal/**, .github/**]
 ---
 # System Architecture
@@ -124,6 +124,8 @@ Responsibilities:
 - serve local API;
 - write logs and audit events.
 
+**Engine seam (`ARCH2-01`):** these responsibilities (reconciler, materializer, worktree manager, secret broker, policy engine) are today implemented as Cobra command closures inside `internal/cli`, not a separate package. Extract a thin `internal/engine` exposing intent-level operations (`Hydrate`, `NewWorktree`, `RunAgent`, `Sync`) so the daemon's job handlers and the CLI call the same core — otherwise the daemon phase must begin with a large, risky extraction from `internal/cli`.
+
 ### `devstraphub`
 
 Small sync service.
@@ -138,9 +140,11 @@ Responsibilities:
 
 MVP hub can be self-hosted on a Mac Mini, Linux box, or small VPS. Later it can become a hosted SaaS.
 
+Wire protocol (see `07_NAMESPACE_AND_SYNC_MODEL.md` and `AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 6): a thin, **zero-knowledge**, store-and-forward relay over HTTPS — `POST /v1/{ws}/events`, `GET /v1/{ws}/events?after=<hlc>`, SSE `GET /v1/{ws}/stream` (Last-Event-ID=HLC, a live hint only), content-addressed `PUT/GET /v1/{ws}/blobs/{sha256}`, `410 Gone` → full-state snapshot. The hub is **semi-trusted**: it sees only signed, end-to-end-encrypted payloads plus routing metadata, never plaintext code/secrets, and is never trusted to order or authenticate (correctness lives off the wire via HLC + content/prev-hash chain + Ed25519). Device auth via mTLS client certs derived from the device identity, rejecting revoked/lost devices. As a single Go binary it ships in the same module, reusing `internal/state`, `internal/sync`, and `internal/devicekeys`.
+
 ### No-daemon mode (correctness guarantee)
 
-Every `devstrap` CLI command works correctly without the daemon. State is materialized on demand and the managed tree is reconciled by periodic scans, so no command depends on `devstrapd` being installed or running. The daemon is purely a performance/UX optimization — its filesystem watcher is a hint, not the source of truth — and is never a correctness dependency. If the daemon is absent, stopped, or behind, results stay correct; only freshness and latency degrade until the next on-demand materialization or periodic-scan reconciliation.
+Every `devstrap` CLI command works correctly without the daemon. State is materialized on demand, and reconciliation today is the **explicit `devstrap scan`** — there is no periodic-scan reconciler yet (`ARCH2-04`); periodic reconciliation arrives with the daemon. No command depends on `devstrapd` being installed or running. The daemon is purely a performance/UX optimization — its filesystem watcher is a hint, not the source of truth — and is never a correctness dependency. If the daemon is absent, stopped, or behind, results stay correct; only freshness and latency degrade until the next on-demand materialization or the next explicit `devstrap scan`. (The daemon socket/IPC/job API in `13_CLI_DAEMON_API.md` and the reserved `exitDaemonUnavailable=3` are design intent for the M5 daemon, not shipped behavior.)
 
 ## Data flows
 

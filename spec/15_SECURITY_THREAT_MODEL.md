@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-26
+last_reviewed: 2026-06-28
 tracks_code: [internal/childenv/**, internal/cli/**, internal/devicekeys/**, internal/envbundle/**, internal/git/**, internal/logging/**]
 ---
 # Security Threat Model
@@ -85,6 +85,8 @@ Mitigation:
 - log redaction;
 - tainted-log handling when secrets are present.
 
+Reality (`AGEN-01`, `AGEN-02`/`SECU-02`): the wrapper command/file policy is argv-substring matching, **trivially bypassed by any interpreter** (`bash -c`, `python -c`, base64-decode, variable indirection), so the default `guarded` agent has full filesystem read + network exfil; and the agent subprocess currently **inherits `HOME` and `SSH_AUTH_SOCK`**, forwarding a live Git/SSH credential capability. The "no secrets by default" and "OS sandbox" bullets above are not yet true. Strip `HOME`/`SSH_AUTH_SOCK`, treat the wrapper as accident-prevention rather than a security boundary, and move to an allowlist + OS sandbox (Seatbelt / bubblewrap-landlock-seccomp).
+
 ### Threat: destructive sync deletes code
 
 Mitigation:
@@ -128,6 +130,8 @@ Mitigation:
 - no raw Git mirror by default.
 
 Residual risk: a malicious approved device can decrypt bundles it is authorized to receive until revoked. Bound this by per-profile recipient scoping, re-encrypting every affected bundle after revocation, and requiring provider/service-side value rotation for secrets that may already have been exposed.
+
+Reality (`SECU-03`, `SECU-05`): event signature verification currently **fails open** — events from a device whose signing key is unknown (or that has no signing key) are accepted unverified, so the "event signatures from day one" and "out-of-band fingerprint confirmation" bullets above are not yet enforced; a malicious hub could inject a rogue device. The hub must be treated as **zero-knowledge / semi-trusted** (ciphertext + routing metadata only); clients must **fail closed** on events from unverified devices once enrollment exists, and mTLS device certs should enforce revocation at the transport layer.
 
 ### Threat: device lost/stolen
 
@@ -210,6 +214,8 @@ Mitigation:
 
 ## Audit log
 
+**Status: NOT implemented.** There is no `audit_log` table in `internal/state/migrations` and no code records these events; only sync `events`, `conflicts`, and `agent_runs` exist. Destructive and trust-affecting actions currently leave **no signed audit record** — a security-relevant gap. Build the table + recording + Ed25519 signing for the trust-affecting subset below.
+
 Record:
 
 - project added/renamed/deleted;
@@ -247,6 +253,8 @@ Event signatures cover `(id, hlc, type, payload_json, content_hash, prev_event_h
 
 Current implementation creates a local Ed25519 signing identity during `devstrap init`, stores only the public key in `devices.signing_public_key`, stores private signing material through the platform keychain adapter with `0600` file fallback, signs local events, and verifies signed inserts when the source device's signing public key is known. Manual remote-device enrollment/approval is available for local env capture recipients. Key fingerprint confirmation, automatic enrollment, and signed hub ingestion remain future work.
 
+Key-custody caveat (`SECR-04`/`SECU-01`): the keychain→file fallback currently triggers on **any** keychain error, not only genuine unavailability, so a transient keychain failure silently downgrades to a `0600` plaintext age/Ed25519 private key on disk. Narrow the fallback to true "unavailable" conditions and surface a warning when it engages. Verification fail-open (`SECU-03`) must become fail-closed once enrollment lands.
+
 ## Security profiles
 
 ### personal-relaxed
@@ -276,3 +284,11 @@ Current implementation creates a local Ed25519 signing identity during `devstrap
 - Agent command execution should be mediated through a PTY proxy before team mode.
 - OS sandboxing is required before public release.
 - Remaining question: should DevStrap refuse to manage repos with secret-looking tracked files, or warn and require explicit adoption?
+
+## Audit implementation notes (2026-06-28)
+
+- **SECU-01**: Key custody fallback now gated on `IsKeychainUnavailable(err)`; present-but-failing keychain fails closed.
+- **SECU-02**: `SSH_AUTH_SOCK` excluded from agent subprocess environment via `AgentAllowlist`.
+- **SECU-03**: `verifyEventSignature` requires valid signatures from known approved devices for destructive event types (`project.deleted`, `project.renamed`).
+- **SECU-04**: `redact.Writer` suppresses multi-line PEM private key blocks across line boundaries.
+- **SECU-05**: `devices enroll --approve` now requires `--signing-public-key`.

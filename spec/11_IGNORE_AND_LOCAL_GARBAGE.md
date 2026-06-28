@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-26
+last_reviewed: 2026-06-28
 tracks_code: [internal/scan/**, .gitignore]
 ---
 # Ignore Rules and Local Garbage
@@ -237,3 +237,7 @@ Loose:
 
 - less enforcement;
 - still block private keys by default.
+
+## Audit follow-ups (2026-06-27)
+
+**The single `.devstrapignore` compiler described here does not exist yet** (audit coverage gap). Prune/secret lists are hardcoded and divergent across three places — `internal/scan` (`shouldPruneDir`/`isSecretName`), the platform watcher, and the agent deny list — which is the root cause of `PLAT-01`, `PLAT-04`, and `AGEN-05`; OS junk (`.DS_Store`, `.AppleDouble`, `Thumbs.db`) is filtered nowhere. Build one canonical compiler that emits the `.gitignore` managed block, the draft-sync ignore set, the watcher exclusion set, and the agent denylist from a single source.
