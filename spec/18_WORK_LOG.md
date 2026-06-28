@@ -27,6 +27,23 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-06-28 — Trunk-based open-source governance (branch protection + OSS files)
+
+Changed:
+- Repo governance / docs only; no `cmd/`/`internal/` code modified.
+- Adopted a **trunk-based** branch model: `main` is the single protected default branch; the superseded `dev` branch was deleted. `dev`'s #3 work is fully contained in `main` (superseded by #4) and remains recoverable via PR #3 / the reflog — no work lost.
+- Enabled GitHub branch protection on `main`: require a PR with 1 approving review + CODEOWNERS review; required status checks (`Spec drift`, `Go lint`, `Go tests (macos-latest)`, `Go tests (ubuntu-latest)`, `Vulnerability check`) with up-to-date branches; required conversation resolution and linear history; force-pushes and deletions blocked; `enforce_admins=false` so the solo maintainer can still merge.
+- Repo merge settings: squash + rebase only (no merge commits), auto-delete head branch on merge; enabled Dependabot automated security fixes.
+- Updated `AGENTS.md`, `CONTRIBUTING.md`, and `spec/00_START_HERE.md` to the trunk-based fork-and-PR flow (dropped the `dev`-integration description).
+- Added `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), `.github/ISSUE_TEMPLATE/feature_request.md`, and `.github/ISSUE_TEMPLATE/config.yml`.
+
+Validated:
+- `GOCACHE=/tmp/devstrap-gocache go run ./cmd/spec-drift --base origin/main --head HEAD`
+- Governance/docs only; Go build/test unaffected.
+
+Follow-ups:
+- None.
+
 ## 2026-06-28 — Cloud-sync architecture: spec refresh + new audit and provisioning guide (docs only)
 
 Changed:

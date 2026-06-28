@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/Reederey87/DevStrap/security/policy
+    about: Please report security issues privately per SECURITY.md — do not open a public issue.
+  - name: Design specs & docs
+    url: https://github.com/Reederey87/DevStrap/tree/main/spec
+    about: Read the design specs before filing a large feature request or architecture change.
