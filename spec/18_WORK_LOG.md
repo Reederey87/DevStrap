@@ -27,6 +27,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-06-28 — go.mod hygiene hotfix (main CI red after PR #16)
+
+Changed:
+- `go mod tidy` promoted `golang.org/x/sync v0.21.0` from the `// indirect` block to the direct `require` block. It is a direct dependency — `internal/cli/materialize.go` imports `golang.org/x/sync/errgroup` for the bounded-concurrency eager materialization added in PR #16 — but the dependency was added without re-tidying, so go.mod was left inconsistent.
+- This was latent in PR #16: the CI `Go tests` job runs `Test` before `Module hygiene`, so while the e2e testscripts failed (`Test`), the job never reached the `go mod tidy` / `git diff --exit-code` check. The testscript fix unblocked `Test`, which exposed the go.mod drift and left `main` red post-merge.
+
+Validated:
+- `go mod tidy` is now idempotent (second run is a no-op); `go.sum` unchanged.
+- `gofmt -l cmd internal` (clean), `go vet ./...`, `go build ./...`, `go test -race ./...` (all pass), `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run`.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+- None. Consider reordering the CI `Go tests` job so `Module hygiene`/`go vet`/`gofmt` run before the slow `Test` step, surfacing cheap hygiene failures first.
+
 ## 2026-06-28 — Hermetic git in cloud-sync e2e testscripts (PR #16 CI fix)
 
 Changed:
