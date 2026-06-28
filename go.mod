@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	filippo.io/age v1.3.1
-	github.com/fsnotify/fsnotify v1.9.0
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/google/uuid v1.6.0
 	github.com/pressly/goose/v3 v3.27.1
 	github.com/rogpeppe/go-internal v1.15.0
