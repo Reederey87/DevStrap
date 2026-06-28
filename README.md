@@ -1,195 +1,274 @@
-# DevStrap
+<div align="center">
 
-DevStrap is a local-first workspace manager for developers who work across multiple machines and AI agents.
+<img src="repo_image2.png" alt="DevStrap — managed code namespaces for developers" width="860">
 
-The core idea is simple: keep a consistent `~/Code` namespace everywhere, but use developer-native tools underneath. Git remains the source of truth for repository contents, SQLite tracks local workspace state, secrets are referenced or encrypted instead of casually copied, and agent work starts from fresh upstream refs in isolated worktrees.
+<h1>DevStrap</h1>
 
-## Current Status
+<strong>Your code. Your structure. Always in sync.</strong>
 
-This repository is at the Phase 0 foundation stage:
+<p>
+A local-first <em>Workspace Passport</em>: one identical <code>~/Code</code> namespace on every machine and AI agent —
+built on Git, SQLite, and age‑encrypted secrets, <em>not</em> a magic filesystem.
+</p>
 
-- Go module and CLI entrypoint are scaffolded.
-- `devstrap init`, `devstrap scan`, `devstrap add`, `devstrap hydrate`, `devstrap open`, `devstrap sync --hub-file`, `devstrap worktree`, `devstrap env capture/hydrate/bind`, `devstrap run`, `devstrap agent run/list/show/pr`, `devstrap devices list/approve/revoke/lost/rename`, `devstrap status`, `devstrap doctor`, `devstrap db`, and `devstrap version` exist.
-- Structured `slog` logging is wired through global CLI flags and redacts secret-like fields.
-- SQLite migrations cover workspace, device, namespace, Git repo, device state, event, conflict, job, and worktree metadata.
-- `init` persists a generated local device ID, `scan --adopt` records discovered projects, `add` creates skeletons, `hydrate` clones Git repos, and `worktree new --fresh-upstream` bases work on fetched remote refs with `worktree status`/`finalize` stale-base checks.
-- Git/editor subprocesses use a sanitized child environment instead of inheriting the full shell environment, `env capture/hydrate` stores and restores age-encrypted local blobs instead of persisting plaintext `.env` values in state, `env hydrate` can resolve 1Password provider refs through `op inject`, and `run` injects encrypted profiles or delegates 1Password refs through `op run`.
-- Initial platform adapter interfaces exist for watcher, service manager, keychain, and editor launch; Darwin/Linux use an fsnotify watcher adapter and an OS keyring-backed keychain adapter with `0600` file fallback, while `open` uses the editor adapter and native service implementations remain future work.
-- CI is configured for macOS and Linux.
-- Product, architecture, security, data model, and test specifications live under `spec/`.
+<p>
+<a href="https://github.com/Reederey87/DevStrap/actions/workflows/ci.yml"><img src="https://github.com/Reederey87/DevStrap/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+<a href="https://goreportcard.com/report/github.com/Reederey87/DevStrap"><img src="https://goreportcard.com/badge/github.com/Reederey87/DevStrap" alt="Go Report Card"></a>
+<img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white" alt="Go 1.26">
+<img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-555" alt="macOS | Linux">
+<a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT"></a>
+<img src="https://img.shields.io/badge/status-alpha-orange" alt="Status: alpha">
+</p>
 
-The daemon, FSEvents-specific Mac watcher, hosted sync hub, automatic remote device enrollment/fingerprint confirmation, native service installers, and OS-enforced agent sandboxing are planned but not implemented yet.
+</div>
 
-## Architecture
+---
 
-DevStrap is designed as a Mac-first, Linux-compatible managed physical namespace.
+## What is DevStrap?
+
+DevStrap gives you a **portable, managed code namespace** — the *Workspace Passport* — that appears identically on every device you work from: your Mac, a Linux box, a cloud VM, or an AI agent runner.
+
+The idea is deliberately boring and robust: `~/Code` is a **real folder**, and DevStrap keeps its structure consistent everywhere using developer‑native tools underneath — **not** a FUSE/virtual filesystem.
+
+- **Git** owns repository contents (cloned on demand, `--filter=blob:none`).
+- **SQLite** owns the local namespace map and workspace state.
+- **Secrets** are referenced (1Password) or **age‑encrypted**, never blindly copied.
+- **Agents** always start from a **fresh worktree off the fetched remote default branch** — never a stale local branch.
+
+> **Install DevStrap on a new machine → point it at `~/Code` → authenticate Git + secrets → run `devstrap sync` once → the whole tree is reconstructed.** Every repo is blobless‑cloned from its existing remote, env/draft folders are pulled as encrypted blobs, and `node_modules`/build artifacts are rebuilt, never synced.
+
+## Table of contents
+
+- [Why DevStrap?](#why-devstrap)
+- [How it works](#how-it-works)
+- [Features](#features)
+- [Project status](#project-status)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Quickstart](#quickstart)
+- [Command reference](#command-reference)
+- [Architecture](#architecture)
+- [Roadmap](#roadmap)
+- [Security](#security)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Why DevStrap?
+
+Moving between machines and handing work to AI agents breaks in predictable ways:
+
+- Your `~/Code` layout drifts from one machine to the next.
+- Repos are cloned ad‑hoc into inconsistent paths.
+- `.env` files get copied around in plaintext (or lost).
+- "I forgot to push" strands work on the wrong box.
+- Agents branch from a **stale local `main`** and open PRs against the wrong base.
+
+DevStrap fixes these without a heavyweight sync daemon or a virtual filesystem. It treats your code namespace as **managed state** — a signed, append‑only event log of *where every project lives, what its remote is, and which env profile it uses* — and reconstructs the real tree from that map plus Git's own transport.
+
+## How it works
+
+File‑sync is **split by content type** — DevStrap never blanket‑syncs a folder, and never file‑syncs `.git` (which would corrupt the repo):
+
+| Content | Transport |
+|---|---|
+| **Repo content** | `git clone --filter=blob:none` / fetch from its existing remote — rides Git's transport, never touches the hub |
+| **Env vars + non‑git/draft folders** | age‑encrypted, content‑addressed `age_blob:<sha256>` bundles |
+| **The map of all projects** | a signed, [HLC](https://cse.buffalo.edu/tech-reports/2014-04.pdf)‑ordered append‑only event log (the "namespace map") |
+| **`node_modules` / build artifacts** | **never synced** — rebuilt on hydrate |
+
+Materialization is **eager**: after `devstrap sync`, the whole `~/Code` tree is really present on disk. There is no placeholder/lazy‑VFS magic — a true virtual filesystem (StrapFS) is explicitly deferred.
 
 ```text
-~/Code                         user-visible managed tree
-~/.devstrap/state.db           local SQLite state
-~/.devstrap/devstrapd.sock      future local daemon socket
-~/.devstrap/worktrees/          managed agent/human worktrees
+1. Add or create a project on Machine A.
+2. DevStrap records it in the signed namespace map (path, remote, env profile, policy).
+3. Machine B runs `devstrap sync` and pulls the map.
+4. Sync eagerly materializes the tree: blobless-clone each repo, pull encrypted env/draft blobs, hydrate env.
+5. The same folder paths are really present on disk.
+6. Agent work starts from a fresh remote default branch — not a stale local one.
 ```
 
-Planned components:
+## Features
 
-- `devstrap`: CLI for workspace setup, status, hydration, worktrees, env, and agents.
-- `devstrapd`: local daemon for reconciliation, watchers, jobs, and local API.
-- DevStrap Hub: future event-log sync service for namespace, device, and encrypted blob sync.
+- 🗂️ **Real managed namespace** under `~/Code` — owned structure + metadata, not a mounted illusion.
+- 💧 **Repo hydration & skeleton directories** — projects exist as lightweight skeletons until materialized; `sync`/`materialize` blobless‑clone them eagerly.
+- 🔄 **Git freshness** — partial clone, LFS policy, authoritative default‑branch resolution, stale‑base detection.
+- 🔐 **Secrets mapping** — repo‑specific env profiles, age‑encrypted at rest or referenced from 1Password; subprocesses get a sanitized, no‑secret‑leak environment.
+- 🤖 **Agent worktrees** — every agent task runs in an isolated worktree off the fetched remote default branch, with a wrapper‑level command/file policy and forge‑aware PR/MR creation (`gh`/`glab`/`tea`).
+- 🧰 **Mac‑first, Linux‑compatible** — one portable Go binary; platform behavior sits behind adapters.
+- 🛰️ **Zero‑knowledge sync hub** *(landing)* — a two‑plane hub (signed event log + content‑addressed encrypted blob store) on Cloudflare R2, behind one pluggable `Hub` interface.
 
-See [spec/00_START_HERE.md](spec/00_START_HERE.md) for the full spec map.
+## Project status
+
+> **Alpha.** The local engine and the agent loop are shipped and tested; the cloud‑sync layer has just landed and the hosted R2 backend is wired but not yet switched on.
+
+**Shipped**
+
+- Phase 0 local CLI: `init`, `scan`/`add`/`hydrate`/`open`, `worktree`, `env`, `run`, `status`, `doctor`, `db`, `devices`, `conflicts`.
+- Phase 3 agent loop: fresh‑worktree `agent run`, recorded logs, base‑gated `agent pr` with forge‑aware routing.
+- Cloud‑sync workstreams (PR #16): **eager materialization** (`sync`/`materialize`), **encrypted draft bundles** + `.devstrapignore` compiler (`draft`), the **pluggable `Hub` interface + R2/S3 backend**, and a **portable `run-loop`** (scan + sync + materialize on an interval, no daemon).
+- Hardened internals: sanitized child env, value‑level secret redaction, partial clone with retry classification, WAL SQLite with single‑writer pool, HLC event ordering with conflict reconciliation, age X25519 device identities in the OS keychain (file‑store fallback for headless/CI).
+
+**Not yet implemented**
+
+- The local daemon, FSEvents‑specific Mac watcher, and native LaunchAgent/systemd installers.
+- The **active** hosted hub: production device enrollment, out‑of‑band fingerprint confirmation, and turning the R2 backend on.
+- OS‑enforced agent sandboxing (today's command/file policy is wrapper‑level).
+
+A standing design/implementation audit drives the backlog: the latest is [`AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md`](AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md) (44 grounded findings across security, sync, hub, git, quality, and product).
 
 ## Requirements
 
-- macOS or Linux
-- Go 1.25 or newer
-- Git
-- GitHub CLI (`gh`) for repository and PR workflows
+- **macOS or Linux**
+- **Go 1.26+** (to build from source)
+- **Git**
+- **GitHub CLI (`gh`)** — and optionally `glab`/`tea` — for PR/MR creation
 
-Optional future tools:
+Optional:
 
-- 1Password, Doppler, or Infisical CLI for secret-provider mode
-- Cursor or VS Code command-line launchers
-- npm only as a possible future distribution wrapper, not as the core runtime
+- **1Password CLI (`op`)** for secret‑provider mode (`env bind` / `run`).
+- **Cursor** or **VS Code** command‑line launchers for `devstrap open`.
 
-## Installation
+## Install
 
-For local development:
+### Download a release binary
+
+Prebuilt binaries for macOS and Linux are published on the [Releases](https://github.com/Reederey87/DevStrap/releases) page (built via GoReleaser). Download, extract, and put `devstrap` on your `PATH`.
+
+```bash
+# example: install a downloaded release binary into ~/.local/bin
+install -m 0755 ./devstrap ~/.local/bin/devstrap
+devstrap version
+```
+
+### Build from source
 
 ```bash
 git clone git@github.com:Reederey87/DevStrap.git
 cd DevStrap
-go mod download
-go test -race ./...
 go build -o bin/devstrap ./cmd/devstrap
+./bin/devstrap version
 ```
 
-On macOS, install prerequisites with Homebrew if needed:
+> A Homebrew tap and a `curl | sh` installer are on the roadmap (audit `PROD-05`). Until then, use a release binary or build from source.
+
+## Quickstart
 
 ```bash
-brew install go git gh
+# 1. Initialize a managed workspace at ~/Code
+devstrap init ~/Code --workspace-name personal
+
+# 2. Adopt the repos you already have on disk
+devstrap scan ~/Code --adopt
+devstrap status
+
+# 3. Add a new repo to the namespace and materialize it
+devstrap add git@github.com:acme/api.git --path work/acme/api --lfs-policy auto
+devstrap hydrate work/acme/api
+devstrap open work/acme/api --cursor
+
+# 4. Capture and re-hydrate its environment (encrypted at rest)
+devstrap env capture work/acme/api .env
+devstrap env hydrate work/acme/api --write .env.local
+
+# 5. Start agent work from a fresh remote default branch
+devstrap worktree new work/acme/api --fresh-upstream --name fix-tests
+devstrap agent run work/acme/api --engine generic --task "run tests" -- npm test
+devstrap agent pr <run-id> --dry-run
+
+# 6. Sync the namespace map (file-backed hub spike today; R2 hub landing)
+devstrap sync --hub-file /tmp/devstrap-hub/events.json
 ```
 
-## Usage
+Prefer not to install? Every command also works via `go run ./cmd/devstrap <cmd> …`.
 
-Initialize a workspace:
+## Command reference
 
-```bash
-go run ./cmd/devstrap init ~/Code --workspace-name personal
+| Command | Description |
+|---|---|
+| `devstrap init` | Initialize a DevStrap workspace |
+| `devstrap status` | Show local workspace status (`--json` supported) |
+| `devstrap doctor` | Check local prerequisites |
+| `devstrap scan` | Scan a workspace root for projects (`--adopt`, `--quarantine`) |
+| `devstrap add` | Add a Git repository to the namespace |
+| `devstrap hydrate` | Clone a skeleton Git repository |
+| `devstrap open` | Hydrate and open a namespace path in an editor (`--cursor`/`--code`) |
+| `devstrap materialize` | Eagerly materialize skeleton projects (clone repos, hydrate env) |
+| `devstrap sync` | Push/pull namespace events and materialize the tree (`--hub-file`) |
+| `devstrap run-loop` | Run scan + sync + materialize on an interval (portable, no daemon) |
+| `devstrap worktree` | Manage isolated worktrees (`new`/`status`/`finalize`/`list`/`remove`/`cleanup`/`unlock`) |
+| `devstrap agent` | Run agents in isolated fresh worktrees (`run`/`list`/`show`/`pr`) |
+| `devstrap env` | Manage project environment profiles (`capture`/`hydrate`/`bind`) |
+| `devstrap run` | Run a command with the project env profile injected |
+| `devstrap draft` | Manage non‑git draft project content sync (`snapshot`) |
+| `devstrap devices` | Manage device trust state (`list`/`approve`/`revoke`/`lost`/`rename`) |
+| `devstrap conflicts` | List open namespace conflicts |
+| `devstrap db` | Manage the local state database (`migrate`/`status`/`backup`/`down`) |
+| `devstrap version` | Print build version |
+
+Run `devstrap <command> --help` for flags and subcommands.
+
+## Architecture
+
+DevStrap is a Mac‑first, Linux‑compatible **managed physical namespace** — not a virtual filesystem.
+
+```text
+~/Code                          user-visible managed tree (real folders)
+~/.devstrap/state.db            local SQLite state (WAL, 0600)
+~/.devstrap/blobs/              age-encrypted env/draft blobs (0600)
+~/.devstrap/keys/               device identities (keychain preferred; file fallback)
+~/.devstrap/worktrees/          managed agent/human worktrees
+~/.devstrap/devstrapd.sock      future local daemon socket
 ```
 
-Check status:
+Components:
 
-```bash
-go run ./cmd/devstrap status
-go run ./cmd/devstrap status --json
-```
+- **`devstrap`** — the CLI for workspace setup, status, hydration, worktrees, env, sync, and agents (shipped).
+- **`devstrapd`** — a local daemon for reconciliation, watchers, and a local API (planned).
+- **DevStrap Hub** — a two‑plane zero‑knowledge sync service: a signed HLC namespace‑map event log plus a content‑addressed encrypted blob store, on Cloudflare R2 behind one pluggable `Hub` interface (landing).
 
-Scan/adopt existing projects:
+The full design corpus lives under [`spec/`](spec/) — start with [`spec/00_START_HERE.md`](spec/00_START_HERE.md).
 
-```bash
-go run ./cmd/devstrap scan ~/Code --dry-run --json
-go run ./cmd/devstrap scan ~/Code --adopt
-```
+## Roadmap
 
-Add and hydrate a Git project:
+Capability layers (see [`spec/14_MVP_ROADMAP_AND_BACKLOG.md`](spec/14_MVP_ROADMAP_AND_BACKLOG.md) for the canonical, re‑ordered sequencing):
 
-```bash
-go run ./cmd/devstrap add git@github.com:acme/api.git --path work/acme/api --lfs-policy auto
-go run ./cmd/devstrap hydrate work/acme/api
-go run ./cmd/devstrap open work/acme/api --cursor
-```
+1. **Local CLI proof** — scan, register, hydrate, fresh worktrees, env profiles. ✅
+2. **Agent workspaces** — one worktree per task, fresh remote base, logs, forge‑agnostic PR/MR. ✅
+3. **Multi‑device sync** — eager materialization, encrypted draft/env blobs, the R2 zero‑knowledge hub. 🚧
+4. **Mac daemon** — LaunchAgent, FSEvents watcher, shell/editor integration. ⏳
+5. **Optional StrapFS** — File Provider / FUSE evaluation. ⏳ (deliberately deferred)
 
-Create a fresh upstream worktree:
+The near‑term priorities — harden the hub's zero‑knowledge guarantees and bound sync‑log growth **before** the R2 backend is switched on, then grow the product surface (`devstrap clone`, a graded `doctor --fix`, a `service install` daemon) — are detailed in [`AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md`](AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md).
 
-```bash
-go run ./cmd/devstrap worktree new work/acme/api --fresh-upstream --name fix-tests
-go run ./cmd/devstrap worktree status wt_01jz...
-go run ./cmd/devstrap worktree finalize wt_01jz...
-go run ./cmd/devstrap worktree list
-```
+## Security
 
-Run a generic command in a fresh agent worktree:
+DevStrap is built so the sync hub is **zero‑knowledge**: repo content rides Git's own transport and never reaches the hub, and env/draft content is **age‑encrypted client‑side** into content‑addressed blobs. Device identities are age X25519 + Ed25519 keypairs kept in the OS keychain (with a `0600` file fallback for headless/CI), and secret values are redacted from logs, errors, and event payloads.
 
-```bash
-go run ./cmd/devstrap agent run work/acme/api --engine generic --task "run tests" -- npm test
-go run ./cmd/devstrap agent list
-go run ./cmd/devstrap agent pr arun_01jz... --dry-run
-```
-
-Inspect local device trust state:
-
-```bash
-go run ./cmd/devstrap devices list
-```
-
-Push/pull namespace events through the file-backed test hub:
-
-```bash
-go run ./cmd/devstrap sync --hub-file /tmp/devstrap-hub/events.json --namespace-only
-```
-
-Check prerequisites:
-
-```bash
-go run ./cmd/devstrap doctor
-```
-
-Capture and hydrate a local env file:
-
-```bash
-go run ./cmd/devstrap env capture work/acme/api .env
-go run ./cmd/devstrap env hydrate work/acme/api --write .env.local
-```
-
-Bind 1Password refs and either inject them at runtime or explicitly hydrate a local file:
-
-```bash
-go run ./cmd/devstrap env bind work/acme/api .env.refs --provider 1password
-go run ./cmd/devstrap run work/acme/api -- npm test
-go run ./cmd/devstrap env hydrate work/acme/api --write .env.local
-```
-
-Print version:
-
-```bash
-go run ./cmd/devstrap version
-```
-
-## Development
-
-Run the standard checks:
-
-```bash
-gofmt -w cmd internal
-go test -race ./...
-```
-
-Build locally:
-
-```bash
-go build -o bin/devstrap ./cmd/devstrap
-```
-
-The next implementation milestones are:
-
-1. Harden scan/adopt around larger fixtures, incremental reconciliation, and richer conflict reporting.
-2. Expand file-backed sync toward peer registration, skeleton reconciliation across roots, and a production hub.
-3. Add OS-enforced sandboxing and project-env allowlists for the thin agent runner.
-4. Add automatic remote device enrollment, fingerprint confirmation, and bundle re-encryption hooks.
-5. Add the Mac LaunchAgent daemon and evaluate whether fsnotify/kqueue must be replaced by a native FSEvents adapter.
-
-## Repository Workflow
-
-Use the `Reederey87/DevStrap` GitHub repository. The branch workflow — trunk `main`, integration branch `dev`, feature branches from `dev` into `dev`, `dev` merged to `main` only after green CI and review, and agents/worktrees always based on the fetched `origin/<default_branch>` — is defined canonically in [AGENTS.md](AGENTS.md). Follow it there rather than restating it here.
+Please report vulnerabilities privately per [SECURITY.md](SECURITY.md). The threat model is documented in [`spec/15_SECURITY_THREAT_MODEL.md`](spec/15_SECURITY_THREAT_MODEL.md); known hardening gaps are tracked as `SEC-*` findings in the latest audit.
 
 ## Contributing
 
-1. Read [spec/00_START_HERE.md](spec/00_START_HERE.md) and the relevant spec file before changing behavior.
-2. Keep implementation aligned with the safety invariants: do not overwrite dirty worktrees, do not log secrets, and never branch agent work from a stale local default branch.
-3. Add focused tests for any behavior that touches Git, secrets, filesystem reconciliation, or destructive actions.
-4. Run `gofmt -w cmd internal` and `go test -race ./...` before opening a PR.
+Contributions are welcome! Before changing behavior, read [`spec/00_START_HERE.md`](spec/00_START_HERE.md) and the relevant spec file, and follow the agent/maintainer guidance in [AGENTS.md](AGENTS.md).
+
+DevStrap uses **trunk‑based development**: `main` is the single protected default branch (there is **no** `dev` branch). All changes land via pull request to `main`; external contributors fork and open a PR, maintainers branch from the fetched `origin/main`. Agents and worktrees always base from the fetched `origin/main`, never a local branch. `main` is protected — PRs require green CI (Spec drift, Go lint, Go tests on macOS + Linux, Vulnerability check), resolved conversations, and linear history.
+
+Before opening a PR:
+
+```bash
+gofmt -w cmd internal
+golangci-lint run
+go run ./cmd/spec-drift --base origin/main --head HEAD
+go test -race ./...
+```
+
+Keep changes aligned with the safety invariants: never overwrite dirty worktrees, never log secrets, keep Mac‑specific behavior behind adapters, and never branch agent work from a stale local default branch. Add focused tests for anything touching Git, secrets, filesystem reconciliation, or destructive actions. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ## License
 
-DevStrap is licensed under the MIT License. See [LICENSE](LICENSE).
+DevStrap is licensed under the [MIT License](LICENSE).
+
+---
+
+<div align="center">
+<sub><img src="icon.png" alt="DevStrap app icon" width="56" align="middle">&nbsp; <strong>DevStrap</strong> — your code, your structure, always in sync.</sub>
+</div>
