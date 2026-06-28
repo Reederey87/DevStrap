@@ -51,8 +51,8 @@ devstrap wip
 Current repository status as of `2026-06-28`:
 
 ```text
-Implemented: devstrap init, version, scan, add, hydrate, open, sync --hub-file, status, doctor, conflicts, db migrate/status/backup/down, env capture/hydrate/bind, run, worktree new/status/finalize/list/remove/cleanup/unlock, agent run/list/show/pr, devices enroll/list/approve/revoke/lost/rename
-Planned: production R2/S3 sync hub, materialize, run-loop, ignore compiler, env check, OS-enforced agent sandboxing, automatic remote device enrollment/fingerprint confirmation, daemon/socket API, export, promote, gitstate, wip
+Implemented: devstrap init, version, scan, add, hydrate, open, sync --hub-file, materialize, draft snapshot create, run-loop, status, doctor, conflicts, db migrate/status/backup/down, env capture/hydrate/bind, run, worktree new/status/finalize/list/remove/cleanup/unlock, agent run/list/show/pr, devices enroll/list/approve/revoke/lost/rename
+Planned: production R2/S3 SDK wiring, env check, OS-enforced agent sandboxing, automatic remote device enrollment/fingerprint confirmation, daemon/socket API, export, promote, gitstate, wip
 ```
 
 ### init
@@ -181,7 +181,7 @@ Options:
 
 Current implementation supports the file-backed test hub only. It requires `--hub-file`, pushes all local events, pulls hub events from the beginning, applies namespace events idempotently, supports `--namespace-only` and `--dry-run`, and reports that hydration/fetch reconciliation is not implemented yet.
 
-Planned (`EAGER-*`/`HUB-*`, audit `AUDIT_RECOMMENDATIONS_2026-06-28.md`): `sync` becomes the materialization entrypoint. `--hydrate-eager` defaults to on, so a single `devstrap sync` eagerly blobless/partial-clones every mapped repo (`git clone --filter=blob:none`) from its existing remote, decrypts env and non-git/draft `age_blob:<sha256>` content, and rebuilds `node_modules`/build artifacts on hydrate rather than syncing them. The hub pull switches from from-the-beginning replay to cursor-based pagination (HLC cursor; `410 -> snapshot`), and the command prints a real materialize summary (repos cloned/fetched, blobs decrypted, skeletons reconciled, conflicts detected). Repo content always rides git's own transport and never traverses the hub; only the signed namespace map (event log) and ciphertext blobs do. `--hub-s3 <bucket>` selects the pluggable Cloudflare R2 / S3 zero-knowledge backend; `--hub-file` remains for tests only. No FUSE/placeholder/lazy-VFS layer is part of this design — StrapFS stays deferred.
+Shipped (`EAGER-*`/`HUB-*`, audit `AUDIT_RECOMMENDATIONS_2026-06-28.md`): `sync` is the materialization entrypoint. A single `devstrap sync` eagerly blobless/partial-clones every mapped repo (`git clone --filter=blob:none`) from its existing remote, hydrates env profiles, extracts draft bundles, and (opt-in via `DEVSTRAP_REBUILD_DEPS`) rebuilds `node_modules`/build artifacts on hydrate rather than syncing them. The hub pull is cursor-based (HLC cursor via `hub_cursors`; `410 -> snapshot`), and the command prints a real materialize summary. Repo content always rides git's own transport and never traverses the hub; only the signed namespace map (event log) and ciphertext blobs do. `--namespace-only` opts out of materialization. `--hub-file` is the test backend; the pluggable Cloudflare R2 / S3 zero-knowledge backend (`internal/hub`) is ready behind the `Hub` interface. No FUSE/placeholder/lazy-VFS layer is part of this design — StrapFS stays deferred.
 
 ### open
 

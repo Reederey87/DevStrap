@@ -181,7 +181,7 @@ CREATE TABLE device_gitstate (
 );
 ```
 
-Status: planned. No `device_gitstate` migration exists yet as of 2026-06-28; add it as `00008_gitstate_mirror.sql` when the Layer A working-state validation plane lands. `sync_cursors`, `event_delivery`, `device_sync_state`, and `jobs` are defined but **not yet wired** — `sync` replays full history from HLC 0 (`ARCH2-02`, `DATA-02`); either wire cursor-based resume or mark them deferred.
+Status: planned. No `device_gitstate` migration exists yet as of 2026-06-28; add it as `00010_gitstate_mirror.sql` when the Layer A working-state validation plane lands. `sync_cursors` and `event_delivery` are defined; `hub_cursors` (00008) is now wired for cursor-based incremental pull (EAGER-02). `device_sync_state` and `jobs` remain unwired.
 
 ### env_profiles
 
@@ -457,6 +457,8 @@ internal/state/migrations/
   00005_namespace_active_index.sql
   00006_workspace_singleton.sql
   00007_secret_binding_rotation.sql
+  00008_sync_hub_cursor.sql
+  00009_draft_snapshots.sql
 ```
 
 CLI:
@@ -477,6 +479,8 @@ internal/state/migrations/00004_device_signing_keys.sql
 internal/state/migrations/00005_namespace_active_index.sql
 internal/state/migrations/00006_workspace_singleton.sql
 internal/state/migrations/00007_secret_binding_rotation.sql
+internal/state/migrations/00008_sync_hub_cursor.sql
+internal/state/migrations/00009_draft_snapshots.sql
 ```
 
 Migrations can be applied by `devstrap init` or explicitly with `devstrap db migrate`.

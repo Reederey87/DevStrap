@@ -70,7 +70,7 @@ func TestApplyEventsQuarantinesFarFutureRemoteEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ApplyEvents(ctx, st, []state.Event{poison, good}); err != nil {
+	if _, err := ApplyEvents(ctx, st, []state.Event{poison, good}); err != nil {
 		t.Fatalf("ApplyEvents should not abort on a quarantined event: %v", err)
 	}
 	projects, err := st.ListProjects(ctx)
@@ -102,7 +102,7 @@ func TestApplyEventsAdvancesLocalClockOnReceive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ApplyEvents(ctx, st, []state.Event{remote}); err != nil {
+	if _, err := ApplyEvents(ctx, st, []state.Event{remote}); err != nil {
 		t.Fatal(err)
 	}
 	local, err := CreateProjectEvent(ctx, st, EventProjectAdded, ProjectPayload{
@@ -129,7 +129,7 @@ func TestApplyEventsRenameMovesProjectAndConflictsOnCollision(t *testing.T) {
 		t.Fatal(err)
 	}
 	ren := renameEvent(t, device.ID, 20<<hlcLogicalBits, "work/acme/old", "work/acme/new")
-	if err := ApplyEvents(ctx, st, []state.Event{add, ren}); err != nil {
+	if _, err := ApplyEvents(ctx, st, []state.Event{add, ren}); err != nil {
 		t.Fatal(err)
 	}
 	projects, err := st.ListProjects(ctx)
@@ -147,7 +147,7 @@ func TestApplyEventsRenameMovesProjectAndConflictsOnCollision(t *testing.T) {
 		t.Fatal(err)
 	}
 	collide := renameEvent(t, device.ID, 40<<hlcLogicalBits, "work/acme/other", "work/acme/new")
-	if err := ApplyEvents(ctx, st, []state.Event{addOther, collide}); err != nil {
+	if _, err := ApplyEvents(ctx, st, []state.Event{addOther, collide}); err != nil {
 		t.Fatal(err)
 	}
 	projects, err = st.ListProjects(ctx)
@@ -178,7 +178,7 @@ func TestApplyEventsDeleteVsDirtyRaisesConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ApplyEvents(ctx, st, []state.Event{add}); err != nil {
+	if _, err := ApplyEvents(ctx, st, []state.Event{add}); err != nil {
 		t.Fatal(err)
 	}
 	project, err := st.ProjectByPath(ctx, "work/acme/api")
@@ -192,7 +192,7 @@ func TestApplyEventsDeleteVsDirtyRaisesConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ApplyEvents(ctx, st, []state.Event{del}); err != nil {
+	if _, err := ApplyEvents(ctx, st, []state.Event{del}); err != nil {
 		t.Fatal(err)
 	}
 	projects, err := st.ListProjects(ctx)
@@ -226,7 +226,7 @@ func TestGCTombstonesPurgesBelowHLC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ApplyEvents(ctx, st, []state.Event{add, del}); err != nil {
+	if _, err := ApplyEvents(ctx, st, []state.Event{add, del}); err != nil {
 		t.Fatal(err)
 	}
 	// Below the tombstone HLC: nothing purged.

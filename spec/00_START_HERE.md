@@ -97,7 +97,7 @@ Phase 4: Optional StrapFS
   - Windows future: WinFsp
 ```
 
-**These phases describe capability layers, not the build order.** The actual, deliberately re-ordered sequencing — the thin agent runner ships *before* the daemon and hub — is canonical in `14_MVP_ROADMAP_AND_BACKLOG.md`; defer to it rather than reading the list above as a schedule. **Current position:** Phase 0 CLI and the Phase 3 agent loop are shipped; the Phase 1 daemon is gated; Phase 2 multi-device sync is a file-backed spike (`devstrap sync --hub-file`) that today reconciles only the namespace map (metadata), not a production hub. The 2026-06-28 audit's eager-clone materialization (`EAGER-*` — `devstrap sync` actually blobless-clones every repo and pulls encrypted env/draft blobs so the whole `~/Code` tree appears) and the Cloudflare R2 two-plane zero-knowledge hub (`HUB-*`) are the next workstreams, not yet built.
+**These phases describe capability layers, not the build order.** The actual, deliberately re-ordered sequencing — the thin agent runner ships *before* the daemon and hub — is canonical in `14_MVP_ROADMAP_AND_BACKLOG.md`; defer to it rather than reading the list above as a schedule. **Current position:** Phase 0 CLI and the Phase 3 agent loop are shipped; the Phase 1 daemon is gated; Phase 2 multi-device sync now eager-materializes the whole `~/Code` tree (blobless clone + env hydrate + draft bundle extract) on `devstrap sync` behind a pluggable `Hub` interface with a file-backed test backend and a Cloudflare R2/S3 production backend. Cursor-based incremental pull, fail-closed event verification, device-revoke blob re-encryption, and the `.devstrapignore` compiler are shipped. The portable `run-loop` delivers periodic convergence without a daemon.
 
 ## Recommended implementation stack
 
@@ -160,18 +160,18 @@ Not implemented yet:
 - production sync hub, remote device registration/fingerprint UX, encrypted blob exchange, and real cross-root skeleton reconciliation;
 - OS-enforced agent sandboxing, project-env allowlists, and non-generic engine adapters;
 - cross-machine working-state sync — git-state validation plane (`repo.gitstate.observed`), WIP refs (`refs/devstrap/wip/*`), and encrypted working-tree bundles (audit Section 5);
-- non-VCS / remote-less / multi-remote content sync — scanner classification for `local_git` and remote preflight are shipped, but `plain_folder` emission, `promote`, draft bundle materialization, and local-only content hydrate remain unbuilt (audit Section 2, `NOVCS-02..05`, `DRAFT-*`);
+- non-VCS / remote-less / multi-remote content sync — scanner classification, `.devstrapignore` compiler, encrypted draft bundles, and type-dispatch materialization are now shipped (`DRAFT-*`); the post-hydrate dependency rebuild is opt-in (`DEVSTRAP_REBUILD_DEPS`);
 - forge hardening beyond the shipped PR/MR routing — `agent pr` now detects GitHub/GitLab/Gitea/Bitbucket/Azure and routes through `gh`/`glab`/`tea` or graceful compare-URL fallback, but `doctor` still needs forge-specific CLI probes, explicit self-hosted overrides, and broader hermetic test coverage (`FORGE-04/05`);
-- zero-knowledge sync hub — the logical Hub interface, R2/S3 backend, temporary scoped credentials, full-state snapshot exchange, and fail-closed enrollment path; the bespoke HTTP/SSE relay and mTLS device certs are deferred behind the R2-direct backend.
+- zero-knowledge sync hub — the logical `Hub` interface (`HUB-01`), Cloudflare R2/S3 backend with immutable keying (`HUB-02/06`), fail-closed enrollment verification (`HUB-03`), device-revoke blob re-encryption (`HUB-04`), and blob ref-count/GC (`HUB-05`) are shipped; the real AWS SDK v2 S3 client wiring, full-state snapshot exchange, and the bespoke HTTP/SSE relay remain deferred.
 
-Next workstreams from the 2026-06-28 cloud-sync pass (`AUDIT_RECOMMENDATIONS_2026-06-28.md`), not yet built:
+Cloud-sync workstreams from the 2026-06-28 audit (`AUDIT_RECOMMENDATIONS_2026-06-28.md`), now built:
 
-- eager-clone materialization (`EAGER-*`) — `devstrap sync` reconstructs the whole `~/Code` tree by blobless/partial-cloning every repo from its existing remote up front (repo content rides git's own transport and never traverses the hub); `node_modules`/build artifacts are rebuilt on hydrate, never synced;
-- non-git/draft content sync (`DRAFT-*`) — a `.devstrapignore` compiler and age-encrypted, content-addressed `age_blob:<sha256>` bundles for env vars and non-git/draft folders pushed/pulled through the blob plane;
-- cloud hub backend (`HUB-*`) — the two-plane zero-knowledge hub (signed HLC namespace-map event log + content-addressed encrypted blob store) on Cloudflare R2 behind one pluggable `Hub` interface, with the file-backed backend retained for tests only;
-- cross-platform hardening (`XP-*`) — portable Go core proven on macOS + Ubuntu before any native daemon/StrapFS work;
+- eager-clone materialization (`EAGER-*`) — `devstrap sync` reconstructs the whole `~/Code` tree by blobless/partial-cloning every repo from its existing remote up front with bounded concurrency and per-project failure isolation; env profiles hydrate; `node_modules`/build artifacts are rebuilt on hydrate (opt-in), never synced;
+- non-git/draft content sync (`DRAFT-*`) — a `.devstrapignore` compiler (`internal/ignore`) and age-encrypted, content-addressed `age_blob:<sha256>` bundles for non-git/draft folders pushed/pulled through the blob plane (`draft snapshot create`, `draft.snapshot.created` event);
+- cloud hub backend (`HUB-*`) — the two-plane zero-knowledge `Hub` interface (event log + content-addressed encrypted blob store) with the Cloudflare R2/S3 backend (`internal/hub`) and the file-backed backend retained for tests;
+- cross-platform hardening (`XP-*`) — portable `devstrap run-loop` (scan → sync → materialize, no daemon); e2e testscript proving two-device materialization; headless key custody test; NFC/case-fold path invariant test;
 - multi-user future (`SCALE-*`) — documented-not-built hosting/scaling direction (Fly.io compute + R2 hub + managed Postgres control plane; control/data-plane split and cell-based tenancy);
-- fail-closed event verification on enrollment — today signed-event verification fails open (`SECU-03`); once device enrollment exists it must fail closed, and device revoke must re-encrypt affected blobs to the reduced recipient set plus flag secrets for rotation.
+- fail-closed event verification on enrollment (`HUB-03`) — once any approved device exists, all non-local events require valid signatures from approved devices; device revoke re-encrypts affected blobs to the reduced recipient set and flags secrets for rotation (`HUB-04`).
 
 Local validation performed:
 

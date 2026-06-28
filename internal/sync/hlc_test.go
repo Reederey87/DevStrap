@@ -131,7 +131,7 @@ func TestApplyEventsIsIdempotentAndDetectsRemoteConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ApplyEvents(ctx, st, []state.Event{event, event}); err != nil {
+	if _, err := ApplyEvents(ctx, st, []state.Event{event, event}); err != nil {
 		t.Fatal(err)
 	}
 	projects, err := st.ListProjects(ctx)
@@ -151,10 +151,10 @@ func TestApplyEventsIsIdempotentAndDetectsRemoteConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ApplyEvents(ctx, st, []state.Event{conflict}); err != nil {
+	if _, err := ApplyEvents(ctx, st, []state.Event{conflict}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ApplyEvents(ctx, st, []state.Event{conflict}); err != nil {
+	if _, err := ApplyEvents(ctx, st, []state.Event{conflict}); err != nil {
 		t.Fatal(err)
 	}
 	projects, err = st.ListProjects(ctx)
@@ -268,10 +268,10 @@ func TestApplyEventsSamePathDifferentRemoteUsesCanonicalWinnerAcrossPullWindows(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ApplyEvents(ctx, st, []state.Event{newer}); err != nil {
+	if _, err := ApplyEvents(ctx, st, []state.Event{newer}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ApplyEvents(ctx, st, []state.Event{older}); err != nil {
+	if _, err := ApplyEvents(ctx, st, []state.Event{older}); err != nil {
 		t.Fatal(err)
 	}
 	projects, err := st.ListProjects(ctx)
@@ -281,7 +281,7 @@ func TestApplyEventsSamePathDifferentRemoteUsesCanonicalWinnerAcrossPullWindows(
 	if len(projects) != 1 || projects[0].RemoteKey != "github.com/acme/api" || projects[0].SourceEventID != older.ID {
 		t.Fatalf("projects = %+v, want canonical older remote/event", projects)
 	}
-	if err := ApplyEvents(ctx, st, []state.Event{newer, older}); err != nil {
+	if _, err := ApplyEvents(ctx, st, []state.Event{newer, older}); err != nil {
 		t.Fatal(err)
 	}
 	conflicts, err := st.OpenConflicts(ctx)
@@ -327,13 +327,13 @@ func TestApplyEventsRejectsDivergentDuplicateEventID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ApplyEvents(ctx, st, []state.Event{event}); err != nil {
+	if _, err := ApplyEvents(ctx, st, []state.Event{event}); err != nil {
 		t.Fatal(err)
 	}
 	divergent := event
 	divergent.PayloadJSON = `{"path":"work/acme/other","type":"git_repo","remote_url":"git@github.com:acme/other.git","remote_key":"github.com/acme/other","default_branch":"main"}`
 	divergent.ContentHash = state.ContentHash(divergent.PayloadJSON)
-	err = ApplyEvents(ctx, st, []state.Event{divergent})
+	_, err = ApplyEvents(ctx, st, []state.Event{divergent})
 	if !errors.Is(err, state.ErrDivergentEvent) {
 		t.Fatalf("ApplyEvents divergent error = %v, want ErrDivergentEvent", err)
 	}
@@ -366,7 +366,7 @@ func TestApplyEventsRejectsBrokenPrevEventHashAndRecordsConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ApplyEvents(ctx, st, []state.Event{first}); err != nil {
+	if _, err := ApplyEvents(ctx, st, []state.Event{first}); err != nil {
 		t.Fatal(err)
 	}
 	second, err := NewProjectEvent(device.ID, EventProjectAdded, 20, ProjectPayload{
@@ -380,7 +380,7 @@ func TestApplyEventsRejectsBrokenPrevEventHashAndRecordsConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	second.PrevEventHash = "sha256:broken"
-	err = ApplyEvents(ctx, st, []state.Event{second})
+	_, err = ApplyEvents(ctx, st, []state.Event{second})
 	// SYNC-05/CODE-01: a hash-chain break records a conflict and continues
 	// (does not abort the batch), so ApplyEvents returns nil.
 	if err != nil {
@@ -401,7 +401,7 @@ func TestApplyEventsRejectsBrokenPrevEventHashAndRecordsConflict(t *testing.T) {
 		t.Fatalf("projects after broken chain = %+v, want only first project", projects)
 	}
 	second.PrevEventHash = first.ContentHash
-	if err := ApplyEvents(ctx, st, []state.Event{second}); err != nil {
+	if _, err := ApplyEvents(ctx, st, []state.Event{second}); err != nil {
 		t.Fatal(err)
 	}
 	projects, err = st.ListProjects(ctx)
@@ -464,7 +464,7 @@ func TestApplyEventsHonorsProjectDeleteTombstoneHLC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ApplyEvents(ctx, st, []state.Event{add, del, olderRestore}); err != nil {
+	if _, err := ApplyEvents(ctx, st, []state.Event{add, del, olderRestore}); err != nil {
 		t.Fatal(err)
 	}
 	projects, err := st.ListProjects(ctx)
@@ -474,7 +474,7 @@ func TestApplyEventsHonorsProjectDeleteTombstoneHLC(t *testing.T) {
 	if len(projects) != 0 {
 		t.Fatalf("projects after delete+older restore = %+v, want none", projects)
 	}
-	if err := ApplyEvents(ctx, st, []state.Event{newerRestore}); err != nil {
+	if _, err := ApplyEvents(ctx, st, []state.Event{newerRestore}); err != nil {
 		t.Fatal(err)
 	}
 	projects, err = st.ListProjects(ctx)

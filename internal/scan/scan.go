@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	dsgit "github.com/Reederey87/DevStrap/internal/git"
+	"github.com/Reederey87/DevStrap/internal/ignore"
 	"github.com/Reederey87/DevStrap/internal/pathkey"
 )
 
@@ -184,17 +185,13 @@ func Walk(ctx context.Context, root string, opts Options) (Result, error) {
 	return result, err
 }
 
+// pruneMatcher is the single compiled ignore policy used for directory pruning
+// (DRAFT-03). The scanner prune predicate, watcher skip set, bundle allow-list,
+// and agent deny-list all share one source of truth via internal/ignore.
+var pruneMatcher = ignore.DefaultMatcher()
+
 func shouldPruneDir(name, rel string) bool {
-	switch name {
-	case ".git", "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache",
-		".ruff_cache", ".ipynb_checkpoints", ".next", ".turbo", "dist", "build", "coverage",
-		"target", ".gradle", "checkpoints":
-		return true
-	}
-	return strings.HasSuffix(rel, "/data/raw") ||
-		strings.HasSuffix(rel, "/data/interim") ||
-		strings.HasSuffix(rel, "/.devstrap/tmp") ||
-		strings.HasSuffix(rel, "/.devstrap/cache")
+	return pruneMatcher.ShouldPruneDir(name, rel)
 }
 
 func isSecretName(name, rel string) bool {

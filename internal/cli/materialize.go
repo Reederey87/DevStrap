@@ -1,0 +1,298 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+
+	"github.com/Reederey87/DevStrap/internal/devicekeys"
+	"github.com/Reederey87/DevStrap/internal/draftbundle"
+	"github.com/Reederey87/DevStrap/internal/logging"
+	"github.com/Reederey87/DevStrap/internal/pathkey"
+	"github.com/Reederey87/DevStrap/internal/platform"
+	"github.com/Reederey87/DevStrap/internal/state"
+	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
+)
+
+// materializeConcurrency returns the bounded worker count for the eager
+// materialization pass (EAGER-04). It is capped so clone-everything across a
+// large ~/Code does not exhaust file descriptors or network connections.
+func materializeConcurrency() int {
+	if n := runtime.NumCPU(); n < 4 {
+		return n
+	}
+	return 4
+}
+
+func newMaterializeCommand(stdout io.Writer, opts *options) *cobra.Command {
+	var partial bool
+	cmd := &cobra.Command{
+		Use:   "materialize [path]",
+		Short: "Eagerly materialize skeleton projects (clone repos, hydrate env)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := opts.openState(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer closeStore(store)
+			var projects []state.ProjectStatus
+			if len(args) == 1 {
+				p, err := store.ProjectByPath(cmd.Context(), args[0])
+				if err != nil {
+					return err
+				}
+				projects = []state.ProjectStatus{p}
+			} else {
+				projects, err = store.SkeletonProjects(cmd.Context())
+				if err != nil {
+					return err
+				}
+			}
+			results := materializePass(cmd.Context(), store, opts, projects)
+			_, _ = fmt.Fprintf(stdout, "Materialized %d/%d projects\n", results.succeeded, results.total)
+			if results.failed > 0 {
+				_, _ = fmt.Fprintf(stdout, "%d project(s) failed; run 'devstrap doctor' or 'devstrap status' for details\n", results.failed)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&partial, "partial", true, "use partial clone with blob filtering")
+	return cmd
+}
+
+type materializeResult struct {
+	total     int
+	succeeded int
+	failed    int
+}
+
+// materializePass runs the eager materialization pass over the given projects
+// with bounded concurrency and per-project failure isolation (EAGER-01/04). A
+// single project's failure marks it failed and continues; it never aborts the
+// batch. Each project that materializes also gets its env profile hydrated
+// (EAGER-03).
+func materializePass(ctx context.Context, store *state.Store, opts *options, projects []state.ProjectStatus) materializeResult {
+	res := materializeResult{total: len(projects)}
+	if len(projects) == 0 {
+		return res
+	}
+	var mu sync.Mutex
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(materializeConcurrency())
+	for _, project := range projects {
+		project := project
+		g.Go(func() error {
+			if gctx.Err() != nil {
+				return nil
+			}
+			if err := materializeOne(gctx, store, opts, project); err != nil {
+				logging.Logger(gctx).Warn("materialize failed, isolating failure",
+					"path", project.Path, "type", project.Type, "err", err.Error())
+				mu.Lock()
+				res.failed++
+				mu.Unlock()
+				return nil // EAGER-04: isolate, do not abort the batch
+			}
+			mu.Lock()
+			res.succeeded++
+			mu.Unlock()
+			return nil
+		})
+	}
+	_ = g.Wait()
+	return res
+}
+
+// materializeOne materializes a single project by type dispatch (EAGER-01,
+// DRAFT-01):
+//   - git_repo: blobless clone/fetch from its existing remote (repo content
+//     rides git's own transport and never traverses the hub).
+//   - local_git / draft_project: decrypt-and-extract the latest draft bundle
+//     (DRAFT-02). Until a bundle exists, returns an honest "not yet
+//     materialized" error instead of the misleading "not git_repo".
+//   - plain_folder: create the skeleton directory (structure, no content).
+func materializeOne(ctx context.Context, store *state.Store, opts *options, project state.ProjectStatus) error {
+	switch project.Type {
+	case "git_repo":
+		return materializeGitRepo(ctx, store, opts, project)
+	case "local_git", "draft_project":
+		return materializeDraft(ctx, store, opts, project)
+	case "plain_folder":
+		return materializePlainFolder(ctx, store, opts, project)
+	default:
+		return fmt.Errorf("%s is %s; unknown project type", project.Path, project.Type)
+	}
+}
+
+func materializeGitRepo(ctx context.Context, store *state.Store, opts *options, project state.ProjectStatus) error {
+	unlock, err := acquireRepoLock(opts.paths().Home, project.ID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	localPath, err := hydrateProjectUnlocked(ctx, store, opts, project, true)
+	if err != nil {
+		return err
+	}
+	// EAGER-03: hydrate the env profile into the freshly materialized repo so
+	// the project is usable, not just cloned. Best-effort: no env profile or an
+	// existing .env means we skip silently.
+	if err := hydrateProjectEnv(ctx, store, opts, project, localPath); err != nil {
+		logging.Logger(ctx).Warn("env hydrate skipped", "path", project.Path, "err", err.Error())
+	}
+	// DRAFT-05: opt-in post-hydrate dependency rebuild. node_modules and build
+	// artifacts are never synced (excluded by the ignore compiler); they are
+	// rebuilt locally from the lockfile. Gated on DEVSTRAP_REBUILD_DEPS so it
+	// never runs on metered/offline paths without explicit opt-in.
+	if os.Getenv("DEVSTRAP_REBUILD_DEPS") != "" {
+		if err := rebuildDependencies(ctx, localPath); err != nil {
+			logging.Logger(ctx).Warn("dependency rebuild failed", "path", project.Path, "err", err.Error())
+		}
+	}
+	return nil
+}
+
+// materializeDraft handles local_git and draft_project content (DRAFT-01/02).
+// It decrypts and extracts the latest age-encrypted draft bundle into the
+// skeleton. When no bundle has been synced yet it returns an honest interim
+// message so the namespace stops lying with "not git_repo".
+func materializeDraft(ctx context.Context, store *state.Store, opts *options, project state.ProjectStatus) error {
+	localPath := project.LocalPath
+	if localPath == "" {
+		localPath = filepath.Join(opts.paths().Root, filepath.FromSlash(project.Path))
+	}
+	if root := opts.paths().Root; root != "" {
+		if err := pathkey.VerifyWithinRoot(root, localPath); err != nil {
+			return fmt.Errorf("refusing to materialize outside managed root: %w", err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o750); err != nil {
+		return fmt.Errorf("create parent directory: %w", err)
+	}
+	// DRAFT-02: attempt to extract the latest synced draft bundle. The bundle
+	// path is wired once draft snapshot events are applied; until a bundle
+	// exists for this project, surface an honest interim state.
+	bundle, err := store.LatestDraftSnapshot(ctx, project.ID)
+	if err != nil {
+		return fmt.Errorf("read draft snapshot for %s: %w", project.Path, err)
+	}
+	if bundle == nil {
+		if err := os.MkdirAll(localPath, 0o750); err != nil {
+			return fmt.Errorf("create draft skeleton: %w", err)
+		}
+		if err := store.UpdateProjectLocalState(ctx, project.ID, localPath, "skeleton", "unknown"); err != nil {
+			return err
+		}
+		return fmt.Errorf("%s is %s; content sync not yet materialized (no draft bundle synced)", project.Path, project.Type)
+	}
+	if err := extractDraftBundle(ctx, store, opts, project, localPath, bundle); err != nil {
+		_ = store.UpdateProjectLocalState(ctx, project.ID, localPath, "failed", "unknown")
+		return err
+	}
+	return store.UpdateProjectLocalState(ctx, project.ID, localPath, "available", "clean")
+}
+
+func materializePlainFolder(ctx context.Context, store *state.Store, opts *options, project state.ProjectStatus) error {
+	localPath := project.LocalPath
+	if localPath == "" {
+		localPath = filepath.Join(opts.paths().Root, filepath.FromSlash(project.Path))
+	}
+	if root := opts.paths().Root; root != "" {
+		if err := pathkey.VerifyWithinRoot(root, localPath); err != nil {
+			return fmt.Errorf("refusing to materialize outside managed root: %w", err)
+		}
+	}
+	if err := os.MkdirAll(localPath, 0o750); err != nil {
+		return fmt.Errorf("create plain folder: %w", err)
+	}
+	return store.UpdateProjectLocalState(ctx, project.ID, localPath, "available", "clean")
+}
+
+// hydrateProjectEnv hydrates a project's bound env profile into the project
+// directory after materialization (EAGER-03). It is best-effort: if the project
+// has no env profile, or the target .env already exists, it returns nil.
+func hydrateProjectEnv(ctx context.Context, store *state.Store, opts *options, project state.ProjectStatus, localPath string) error {
+	profile, bindings, err := store.EnvProfileForProject(ctx, project.ID)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return nil // no env profile — nothing to hydrate
+		}
+		return err
+	}
+	target := filepath.Join(localPath, ".env")
+	if _, err := os.Stat(target); err == nil {
+		return nil // .env already exists — do not clobber
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("stat env target: %w", err)
+	}
+	content, _, err := hydratedEnvContent(ctx, opts, store, profile, bindings, target, false)
+	if err != nil {
+		return err
+	}
+	return writeHydratedEnvFile(target, content, false)
+}
+
+// extractDraftBundle reads the content-addressed draft blob from the local blob
+// cache, decrypts it with the local device identity, and extracts it into the
+// skeleton (DRAFT-02). The blob is fetched from the hub during sync; if it is
+// not yet cached locally, the error tells the user to run sync.
+func extractDraftBundle(ctx context.Context, store *state.Store, opts *options, project state.ProjectStatus, localPath string, snapshot *state.DraftSnapshot) error {
+	ciphertext, err := readEnvBlob(opts.paths(), snapshot.BlobRef)
+	if err != nil {
+		return fmt.Errorf("read draft blob %s: %w (run 'devstrap sync' to fetch blobs from the hub)", snapshot.BlobRef, err)
+	}
+	device, err := store.CurrentDevice(ctx)
+	if err != nil {
+		return err
+	}
+	identity, err := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain).Read(ctx, device.ID)
+	if err != nil {
+		return fmt.Errorf("read local device identity: %w", err)
+	}
+	return draftbundle.Extract(ciphertext, identity.Private, localPath)
+}
+
+// rebuildDependencies detects the project toolchain and runs the appropriate
+// dependency restore from the lockfile (DRAFT-05). node_modules and build
+// artifacts are never synced; they are rebuilt locally. This is opt-in
+// (DEVSTRAP_REBUILD_DEPS) and logged, never automatic on metered/offline runs.
+func rebuildDependencies(ctx context.Context, localPath string) error {
+	toolchains := []struct {
+		marker  string
+		command string
+		args    []string
+	}{
+		{"package-lock.json", "npm", []string{"ci"}},
+		{"pnpm-lock.yaml", "pnpm", []string{"install", "--frozen-lockfile"}},
+		{"yarn.lock", "yarn", []string{"install", "--frozen-lockfile"}},
+		{"uv.lock", "uv", []string{"sync", "--frozen"}},
+		{"poetry.lock", "poetry", []string{"install", "--no-update"}},
+		{"go.mod", "go", []string{"mod", "download"}},
+		{"Cargo.lock", "cargo", []string{"fetch"}},
+	}
+	for _, tc := range toolchains {
+		if _, err := os.Stat(filepath.Join(localPath, tc.marker)); err != nil {
+			continue
+		}
+		return runRebuildCommand(ctx, localPath, tc.command, tc.args)
+	}
+	return nil // no recognized lockfile — nothing to rebuild
+}
+
+func runRebuildCommand(ctx context.Context, dir, command string, args []string) error {
+	//nolint:gosec // command is from a hardcoded toolchain table, not user input.
+	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.Dir = dir
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	return cmd.Run()
+}
