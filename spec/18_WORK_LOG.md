@@ -27,6 +27,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-06-28 — Fourth-pass design & implementation audit (post-PR-#16)
+
+Changed:
+- Added `AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md` at the repo root — a fourth-pass audit of the *now-shipped* cloud-sync system (PR #16). Produced by a six-dimension multi-agent review (per-dimension audit → independent adversarial grounding against the live tree → sectioned synthesis) with external best-practice research, yielding **44 verified findings** (P1=17, P2=23, P3=4) across Security/Crypto (`SEC-*`), Sync Engine & Data Model (`SYNC-*`), Cloud Hub & Scalability (`HUB-09..16`), Git Materialization & Agents (`GIT-*`), Code Quality & Testing (`QUAL-*`), and Product/UX & New Features (`PROD-*`). The new cloud-hub findings are numbered `HUB-09..16` to continue (not collide with) the shipped `HUB-01..08`.
+- Linked the new audit from `spec/00_START_HERE.md` (a third top-of-file blockquote, matching the prior two audits) and added it to that file's `tracks_code` frontmatter.
+- Headline findings: encrypt the namespace map before R2 upload (`SEC-02`), verify content-addressed blobs on fetch (`SEC-03`), make device revocation actually delete/rotate hub ciphertext (`SEC-01`), wire event-log compaction/snapshot + hub-side GC (`SYNC-02`/`HUB-11`/`HUB-12`), fix the clone network-retry-into-non-empty-dir bug (`GIT-02`) and record honest state on empty checkouts (`GIT-01`), and grow the product surface (`devstrap clone`, graded `doctor --fix`, `service install` daemon — `PROD-01/02/04`).
+
+Validated:
+- Each finding carries `file:line`/spec evidence checked by an adversarial verifier (already-implemented / unsupported findings were dropped or rescoped); e.g. the initial `GIT-01` "needs `ls-remote --symref`" claim was corrected to "verify non-empty checkout" after confirming `git clone` already resolves HEAD over the protocol handshake.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+- This audit is the recommendation backlog; converting `SEC-*`/`SYNC-*`/`HUB-09..16`/`GIT-*`/`QUAL-*`/`PROD-*` into implemented workstreams is the next set of cycles. Sequencing guidance is in the audit's Appendix C.
+
 ## 2026-06-28 — go.mod hygiene hotfix (main CI red after PR #16)
 
 Changed:
