@@ -43,6 +43,7 @@ The Phase 0 suite must cover:
 - `add -> hydrate` against a local bare remote, refusal to write skeletons into non-empty directories, missing-remote clone failure preserving the original skeleton without temp-dir leaks, and promotion-time dirty-target refusal without removing local files;
 - repo operation locks reject active concurrent operations and reclaim stale same-host owners before hydrate/worktree mutation;
 - fresh worktree creation from an advanced remote SHA while local clone state is stale, collision-resistant worktree branch naming with retry, `worktree status` reporting stale after the remote base advances again, `worktree finalize` refusing stale bases unless `--allow-stale-base`, and LFS-policy warning/pull branching for agent worktrees;
+- forge detection/routing for `agent pr` across GitHub/GitLab/Gitea/Forgejo/Bitbucket/Azure-style remotes, forge-specific token env allowlists, Azure remote-key folding, and graceful unknown-forge compare-URL fallback;
 - HLC monotonic send/receive, max-skew rejection, logical-counter overflow behavior, persisted local event HLC/sequence stamping and previous-hash linking across reopen, transactional idempotent event apply, divergent duplicate event rejection, incoming `prev_event_hash` chain-break rejection with conflict recording, HLC-gated delete tombstone restore/ignore behavior, and order-independent same-path/different-remote conflict protection with stable conflict details.
 
 Future-phase sections below are required before their corresponding features ship; they are not allowed to satisfy the Phase 0 gate until the commands exist.
@@ -223,7 +224,8 @@ This is the most important test.
 4. run a generic agent command that writes inside the fresh worktree
 5. assert an `agent_runs` row, `0600` log, and diff summary are recorded
 6. advance the remote base and assert `agent pr` refuses without `--allow-stale-base`
-7. run non-dry `agent pr` with a fake `gh` executable and assert `gh pr create` receives base/head/title/body argv
+7. run non-dry `agent pr` with fake `gh`, `glab`, and `tea` executables and assert each receives the expected base/head/title/body argv for its forge
+8. run `agent pr` against an unsupported forge and assert the branch is pushed, a compare/MR URL is printed, and no GitHub-only CLI is invoked
 ```
 
 ### Env capture/hydrate
@@ -351,9 +353,11 @@ Run the identical suite against the file-backed test backend and a Cloudflare R2
 
 ```text
 - event-log plane: append is signed + HLC-ordered; cursor=<HLC> pull returns only events after the cursor; a too-old cursor returns 410 -> full-state snapshot
+- R2/S3 event-log plane: event objects use immutable unique keys, conditional put (`If-None-Match: *` where supported), bounded `ListObjectsV2` pagination, and `next_cursor` without unbounded prefix scans or a single overwritten manifest
 - blob plane: put/get is content-addressed by sha256; a tampered blob fails its content-address check on get; blobs are namespaced by workspace_id with no cross-workspace read
 - idempotency: re-putting the same age_blob:<sha256> is a no-op; re-appending a duplicate event is deduplicated
 - backend parity: a fixture written via the file-backed backend and read via the R2/S3 backend (and vice versa) yields identical bytes
+- hosted credential mode: clients/runners can operate with prefix-scoped temporary credentials or presigned URLs and cannot read/write outside `workspaces/<workspace_id>/...`
 ```
 
 ### Zero-knowledge property

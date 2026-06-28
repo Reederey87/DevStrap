@@ -23,18 +23,18 @@ Alternatives:
 - raw sync folder: feels good but unsafe for Git/secrets/dependencies;
 - virtual filesystem: best UX but too hard for MVP.
 
-## 2. Lazy project materialization
+## 2. Eager project materialization with lazy fallback
 
-Problem: full cloning every repo on every machine is slow and wasteful.
+Problem: a new device must end with a usable `~/Code` tree, but full cloning every repo can be slow if done without partial clone, bounded concurrency, and resumability.
 
-Recommended MVP solution:
+Recommended target solution (`EAGER-*`):
 
-- create skeleton directories;
-- `devstrap open` materializes the repo;
-- optional shell hook hydrates when entering a skeleton folder;
-- optional editor adapter hydrates before opening.
+- `devstrap sync` eagerly materializes the whole namespace by blobless/partial-cloning every `git_repo` from its existing remote;
+- extract a shared materialization engine from the current single-project `hydrate` path and use it from `sync`, `open`, and the future run-loop;
+- use bounded workers, per-project failure isolation, and resumable `failed`/`skeleton` states;
+- keep skeleton directories only as transient/failure state and as a fallback for non-materializable project types.
 
-Later solution:
+Lazy-on-open remains a later opt-in/fallback solution:
 
 - StrapFS virtual filesystem;
 - macOS File Provider or macFUSE/FSKit;
@@ -148,19 +148,19 @@ See `07_NAMESPACE_AND_SYNC_MODEL.md` (working-state plane) and `AUDIT_RECOMMENDA
 
 ## 6c. Non-VCS / remote-less / multi-remote projects
 
-Problem: a real `~/Code` is full of folders with no remote (just `git init`), no git at all (scripts, assets, notebooks), or a non-`origin`/multi-remote setup. Today a no-remote repo is mis-adopted as a clonable `git_repo` and breaks hydration on every other device.
+Problem: a real `~/Code` is full of folders with no remote (just `git init`), no git at all (scripts, assets, notebooks), or a non-`origin`/multi-remote setup. A no-remote repo must never be adopted as a clonable `git_repo` because hydration on every other device would be impossible.
 
 Recommended solution:
 
-- classify a remote-less repo as `local_git` (never a clonable `git_repo`); enforce non-empty `remote_key` for `git_repo` in both `add` and `scan --adopt`;
+- classify a remote-less repo as `local_git` (never a clonable `git_repo`); enforce non-empty `remote_key` for `git_repo` in both `add` and `scan --adopt` (shipped);
 - emit `plain_folder` for structure-only dirs; sync local-only content via the encrypted bundle path (Layer C); add a `promote` command for `plain → draft/local_git → git_repo`;
 - preflight `worktree`/`agent` with a clear "requires a remote" error. See `AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 2 (`NOVCS-*`).
 
 ## 6d. Non-GitHub forges
 
-Problem: clone/fetch/push are forge-neutral, but `agent pr` is hardcoded to `gh` and fails post-push on GitLab/Bitbucket/Gitea/self-hosted/Azure.
+Problem: clone/fetch/push are forge-neutral, while PR/MR creation is forge-specific and must not assume GitHub.
 
-Recommended solution: detect the forge from the `origin` host; route PR/MR creation through a `Forge` interface (`gh`/`glab`/`tea`) with a forge-aware token allowlist; fail gracefully (print branch + compare/MR URL) on unknown forges. See `AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 3 (`FORGE-*`).
+Recommended solution: detect the forge from the `origin` host; route PR/MR creation through a `Forge` interface (`gh`/`glab`/`tea`) with a forge-aware token allowlist; fail gracefully (print branch + compare/MR URL) on unknown forges. GitHub/GitLab/Gitea routing, Azure remote-key folding, and graceful unknown-forge fallback are shipped. Remaining work: `doctor` should probe the relevant forge CLI per adopted remote, self-hosted/SSH-alias overrides need a config surface, and native Bitbucket/Azure PR clients remain future. See `AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 3 (`FORGE-*`).
 
 ## 7. Draft projects not in Git yet
 
@@ -385,10 +385,11 @@ Recommended solution:
 
 MVP options:
 
-1. local home-hub on Mac Mini/GMK;
-2. small VPS;
-3. encrypted object-store backend;
-4. hidden Git backend as a temporary adapter, not the user-facing model.
+1. encrypted object-store backend (chosen target: Cloudflare R2/S3 behind the pluggable Hub interface);
+2. file-backed local backend for tests only;
+3. later HTTP/SSE relay if live push or multi-tenant routing outgrows R2 polling;
+4. local home-hub / small VPS only as historical fallback options.
+5. hidden Git backend as a historical/superseded temporary-adapter idea, not the current target and not the user-facing model.
 
 ## 20b. Cloud-backend trust and reachability
 

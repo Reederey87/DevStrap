@@ -85,7 +85,7 @@ Mitigation:
 - log redaction;
 - tainted-log handling when secrets are present.
 
-Reality (`AGEN-01`, `AGEN-02`/`SECU-02`): the wrapper command/file policy is argv-substring matching, **trivially bypassed by any interpreter** (`bash -c`, `python -c`, base64-decode, variable indirection), so the default `guarded` agent has full filesystem read + network exfil; and the agent subprocess currently **inherits `HOME` and `SSH_AUTH_SOCK`**, forwarding a live Git/SSH credential capability. The "no secrets by default" and "OS sandbox" bullets above are not yet true. Strip `HOME`/`SSH_AUTH_SOCK`, treat the wrapper as accident-prevention rather than a security boundary, and move to an allowlist + OS sandbox (Seatbelt / bubblewrap-landlock-seccomp).
+Reality (`AGEN-01`, `AGEN-02`/`SECU-02`): the credential-env leak is fixed — `SSH_AUTH_SOCK` is excluded and `HOME` is repointed to the worktree — but the wrapper command/file policy is still argv-substring matching and **trivially bypassed by any interpreter** (`bash -c`, `python -c`, base64-decode, variable indirection). The default `guarded` agent still has ordinary process-user filesystem read capability and network egress unless an OS sandbox constrains it. Treat the wrapper as accident-prevention rather than a security boundary, and move to an allowlist + OS sandbox (Seatbelt / bubblewrap-landlock-seccomp).
 
 ### Threat: destructive sync deletes code
 
@@ -135,7 +135,7 @@ Residual risk: a malicious approved device can decrypt bundles it is authorized 
 
 Reality (`SECU-03`, `SECU-05`): event signature verification currently **fails open** — events from a device whose signing key is unknown (or that has no signing key) are accepted unverified, so the "event signatures from day one" and "out-of-band fingerprint confirmation" bullets above are not yet enforced; a malicious hub could inject a rogue device. The hub must be treated as **zero-knowledge / semi-trusted** (ciphertext + routing metadata only); clients must **fail closed** on events from unverified devices once enrollment exists, and mTLS device certs should enforce revocation at the transport layer. Destructive event types (`project.deleted`, `project.renamed`) already verify fail-closed (`SECU-03`); the remaining work is to extend fail-closed to all event types once device enrollment is the default.
 
-Multi-tenant isolation (future SaaS direction, `SCALE-*`): when the hub serves more than one owner, tenant isolation is **by construction, not by access-control list** — every blob and event is client-side age-encrypted before upload and namespaced by `workspace_id`, so a zero-knowledge hub cannot read across tenants even if its access controls fail. This keeps the single-owner-fleet model and the eventual SaaS model on the same zero-knowledge primitives.
+Multi-tenant isolation (future SaaS direction, `SCALE-*`): when the hub serves more than one owner, **confidentiality** is by construction — every blob and event is client-side age-encrypted before upload and namespaced by `workspace_id`, so a zero-knowledge hub cannot decrypt across tenants even if its access controls fail. Integrity and availability are not automatic: a leaked bucket-wide key can still delete, overwrite, withhold, or reorder ciphertext. Hosted mode therefore requires prefix-scoped temporary credentials, signed hash chains, fail-closed verification, snapshots/backups, retention discipline, rate limits, and cell/tenant scoping.
 
 ### Threat: device lost/stolen
 
@@ -257,7 +257,7 @@ Event signatures cover `(id, hlc, type, payload_json, content_hash, prev_event_h
 
 Current implementation creates a local Ed25519 signing identity during `devstrap init`, stores only the public key in `devices.signing_public_key`, stores private signing material through the platform keychain adapter with `0600` file fallback, signs local events, and verifies signed inserts when the source device's signing public key is known. Manual remote-device enrollment/approval is available for local env capture recipients. Key fingerprint confirmation, automatic enrollment, and signed hub ingestion remain future work.
 
-Key-custody caveat (`SECR-04`/`SECU-01`): the keychain→file fallback currently triggers on **any** keychain error, not only genuine unavailability, so a transient keychain failure silently downgrades to a `0600` plaintext age/Ed25519 private key on disk. Narrow the fallback to true "unavailable" conditions and surface a warning when it engages. Verification fail-open (`SECU-03`) must become fail-closed once enrollment lands.
+Key-custody status (`SECR-04`/`SECU-01`): the file fallback is now gated on true keychain unavailability and a present-but-failing keychain fails closed; the fallback warns when engaged. Remaining coverage risk is Linux Secret Service/headless integration (`XP-03`). Verification fail-open (`SECU-03`) must become fail-closed for all remote event types once enrollment lands.
 
 ## Security profiles
 

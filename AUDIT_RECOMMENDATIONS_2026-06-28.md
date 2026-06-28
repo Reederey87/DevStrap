@@ -9,12 +9,13 @@
 - How this relates to the prior audits
 - Executive Summary
 - Architecture decisions encoded by this audit (the substance)
+- 2026-06-28 rebaseline addendum — spec/code status, provider audit, and implementation dependency graph
 - Priority Matrix — P0 list + full matrix
 - **Section 1** — Eager-clone materialization (`EAGER-01..04`) — P0
 - **Section 2** — Non-git content sync (`DRAFT-01..05`) — P0
-- **Section 3** — Cloud Hub backend (`HUB-01..05`) — P1
+- **Section 3** — Cloud Hub backend (`HUB-01..08`) — P1
 - **Section 4** — Cross-platform hardening (`XP-01..04`) — P1
-- **Section 5** — Scaling to multi-user (`SCALE-01..05`) — future, P2
+- **Section 5** — Scaling to multi-user (`SCALE-01..08`, `COST-01`) — future, P2
 - **Section 6** — Deferred (explicit): FUSE/StrapFS, native installers, production HTTP/SSE hub
 
 ## How this relates to the prior audits
@@ -47,7 +48,7 @@ The single most important architectural commitment in this audit is **file-sync 
 
 `node_modules` / build artifacts are **never synced** — they are rebuilt on hydrate.
 
-Materialization is **eager clone-everything on `devstrap sync`** (blobless up front): after a sync the whole `~/Code` tree is present. There is **no FUSE / placeholder / lazy-VFS magic in this design** — StrapFS stays explicitly deferred (Section 6). The transport target is a **two-plane zero-knowledge hub** (event log + content-addressed encrypted blob store) where the hub sees only ciphertext plus a signed map; the production backend is **Cloudflare R2 from the start** (S3 API, zero egress, namespaced by `workspace_id`, zero-knowledge via client-side age encryption), with a file-backed backend retained **only for tests**. Cross-platform Go on macOS + Ubuntu comes first; OS-specific magic (native daemon, StrapFS) is deferred this cycle.
+Materialization is **eager clone-everything on `devstrap sync`** (blobless up front): after a sync the whole `~/Code` tree is present. There is **no FUSE / placeholder / lazy-VFS magic in this design** — StrapFS stays explicitly deferred (Section 6). The transport target is a **two-plane zero-knowledge hub** (event log + content-addressed encrypted blob store) where the hub sees only ciphertext plus a signed map; the production backend is **Cloudflare R2 from the start** (S3 API, zero egress, namespaced by `workspace_id`, confidentiality via client-side age encryption), with a file-backed backend retained **only for tests**. Cross-platform Go on macOS + Ubuntu comes first; OS-specific magic (native daemon, StrapFS) is deferred this cycle.
 
 Two themes frame the work:
 
@@ -69,10 +70,61 @@ These are the canonical 2026-06-28 decisions the workstreams below implement. Th
 3. **Two-plane zero-knowledge hub (`devstraphub`):** (a) event log = the namespace map; (b) content-addressed encrypted blob store = env + non-git/draft content. The hub sees **only** ciphertext + a signed map. Pluggable backend behind one `Hub` interface.
 4. **Cloud backend: Cloudflare R2 from the start** (S3 API, zero egress, namespaced by `workspace_id`, zero-knowledge via client-side age encryption). **No NAS-first phase.** File-backed backend remains **only** for tests.
 5. **Cross-platform core first** (portable Go on macOS + Ubuntu; no native daemon/StrapFS this cycle).
-6. **Hosting & scaling (future direction, documented not built):** Fly.io for compute (control plane + agent runners; Firecracker microVM isolation, scale-to-zero/suspend-resume, runs the Go binary natively) + Cloudflare R2 for the hub (namespaced by `workspace_id`; zero-knowledge ⇒ tenant isolation by construction) + managed Postgres (Neon/Supabase) for the control-plane DB. Runner escape-hatch: E2B (self-hostable microVM agent sandboxes).
+6. **Hosting & scaling (future direction, documented not built):** Fly.io for compute (control plane + agent runners; Firecracker microVMs, scale-to-zero/suspend-resume, runs the Go binary natively) + Cloudflare R2 for the hub (namespaced by `workspace_id`; client-side encryption gives confidentiality by construction, while integrity/availability still require signatures, scoped credentials, snapshots, and backups) + managed Postgres (Neon default; Supabase/Render/Railway alternatives depending on product shape) for the control-plane DB. Runner escape-hatch: E2B (self-hostable microVM agent sandboxes).
 7. **Conflicts:** HLC ordering + tombstones + detect-don't-merge (already built); never byte-merge files (dual-copy is the only safe default for opaque files; CRDTs solve a different problem).
 8. **Device trust:** per-device enrollment/approval; revoke ⇒ re-encrypt affected blobs to the reduced recipient set + flag secrets for rotation (age has no native revocation). Event verification must **fail closed** once enrollment exists.
 9. **Out of scope:** the LLM/Claude API the agent runner uses — do not add LLM-provider content to any spec.
+
+---
+
+## 2026-06-28 rebaseline addendum — spec/code status, provider audit, and implementation dependency graph
+
+This addendum reconciles the audit with the live tree after the 2026-06-28 implementation passes and the cloud-provider review. It is the handoff plan future code agents should follow.
+
+### Closed or reclassified from the second pass
+
+- Shipped: `NOVCS-01` no-remote/unvalidated-remotes classify as `local_git`; `NOVCS-04` worktree/agent remote preflight; `FORGE-01/02/03` forge detection, PR/MR routing, forge token allowlist, Azure remote-key folding, and graceful unknown-forge fallback; `SECR-01/02/04/05`; `SECU-01/02`; destructive-event fail-closed subset of `SECU-03`; `PROD-02` conflict surfacing; `CI-01`.
+- Still open: `ARCH2-01` shared engine extraction; `ARCH2-02` cursor wiring/snapshot recovery; `DRAFT-*`; `HUB-*`; `XP-*`; `AGEN-01/03/04/05` OS sandbox/profile semantics/deny compiler; `FORGE-04/05` forge `doctor` probes and tests; `NOVCS-02/03/05` plain-folder/promote/draft materialization; `PROD-01/03`; `DATA-*` constraints/snapshots/retention; `PLAT-*` watcher/ignore convergence.
+- Documentation correction: `device_gitstate` is planned only. No `00008_gitstate_mirror.sql` migration exists as of this audit; the live migrations stop at `00007_secret_binding_rotation.sql`.
+- Security correction: agents no longer inherit `SSH_AUTH_SOCK` or the user's `HOME`; the remaining risk is that wrapper policy is not an OS sandbox and has no hard network/filesystem isolation.
+
+### Implementation dependency graph
+
+1. **Spec rebaseline and stale-claim cleanup** so agents stop chasing already-closed findings.
+2. **Extract shared `internal/engine` materialization primitives** from the current single-project `hydrate`/`open` path: lock, temp clone, atomic promote, failure state, retry classification.
+3. **Define `internal/hub` interface and conformance suite** with file-backed backend first; include event and blob planes, typed errors, cursor/pagination, `io.Reader`/`io.ReadCloser` blob APIs, and immutable object-key contract.
+4. **Wire cursor-based sync** (`sync_cursors.last_hlc_applied`, transactionally advanced after apply) and snapshot-required recovery before any retention GC.
+5. **Eager materialization in `sync`**: bounded workers, per-project failure isolation, resumability, two-device file-hub e2e proving Device B gets a real blobless clone.
+6. **Env hydrate in sync** using existing `envbundle`/age blobs and explicit overwrite semantics.
+7. **Build `.devstrapignore` compiler** and wire scanner, watcher, agent deny policy, generated ignore blocks, and future bundle packer to one compiled policy.
+8. **Draft/local-only materialization**: honest interim errors, typed dispatch for `git_repo`/`local_git`/`draft_project`/`plain_folder`, `draft.snapshot.created`, tar+zstd+age bundles, size/file-count enforcement, dual-copy conflicts.
+9. **R2/S3 backend** behind the Hub interface: immutable event objects, conditional puts, bounded `ListObjectsV2` pagination, encrypted blob PUT/GET/HEAD, zero-knowledge and cost tests, MinIO/S3 stub conformance.
+10. **Fail-closed enrollment and payload validation**: all remote event types require known approved signing keys once enrolled; validate event payloads before apply (for example `git_repo` remote URL/key cannot be empty or unvalidated).
+11. **Device revoke hardening**: re-encrypt affected blobs to the reduced recipient set, update refs, flag secrets for provider rotation, and implement blob ref-count/GC only after snapshots exist.
+12. **Portable `devstrap run-loop`**: foreground scan -> sync -> materialize with interval/backoff/`--once`; native launchd/systemd installers remain deferred.
+13. **Hosted/SaaS controls**: temporary R2 credentials, Fly runner app/process separation, Neon pooled/runtime and direct/migration DSNs, cell/data-residency provisioning, cost alerts.
+
+### Cloud-provider decision audit
+
+**Verdict: keep Fly.io + Cloudflare R2 + Neon as the documented direction; do not switch providers now.** The stack matches DevStrap's Go-first binary, low-idle personal fleet, encrypted object-store hub, and future per-task runner isolation. The risks are implementation boundaries, not a wrong provider choice.
+
+- **Cloudflare R2** is the right default data plane for encrypted namespace events and blobs because it is S3-compatible, has free egress, and has strong consistency for object writes/listing. Do not implement the event log as one overwritten manifest. Use immutable unique event keys such as `workspaces/<ws>/events/<hlc-padded>/<device>/<seq>/<event>.json`, conditional PUT (`If-None-Match: *` where supported), paged `ListObjectsV2`, signed hash chains, snapshots, and cost-aware polling/backoff. R2 gives confidentiality via encryption, not integrity/availability by itself.
+- **Tigris** is the strongest storage alternative because it is Fly-native, S3-compatible, zero-egress, and globally places data. Prefer it only if Fly integration/global placement outweigh R2's lower Standard storage/operation pricing and larger free tier.
+- **Fly.io** is a good Go-native compute target and reasonable runner substrate, but specs must avoid fixed region-count and "near-zero" cost claims. Use current Fly pricing/regions, account for rootfs/volumes/IPs/egress, and put untrusted runners in a separate app/org/process boundary with no parent R2 key, no broad `DATABASE_URL`, TTL cleanup, no shared volumes, egress/resource limits, and destroy-after-task semantics.
+- **Neon** is a good default control-plane Postgres for low-duty workloads because of scale-to-zero and branching. Hosted code must use a provider-neutral control-store boundary and two DSNs: pooled runtime for request traffic and direct migration/admin for session-level work. Supabase is better only if Auth/Storage/BaaS become product requirements; Render/Railway are simpler trusted app-hosting options; Cloudflare Workers/Durable Objects/D1 + R2 is a future serverless edge alternative if a non-Go runtime becomes acceptable.
+- **Data residency/cells** must be explicit before SaaS: choose Fly region, Neon region, R2 location/jurisdiction, bucket/prefix strategy (pooled, dedicated, BYOC), and budget alerts per cell/tenant.
+
+New findings added by this addendum:
+
+| Severity | ID | Area | Effort | Finding |
+|---|---|---|---|---|
+| high | `HUB-06` | hub | M | R2 event-log append semantics are underspecified; define immutable keying, conditional put, pagination, cursor, and snapshot semantics |
+| high | `HUB-07` | hub/security | M | Hosted clients/runners must use temporary prefix-scoped credentials or presigned URLs; no bucket-wide long-lived keys outside trusted control plane |
+| medium | `HUB-08` | hub | S | R2 backend is polling/cursor-based; HTTP/SSE/Worker/Queue path is deferred until live push is required |
+| high | `SCALE-06` | runners | M | Fly runners need separate app/process boundary, per-task credentials, TTL cleanup, no shared volumes, and destroy-after-task for untrusted code |
+| medium | `SCALE-07` | database | M | Managed Postgres needs provider-neutral boundary plus pooled runtime DSN and direct migration/admin DSN |
+| medium | `SCALE-08` | data residency | M | Cell provisioning must pick Fly/Neon/R2 region/jurisdiction and pooled/dedicated/BYOC tenancy shape |
+| medium | `COST-01` | cost | S | Add budget/cost model for R2 operations, Fly Machines/rootfs/egress/IPs, and Neon CU/storage/branches |
 
 ---
 
@@ -103,15 +155,22 @@ Ranked by leverage toward the demonstrable killer loop. **P0** = blocks the "sam
 | high | `HUB-03` | hub | M | Event verification fails open outside a two-type allowlist; must fail closed once enrollment exists |
 | medium | `HUB-04` | hub | M | Device revoke does not re-encrypt blobs to the reduced recipient set (age has no native revocation) |
 | medium | `HUB-05` | hub | M | Content-addressed blobs have no ref-count or GC; retention GC must be gated on snapshot exchange |
+| high | `HUB-06` | hub | M | R2 event-log keying, conditional append, pagination, and snapshot cursor semantics must be specified before implementation |
+| high | `HUB-07` | hub/security | M | SaaS/runners need temporary prefix-scoped R2 credentials or presigned URLs; no bucket-wide long-lived keys on clients/runners |
+| medium | `HUB-08` | hub | S | R2 direct backend is polling/cursor-based; HTTP/SSE/Worker/Queue live-push path remains deferred |
 | high | `XP-01` | cross-platform | M | Ubuntu parity unproven end-to-end for the full materialize loop (the incoming GMKtec box) |
 | medium | `XP-02` | cross-platform | M | No portable periodic scan/sync/materialize loop; sync only runs when invoked by hand |
 | medium | `XP-03` | cross-platform | S | Secret Service / `DEVSTRAP_NO_KEYCHAIN` headless key custody untested on Linux |
 | low | `XP-04` | cross-platform | S | NFC/case-fold path semantics unvalidated on ext4/Ubuntu and on the NAS mount |
 | future | `SCALE-01` | multi-user | L | Control/data-plane split for multi-tenant operation |
-| future | `SCALE-02` | multi-user | M | R2 namespaced per `workspace_id` ⇒ tenant isolation by construction |
+| future | `SCALE-02` | multi-user | M | R2 namespaced per `workspace_id` gives confidentiality by construction; integrity/availability need controls |
 | future | `SCALE-03` | multi-user | L | Rented microVM runner sandboxes for untrusted multi-tenant agent code |
 | future | `SCALE-04` | multi-user | M | Tenancy spectrum (pooled → dedicated/BYOC) + cell-based scaling |
 | future | `SCALE-05` | multi-user | S | Chosen hosting stack: Fly.io + Cloudflare R2 + managed Postgres (with rejected alternatives) |
+| future | `SCALE-06` | multi-user | M | Fly runner isolation boundary: separate app/process, scoped secrets, TTL cleanup, no shared volumes, destroy-after-task |
+| future | `SCALE-07` | multi-user | M | Provider-neutral Postgres control store with pooled runtime DSN and direct migration/admin DSN |
+| future | `SCALE-08` | multi-user | M | Region/data-residency/cell placement across Fly, Neon, and R2 jurisdiction/bucket choices |
+| medium | `COST-01` | cost | S | Concrete budget model and alerts for R2 operations, Fly Machines/rootfs/egress/IPs, and Neon CU/storage/branches |
 
 ---
 
@@ -301,11 +360,11 @@ for _, p := range store.SkeletonGitRepos(ctx) {     // type=git_repo, materializ
 ### [HUB-02] Cloudflare R2 zero-knowledge production backend (S3 API, per-`workspace_id`, client-side age)
 `high` · `effort: L` · new `internal/hub` (R2 backend), `internal/envbundle` (encryption boundary), `internal/devicekeys` (signing)
 
-**Problem.** There is no production transport. Decision #4 fixes the backend as **Cloudflare R2 from the start**: S3-compatible API, zero egress fees, objects namespaced by `workspace_id`, and zero-knowledge by construction because all content is client-side age-encrypted before upload. No NAS-first phase, no bespoke server to operate for the single-user fleet.
+**Problem.** There is no production transport. Decision #4 fixes the backend as **Cloudflare R2 from the start**: S3-compatible API, zero egress fees, objects namespaced by `workspace_id`, and confidentiality by construction because all content is client-side age-encrypted before upload. Integrity and availability still require the `HUB-06` object-key/conditional-put/cursor contract, signed hash-chain verification, scoped credentials, snapshots, and backups. No NAS-first phase, no bespoke server to operate for the single-user fleet.
 
 **Current state.** Nothing — no S3 client, no R2 config, no object-key scheme. The encryption boundary that makes R2 safe already exists client-side (`internal/envbundle.Encrypt`, `internal/devicekeys.Sign`).
 
-**Recommended fix.** Implement an R2 `Hub` backend (S3 API via the AWS SDK or `minio-go`) with object keys namespaced `workspace/<workspace_id>/events/<hlc>` and `workspace/<workspace_id>/blobs/<sha256>`. The event log is append-only objects (or a manifest + segments); blobs are content-addressed PUT/GET. **All payloads and blobs are age-encrypted and Ed25519-signed before upload** — R2 stores only ciphertext + a signed map. Add a zero-knowledge test asserting the backend, given only what it stores, can decrypt nothing and holds no private key.
+**Recommended fix.** Implement an R2 `Hub` backend (S3 API via the AWS SDK or `minio-go`) using the `HUB-06` immutable object-key contract: events under `workspaces/<workspace_id>/events/<hlc-padded>/<device_id>/<seq>/<event_id>.json`, blobs under `workspaces/<workspace_id>/blobs/<sha256>`, conditional event PUT, and paged cursor pulls. Never append by overwriting one manifest object. Blobs are content-addressed PUT/GET/HEAD. **All payloads and blobs are age-encrypted and Ed25519-signed before upload** — R2 stores only ciphertext + a signed map. Add a zero-knowledge/confidentiality test asserting the backend, given only what it stores, can decrypt nothing and holds no private key.
 
 **Reuse.** `internal/envbundle` (age encrypt/decrypt above the wire), `internal/devicekeys` (Ed25519 sign/verify), the `Hub` interface from `HUB-01`, the cursor from `EAGER-02`. The file-backed `FileHub` stays the test double.
 
@@ -358,6 +417,33 @@ for _, p := range store.SkeletonGitRepos(ctx) {     // type=git_repo, materializ
 
 **References.** content-addressed GC (https://git-scm.com/book/en/v2/Git-Internals-Maintenance-and-Data-Recovery), second-pass Section 6 (`AUDIT_RECOMMENDATIONS_2026-06-27.md`).
 
+### [HUB-06] R2 event-log keying, conditional append, pagination, and snapshot cursor semantics
+`high` · `effort: M` · new `internal/hub` R2/S3 backend
+
+**Problem.** R2 is strongly consistent, but same-key concurrent writes are last-writer-wins. An append-only event log must therefore never be one overwritten manifest object. Correctness must live in object-key design plus the signed hash chain.
+
+**Recommended fix.** Store every event as an immutable, unique, lexicographically sortable object such as `workspaces/<ws>/events/<hlc-padded>/<device_id>/<seq>/<event_id>.json`; create with conditional put semantics (`If-None-Match: *` where supported); pull with bounded `ListObjectsV2` pages, `start-after`/`next_cursor`, and a caller-supplied `limit`; and expose snapshot-required recovery when the cursor falls behind retention. Add tests that reject duplicate keys, page correctly, avoid unbounded prefix scans, and detect reordering/omission/substitution through the signed event chain.
+
+**Sequencing.** Land with `HUB-01`/`HUB-02`; this is the provider-specific contract that makes R2 safe as an event log.
+
+### [HUB-07] Temporary prefix-scoped credentials for hosted clients and runners
+`high` · `effort: M` · cloud credential broker
+
+**Problem.** A bucket-wide, long-lived R2 key on devices or runner Machines cannot decrypt ciphertext, but it can delete, overwrite, or withhold every tenant's objects. That violates the hosted/SaaS trust boundary.
+
+**Recommended fix.** Single-owner self-hosted mode may use a bucket-scoped R2 key. Hosted mode must keep the parent R2 key only in trusted control-plane code and mint short-lived temporary credentials or presigned URLs scoped to `workspaces/<workspace_id>/...` and the minimum needed operations. Runner Machines receive only per-task scoped credentials and never the parent key.
+
+**Sequencing.** Required before any hosted/rented runner path; optional for local personal mode.
+
+### [HUB-08] R2 direct backend is polling/cursor-based; live-push relay is deferred
+`medium` · `effort: S` · architecture boundary
+
+**Problem.** Specs previously mixed R2-direct storage with a bespoke HTTP/SSE `cmd/devstraphub` relay. These are different implementations with different auth and cost models.
+
+**Recommended fix.** Name the abstraction "logical DevStrap Hub" and make implementations explicit: `file` test backend, `s3/r2` direct backend, and later `http/sse` relay backend. R2 direct uses S3 credentials and cursor polling with backoff; mTLS and SSE belong only to the later relay if live push or multi-tenant routing requires it.
+
+**Sequencing.** Clarifies M7: ship interface + R2 first; defer HTTP/SSE.
+
 ---
 
 ## Section 4 — Cross-platform hardening (P1)
@@ -399,11 +485,11 @@ for _, p := range store.SkeletonGitRepos(ctx) {     // type=git_repo, materializ
 ### [XP-03] Secret Service / `DEVSTRAP_NO_KEYCHAIN` headless key custody untested on Linux
 `medium` · `effort: S` · `internal/devicekeys`, `internal/platform/detect_linux.go`
 
-**Problem.** Device age/Ed25519 private identities back the entire zero-knowledge model. On Linux they should live in the Secret Service, falling back to `~/.devstrap/keys` (0600) when unavailable, with `DEVSTRAP_NO_KEYCHAIN` forcing the file store for headless/CI. This fallback is asserted but not exercised on a real Ubuntu environment, and the second pass flagged the custody downgrade as silently fail-open on *any* keychain error (`SECR-04`/`SECU-01`).
+**Problem.** Device age/Ed25519 private identities back the entire zero-knowledge model. On Linux they should live in the Secret Service, falling back to `~/.devstrap/keys` (0600) when unavailable, with `DEVSTRAP_NO_KEYCHAIN` forcing the file store for headless/CI. The fallback narrowing from the second pass is now implemented for present-but-failing keychains; the remaining gap is real Ubuntu/Secret Service and headless coverage.
 
-**Current state.** The linux keychain target is `secret-service`; `DEVSTRAP_NO_KEYCHAIN` gates the file store. No Linux integration test covers the Secret Service path or the headless fallback, and the downgrade is still on-any-error rather than only-on-unavailable.
+**Current state.** The linux keychain target is `secret-service`; `DEVSTRAP_NO_KEYCHAIN` gates the file store. No Linux integration test covers the Secret Service path or the headless fallback.
 
-**Recommended fix.** Add a Linux key-custody test (Secret Service present, absent, and `DEVSTRAP_NO_KEYCHAIN` set), and make the file fallback fail-closed on a present-but-failing keyring with a visible warning (closing second-pass `SECR-04`/`SECU-01`).
+**Recommended fix.** Add a Linux key-custody test (Secret Service present, absent, and `DEVSTRAP_NO_KEYCHAIN` set), and keep the present-but-failing keyring behavior fail-closed with a visible warning.
 
 **Reuse.** The existing `DEVSTRAP_NO_KEYCHAIN` gate and the `keychainUnavailable` classifier in `internal/devicekeys`.
 
@@ -445,12 +531,12 @@ for _, p := range store.SkeletonGitRepos(ctx) {     // type=git_repo, materializ
 
 **References.** Coder architecture (https://coder.com/docs/admin/infrastructure/architecture).
 
-### [SCALE-02] R2 namespaced per `workspace_id` ⇒ tenant isolation by construction
+### [SCALE-02] R2 namespaced per `workspace_id` ⇒ confidentiality by construction, not full isolation by itself
 `future` · `effort: M` · architecture direction
 
-**Problem (future).** Multi-tenant blob/event storage must isolate tenants without trusting the server. Because every object is client-side age-encrypted and namespaced by `workspace_id` (`HUB-02`), the zero-knowledge property *is* the tenant-isolation property: one tenant's keys cannot decrypt another's objects even given full bucket access.
+**Problem (future).** Multi-tenant blob/event storage must isolate tenants without trusting the server. Because every object is client-side age-encrypted and namespaced by `workspace_id` (`HUB-02`), one tenant's keys cannot decrypt another's objects even given full bucket access. That is confidentiality, not integrity or availability.
 
-**Direction.** Keep the `HUB-02` `workspace/<workspace_id>/...` key scheme; per-tenant IAM/bucket policies on R2 are defense-in-depth atop the cryptographic isolation. No per-tenant server logic is required for isolation.
+**Direction.** Keep the `HUB-02` `workspaces/<workspace_id>/...` key scheme; per-tenant/prefix-scoped credentials, bucket policies, cells, signed hash chains, snapshots/backups, and rate limits are required for integrity and availability atop the cryptographic confidentiality boundary.
 
 **Sequencing.** Falls out of `HUB-02` for free; formalize bucket/IAM scoping when onboarding tenant #2.
 
@@ -461,7 +547,7 @@ for _, p := range store.SkeletonGitRepos(ctx) {     // type=git_repo, materializ
 
 **Problem (future).** Running other users' agent tasks on shared infrastructure requires hardware-grade isolation — the argv-substring agent policy (second-pass `AGEN-01`) and even an OS sandbox are insufficient against untrusted multi-tenant code. The current agent runner has no OS-enforced sandbox at all.
 
-**Direction.** Per-task **microVM** isolation: **Fly Machines** (Firecracker) as primary (runs the Go binary natively, scale-to-zero/suspend-resume, 35+ regions), with **E2B** (self-hostable microVM agent sandboxes) as the escape hatch. Vercel Sandbox and AWS Lambda MicroVMs are alternatives in the same Firecracker family. Each agent task gets a fresh microVM, a fresh worktree from `origin/<default_branch>`, and no access to other tenants' data.
+**Direction.** Per-task **microVM** isolation: **Fly Machines** (Firecracker) as primary (runs the Go binary natively, scale-to-zero/suspend-resume, global regions verified from current Fly docs), with **E2B** (self-hostable microVM agent sandboxes) as the escape hatch. Vercel Sandbox and AWS Lambda MicroVMs are alternatives in the same Firecracker family. Each agent task gets a fresh microVM, a fresh worktree from `origin/<default_branch>`, only per-task scoped credentials, and no access to other tenants' data.
 
 **Reuse.** The thin generic agent runner (fresh worktree, sanitized env, command/file policy, 0600 log) is the workload; the microVM is the new isolation boundary around it.
 
@@ -484,9 +570,9 @@ for _, p := range store.SkeletonGitRepos(ctx) {     // type=git_repo, materializ
 `future` · `effort: S` · hosting decision (direction)
 
 **Decision (direction).** When DevStrap is hosted for others, the stack is:
-- **Compute (control plane + agent runners): Fly.io** — Firecracker microVM isolation, 35+ regions, scale-to-zero/suspend-resume, runs the Go binary natively.
-- **Sync hub storage: Cloudflare R2** — namespaced by `workspace_id`; zero-knowledge ⇒ tenant isolation by construction; zero egress (`HUB-02`).
-- **Control-plane DB: managed Postgres (Neon/Supabase).**
+- **Compute (control plane + agent runners): Fly.io** — Firecracker microVMs, global regions verified from current Fly docs, scale-to-zero/suspend-resume, runs the Go binary natively.
+- **Sync hub storage: Cloudflare R2** — namespaced by `workspace_id`; client-side encryption gives confidentiality by construction; zero egress (`HUB-02`).
+- **Control-plane DB: managed Postgres (Neon default; Supabase/Render/Railway depending on requirements).**
 - **Runner escape-hatch: E2B** (self-hostable microVM agent sandboxes).
 
 **Rejected as primary (with reasons).**
@@ -498,6 +584,26 @@ for _, p := range store.SkeletonGitRepos(ctx) {     // type=git_repo, materializ
 
 **References.** Fly.io (https://fly.io/docs/), Cloudflare R2 (https://developers.cloudflare.com/r2/), Neon (https://neon.tech/docs), E2B (https://e2b.dev/docs).
 
+### [SCALE-06] Fly runner isolation boundary
+`future` · `effort: M` · architecture direction
+
+Hosted runners must not share the control-plane app's broad secrets or lifecycle. Use a separate Fly app/org/process boundary, one Machine per task, no shared volumes for untrusted code, no parent R2 key, no broad `DATABASE_URL`, TTL cleanup, explicit egress/resource limits, and destroy-after-task semantics for untrusted tenant code. Suspend/resume is acceptable only for trusted warm pools because it preserves memory state.
+
+### [SCALE-07] Provider-neutral Postgres control store with pooled runtime and direct admin DSNs
+`future` · `effort: M` · architecture direction
+
+Neon's pooled connection string is right for many short-lived runtime requests, but PgBouncer transaction mode does not support every session-level feature. Hosted DevStrap should use a provider-neutral `ControlStore`/Postgres boundary with separate roles and DSNs: pooled `DATABASE_URL` for runtime and direct `DATABASE_MIGRATOR_URL` for migrations, `pg_dump`, logical replication, `LISTEN/NOTIFY`, session advisory locks, and admin work.
+
+### [SCALE-08] Region, data residency, and cell placement
+`future` · `effort: M` · architecture direction
+
+Each cell/tenant placement must choose Fly region, Neon region, R2 location/jurisdiction, and tenancy shape (pooled prefix, dedicated bucket, or BYOC). R2 jurisdiction/location choices are provisioning-time decisions, so they belong in the cloud runbook before SaaS onboarding.
+
+### [COST-01] Cost model and budget alerts
+`medium` · `effort: S` · architecture direction
+
+Track and document the bill drivers before hosted rollout: R2 storage and Class A/B operations (polling/listing can dominate), Fly Machine runtime plus rootfs/volumes/IPs/egress, and Neon CU-hours/storage/branches/egress. Add budget alerts per environment/cell and keep the guide tied to current provider pricing instead of fixed "near zero" claims.
+
 ---
 
 ## Section 6 — Deferred (explicit)
@@ -505,7 +611,7 @@ for _, p := range store.SkeletonGitRepos(ctx) {     // type=git_repo, materializ
 These are deliberately **not** built this cycle. They are listed so coverage limits are not mistaken for completeness, and so they are not relitigated mid-stream.
 
 - **FUSE / StrapFS (lazy virtual filesystem).** The materialization design is **eager clone-everything** (Section 1); there is no placeholder/lazy-VFS layer. StrapFS (macOS File Provider / macFUSE/FSKit; Linux FUSE; Windows WinFsp) remains the explicitly-later Phase-4 layer from `spec/00`. Eager clone delivers the Dropbox-like experience without the kernel-extension/File-Provider/FUSE complexity that the architecture decision (`spec/01`) rejected as the MVP.
-- **Native launchd / systemd installers.** Periodic convergence this cycle is the **portable** `devstrap run-loop` (`XP-02`), driven by whatever scheduler the user already has. The native LaunchAgent (launchd) and systemd user-service installers, the local socket API, and the FSEvents-specific Mac watcher stay deferred (Phase-1 daemon work), consistent with `CLAUDE.md` "Not implemented yet".
+- **Native launchd / systemd installers.** Periodic convergence this cycle is the **portable** `devstrap run-loop` (`XP-02`), driven by whatever scheduler the user already has. The native LaunchAgent (launchd) and systemd user-service installers, the local socket API, and the FSEvents-specific Mac watcher stay deferred (Phase-1 daemon work), consistent with `AGENTS.md` and `spec/00_START_HERE.md` "Not implemented yet".
 - **Production HTTP/SSE hub server.** This cycle ships the pluggable `Hub` interface (`HUB-01`) and the **Cloudflare R2** client backend (`HUB-02`) — a managed object store, not a server to operate. The bespoke `cmd/devstraphub` HTTP/SSE relay (POST/GET `/events`, SSE `/stream` with `Last-Event-ID`, `410 → snapshot`, mTLS device certs) from the second pass's Section 6 remains deferred; R2 + client-side crypto covers the single-user fleet without standing up and securing a service. Revisit the bespoke server only if a transport need (live push, multi-tenant routing) outgrows R2.
 
 > Coverage note: this audit defines the cloud-sync workstreams only. The second-pass audit's other open items — agent OS-sandboxing (`AGEN-03`), the signed audit-log subsystem (`spec/15`), the daemon socket API hardening (`CLI-05`), and the full `--json`/exit-code contract (`CLI-01..04`) — remain valid and are not superseded here.

@@ -151,7 +151,7 @@ Generated header:
 # Generated at: 2026-06-23T12:00:00Z
 ```
 
-Status (`SECR-01`, `SECR-02`, `SECR-05`): the current writer (1) re-emits captured values in double quotes **without escaping `$` or backtick**, enabling downstream command substitution and silent truncation — single-quote values or escape `$`/`` ` ``/`\`; (2) does not yet emit the header above; and (3) updates only `.gitignore`, not `.devstrapignore`. Fix all three so hydration is genuinely safe-by-default. Also write the plaintext file via a `0600` temp + atomic rename so it is never briefly world-readable before the ignore entry lands.
+Status (`SECR-01`, `SECR-02`, `SECR-05`): env hydrate now quotes safely, emits the generated-file header, writes atomically with mode `0600`, and ensures the hydrated target is ignored before secret content is written. Remaining follow-up: route ignore updates through the planned `.devstrapignore` compiler once `DRAFT-03` lands so `.gitignore`, scanner, watcher, agent deny, and bundle exclusions share one policy source.
 
 ## Env schema
 

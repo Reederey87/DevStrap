@@ -17,7 +17,7 @@ The user-visible folder is real:
   experiments/
 ```
 
-DevStrap maintains the structure, metadata, device state, Git freshness, secrets mapping, and agent worktrees. Repos may be fully hydrated or represented as skeleton directories until opened.
+DevStrap maintains the structure, metadata, device state, Git freshness, secrets mapping, and agent worktrees. The target sync loop eagerly materializes the namespace on `devstrap sync`; skeleton directories are transient recovery/fallback state, not the primary UX.
 
 ## Final architecture
 
@@ -80,7 +80,7 @@ See `07_NAMESPACE_AND_SYNC_MODEL.md` and `08_GIT_MATERIALIZATION_AND_WORKTREES.m
 
 The hub sees **only ciphertext plus a signed map**; it cannot read code, secrets, or drafts. Repo content is absent from the hub entirely (it rides git, above).
 
-The chosen cloud backend is **Cloudflare R2 from the start** (S3 API, zero egress, namespaced by `workspace_id`; zero-knowledge by construction via client-side age encryption). There is **no NAS-first phase**. The `Hub` interface stays pluggable, and the existing file-backed backend (`devstrap sync --hub-file`) is retained **only for tests**.
+The chosen cloud backend is **Cloudflare R2 from the start** (S3 API, zero egress, namespaced by `workspace_id`; client-side age encryption gives confidentiality by construction). Integrity and availability still require signed hash chains, fail-closed event verification, scoped credentials, snapshots/backups, and retention discipline. There is **no NAS-first phase**. The `Hub` interface stays pluggable, and the existing file-backed backend (`devstrap sync --hub-file`) is retained **only for tests**.
 
 The cloud hub sync path and R2 backend selection are **planned/future**, not yet shipped; the only implemented transport remains `devstrap sync --hub-file`. See `13_CLI_DAEMON_API.md` and `14_MVP_ROADMAP_AND_BACKLOG.md`.
 
@@ -188,15 +188,15 @@ Apple File Provider is designed for local/remote file-provider sync and Finder-i
 
 Rejected for product feel, acceptable for Phase 0.
 
-A CLI-only tool is useful but will not feel like Dropbox. The daemon is needed to notice new projects, reconcile state, create skeletons, and sync across machines.
+A CLI-only tool is useful but will not feel like Dropbox forever. It is acceptable for the current portable cycle when paired with `devstrap run-loop` (planned) to run scan -> sync -> materialize without native launchd/systemd installers. A native daemon remains the later product-feel layer for noticing new projects, reconciling state, and integrating with OS watchers.
 
 ### Alternative F — Reuse an existing sync substrate (Syncthing/Mutagen) or a hidden manifest Git repo for namespace + blob transport
 
-Deferred, **gated** — not foreclosed.
+Deferred and superseded for the current cloud-sync cycle.
 
-Instead of hand-rolling `devstraphub` (HLC + content-hash chain + Ed25519 signatures + HTTP/SSE), the namespace event log and encrypted blobs could ride an existing local-first sync engine, or a hidden manifest Git repo (Alternative B as a transport adapter). This is the strongest argument *against* building the bespoke sync stack, and it must be re-evaluated at the M7 entry gate in `14_MVP_ROADMAP_AND_BACKLOG.md` (which already concedes "a hidden manifest git repo may substitute for a bespoke service"). Adopting F would retire much of the bespoke `internal/sync` surface.
+Instead of hand-rolling the logical Hub (HLC + content-hash chain + Ed25519 signatures + R2/S3 or later HTTP/SSE transport), the namespace event log and encrypted blobs could ride an existing local-first sync engine, or a hidden manifest Git repo (Alternative B as a transport adapter). This remains a useful historical comparison, but it is **not** the M7 target after the 2026-06-28 rebaseline: M7 builds the Hub interface and direct R2/S3 backend first, with file-backed tests and HTTP/SSE deferred.
 
-Rejected only as the *default*, because a thin zero-knowledge hub gives end-to-end encryption (age, per-device recipients) and signed-event integrity guarantees that a generic file-sync engine does not, and because the bespoke hub is forge-agnostic by construction. The decision is contingent on a real two-machine drift signal, not assumed.
+Rejected as the current implementation path because the direct R2/S3 Hub keeps end-to-end encryption (age, per-device recipients), signed-event integrity, provider-independent object-store semantics, and forge-agnostic repo transport without returning Git merge conflicts to the namespace map. Reopen only if R2/S3 conformance fails or a later product decision intentionally trades those properties for a different sync substrate.
 
 ### Alternative G — devcontainer/DevPod-style committed config as the cross-device source of truth
 
@@ -211,9 +211,11 @@ Build in this order:
 ```text
 1. CLI proof: scan, adopt, hydrate, open, worktree, env.
 2. Thin agent runner: branch/worktree per task, scoped env, logs, diff summary, PR gate.
-3. Local daemon: watcher, reconciler, skeletons, LaunchAgent.
-4. Multi-device hub: event sync, device status, encrypted blobs.
-5. StrapFS: optional virtual filesystem layer.
+3. Shared materialization engine + eager sync: cursor pull, blobless clone/fetch, env/draft hydrate, bounded resumable workers.
+4. Logical Hub interface + R2/S3 backend: immutable event objects, encrypted blob store, scoped credentials, fail-closed enrollment, snapshots.
+5. Portable run-loop: foreground scan -> sync -> materialize loop for macOS/Linux before native services.
+6. Local daemon: watcher, reconciler, LaunchAgent/systemd installers, socket API.
+7. StrapFS: optional virtual filesystem layer.
 ```
 
 ## Non-negotiable architecture rules

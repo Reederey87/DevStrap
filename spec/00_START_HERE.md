@@ -120,7 +120,7 @@ Why Go: one portable binary, good process management, solid cross-platform files
 
 ## Current repository state
 
-Last validated: `2026-06-27`.
+Last validated: `2026-06-28`.
 
 Implemented in this repository:
 
@@ -140,7 +140,7 @@ Implemented in this repository:
 - Initial `internal/platform` adapter seams for watcher, service manager, keychain, and editor launch, with build-tagged platform detection, a polling watcher fallback for unsupported platforms, fsnotify-backed watcher adapters for Darwin/Linux with debounce/coalescing, explicit unsupported service/keychain placeholders, and `open` routed through the editor adapter.
 - Hardened `.env` parser plus `devstrap env capture/hydrate/bind` and `devstrap run` flows: capture refuses interpolation unless `--literal`, encrypts parsed values to the local age recipient, stores only `age_blob:<sha256>` refs in SQLite, writes `0600` ciphertext blobs, and gitignores captured env files; hydrate decrypts local encrypted blobs or resolves 1Password refs through `op inject`, writes the requested env file atomically with mode `0600`, refuses overwrites unless `--force`, and gitignores the hydrated target; bind stores 1Password `op://` refs without resolving plaintext; run injects encrypted profiles into subprocess env or delegates provider refs to `op run`.
 - Fresh upstream worktree creation that holds the repo operation lock, fetches `origin/<default_branch>`, resolves base SHA from the remote ref, honors stored LFS policy with pull-or-warn behavior, records worktree metadata, exposes `worktree status` stale-base detection, and gates `worktree finalize` on the recorded base unless `--allow-stale-base` is explicit.
-- Thin generic agent runner that creates a fresh worktree, runs explicit argv commands with a sanitized no-secret default environment and wrapper-level command/file path policy, captures a `0600` log, records `agent_runs`, summarizes Git status/diff, and gates `agent pr` on the recorded base before pushing/creating a GitHub PR.
+- Thin generic agent runner that creates a fresh worktree, runs explicit argv commands with a sanitized no-secret default environment and wrapper-level command/file path policy, captures a `0600` log, records `agent_runs`, summarizes Git status/diff, and gates `agent pr` on the recorded base before pushing and creating a forge-aware PR/MR when the relevant CLI is available (`gh`/`glab`/`tea`) or printing a compare URL for unsupported forges.
 - Device trust-state CLI for listing, renaming, approving, revoking, and marking non-local devices lost, with refusal to revoke the current local device.
 - In-process/file-backed sync spike with mutex-protected HLC send/receive, persisted local HLC/sequence stamping, local event signatures, signed-event verification when the source signing key is known, logical-counter overflow handling, clock-skew rejection, append-only event helpers, HLC-gated project delete tombstones, deterministic replay ordering, duplicate event idempotency, and order-independent same-path/different-remote conflict reconciliation.
 - User-facing `devstrap sync --hub-file <path>` for the file-backed test hub; `add` and `scan --adopt` stamp local project events, sync pushes local events, pulls hub events, applies namespace events idempotently, and reports that hydration/fetch reconciliation remains future work.
@@ -155,14 +155,14 @@ Implemented in this repository:
 
 Not implemented yet:
 
-- synced encrypted env bundle exchange, production remote device registration, and out-of-band fingerprint confirmation;
+- synced encrypted env/draft bundle exchange, production remote device registration, and out-of-band fingerprint confirmation;
 - daemon, local socket API, FSEvents-specific Mac watcher, LaunchAgent/systemd installers;
 - production sync hub, remote device registration/fingerprint UX, encrypted blob exchange, and real cross-root skeleton reconciliation;
 - OS-enforced agent sandboxing, project-env allowlists, and non-generic engine adapters;
 - cross-machine working-state sync — git-state validation plane (`repo.gitstate.observed`), WIP refs (`refs/devstrap/wip/*`), and encrypted working-tree bundles (audit Section 5);
-- non-VCS / remote-less / multi-remote project handling — `local_git`/`plain_folder` content sync; a no-remote repo is currently mis-adopted as a clonable `git_repo` (audit Section 2, `NOVCS-01`);
-- forge-agnostic PR/MR creation — `agent pr` is currently `gh`-only and fails post-push on non-GitHub remotes (audit Section 3, `FORGE-01`);
-- zero-knowledge sync hub — HTTP/SSE wire protocol, mTLS device certs, full-state snapshot exchange (audit Section 6).
+- non-VCS / remote-less / multi-remote content sync — scanner classification for `local_git` and remote preflight are shipped, but `plain_folder` emission, `promote`, draft bundle materialization, and local-only content hydrate remain unbuilt (audit Section 2, `NOVCS-02..05`, `DRAFT-*`);
+- forge hardening beyond the shipped PR/MR routing — `agent pr` now detects GitHub/GitLab/Gitea/Bitbucket/Azure and routes through `gh`/`glab`/`tea` or graceful compare-URL fallback, but `doctor` still needs forge-specific CLI probes, explicit self-hosted overrides, and broader hermetic test coverage (`FORGE-04/05`);
+- zero-knowledge sync hub — the logical Hub interface, R2/S3 backend, temporary scoped credentials, full-state snapshot exchange, and fail-closed enrollment path; the bespoke HTTP/SSE relay and mTLS device certs are deferred behind the R2-direct backend.
 
 Next workstreams from the 2026-06-28 cloud-sync pass (`AUDIT_RECOMMENDATIONS_2026-06-28.md`), not yet built:
 

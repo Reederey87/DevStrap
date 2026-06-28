@@ -147,9 +147,11 @@ Responsibilities:
 - never store plaintext secrets, code, or drafts — **the hub sees only ciphertext plus a signed map**;
 - support offline-first sync.
 
-Because the hub only ever holds ciphertext blobs plus a signed event map, it cannot read code, secrets, or drafts; tenant isolation for any future multi-user deployment therefore falls out of the encryption model rather than from access control alone.
+Because the hub only ever holds ciphertext blobs plus a signed event map, it cannot read code, secrets, or drafts. That gives tenant **confidentiality** by construction for any future multi-user deployment. Integrity and availability still require access controls, signed hash chains, fail-closed event verification, snapshots/backups, and scoped credentials.
 
-**Hub backend is pluggable behind one interface** (`HUB-*`). The chosen **production backend is Cloudflare R2 from the start** (S3-compatible API, zero egress, namespaced by `workspace_id`; zero-knowledge via client-side age encryption — there is no NAS-first phase). A **file-backed local backend remains only for tests** (today's `devstrap sync --hub-file` spike). An **HTTP/SSE hub service** (the wire protocol below) is the later networked backend. See the `Hub` boundary under *Platform adapter boundaries*.
+**Hub backend is pluggable behind one interface** (`HUB-*`). The chosen **production backend is Cloudflare R2 from the start** (S3-compatible API, zero egress, namespaced by `workspace_id`; confidentiality via client-side age encryption — there is no NAS-first phase). A **file-backed local backend remains only for tests** (today's `devstrap sync --hub-file` spike). An **HTTP/SSE hub service** (the wire protocol below) is the later networked backend. See the `Hub` boundary under *Platform adapter boundaries*.
+
+R2 event-log correctness is part of the DevStrap design, not delegated to object-storage locking. Events are written as immutable, unique, lexicographically sortable objects under a workspace prefix and created with conditional put semantics (`If-None-Match: *` where supported). Pulls page by prefix and cursor; they must never append by overwriting one shared manifest object. The signed event hash chain and local replay rules detect reordering, omission, substitution, and duplicate replay.
 
 Wire protocol — *planned* networked backend (see `07_NAMESPACE_AND_SYNC_MODEL.md`, `AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 6, and `AUDIT_RECOMMENDATIONS_2026-06-28.md`): a thin, **zero-knowledge**, store-and-forward relay over HTTPS — `POST /v1/{ws}/events`, `GET /v1/{ws}/events?after=<hlc>`, SSE `GET /v1/{ws}/stream` (Last-Event-ID=HLC, a live hint only), content-addressed `PUT/GET /v1/{ws}/blobs/{sha256}`, `410 Gone` → full-state snapshot. The hub is **semi-trusted**: it sees only signed, end-to-end-encrypted payloads plus routing metadata, never plaintext code/secrets, and is never trusted to order or authenticate (correctness lives off the wire via HLC + content/prev-hash chain + Ed25519). Device auth via mTLS client certs derived from the device identity, rejecting revoked/lost devices. As a single Go binary it ships in the same module, reusing `internal/state`, `internal/sync`, and `internal/devicekeys`.
 
@@ -159,9 +161,9 @@ This subsection records the target deployment shape (`SCALE-*`, `AUDIT_RECOMMEND
 
 Chosen stack:
 
-- **Compute — Fly.io** for the control plane and agent runners. Firecracker microVM isolation suits running untrusted agent code, 35+ regions give global reach, scale-to-zero / suspend-resume keeps idle cost near zero, and it runs the Go binary natively. **E2B** (self-hostable microVM agent sandboxes) is the runner escape-hatch.
-- **Sync hub — Cloudflare R2** (as above), namespaced by `workspace_id`; because the hub is zero-knowledge, tenant isolation holds by construction.
-- **Control-plane DB — managed Postgres** (Neon / Supabase) for non-secret control-plane metadata.
+- **Compute — Fly.io** for the control plane and agent runners. Firecracker microVMs suit Go-native control services and per-task runners; use current Fly regions (`fly platform regions`) rather than hard-coding a region count. Runner Machines must be isolated from the control-plane app/org/process boundary, receive only per-task scoped credentials, and be destroyed after untrusted tasks rather than suspended with live memory.
+- **Sync hub — Cloudflare R2** (as above), namespaced by `workspace_id`; client-side encryption provides confidentiality, while prefix-scoped temporary credentials, hash-chain verification, and snapshots/backups preserve integrity and availability.
+- **Control-plane DB — managed Postgres** (Neon default; Supabase/Render/Railway as alternatives) for non-secret control-plane metadata. Runtime code should use a provider-neutral `ControlStore` boundary with separate pooled runtime and direct migration/admin DSNs when the hosted control plane exists.
 
 Rejected as the *primary* platform, with reasons:
 
@@ -329,18 +331,29 @@ type EditorAdapter interface {
 }
 
 // Hub is the pluggable two-plane backend boundary (HUB-*).
-// Implementations: file-backed (tests only), Cloudflare R2 (production),
-// HTTP/SSE hub service (later networked backend). All are zero-knowledge:
-// they handle signed events + age-encrypted blobs only, never plaintext.
+// Intended package: internal/hub. Implementations: file-backed (tests only),
+// Cloudflare R2/S3 (production), HTTP/SSE hub service (later networked backend).
+// All implementations handle signed events + age-encrypted blobs only.
 type Hub interface {
     Name() string
+
     // Plane A: append-only, signed, HLC-ordered namespace event log.
-    PushEvents(ctx context.Context, ws string, events []SignedEvent) error
-    PullEvents(ctx context.Context, ws string, afterHLC string) ([]SignedEvent, error)
+    PushEvents(ctx context.Context, workspaceID string, events []SignedEvent) error
+    PullEvents(ctx context.Context, workspaceID string, after Cursor, limit int) (PullResult, error)
+
     // Plane B: content-addressed age-encrypted blob store (age_blob:<sha256>).
-    PutBlob(ctx context.Context, ws, sha256 string, ciphertext []byte) error
-    GetBlob(ctx context.Context, ws, sha256 string) ([]byte, error)
+    PutBlob(ctx context.Context, workspaceID, sha256 string, size int64, ciphertext io.Reader) error
+    GetBlob(ctx context.Context, workspaceID, sha256 string) (io.ReadCloser, BlobMeta, error)
+    HasBlob(ctx context.Context, workspaceID, sha256 string) (bool, error)
 }
+```
+
+The interface contract is idempotent for duplicate event/blob writes and fails with typed errors such as `ErrSnapshotRequired`, `ErrBlobNotFound`, and `ErrUnauthorizedDevice`. Object keys are planned as:
+
+```text
+workspaces/<workspace_id>/events/<hlc-padded>/<device_id>/<seq>/<event_id>.json
+workspaces/<workspace_id>/blobs/<sha256>
+workspaces/<workspace_id>/snapshots/<hlc-padded>.json.age
 ```
 
 Hub backends:
