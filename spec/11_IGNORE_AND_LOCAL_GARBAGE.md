@@ -26,8 +26,10 @@ Dangerous or noisy folders:
 DevStrap needs one canonical ignore policy that can compile to multiple systems.
 
 ```text
-.devstrapignore → .gitignore, .dockerignore, draft-sync ignore, agent denylist
+.devstrapignore → .gitignore, .dockerignore, draft-sync ignore, watcher exclusion set, agent denylist
 ```
+
+As of the 2026-06-28 cloud-sync design, this single `.devstrapignore` compiler is **designed and required** (no longer an optional convenience). It is the prerequisite for safe non-git content sync: the draft-bundling layer that ships env vars and non-git/draft folders as age-encrypted, content-addressed `age_blob:<sha256>` blobs must derive its exclusion set from exactly the same compiler that drives scan, the watcher, and the agent deny-list. Any divergence between those consumers can leak a secret or a `node_modules` tree into a draft bundle, so they MUST all read one compiled output rather than maintain separate hardcoded lists (workstream `DRAFT-*` in `AUDIT_RECOMMENDATIONS_2026-06-28.md`).
 
 ## Default `.devstrapignore`
 
@@ -76,9 +78,13 @@ DevStrap needs one canonical ignore policy that can compile to multiple systems.
 **/models/*.onnx
 **/checkpoints/
 
-# OS/editor
+# OS/editor (OS junk is compiled into every consumer, including draft sync)
 **/.DS_Store
+**/.AppleDouble
+**/.LSOverride
+**/Icon?
 **/Thumbs.db
+**/desktop.ini
 **/.idea/workspace.xml
 **/.vscode/.ropeproject/
 
@@ -113,11 +119,15 @@ Generate `.dockerignore` block to avoid huge Docker build contexts.
 
 ### Draft sync
 
-Use `.devstrapignore` directly to exclude files from encrypted draft bundles.
+Use the compiled `.devstrapignore` output directly to exclude files from encrypted draft bundles. This consumer is load-bearing for confidentiality: anything not pruned here is what gets age-encrypted into an `age_blob:<sha256>` blob and pushed to the hub, so the draft-sync exclusion set MUST be the exact compiler output (not a re-derived list) and MUST cover secrets, `node_modules`, build artifacts, and OS junk.
+
+### Watcher exclusion set
+
+Compile the same source into the FSEvents/inotify watcher's exclusion set so the watcher never raises change events for ignored or generated trees. Today the watcher carries its own hardcoded list (`PLAT-01`/`PLAT-04`); it must consume the compiler instead.
 
 ### Agent denylist
 
-Translate secret patterns to agent file-deny policy.
+Translate secret patterns to agent file-deny policy from the same compiled source (`AGEN-05`).
 
 ## OS-specific local garbage
 
@@ -241,3 +251,13 @@ Loose:
 ## Audit follow-ups (2026-06-27)
 
 **The single `.devstrapignore` compiler described here does not exist yet** (audit coverage gap). Prune/secret lists are hardcoded and divergent across three places — `internal/scan` (`shouldPruneDir`/`isSecretName`), the platform watcher, and the agent deny list — which is the root cause of `PLAT-01`, `PLAT-04`, and `AGEN-05`; OS junk (`.DS_Store`, `.AppleDouble`, `Thumbs.db`) is filtered nowhere. Build one canonical compiler that emits the `.gitignore` managed block, the draft-sync ignore set, the watcher exclusion set, and the agent denylist from a single source.
+
+## Audit follow-ups (2026-06-28)
+
+The 2026-06-28 cloud-sync design **promotes the single `.devstrapignore` compiler from absent to designed-and-required** and makes it a hard dependency of the new non-git content-sync workstream. The "Dropbox experience for code" splits sync strictly by content type — repo content rides git's own blobless clone/fetch from its existing remote and never touches the hub; env vars and non-git/draft folders ship as age-encrypted, content-addressed `age_blob:<sha256>` blobs; `node_modules` and build artifacts are never synced and are rebuilt on hydrate. Because the draft-bundling layer is the only path by which uncontrolled files reach the zero-knowledge hub, its exclusion set MUST be the compiled `.devstrapignore` output and nothing else.
+
+Required follow-ups (workstream `DRAFT-*` in `AUDIT_RECOMMENDATIONS_2026-06-28.md`):
+
+- build the one canonical compiler and route every consumer through it — `internal/scan`, the draft-bundling/encrypted-blob layer, the platform watcher, and the agent deny-list — retiring the divergent hardcoded lists behind `PLAT-01`, `PLAT-04`, and `AGEN-05`;
+- guarantee OS junk (`.DS_Store`, `.AppleDouble`, `Thumbs.db`, `Icon?`, `desktop.ini`) is compiled into every consumer, especially draft sync, so it never enters an encrypted blob or the namespace map;
+- treat this compiler as a blocking prerequisite for shipping non-git content sync: no draft bundle is created until its exclusion set is sourced from the compiler.

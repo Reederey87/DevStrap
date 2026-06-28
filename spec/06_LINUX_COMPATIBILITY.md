@@ -6,7 +6,9 @@ tracks_code: [internal/platform/**, .github/**]
 
 ## Goal
 
-Keep the Mac-first implementation portable enough that a GMK Ubuntu box can become a first-class DevStrap node early.
+Keep the portable Go core identical on macOS and Linux so an incoming GMKtec Ubuntu box becomes a first-class DevStrap node now, not "early" — Ubuntu parity is a present requirement, not a later port.
+
+The 2026-06-28 cloud-sync decisions (recorded in `AUDIT_RECOMMENDATIONS_2026-06-28.md`, extending the 2026-06-27 second-pass audit) make this explicit: **cross-platform core first, OS-specific magic deferred** (workstream `XP-*`). The owner's fleet is mixed by design — two Mac Minis, the GMKtec Ubuntu box, a graphics laptop, and a NAS — so the same `~/Code` tree and the same `devstrap sync` eager-clone behavior must appear identically on macOS and Ubuntu running the one portable binary. No native daemon, FSEvents/inotify-specific watcher, or StrapFS is built this cycle on either platform; those remain deferred. The systemd unit below is a documented target, not shipped code.
 
 ## Linux target
 
@@ -15,11 +17,13 @@ Initial target:
 ```text
 Ubuntu 24.04+ or current LTS
 x86_64 and arm64 where practical
-systemd user service
-inotify watcher
-~/Code managed root
-~/.devstrap state
+systemd user service          (deferred OS layer)
+inotify watcher               (deferred OS layer)
+~/Code managed root           (portable core, runs now)
+~/.devstrap state             (portable core, runs now)
 ```
+
+The portable core — `init`, `scan/adopt`, `add`, `hydrate`, `open`, `worktree`, `env`, and the file-backed `devstrap sync --hub-file` spike — must run identically on Ubuntu and macOS this cycle from the single Go binary. The `devstrap sync` eager blobless clone-everything flow (`EAGER-*`) and the cloud hub backend (`HUB-*`) are the cross-platform sync targets that land next, also platform-neutral. The systemd user service and native inotify watcher are deferred OS-specific layers (see "systemd user service" and "Linux watcher" below); the product is usable on Ubuntu through the foreground CLI before they land.
 
 ## Platform-neutral core
 
@@ -79,7 +83,7 @@ Paths: ~/.devstrap, ~/Code, XDG optional
 
 ## systemd user service
 
-Example:
+Deferred this cycle (`XP-*` defers the native daemon on both platforms); documented here as the target so the cross-platform `ServiceManager` seam stays accurate. On Ubuntu today the foreground CLI is the supported entry point. Example unit:
 
 ```ini
 [Unit]
@@ -234,8 +238,17 @@ Recommended:
 - watcher detects new folders and Git repos.
 - same namespace event stream syncs with Mac.
 
-Current repository implementation covers the portable CLI pieces for init, scan/adopt, add, hydrate, env capture/hydrate/bind, provider-backed env runtime injection through `op run`, provider file hydration through `op inject`, status, fresh worktree creation, platform adapter interfaces, build-tagged platform detection, and a polling watcher fallback. The systemd service, native inotify watcher, and cross-device sync command remain future Linux work.
+Current repository implementation covers the portable CLI pieces for init, scan/adopt, add, hydrate, env capture/hydrate/bind, provider-backed env runtime injection through `op run`, provider file hydration through `op inject`, status, fresh worktree creation, the file-backed `devstrap sync --hub-file` spike, platform adapter interfaces, build-tagged platform detection, and a polling watcher fallback. These already run from the one portable binary on both platforms. The systemd service, native inotify watcher, the cloud hub backend (`HUB-*`), and the `devstrap sync` eager blobless clone-everything materialization (`EAGER-*`) remain future work shared across macOS and Ubuntu — not Linux-specific.
 
 ## Audit follow-ups (2026-06-27)
 
 The platform findings in `05_MAC_FIRST_IMPLEMENTATION.md` (`PLAT-01..05`) apply equally to the Linux adapters: unify watcher exclusions with the `spec/11` ignore compiler, add inotify `ENOSPC`/`max_user_watches` handling + polling fallback + periodic reconciliation, filter OS junk, and make the `ServiceSpec` seam rich enough to render the systemd user unit. Keep all Linux specifics behind `internal/platform` adapters.
+
+## Audit follow-ups (2026-06-28)
+
+The 2026-06-28 cloud-sync architecture (`AUDIT_RECOMMENDATIONS_2026-06-28.md`, workstream `XP-*`) sets the ordering this file follows: **cross-platform core first, OS-specific magic deferred.**
+
+- Ubuntu is a first-class target now because the owner's fleet already includes an incoming GMKtec Ubuntu box alongside two Mac Minis, a graphics laptop, and a NAS. The same `~/Code` tree must appear on all of them via the one Go binary.
+- The cloud sync hub (`devstraphub`) is platform-neutral by construction: repo content rides git's own blobless clone/fetch transport from each repo's existing remote and never touches the hub, env/draft content moves as age-encrypted content-addressed `age_blob:<sha256>` blobs, and the namespace map is a signed HLC-ordered event log. None of these planes are OS-specific, so Ubuntu and macOS sync identically (`HUB-*`, `DRAFT-*`). Backend is Cloudflare R2 from the start, pluggable behind one Hub interface, with a file-backed local backend kept only for tests — see `07_NAMESPACE_AND_SYNC_MODEL.md` and `13_CLI_DAEMON_API.md`.
+- `devstrap sync` materializes eagerly (blobless/partial clone-everything up front; `node_modules`/build artifacts are never synced and are rebuilt on hydrate). There is no FUSE/placeholder/lazy-VFS layer in this design on either platform; StrapFS (the "Linux future virtual filesystem" section above) stays explicitly deferred (`EAGER-*`).
+- The native systemd daemon and native inotify watcher remain deferred OS layers; the portable foreground CLI is the supported Ubuntu entry point this cycle.

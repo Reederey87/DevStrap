@@ -390,6 +390,30 @@ MVP options:
 3. encrypted object-store backend;
 4. hidden Git backend as a temporary adapter, not the user-facing model.
 
+## 20b. Cloud-backend trust and reachability
+
+Problem: the multi-device hub must be reachable from every device in the fleet (the Mac Minis, an incoming GMKtec Ubuntu box, a graphics laptop, a NAS) yet must never be trusted with code, secrets, or drafts — and a home NAS is neither reliably reachable off-LAN nor a credible zero-knowledge boundary.
+
+Recommended solution — a two-plane, zero-knowledge hub (working name `devstraphub`):
+
+- **Plane 1 — the namespace map:** a signed, HLC-ordered append-only event log. This is the only "map" the hub holds, and it never contains repo content.
+- **Plane 2 — content-addressed blob store:** age-encrypted, content-addressed `age_blob:<sha256>` blobs for env profiles and non-git/draft content only. Repo content never transits the hub — it rides git's own transport via blobless (`--filter=blob:none`) clone/fetch from each repo's existing remote.
+- the hub therefore sees **only ciphertext plus a signed map**; it cannot read code, secrets, or drafts (zero-knowledge by construction).
+
+Backend decision:
+
+- **Cloudflare R2 from the start** (S3 API, zero egress, namespaced by `workspace_id`; zero-knowledge via client-side age encryption). **No NAS-first phase** — a NAS is a backup target (see §19), not the sync hub.
+- the hub stays pluggable behind a single `Hub` interface; a file-backed local backend is retained **only for tests** (the shipped `devstrap sync --hub-file` spike).
+- this refines §20's MVP options to one chosen backend — the encrypted object-store / R2 option — superseding the home-hub-first ordering.
+
+Device revocation (age has no native revocation, so this is not a no-op):
+
+- per-device enrollment/approval gates blob decryption (see §15);
+- on revoke, **re-encrypt affected blobs to the reduced recipient set and flag the affected secrets for rotation** — removing a recipient only protects future blobs, never past ciphertext a held key could already read;
+- event verification must **fail closed** once enrollment exists (today it fails open — audit `SECU-03`).
+
+See `AUDIT_RECOMMENDATIONS_2026-06-28.md` (`HUB-*`), `07_NAMESPACE_AND_SYNC_MODEL.md`, and `15_SECURITY_THREAT_MODEL.md`.
+
 ## 21. Security vs convenience
 
 Problem: Dropbox-like convenience tempts unsafe secret syncing.

@@ -254,16 +254,29 @@ sync_cursors(workspace_id, peer_id, last_hlc_applied, last_seq_applied)
 Sync loop:
 
 ```text
-1. push local queued events to Hub
-2. pull remote events after the peer cursor
-3. verify/decrypt where needed
+1. push local queued events to the hub (only events past the peer's last delivered cursor)
+2. cursor-based incremental pull: GET events after sync_cursors.last_hlc_applied — never a full replay from HLC 0
+3. verify signatures / decrypt blob refs where needed
 4. apply events to local SQLite in (hlc, device_id) order
-5. reconcile local filesystem
-6. write event_delivery and sync_cursors transactionally
+5. materialize the local filesystem to match the applied namespace (eager clone-everything; see below)
+6. write event_delivery and advance sync_cursors (last_hlc_applied, last_seq_applied) transactionally
 7. update device heartbeat
 ```
 
+The pull cursor is `sync_cursors.last_hlc_applied`. Because the HLC int64 is simultaneously the global ordering key and the resume cursor, an incremental pull only ever transfers events the device has not already applied — there is no full-history replay on a steady-state sync. A full replay is reserved for the `410 Gone {snapshot_required:true}` recovery path.
+
 If the hub no longer retains events after a cursor, the device must fall back to a full-state snapshot plus cursor reset. Silent divergence is not allowed.
+
+### Sync materialization — eager clone-everything (`EAGER-*`)
+
+`devstrap sync` is **eager clone-everything**, not a lazy/placeholder/VFS scheme. After the namespace events apply (steps 4-5), the device walks every non-deleted entry and brings the whole `~/Code` tree toward `available` in one pass — materializing **by content type**, honoring the file-sync split (never blanket file-sync, never route repo content through the hub):
+
+- `git_repo` → blobless/partial clone or fetch (`git clone --filter=blob:none`) from the entry's **existing** remote, riding git's own integrity-checked transport. Repo content never traverses the DevStrap hub.
+- `local_git` / `draft_project` → download the newest `draft.snapshot.created` encrypted bundle from the hub blob store and extract it (see Draft sync model). [planned, `DRAFT-*`]
+- env profiles → decrypt `age_blob:<sha256>` env blobs / resolve provider refs and hydrate the bound env files (see `09_SECRETS_AND_ENVIRONMENT.md`).
+- `node_modules` / build artifacts → **never synced**; rebuilt on hydrate from the tooling profile (`npm`/`pnpm`/`uv install`).
+
+After a completed sync the entire tree is present on disk; `materialization_state=skeleton` is only the transient pre-clone state before the first sync finishes, and the `materialization_policy` field is retained for a future opt-in lazy mode (`StrapFS`, `spec/00_START_HERE.md` Phase 4) — it is not the shipped/target default. There is no FUSE/File-Provider materialization in this design. Status today: the apply path lands namespace events, but the eager full-tree clone/fetch/bundle/env pass is not yet wired (`ARCH2-02`, `EAGER-*`); see `AUDIT_RECOMMENDATIONS_2026-06-28.md`.
 
 ### Wire protocol (Phase 2 hub)
 
@@ -314,6 +327,8 @@ Detectors:
 On dangerous conflicts, write a `conflicts` row and never auto-overwrite local files. For same-path/different-remote namespace events, the active entry is selected by the canonical event order `(hlc, device_id, event_id)` and the conflict identity is keyed by `path + sorted(remote_key_a, remote_key_b)`. `created_at` is display-only and must not affect the winner.
 
 ## Hub storage
+
+The hub is **two planes**, both zero-knowledge: (a) the append-only, signed, HLC-ordered event log — the namespace map; and (b) a content-addressed encrypted blob store (`age_blob:<sha256>`) for env and non-git/draft content. The hub sees only ciphertext plus a signed map — it cannot read code, secrets, or drafts. Repo content rides git's own transport and never enters the hub.
 
 Hub stores:
 
@@ -402,6 +417,8 @@ Phase 2: home-hub HTTP event log.
 Phase 3: hosted hub or object-store adapter.
 ```
 
+**2026-06-28 update (`HUB-*`):** the chosen production backend is now **Cloudflare R2 from the start** (S3 API, zero egress, namespaced by `workspace_id`), realized as Option C (object-store) behind a single pluggable `Hub` interface. Zero-knowledge is preserved by client-side age encryption, so R2 only ever holds ciphertext blobs plus the signed, HLC-ordered event log (the two-plane model in Hub storage). There is **no NAS-first / home-hub-first phase**; the Option A/B/D variants above are retained as historical alternatives, and the file-backed adapter (`devstrap sync --hub-file`) is kept **only for tests**. Future compute for the control plane and agent runners is documented (not built) in `03_SYSTEM_ARCHITECTURE.md`; see `AUDIT_RECOMMENDATIONS_2026-06-28.md`.
+
 ## Conflict model
 
 Conflict is a first-class state.
@@ -489,31 +506,52 @@ On each device:
 
 This encrypted-bundle flow is **Layer C** of the working-state plane: the fallback for `draft_project`/`local_git`/non-git folders and untracked-only content where there is no remote ref to push to. For tracked content in a `git_repo`, the **WIP-ref path (Layer B) is strictly preferred** — git's own integrity-checked transport is safer and cheaper than re-bundling. This flow is specified but **not yet implemented** (no bundle/snapshot code exists today, `NOVCS-02`).
 
-Draft project snapshot:
+Draft project snapshot (`draft.snapshot.created`, workstream `DRAFT-*`):
 
 ```text
-scan draft folder
-apply ignore rules
-create tar stream
-encrypt for approved devices
-upload encrypted blob
-emit draft.snapshot.created event
+1. scan the draft folder
+2. apply the .devstrapignore compiler (universal ignore + node_modules/build artifacts excluded; see 11_IGNORE_AND_LOCAL_GARBAGE.md)
+3. create a deterministic tar stream
+4. age-encrypt for the current approved device recipient set (internal/envbundle)
+5. content-address the ciphertext as age_blob:<sha256>
+6. PUT the blob to the hub blob store (idempotent; identical content dedups)
+7. emit draft.snapshot.created carrying {path_key, age_blob:<sha256>, size, file_count}
 ```
 
-Restore:
+Restore (pulled during sync materialization for `local_git` / `draft_project`):
 
 ```text
-download encrypted blob
-decrypt locally
-extract to skeleton path
-preserve metadata where possible
+1. select the newest draft.snapshot.created for the path in HLC order
+2. GET the age_blob:<sha256> from the hub blob store
+3. decrypt locally with the device age identity
+4. extract to the skeleton path
+5. preserve metadata where possible
 ```
+
+The bundle is content-addressed, so an unchanged draft re-snapshots to the same `age_blob:<sha256>` and uploads nothing; the hub blob store sees only ciphertext keyed by hash, never plaintext or filenames. Because every snapshot is encrypted to the approved recipient *set*, a device revocation forces affected bundles to be re-encrypted to the reduced set (see Device trust and revocation).
 
 Draft conflict rule:
 
 ```text
 If two devices modify the same draft offline, create two snapshots and require manual merge.
 ```
+
+## Device trust and revocation
+
+Devices are enrolled and approved per-device (`devstrap devices`, `15_SECURITY_THREAT_MODEL.md`). Encrypted env and draft blobs are age-encrypted to the **set** of approved device recipients, so a trust change carries a cryptographic cost — age has no native revocation, and a recipient that still holds the old key can read any ciphertext it already pulled.
+
+`device.revoked` (revoke / lost) therefore drives two actions:
+
+```text
+1. re-encrypt every affected age_blob:<sha256> to the REDUCED recipient set,
+   re-upload under its new content hash (only protects FUTURE pulls).
+2. flag every secret reachable through the revoked device's env profiles for
+   rotation: secret_bindings.needs_rotation, surfaced in `doctor`.
+```
+
+Re-encryption shrinks the recipient set for new pulls; **rotation is what actually invalidates already-exposed secret values**, so both steps are required. Status: the `needs_rotation` flag on revoke/lost is shipped; the blob re-encryption pass is planned (`HUB-*`, `DRAFT-*`).
+
+**Fail-closed verification:** once any device enrollment exists, signed-event verification MUST fail closed — an event whose signing key is unknown or not approved is rejected, not applied. Today `SECU-03` fails *open* (an unknown-key event is applied when the key is simply not yet known); closing this is a Phase-2 prerequisite before the hub relay can be trusted. See `AUDIT_RECOMMENDATIONS_2026-06-28.md`.
 
 ## Namespace snapshot export
 

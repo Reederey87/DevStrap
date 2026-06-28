@@ -99,6 +99,18 @@ Cases:
 - `node_modules` excluded;
 - generated managed block preserves user rules.
 
+#### `.devstrapignore` single-compiler consumers (planned, `DRAFT-*`)
+
+The 2026-06-28 cloud-sync design makes one `.devstrapignore` compiler load-bearing for confidentiality: scan pruning, the `.gitignore` managed block, the watcher exclusion set, the agent denylist, and the draft-bundle exclusion set must all derive from the *same* compiled output (`11_IGNORE_AND_LOCAL_GARBAGE.md`). These tests are required before the non-git content-sync feature ships.
+
+Cases:
+
+- one compile call emits all consumer views (gitignore managed block, draft-sync exclusion set, watcher exclusion set, agent denylist, scan prune set) from a single source; a property test asserts no consumer includes a path another consumer excludes;
+- `node_modules`, build artifacts, and OS junk (`.DS_Store`, `.AppleDouble`, `Thumbs.db`) are excluded from every consumer view, including the draft-bundle set;
+- secret-looking files and `.git` are always in the draft-bundle exclusion set, so they can never be age-encrypted into an `age_blob:<sha256>` blob;
+- user rules in the managed block survive a recompile;
+- the draft-bundle packer reads the compiled output, not a re-derived hardcoded list (regression guard for `PLAT-01`/`PLAT-04`/`AGEN-05`).
+
 ### Env parser
 
 Cases:
@@ -301,6 +313,8 @@ periodic reconciliation catches drift
 
 Use two temporary roots and one test hub.
 
+### Namespace-map sync (current file-backed spike)
+
 ```text
 Device A: add project
 Hub: receives event
@@ -308,6 +322,46 @@ Device B: sync pulls event
 Device B: skeleton appears
 Device B: hydrate repo
 Device A: status shows Device B ready after heartbeat
+```
+
+### Eager-clone two-machine end-to-end (planned, `EAGER-*`/`DRAFT-*`/`HUB-*`)
+
+Proves the "Dropbox experience for code" round trip: one `devstrap sync` on Device B reconstructs the whole `~/Code` tree — repos blobless-cloned from their existing remotes, drafts restored from encrypted blobs, env hydrated — with no skeletons left behind. Required before eager-clone materialization ships.
+
+```text
+1. Device A: scan --adopt a git repo (with an existing remote) and a remote-less draft folder
+2. Device A: capture an env profile for the repo
+3. Device A: devstrap sync (push namespace map + encrypted env/draft blobs to the test hub)
+4. Device B (fresh root): devstrap sync
+5. assert the repo is materialized at the SAME namespace path via blobless clone (git clone --filter=blob:none), not a skeleton
+6. assert the draft folder is restored byte-identical (excluding .devstrapignore-pruned paths)
+7. assert env hydrates to the requested file with mode 0600 and the original value
+8. assert node_modules / build artifacts are absent (rebuilt on hydrate, never synced)
+9. run devstrap sync again on Device B and assert it pulls 0 new events (idempotent)
+10. assert NO .git bytes ever transit the hub: the hub backend saw only the signed namespace map + age_blob:<sha256> ciphertext; repo content rode git's own transport
+```
+
+## Hub backend tests (planned, `HUB-*`)
+
+The cloud hub is pluggable behind one `Hub` interface with two planes — a signed HLC-ordered namespace-map event log and a content-addressed encrypted blob store (`age_blob:<sha256>`). The same conformance suite must pass against every backend: a file-backed local backend retained ONLY for tests, and Cloudflare R2 (S3 API) as the production backend.
+
+### Hub interface conformance (both backends)
+
+Run the identical suite against the file-backed test backend and a Cloudflare R2 / S3 backend (real bucket or an S3-API stub such as MinIO):
+
+```text
+- event-log plane: append is signed + HLC-ordered; cursor=<HLC> pull returns only events after the cursor; a too-old cursor returns 410 -> full-state snapshot
+- blob plane: put/get is content-addressed by sha256; a tampered blob fails its content-address check on get; blobs are namespaced by workspace_id with no cross-workspace read
+- idempotency: re-putting the same age_blob:<sha256> is a no-op; re-appending a duplicate event is deduplicated
+- backend parity: a fixture written via the file-backed backend and read via the R2/S3 backend (and vice versa) yields identical bytes
+```
+
+### Zero-knowledge property
+
+```text
+- a server/operator holding only the backend bytes can decrypt nothing: blobs are age ciphertext and the event log is a signed map with no plaintext code/secrets/draft content
+- no plaintext repo content, secret value, or draft byte appears anywhere in the backend store
+- repo content is never written to either plane (no .git, no working-tree bytes) — it rides git's own transport
 ```
 
 ## Conflict tests
@@ -422,3 +476,14 @@ Testing gaps (`TEST-*`, from `AUDIT_RECOMMENDATIONS_2026-06-27.md`):
 - **`govulncheck` is unpinned (`@latest`) and bundled into the "Go tests" job** (`TEST-05`/`CI-01`); pin it and split it into its own (non-blocking/scheduled) job. **[Implemented 2026-06-28: pinned `@v1.1.4`, split into own `vuln` CI job, `continue-on-error` on PRs, daily scheduled run.]**
 - **The fsnotify watcher has no tests and concurrent code has no goroutine-leak detection** (`TEST-06`).
 - **New coverage:** WIP-ref base-exclusion test, forge detection/routing, non-VCS classification, and a zero-knowledge hub test (server can decrypt nothing).
+
+## Audit follow-ups (2026-06-28)
+
+New test workstreams from `AUDIT_RECOMMENDATIONS_2026-06-28.md` (cloud-sync design; all planned/future until their features ship — they do not satisfy the Phase 0 gate):
+
+- **Eager-clone two-machine e2e** (`EAGER-*`): the round trip in *Multi-device tests* — Device B reconstructs the whole `~/Code` tree from one `sync`, repos blobless-cloned at the same path, drafts byte-identical, env hydrated, a second sync pulls 0 events, and no `.git` bytes transit the hub.
+- **`.devstrapignore` single-compiler tests** (`DRAFT-*`): all consumers derive from one compiled output; the draft-bundle exclusion set is the compiler output and nothing else, so secrets, `.git`, and `node_modules` can never be age-encrypted into a blob.
+- **Hub backend conformance** (`HUB-*`): one suite passes against the file-backed test backend and the Cloudflare R2 / S3 backend behind the same `Hub` interface, plus the zero-knowledge property (server can decrypt nothing).
+- **Device revocation re-encryption** (device-trust): revoke -> affected blobs re-encrypted to the reduced recipient set and secrets flagged for rotation; signed-event verification must **fail closed** once enrollment exists (today `SECU-03` fails open).
+- **Cross-platform parity** (`XP-*`): the eager-clone, draft-sync, and hub-backend suites run identically on macOS and Ubuntu from the one Go binary.
+- **Deferred:** OS-native daemon/StrapFS sync paths and multi-user/multi-tenant hub scaling (`SCALE-*`) are documented-not-built; no tests required this cycle.

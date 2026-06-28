@@ -50,6 +50,40 @@ DB:    SQLite WAL under ~/.devstrap/state.db
 IPC:   Unix domain socket: ~/.devstrap/devstrapd.sock
 ```
 
+## Cloud-sync architecture (2026-06-28 extension)
+
+> Extends the 2026-06-27 second-pass audit (see `00_START_HERE.md` and `AUDIT_RECOMMENDATIONS_2026-06-27.md`); driven by `AUDIT_RECOMMENDATIONS_2026-06-28.md` (workstreams `EAGER-*`, `DRAFT-*`, `HUB-*`, `XP-*`, `SCALE-*`). The product goal is the **Dropbox experience for code**: one identical `~/Code` tree that appears automatically on every device in the owner's fleet (multiple Mac Minis, an incoming Ubuntu box, a graphics laptop, a NAS).
+
+### Sync is split by content type — never blanket file-sync
+
+DevStrap never blanket-syncs files, and **never file-syncs `.git`** (a torn `.git` corrupts the repo — see Alternative A). Each content class rides its own purpose-built channel:
+
+| Content | Channel |
+| --- | --- |
+| Repo content | git blobless/partial clone + fetch (`git clone --filter=blob:none`) from its **existing remote**, over git's own transport. Repo content **never** traverses the DevStrap hub. |
+| Env vars + non-git/draft folders | age-encrypted, content-addressed `age_blob:<sha256>` blobs. |
+| Project map ("namespace map") | a signed, HLC-ordered, append-only event log. |
+| `node_modules` / build artifacts | **never synced**; rebuilt on hydrate (`npm`/`pnpm`/`uv install`). |
+
+See `07_NAMESPACE_AND_SYNC_MODEL.md` and `08_GIT_MATERIALIZATION_AND_WORKTREES.md`.
+
+### Decision 2 — Eager clone-everything materialization (`EAGER-*`)
+
+`devstrap sync` materializes **eagerly**: every project in the namespace map is blobless/partial-cloned up front, so after a sync the whole `~/Code` tree is present on the device. There is **no FUSE/placeholder/lazy-VFS magic** in this design — StrapFS stays explicitly deferred (see Alternatives C/D and the build order below). This trades disk for predictability and debuggability, and keeps the core portable Go on macOS and Ubuntu (`XP-*`). Eager whole-tree materialization on `devstrap sync` is **planned/future**; today's `sync` is the file-backed namespace spike.
+
+### Decisions 3–4 — Two-plane zero-knowledge cloud hub (`HUB-*`)
+
+`devstraphub` is a **two-plane, zero-knowledge** service behind a single pluggable `Hub` interface:
+
+1. **Event-log plane** — the signed, HLC-ordered namespace map.
+2. **Content-addressed encrypted blob-store plane** — env + non-git/draft content as `age_blob:<sha256>` ciphertext.
+
+The hub sees **only ciphertext plus a signed map**; it cannot read code, secrets, or drafts. Repo content is absent from the hub entirely (it rides git, above).
+
+The chosen cloud backend is **Cloudflare R2 from the start** (S3 API, zero egress, namespaced by `workspace_id`; zero-knowledge by construction via client-side age encryption). There is **no NAS-first phase**. The `Hub` interface stays pluggable, and the existing file-backed backend (`devstrap sync --hub-file`) is retained **only for tests**.
+
+The cloud hub sync path and R2 backend selection are **planned/future**, not yet shipped; the only implemented transport remains `devstrap sync --hub-file`. See `13_CLI_DAEMON_API.md` and `14_MVP_ROADMAP_AND_BACKLOG.md`.
+
 ## What DevStrap owns
 
 DevStrap owns:
@@ -192,3 +226,4 @@ Build in this order:
 6. **Keep platform-specific code behind adapters.** Mac and Linux should share the core.
 7. **Keep the human working-state plane separate from the agent plane.** Cross-machine "forgot to push" recovery lives under the reserved `refs/devstrap/wip/*` ref namespace and encrypted draft bundles; the fresh-worktree base resolver must never read them. Validation (read-only git-state) and recovery (WIP refs) are human-convenience; agents always base from `origin/<default_branch>`.
 8. **Treat the hub as semi-trusted.** It transports opaque, signed, end-to-end-encrypted payloads; it never sees plaintext code/secrets and is never trusted to order or authenticate events.
+9. **Repo content rides git and never traverses the hub.** Repositories materialize by blobless/partial clone + fetch from their own remote, over git's own transport. The two-plane hub carries only the signed namespace map and `age_blob:<sha256>` ciphertext (env + non-git drafts); `.git` is never file-synced. `node_modules`/build artifacts are never synced — they are rebuilt on hydrate.

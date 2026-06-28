@@ -1,26 +1,48 @@
 ---
 last_reviewed: 2026-06-28
-tracks_code: [cmd/**, internal/**, .github/**, AUDIT_RECOMMENDATIONS.md, AUDIT_RECOMMENDATIONS_2026-06-27.md]
+tracks_code: [cmd/**, internal/**, .github/**, AUDIT_RECOMMENDATIONS.md, AUDIT_RECOMMENDATIONS_2026-06-27.md, AUDIT_RECOMMENDATIONS_2026-06-28.md]
 ---
 # MVP Roadmap and Backlog
 
 ## MVP definition
 
-The MVP is successful when one user can register multiple Macs/Linux machines, keep a consistent `~/Code` structure, materialize repos on demand, hydrate env safely, and create fresh worktrees for agents.
+The MVP is successful when one user can register multiple Macs/Linux machines, keep a consistent `~/Code` structure, materialize repos (on-demand `hydrate` today, moving to eager clone-everything on `sync` — `EAGER-*`), hydrate env safely, and create fresh worktrees for agents.
+
+The "Dropbox experience for code" target — one identical `~/Code` tree that appears automatically across the owner's fleet — is delivered by the 2026-06-28 cloud-sync architecture: content split by type (repo content rides git's own blobless clone/fetch from its existing remote and never transits the hub; env + non-git/draft folders ride age-encrypted content-addressed `age_blob:<sha256>` blobs; the project map rides the signed HLC-ordered event log), eager materialization on `sync`, and a two-plane zero-knowledge hub on Cloudflare R2. See `AUDIT_RECOMMENDATIONS_2026-06-28.md`.
 
 ## Recommended build order
 
+Historic milestone numbering (M0–M3.5/M4 are shipped; M5–M7 below describe capability layers):
+
 ```text
-Milestone 0: repo skeleton and CLI
-Milestone 1: local state and scan/adopt
-Milestone 1.5: namespace event-log and two-root sync spike
-Milestone 2: Git hydration and open
-Milestone 3: fresh worktree manager
-Milestone 3.5: thin agent runner MVP
-Milestone 4: env capture/hydrate and runtime injection
-Milestone 5: Mac daemon and watcher
-Milestone 6: Linux compatibility
-Milestone 7: multi-device hub
+Milestone 0: repo skeleton and CLI                          [shipped]
+Milestone 1: local state and scan/adopt                     [shipped]
+Milestone 1.5: namespace event-log and two-root sync spike  [shipped]
+Milestone 2: Git hydration and open                         [shipped]
+Milestone 3: fresh worktree manager                         [shipped]
+Milestone 3.5: thin agent runner MVP                        [shipped]
+Milestone 4: env capture/hydrate and runtime injection      [shipped]
+Milestone 5: Mac daemon and watcher                         [deferred — see below]
+Milestone 6: Linux compatibility                            [portable Go first; native parts deferred]
+Milestone 7: multi-device hub                               [reframed as the cloud R2 hub — see below]
+```
+
+### 2026-06-28 cloud-sync re-sequencing
+
+The next cycle is re-sequenced around the **eager-clone core + cloud backend**, not a native daemon. IDs reference `AUDIT_RECOMMENDATIONS_2026-06-28.md`. This overlay supersedes the priority of the historic M5–M7 above without renumbering them:
+
+```text
+Next:      eager-clone materialization (EAGER-*) — clone-everything (blobless) on `devstrap sync`;
+           the whole ~/Code tree is present after sync; no FUSE/placeholder/lazy-VFS
+Then:      non-git/draft content sync + .devstrapignore compiler + encrypted bundles (DRAFT-*)
+Then:      cloud zero-knowledge hub on Cloudflare R2, two planes (event log + blob store) (HUB-*)
+Alongside: cross-platform core — portable Go on macOS + Ubuntu, no native daemon (XP-*)
+
+--- deferred this cycle ---
+Mac daemon + native watcher (historic M5):      behind its entry gate, not this cycle
+Linux native service/inotify (historic M6 native): portable Go first; native adapter deferred
+StrapFS / FUSE / File Provider (Backlog V2):    explicitly deferred
+Multi-user / multi-tenant scaling (SCALE-*):    future direction, documented not built
 ```
 
 ## Milestone 0 — Project skeleton
@@ -153,6 +175,8 @@ devstrap sync --namespace-only
 devstrap open work/org/repo --cursor
 ```
 
+On-demand `hydrate` ships and stays valid for materializing one repo. The 2026-06-28 cycle layers **eager clone-everything on `sync`** (`EAGER-*`) on top: `devstrap sync` performs a blobless/partial clone (`git clone --filter=blob:none`) of every namespaced repo from its existing remote up front, so the whole `~/Code` tree is present afterward. Repo content rides git's own transport and never transits the hub; `node_modules`/build artifacts are never synced and are rebuilt on hydrate (`npm`/`pnpm`/`uv install`).
+
 ## Milestone 3 — Fresh worktree manager
 
 Deliverables:
@@ -255,6 +279,8 @@ devstrap run work/org/repo -- printenv SOME_VAR
 
 ## Milestone 5 — Mac daemon and watcher
 
+> Deferred (2026-06-28). The cloud-sync cycle ships a **cross-platform core first** (`XP-*`) — portable Go on macOS + Ubuntu — with no native daemon or StrapFS this cycle. Eager-clone materialization on `sync` (`EAGER-*`) plus periodic reconciliation cover the loop without a resident watcher. Keep this milestone behind its entry gate below; do not start it until the gate is satisfied and the cloud planes (`EAGER-*`/`DRAFT-*`/`HUB-*`) are in place.
+
 Entry gate (review before starting M5):
 
 - the indexer-hydration-storm test must pass (watcher treats events as hints and does not hydrate without explicit open/adopt);
@@ -323,6 +349,8 @@ devstrap status
 
 ## Milestone 7 — Multi-device hub
 
+> Reframed (2026-06-28) as the **cloud zero-knowledge hub** (`HUB-*`). The chosen backend is **Cloudflare R2 from the start** (S3 API, zero egress, namespaced by `workspace_id`), not a NAS-first phase. The hub stays pluggable behind one `Hub` interface; the file-backed local backend remains **only for tests**. The hub is two planes and sees only ciphertext + a signed map: (a) the **event log** = the namespace map, and (b) a **content-addressed encrypted blob store** = env + non-git/draft content (`age_blob:<sha256>`). It cannot read code, secrets, or drafts. Repo content never transits the hub — it rides git's own blobless clone/fetch from the existing remote.
+
 Entry gate (review before starting M7): require a real two-machine path-drift usage signal before building a bespoke `devstraphub`; a hidden manifest git repo (see `spec/01` / `spec/04`) may substitute for a bespoke service.
 
 Decision note: re-evaluate whether a hidden manifest git repo (see `spec/01` / `spec/04`) is a faster hub than a bespoke service before building `devstraphub`.
@@ -380,18 +408,21 @@ Status shows both devices.
 ## Backlog: V2
 
 ```text
-[ ] StrapFS Linux FUSE prototype
-[ ] macFUSE/FSKit prototype
-[ ] Apple File Provider prototype
+[ ] StrapFS Linux FUSE prototype                 (deferred — see Backlog V2 note)
+[ ] macFUSE/FSKit prototype                       (deferred)
+[ ] Apple File Provider prototype                 (deferred)
 [ ] menu bar app
 [ ] Finder status icons
 [ ] hosted SaaS hub
+[ ] multi-user / multi-tenant scaling (SCALE-*)   (future direction, documented not built)
 [ ] team policies
 [ ] SSO
 [ ] audit logs
 [ ] containerized agent sandbox
 [ ] network policy enforcement
 ```
+
+StrapFS / FUSE / File Provider stay **explicitly deferred**: the 2026-06-28 design is eager clone-everything with no lazy virtual filesystem. Multi-user scaling is a documented future direction only; see the `SCALE-*` workstream below for the chosen hosting stack and tenancy model.
 
 ## MVP risk reducers
 
@@ -464,3 +495,38 @@ Workstreams added by the second-pass design & implementation audit (`AUDIT_RECOM
 - Signed **audit-log subsystem** (`spec/15`) — currently absent.
 - **`.devstrapignore` compiler** (`spec/11`) — currently absent; root cause of duplicated prune/secret/deny lists.
 - Daemon crash-recovery/reaper, observability/log-rotation, large-namespace scan benchmarks, cross-process `state.db` coordination, migration-rollback tests (audit coverage gaps).
+
+## Audit follow-ups (cloud-sync pass, 2026-06-28)
+
+Workstreams added by the cloud-sync architecture pass (`AUDIT_RECOMMENDATIONS_2026-06-28.md`). These **extend** the 2026-06-27 second-pass audit above — they do not revert it. The product goal is the "Dropbox experience for code": one identical `~/Code` tree that appears automatically across the owner's fleet. The core rule is **file-sync split by content type — never blanket file-sync, never file-sync `.git`** (it corrupts the repo). New planned commands/flags are **future**, not yet shipped.
+
+### EAGER-* — eager-clone materialization
+- Make `devstrap sync` perform eager **clone-everything** up front via blobless/partial clone (`git clone --filter=blob:none`) of every namespaced repo from its existing remote; the whole `~/Code` tree is present after sync.
+- Repo content rides git's own transport and **never** transits the DevStrap hub. No FUSE/placeholder/lazy-VFS — StrapFS stays explicitly deferred.
+- `node_modules`/build artifacts are never synced; rebuild on hydrate (`npm`/`pnpm`/`uv install`).
+
+### DRAFT-* — non-git / draft content sync
+- Sync env vars and non-git/draft folders as **age-encrypted, content-addressed `age_blob:<sha256>` blobs** (the human/draft plane), never as repo content and never byte-merged.
+- Build the **`.devstrapignore` compiler** (shared with `spec/11`) so bundle contents exclude generated/secret/junk paths deterministically.
+- Encrypted working-tree/draft bundles (`draft.snapshot.created`) build on the 2026-06-27 Layer C; conflicts use detect-don't-merge with dual-copy as the safe default (no byte-merge of opaque files; CRDTs solve a different problem).
+
+### HUB-* — cloud zero-knowledge hub
+- Ship `cmd/devstraphub` as the **two-plane** zero-knowledge hub: (a) event log = the namespace map; (b) content-addressed encrypted blob store = env + non-git/draft content. The hub sees only ciphertext + a signed map.
+- **Cloudflare R2 backend from the start** (S3 API, zero egress, namespaced by `workspace_id`; zero-knowledge via client-side age encryption). **No NAS-first phase.** Keep the backend pluggable behind one `Hub` interface; retain a file-backed local backend **only for tests**.
+- mTLS device certs, full-state snapshot exchange before retention GC, and wire the resume cursor (`ARCH2-02`, `sync` currently replays from HLC 0).
+- **Device trust must fail closed** once enrollment exists (today `SECU-03` fails open). Revoke ⇒ re-encrypt affected blobs to the reduced recipient set + flag secrets for rotation (age has no native revocation).
+
+### XP-* — cross-platform core first
+- Ship a **portable Go core on macOS + Ubuntu** with OS-specific magic deferred: no native daemon, no StrapFS this cycle. Eager-clone on `sync` plus periodic reconciliation cover the loop without a resident watcher.
+- Validates the GMKtec Ubuntu box and graphics-laptop targets alongside the Mac Minis.
+
+### SCALE-* — multi-user / multi-tenant scaling (future direction, documented not built)
+- **Chosen stack:** Fly.io for compute (control plane + agent runners — Firecracker microVM isolation, 35+ regions, scale-to-zero/suspend-resume, runs the Go binary natively) + Cloudflare R2 for the sync hub (namespaced by `workspace_id`; zero-knowledge ⇒ tenant isolation by construction) + managed Postgres (Neon/Supabase) for the control-plane DB. Runner escape-hatch: **E2B** (self-hostable microVM agent sandboxes).
+- **Rejected as primary:** Railway (shared-kernel containers — fine for the control plane or a trusted single instance, not for untrusted multi-tenant code); Vercel (strong if the stack were Next.js/TS via Sandbox + Functions/Workflows, but DevStrap is Go-first, so its TS/Python sandbox SDKs are an awkward fit); Hetzner (cheapest always-on box, good for the solo MVP, but no microVM/global/scale-to-zero).
+- **Scaling model:** control/data-plane split, tenancy spectrum (pooled → dedicated/BYOC), cell-based scaling; Coder is the reference architecture for agents-on-your-infra at scale.
+
+### Deferred (2026-06-28)
+- **StrapFS / FUSE / macFUSE / FSKit / Apple File Provider** — no lazy virtual filesystem in this design; remains Backlog V2.
+- **Mac daemon + native FSEvents watcher and Linux native systemd/inotify adapters** — portable Go core first (`XP-*`); native service work stays behind the Milestone 5/6 entry gates.
+- **Multi-user / multi-tenant build-out (`SCALE-*`)** — documented direction only; nothing built this cycle.
+- Out of scope for these docs: which LLM/agent API the runner uses (a separate concern, deliberately not specified here).

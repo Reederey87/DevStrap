@@ -31,7 +31,7 @@ Behavior:
 - hydrates on another device only after device approval;
 - can write local `.env.local` or inject at runtime.
 
-Current implementation covers local capture, hydrate, provider binding, runtime injection, local OS-backed device private-key storage, manual remote-device enrollment, and local device trust-state commands: `devstrap env capture` parses without mutating process env, rejects dangerous variable names and interpolation-looking values unless `--literal` is explicit, encrypts the parsed bundle to the local device plus approved device age recipients, writes a `0600` ciphertext blob under `~/.devstrap/blobs`, records only `age_blob:<sha256>` references in SQLite, and adds the captured file to `.gitignore` when it is inside the project. `devstrap env hydrate --write <file>` decrypts local encrypted blobs with the local device age identity or resolves 1Password `op://` refs through `op inject`, writes the requested env file atomically with mode `0600`, refuses overwrites unless `--force`, and gitignores the hydrated target when it is inside the project. `devstrap run` injects encrypted local profiles into subprocess env or delegates 1Password refs to `op run`. `devstrap devices enroll/list/approve/revoke/lost/rename` exposes local device registration and trust-state management and refuses revocation of the current local device. Hub sync, out-of-band fingerprint confirmation, and automatic remote enrollment remain future work.
+Current implementation covers local capture, hydrate, provider binding, runtime injection, local OS-backed device private-key storage, manual remote-device enrollment, and local device trust-state commands: `devstrap env capture` parses without mutating process env, rejects dangerous variable names and interpolation-looking values unless `--literal` is explicit, encrypts the parsed bundle to the local device plus approved device age recipients, writes a `0600` ciphertext blob under `~/.devstrap/blobs`, records only `age_blob:<sha256>` references in SQLite, and adds the captured file to `.gitignore` when it is inside the project. `devstrap env hydrate --write <file>` decrypts local encrypted blobs with the local device age identity or resolves 1Password `op://` refs through `op inject`, writes the requested env file atomically with mode `0600`, refuses overwrites unless `--force`, and gitignores the hydrated target when it is inside the project. `devstrap run` injects encrypted local profiles into subprocess env or delegates 1Password refs to `op run`. `devstrap devices enroll/list/approve/revoke/lost/rename` exposes local device registration and trust-state management and refuses revocation of the current local device. The encrypted blobs are still local-only — they do not yet travel between devices. Hub-backed env-bundle exchange (`DRAFT-*`, see *Env-bundle exchange over the Hub*), out-of-band fingerprint confirmation, and automatic remote enrollment remain future work.
 
 ### Mode B — Secret-manager references
 
@@ -50,6 +50,21 @@ Behavior:
 - provider CLI resolves values at runtime;
 - logs redact values;
 - no plaintext files written unless explicit.
+
+## Env-bundle exchange over the Hub (`DRAFT-*`, `HUB-*`)
+
+Today env values are age-encrypted into content-addressed `age_blob:<sha256>` blobs and stored only under the local `~/.devstrap/blobs` directory; `state.db` keeps just the `age_blob:<sha256>` reference. The blobs are correctly encrypted for the approved device recipient set, but they do not yet travel between devices — so a profile captured on the Mac Mini upstairs cannot be hydrated on the GMKtec Ubuntu box. This is the open local-only gap (`DRAFT-*`).
+
+Closing it (planned, not built) reuses the two-plane, zero-knowledge hub from `03_SYSTEM_ARCHITECTURE.md` and `07_NAMESPACE_AND_SYNC_MODEL.md` rather than introducing a new channel:
+
+- **Plane A — the signed, HLC-ordered namespace-map event log** carries the *metadata*: which project owns which env profile, its `bundle_id`, and the `age_blob:<sha256>` reference. It never carries plaintext or ciphertext bytes, only the reference plus signed ordering.
+- **Plane B — the content-addressed encrypted blob store** carries the *ciphertext*: `devstrap sync` uploads any local `age_blob:<sha256>` blob the hub is missing and downloads any referenced blob the local device lacks, keyed purely by SHA-256. The hub stores opaque ciphertext; it can decrypt nothing.
+
+Because blobs are encrypted client-side to the enrolled device recipient set before upload (see *Encryption*), the hub stays zero-knowledge: it sees only `age_blob:<sha256>` ciphertext plus the signed map. Repo content never uses this path — it rides git's own blobless (`--filter=blob:none`) clone/fetch transport from each repo's existing remote — and `.git`, `node_modules`, and build artifacts are never placed in the blob store.
+
+Device revoke/lost still re-encrypts affected bundles to the reduced recipient set and flags exposed values for rotation (see *Device trust* and *Encryption*); after re-encryption the new `age_blob:<sha256>` is uploaded and the superseded blob becomes unreferenced and is garbage-collected. The production exchange additionally requires automatic remote enrollment and out-of-band fingerprint confirmation, which remain future work.
+
+Backend is Cloudflare R2 from the start, pluggable behind one `Hub` interface, with a file-backed local backend kept only for tests.
 
 ## Supported providers
 

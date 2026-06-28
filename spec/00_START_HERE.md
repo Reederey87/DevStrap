@@ -1,10 +1,12 @@
 ---
 last_reviewed: 2026-06-28
-tracks_code: [cmd/**, internal/**, .github/**, AGENTS.md, README.md, go.mod, go.sum]
+tracks_code: [cmd/**, internal/**, .github/**, AGENTS.md, README.md, go.mod, go.sum, AUDIT_RECOMMENDATIONS_2026-06-28.md]
 ---
 # DevStrap — Start Here
 
 > A second-pass design & implementation audit (2026-06-27) is recorded at the repo root in `AUDIT_RECOMMENDATIONS_2026-06-27.md`. It drives the new workstreams referenced throughout the specs: cross-machine working-state sync, non-VCS/remote-less project support, forge-agnostic PR creation, and the zero-knowledge sync hub.
+
+> A cloud-sync architecture pass (2026-06-28) is recorded at the repo root in `AUDIT_RECOMMENDATIONS_2026-06-28.md`. It extends — does not revert — the 2026-06-27 audit, and pins the "Dropbox experience for code" model: `devstrap sync` eagerly reconstructs the whole `~/Code` tree (blobless-clone repos from their existing remotes + pull age-encrypted env/draft blobs + hydrate env); file-sync is split by content type and never blanket-syncs `.git`; the two-plane zero-knowledge hub (signed HLC namespace-map event log + content-addressed encrypted blob store) ships on Cloudflare R2 behind one pluggable Hub interface; cross-platform Go core comes first and StrapFS/FUSE stays explicitly deferred. Its workstream IDs are `EAGER-*`, `DRAFT-*`, `HUB-*`, `XP-*`, and `SCALE-*`.
 
 "Workspace Passport" is the core-concept tagline — the portable, managed code namespace that appears identically on every device — not a separate product name (see `spec/adr/0001-product-naming.md`).
 
@@ -19,7 +21,7 @@ In practice:
 DevStrap owns the structure and metadata.
 Git owns repository content.
 A local daemon keeps the namespace consistent.
-Repos are skeletons until materialized.
+Repos are skeletons until materialized; `devstrap sync` materializes the whole tree eagerly (blobless clone up front), not lazily on open.
 Secrets are referenced or encrypted, not blindly copied.
 Agents always get fresh worktrees from fetched remote refs.
 Local-only / remote-less folders are first-class, synced via encrypted bundles — never adopted as broken clonable git repos.
@@ -35,10 +37,14 @@ This gives the Dropbox-like experience you want without starting with the hardes
 Install DevStrap on a new Mac, Linux box, cloud machine, or agent runner.
 Point it at ~/Code.
 Authenticate Git + secrets.
-The same project tree appears.
-Opening a project hydrates it.
+Run `devstrap sync` once.
+The whole ~/Code tree is reconstructed eagerly: every repo is blobless/partial-cloned
+  from its existing remote, env/draft folders are pulled as age-encrypted blobs, and env profiles hydrate.
+node_modules and build artifacts are never synced — they are rebuilt on hydrate.
 Starting an agent creates a fresh, isolated worktree from the fetched remote default branch.
 ```
+
+This is the **eager-clone Workspace Passport**: `devstrap sync` materializes content, not just metadata. There is no FUSE/placeholder/lazy-VFS magic in this design — after sync the tree is really present on disk. StrapFS stays explicitly deferred (see "Why not FUSE or Apple File Provider first?" and Phase 4 below).
 
 ## Why not FUSE or Apple File Provider first?
 
@@ -51,7 +57,7 @@ The first version should avoid:
 - FUSE performance, caching, file locking, and editor-indexer edge cases;
 - cross-platform filesystem semantics before the product loop is proven.
 
-The MVP can still feel close to Dropbox because it creates the same directory tree everywhere and materializes projects through CLI, shell hooks, editor adapters, and agent adapters.
+The MVP can still feel close to Dropbox because it creates the same directory tree everywhere and materializes projects through CLI, shell hooks, editor adapters, and agent adapters. The 2026-06-28 cloud-sync pass keeps this position: materialization is **eager whole-tree clone** on `devstrap sync` (blobless/partial clone up front), and StrapFS/FUSE remains explicitly deferred — there is no placeholder/lazy-VFS layer in this design.
 
 ## Architecture phases
 
@@ -91,7 +97,7 @@ Phase 4: Optional StrapFS
   - Windows future: WinFsp
 ```
 
-**These phases describe capability layers, not the build order.** The actual, deliberately re-ordered sequencing — the thin agent runner ships *before* the daemon and hub — is canonical in `14_MVP_ROADMAP_AND_BACKLOG.md`; defer to it rather than reading the list above as a schedule. **Current position:** Phase 0 CLI and the Phase 3 agent loop are shipped; the Phase 1 daemon is gated; Phase 2 multi-device sync is a file-backed spike (`devstrap sync --hub-file`), not a production hub.
+**These phases describe capability layers, not the build order.** The actual, deliberately re-ordered sequencing — the thin agent runner ships *before* the daemon and hub — is canonical in `14_MVP_ROADMAP_AND_BACKLOG.md`; defer to it rather than reading the list above as a schedule. **Current position:** Phase 0 CLI and the Phase 3 agent loop are shipped; the Phase 1 daemon is gated; Phase 2 multi-device sync is a file-backed spike (`devstrap sync --hub-file`) that today reconciles only the namespace map (metadata), not a production hub. The 2026-06-28 audit's eager-clone materialization (`EAGER-*` — `devstrap sync` actually blobless-clones every repo and pulls encrypted env/draft blobs so the whole `~/Code` tree appears) and the Cloudflare R2 two-plane zero-knowledge hub (`HUB-*`) are the next workstreams, not yet built.
 
 ## Recommended implementation stack
 
@@ -158,6 +164,15 @@ Not implemented yet:
 - forge-agnostic PR/MR creation — `agent pr` is currently `gh`-only and fails post-push on non-GitHub remotes (audit Section 3, `FORGE-01`);
 - zero-knowledge sync hub — HTTP/SSE wire protocol, mTLS device certs, full-state snapshot exchange (audit Section 6).
 
+Next workstreams from the 2026-06-28 cloud-sync pass (`AUDIT_RECOMMENDATIONS_2026-06-28.md`), not yet built:
+
+- eager-clone materialization (`EAGER-*`) — `devstrap sync` reconstructs the whole `~/Code` tree by blobless/partial-cloning every repo from its existing remote up front (repo content rides git's own transport and never traverses the hub); `node_modules`/build artifacts are rebuilt on hydrate, never synced;
+- non-git/draft content sync (`DRAFT-*`) — a `.devstrapignore` compiler and age-encrypted, content-addressed `age_blob:<sha256>` bundles for env vars and non-git/draft folders pushed/pulled through the blob plane;
+- cloud hub backend (`HUB-*`) — the two-plane zero-knowledge hub (signed HLC namespace-map event log + content-addressed encrypted blob store) on Cloudflare R2 behind one pluggable `Hub` interface, with the file-backed backend retained for tests only;
+- cross-platform hardening (`XP-*`) — portable Go core proven on macOS + Ubuntu before any native daemon/StrapFS work;
+- multi-user future (`SCALE-*`) — documented-not-built hosting/scaling direction (Fly.io compute + R2 hub + managed Postgres control plane; control/data-plane split and cell-based tenancy);
+- fail-closed event verification on enrollment — today signed-event verification fails open (`SECU-03`); once device enrollment exists it must fail closed, and device revoke must re-encrypt affected blobs to the reduced recipient set plus flag secrets for rotation.
+
 Local validation performed:
 
 ```bash
@@ -182,18 +197,23 @@ devstrap open work/nclh/foc-models --cursor
 devstrap worktree new work/nclh/foc-models --fresh-upstream --name route-tests
 devstrap env capture work/nclh/foc-models .env
 devstrap env hydrate work/nclh/foc-models --write .env.local
-devstrap sync
+devstrap sync   # today: namespace-map reconcile + --hub-file spike.
+                # planned (EAGER-*/HUB-*): eagerly blobless-clone every repo and pull
+                # encrypted env/draft blobs so the whole ~/Code tree materializes.
 ```
 
-The first killer loop:
+The first killer loop (eager-clone Workspace Passport):
 
 ```text
 1. Add or create a project on Machine A.
-2. DevStrap notices it and records its path, remote, env profile, and policy.
-3. Machine B receives the namespace update.
-4. The same folder path appears as a skeleton.
-5. Opening it clones/fetches/hydrates it.
-6. Agent work starts from fresh remote default branch, not stale local default branch.
+2. DevStrap records it in the signed HLC namespace map (path, remote, env profile, policy),
+   and pushes any non-git/draft content + env as age-encrypted blobs to the hub.
+3. Machine B runs `devstrap sync` and pulls the updated namespace map.
+4. Sync eagerly materializes the whole tree: every repo is blobless/partial-cloned from its
+   existing remote, env/draft folders are pulled from encrypted blobs, env profiles hydrate.
+   (.git is never file-synced; node_modules/build artifacts are rebuilt, not synced.)
+5. The same folder paths are really present on disk — no skeleton to "open" first.
+6. Agent work starts from a fresh remote default branch, not a stale local default branch.
 ```
 
 The branch workflow that backs this invariant — trunk `main`, integration branch `dev`, and the rule that agents and worktrees always base from the fetched `origin/<default_branch>`, never any local branch — is defined canonically in `AGENTS.md`. Refer to it there rather than restating the model here.
@@ -218,3 +238,4 @@ The branch workflow that backs this invariant — trunk `main`, integration bran
 - `16_TEST_PLAN.md` — unit, integration, e2e, chaos, and cross-platform tests.
 - `17_REFERENCES.md` — useful platform and tool references.
 - `18_WORK_LOG.md` — concise end-of-cycle implementation tracking and handoff notes.
+- `19_CLOUD_PROVISIONING_GUIDE.md` — register/configure the chosen cloud stack (Fly.io + Cloudflare R2 + Neon).

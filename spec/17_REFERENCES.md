@@ -1,6 +1,6 @@
 ---
 last_reviewed: 2026-06-28
-tracks_code: [.github/**, go.mod, go.sum, AUDIT_RECOMMENDATIONS.md]
+tracks_code: [.github/**, go.mod, go.sum, AUDIT_RECOMMENDATIONS.md, AUDIT_RECOMMENDATIONS_2026-06-27.md, AUDIT_RECOMMENDATIONS_2026-06-28.md]
 ---
 # References
 
@@ -135,3 +135,56 @@ Exa MCP review on `2026-06-26` supported agent/watcher hardening behavior:
 - Server-Sent Events: https://html.spec.whatwg.org/multipage/server-sent-events.html
 - Caddy automatic HTTPS: https://caddyserver.com/docs/automatic-https ; Tailscale: https://tailscale.com/
 - Full per-finding sources: `AUDIT_RECOMMENDATIONS_2026-06-27.md`.
+
+## Cloud-sync architecture (2026-06-28) — added references
+
+These sources back the cloud-sync architecture cycle: the "Dropbox experience for code" (one identical `~/Code` tree on every device in the owner's fleet), the content-type-split sync model (git transport for repo content, age blobs for env/draft content, a signed HLC event log for the namespace map), eager clone-everything materialization, and the two-plane zero-knowledge hub. They drive the EAGER-*, DRAFT-*, HUB-*, XP-*, and SCALE-* workstreams in `AUDIT_RECOMMENDATIONS_2026-06-28.md`.
+
+### Never file-sync a git repo
+
+- Git FAQ — a working tree / `.git` directory must never be sync'd by a file-sync service (it corrupts the repo); replicate via git transport instead: https://git-scm.com/docs/gitfaq (also cited above for the 2026-06-27 follow-ups).
+- Blobless/partial clone as the repo-content transport (`git clone --filter=blob:none`): https://git-scm.com/docs/partial-clone ; https://github.blog/2020-12-21-get-up-to-speed-with-partial-clone-and-shallow-clone/
+
+### Dropbox / Drive system design (two-plane, content-addressed, change feed, dual-copy)
+
+- Dropbox sync engine rewrite (Nucleus) — split metadata plane from content plane, content-addressed blocks: https://dropbox.tech/infrastructure/rewriting-the-heart-of-our-sync-engine
+- Dropbox cursor-based change feed (`list_folder` / `list_folder/continue`): https://www.dropbox.com/developers/documentation/http/documentation#files-list_folder-continue
+- Google Drive API change feed (start page token + incremental changes): https://developers.google.com/workspace/drive/api/guides/manage-changes
+- Dropbox "conflicted copy" — dual-copy as the safe conflict default for opaque files (never byte-merge): https://help.dropbox.com/sync/conflicted-copy
+
+### Zero-knowledge / content-addressed encrypted sync engines
+
+- secsync — end-to-end-encrypted CRDT/document sync (client holds keys, server stores ciphertext): https://github.com/serenity-kit/secsync
+- Tahoe-LAFS — provider-independent, zero-knowledge content-addressed storage grid: https://tahoe-lafs.org/
+- Content addressing (encrypt-then-hash; immutable `<sha256>` blob keys): https://docs.ipfs.tech/concepts/content-addressing/
+- Convergent / content-derived encryption background: https://en.wikipedia.org/wiki/Convergent_encryption
+
+### age encryption (multi-recipient, rotation, no native revocation)
+
+- age project: https://github.com/FiloSottile/age (also cited above)
+- age v1 format spec — multi-recipient stanzas; revocation means re-encrypting to the reduced recipient set (no native revoke), so revoke flags secrets for rotation: https://age-encryption.org/v1
+
+### Object storage backends (pluggable Hub blob store)
+
+- Cloudflare R2 — chosen from the start: S3-compatible API, zero egress fees, namespaced by `workspace_id`: https://developers.cloudflare.com/r2/ ; pricing/egress: https://developers.cloudflare.com/r2/pricing/
+- Backblaze B2 (S3-compatible): https://www.backblaze.com/docs/cloud-storage-s3-compatible-api
+- Amazon S3 API reference: https://docs.aws.amazon.com/AmazonS3/latest/API/Welcome.html
+- MinIO (self-hostable, S3-compatible; useful for a non-cloud Hub backend): https://min.io/docs/minio/linux/index.html
+
+### Agent-runner sandboxes (microVM isolation for the future control plane)
+
+- Fly Machines — chosen compute: Firecracker microVMs, many regions, scale-to-zero/suspend-resume, runs the Go binary natively: https://fly.io/docs/machines/ ; https://fly.io/
+- E2B — self-hostable microVM agent sandboxes (runner escape-hatch): https://e2b.dev/docs
+- Modal sandboxes: https://modal.com/docs/guide/sandbox
+- Daytona dev-environment runtime: https://www.daytona.io/docs/
+- Firecracker — the microVM technology behind AWS Lambda and Fargate: https://firecracker-microvm.github.io/
+- Vercel Sandbox (strong for a Next.js/TS stack; awkward for Go-first): https://vercel.com/docs/vercel-sandbox
+- Coder — reference architecture for agents/dev workspaces on your own infra at scale: https://coder.com/docs
+
+### Multi-tenant SaaS scaling (future direction)
+
+- Control plane vs. application/data plane split: https://docs.aws.amazon.com/whitepapers/latest/saas-architecture-fundamentals/control-plane-vs.-application-plane.html
+- SaaS tenant-isolation strategies (pooled → siloed/dedicated → BYOC tenancy spectrum): https://docs.aws.amazon.com/whitepapers/latest/saas-tenant-isolation-strategies/saas-tenant-isolation-strategies.html
+- Cell-based architecture (reducing scope of impact): https://docs.aws.amazon.com/wellarchitected/latest/reducing-scope-of-impact-with-cell-based-architecture/reducing-scope-of-impact-with-cell-based-architecture.html
+- Managed Postgres options for the control-plane DB: https://neon.tech/docs ; https://supabase.com/docs/guides/database
+- Full per-finding sources: `AUDIT_RECOMMENDATIONS_2026-06-28.md`.

@@ -39,7 +39,7 @@ DevStrap should make `~/Code` behave like a Dropbox-style shared namespace while
 ```text
 Structure sync      → DevStrap namespace
 Repo content        → Git
-Lazy clone/fetch    → Git partial clone/sparse checkout
+Eager clone on sync → Git blobless clone (--filter=blob:none)
 Worktrees           → git worktree
 Secrets             → vault references or encrypted personal env bundles
 Dependencies        → recreated locally
@@ -54,7 +54,7 @@ Agent tasks         → isolated fresh worktrees
 
 Uses:
 
-- Mac Mini / MacBook / Linux box / cloud machine;
+- a personal fleet of machines — e.g. a Mac Mini upstairs, a second Mac Mini downstairs, an incoming GMKtec Ubuntu box, a graphics laptop, and a NAS — plus cloud/agent runners;
 - Cursor, VS Code, Codex/Copilot/Cursor/Claude Code agents;
 - multiple repos and worktrees;
 - many `.env` files;
@@ -62,7 +62,7 @@ Uses:
 
 Needs:
 
-- same folder layout everywhere;
+- the same `~/Code` tree appears automatically on every machine in the fleet (no manual copying);
 - open project anywhere;
 - env available everywhere;
 - fresh agent worktrees;
@@ -244,6 +244,8 @@ For personal/MVP use:
 
 - new machine from zero to visible `~/Code` tree in under 5 minutes;
 - materialize average repo in under 2 minutes, excluding dependency install;
+- after `devstrap sync` completes, the full `~/Code` namespace tree is present on the device with every clonable repo eagerly materialized via blobless clone — no skeleton placeholders left behind (eager-clone target, workstream `EAGER-*`);
+- the same namespace tree appears automatically on every enrolled device in the fleet, with no manual file copying;
 - zero stale-default-branch agent branches in normal DevStrap flow;
 - zero plaintext secret exposure in logs;
 - all project paths consistent across registered devices;
@@ -279,3 +281,11 @@ From `AUDIT_RECOMMENDATIONS_2026-06-27.md`:
 - **Draft limits unenforced (`PROD-03`):** invariant #8 (size/ignore limits) and draft lifecycle commands are unbuilt.
 - **MVP framing (`PROD-04`):** the "Must have"/MVP definition implies a multi-machine daemon MVP that is deliberately deferred; align with the re-ordered roadmap (agents before daemon).
 - **New requirements:** first-class non-VCS/remote-less projects (audit Section 2), forge-agnostic PR (Section 3), and cross-machine working-state sync (Section 5) — add personas/JTBD/invariants for each and make success metrics measurable.
+
+## Cloud-sync direction (2026-06-28)
+
+From `AUDIT_RECOMMENDATIONS_2026-06-28.md`, extending (not replacing) the 2026-06-27 audit. These decisions sharpen the "Dropbox experience for code" promise into measurable product requirements:
+
+- **Eager-clone materialization (`EAGER-*`):** the target sync model is eager, not lazy. `devstrap sync` clones every clonable repo up front via blobless/partial clone (`--filter=blob:none`) from its existing remote, so the whole `~/Code` tree is present afterward. There is no FUSE/placeholder/lazy-VFS layer in this design — StrapFS stays explicitly deferred. Repo content rides Git's own transport and never passes through the DevStrap hub. The success metrics above are updated to reflect this.
+- **Dropbox-for-code fleet promise:** the primary persona runs a personal fleet (multiple Macs, an Ubuntu box, a graphics laptop, a NAS); the same `~/Code` namespace must appear automatically on every enrolled device. Content is split by type — repo content via Git, env + non-git/draft folders via age-encrypted content-addressed blobs, the project map via the signed HLC-ordered event log — and `node_modules`/build artifacts are never synced (rebuilt on hydrate). See `07_NAMESPACE_AND_SYNC_MODEL.md` and `09_SECRETS_AND_ENVIRONMENT.md`.
+- **Multi-user / SaaS is a documented-not-built future direction (`SCALE-*`):** a hosted multi-tenant product remains possible — control/data-plane split, a pooled→dedicated tenancy spectrum, and a zero-knowledge hub that gives tenant isolation by construction — but it is not committed for the personal MVP and adds no scope here. It stays a non-goal (see "Non-goals for MVP"); hosting and scaling choices are documented, not built, in `03_SYSTEM_ARCHITECTURE.md` and `14_MVP_ROADMAP_AND_BACKLOG.md`.
