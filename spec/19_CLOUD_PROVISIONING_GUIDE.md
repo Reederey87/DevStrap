@@ -44,10 +44,12 @@ Two invariants hold across the whole stack:
 1. **Repo content never enters the cloud stack.** It rides each repository's own git
    transport (blobless `git clone --filter=blob:none` / fetch) from its existing remote.
    R2 carries only the signed namespace map and `age_blob:<sha256>` ciphertext.
-2. **R2 is zero-knowledge.** Everything stored there is client-side age-encrypted and
-   signed before upload, so R2 holds ciphertext plus a signed map and can read neither
-   code, secrets, nor drafts. Tenant isolation for the eventual SaaS therefore falls out
-   of the encryption model, not out of access-control lists (`15_SECURITY_THREAT_MODEL.md`).
+2. **R2 is zero-knowledge for confidentiality.** Everything stored there is client-side
+   age-encrypted and signed before upload, so R2 holds ciphertext plus a signed map and
+   can read neither code, secrets, nor drafts. Tenant confidentiality for the eventual
+   SaaS falls out of the encryption model. Integrity and availability still require
+   scoped credentials, signed hash-chain verification, snapshots/backups, retention
+   discipline, and budget/rate controls (`15_SECURITY_THREAT_MODEL.md`).
 
 ---
 
@@ -72,25 +74,37 @@ for the S3-compatible API, **zero egress fees**, and a generous free tier.
    domain. **No CORS configuration is needed** — DevStrap reaches R2 server-side over the
    S3 API, not from a browser.
 
-One bucket holds every workspace. Tenants are separated by **key prefix**, never by
-separate buckets:
+For a solo or pooled deployment, one bucket can hold every workspace. Tenants/workspaces
+are separated by **key prefix**; dedicated buckets or BYOC buckets remain options for
+regulated or large tenants:
 
 ```text
-s3://devstrap-hub/<workspace_id>/events/<hlc>-<seq>.json   # Plane A — signed event log
-s3://devstrap-hub/<workspace_id>/blobs/<sha256>            # Plane B — age ciphertext
+s3://devstrap-hub/workspaces/<workspace_id>/events/<hlc-padded>/<device_id>/<seq>/<event_id>.json
+s3://devstrap-hub/workspaces/<workspace_id>/blobs/<sha256>
+s3://devstrap-hub/workspaces/<workspace_id>/snapshots/<hlc-padded>.json.age
 ```
 
 `<workspace_id>` is the local `ws_<uuidv7>` identity minted during `devstrap init`. Because
 every object under a prefix is already encrypted and the map signed, prefix-level
-separation is sufficient for isolation; access scoping (below) is defense in depth.
+separation is sufficient for confidentiality. Access scoping (below) is still required
+for integrity and availability: a bucket-wide key can delete or withhold ciphertext even
+though it cannot decrypt it.
 
-### A.3 Create an S3-compatible API token (least privilege)
+Event-log correctness depends on immutable object design. DevStrap must create event
+objects with unique keys and conditional put semantics (`If-None-Match: *` where the S3
+client supports it), pull with bounded `ListObjectsV2` pagination and `next_cursor`, and
+never append by overwriting one shared manifest object.
+
+### A.3 Create S3-compatible credentials (least privilege)
 
 1. **R2 → Manage R2 API Tokens → Create API Token.**
 2. Permission: **Object Read & Write** (not Admin). Do **not** grant account-wide or
    bucket-management rights.
-3. Scope: **Apply to specific buckets only → `devstrap-hub`**. This is the least-privilege
-   boundary — the token can read and write objects in exactly one bucket and nothing else.
+3. Scope: **Apply to specific buckets only → `devstrap-hub`**. In single-owner self-hosted
+   mode this bucket-scoped token is acceptable. In hosted/SaaS or runner mode, the
+   long-lived parent key must stay only in trusted control-plane code; devices and
+   runners receive short-lived credentials or presigned URLs scoped to
+   `workspaces/<workspace_id>/...` and the operations they need.
 4. On creation Cloudflare shows three values **once**:
    - **Access Key ID**
    - **Secret Access Key** (shown only at creation — capture it immediately into the
@@ -148,18 +162,23 @@ DevStrap owns object lifecycle: blob **ref-counting** and garbage collection of 
 
 ### A.5 Cost note
 
-R2's free tier (10 GB-month storage, plus monthly Class A/B operation allowances) covers a
-solo fleet comfortably, and **egress is always free** — the property that makes
-clone-from-anywhere cheap. A card is required to enable R2 even while you stay free.
+R2's free tier currently includes 10 GB-month Standard storage, 1M Class A operations, and
+10M Class B operations; paid Standard storage is $0.015/GB-month, Class A is $4.50/M, and
+Class B is $0.36/M. **Egress is free**, which makes blob restore cheap, but polling can be
+the first bill: `ListObjectsV2` is a Class A operation. Use cursor backoff, page limits,
+event segments/snapshots, and avoid unbounded prefix scans. Standard storage is the
+default for hot events/blobs; Infrequent Access has retrieval fees and a minimum storage
+duration, so it is not appropriate for the hot event log. A card is required to enable R2
+even while usage stays inside the free tier.
 
 ---
 
 ## B. Fly.io — compute (control plane + agent runners)
 
-Fly.io runs **both** planes: a small Go control-plane API service as a long-lived app, and
+Fly.io runs compute for **both** planes: a small Go control-plane API service as a long-lived app, and
 **ephemeral per-task agent-runner Machines** (Firecracker microVMs). It is chosen for
-microVM isolation (safe for untrusted agent code), 35+ regions, scale-to-zero /
-suspend-resume, and native execution of the Go binary. E2B (self-hostable microVM agent
+microVM isolation, global regions (verify current choices with `fly platform regions`),
+scale-to-zero / suspend-resume, and native execution of the Go binary. E2B (self-hostable microVM agent
 sandboxes) is the documented runner escape-hatch (`03_SYSTEM_ARCHITECTURE.md`).
 
 ### B.1 Install flyctl and authenticate
@@ -170,8 +189,9 @@ fly version
 fly auth signup                  # first time; or `fly auth login`
 ```
 
-Add a payment method in the Fly dashboard billing page. Fly is pay-as-you-go; a small
-control-plane Machine costs cents/day and scale-to-zero keeps an idle deployment near zero.
+Add a payment method in the Fly dashboard billing page. Fly is pay-as-you-go; estimate
+with current Fly pricing, including started/stopped Machine time, rootfs, volumes, IPs,
+and outbound data transfer.
 
 ### B.2 Control-plane app
 
@@ -222,9 +242,9 @@ fly secrets set \
 
 ### B.3 Agent-runner Machines (ephemeral, per task)
 
-Runners are **not** part of the long-lived app's autoscaling. Each task gets its own
-Firecracker microVM created on demand and destroyed when the task ends — strong isolation
-for untrusted multi-tenant code, **one Machine per task / tenant**:
+Runners are **not** part of the long-lived control-plane app's autoscaling and should live
+in a separate Fly app/org/process boundary. Each task gets its own Firecracker microVM
+created on demand and destroyed when the task ends — **one Machine per task / tenant**:
 
 ```bash
 # create a throwaway runner microVM for a single task
@@ -235,7 +255,8 @@ fly machine run <runner-image> \
   --env DEVSTRAP_AGENT_RUN_ID=<run-id>
 ```
 
-For bursty agents, suspend/resume keeps warm capacity without paying for idle:
+For trusted single-owner runners, suspend/resume can keep warm capacity without paying for
+idle CPU:
 
 ```bash
 fly machine suspend <machine-id>
@@ -246,23 +267,29 @@ In production these are driven programmatically via the **Fly Machines REST API*
 (`https://api.machines.dev/v1/apps/<app>/machines`) using a Fly access token held as a
 control-plane secret, so the control plane spins runners up and tears them down per task.
 Runners inherit secrets the same way — injected at boot, never in the image — and should
-receive only the minimal scoped credentials a single task needs.
+receive only the minimal scoped credentials a single task needs: no parent R2 key, no
+bucket-wide key, no `DATABASE_URL` unless the task strictly requires it, TTL cleanup, no
+shared volumes for untrusted tasks, and explicit egress/resource limits. For untrusted
+tenant code, prefer destroy-after-task over suspend/resume because suspend preserves
+memory state.
 
 ### B.4 Regions, scaling, one platform
 
 Pick `primary_region` near the operator and the bulk of devices; add regions later by
-scaling the app or launching runner Machines in other regions (35+ available). The same
-Fly account/org hosts both planes — control-plane app and runner Machines — which keeps
-networking, secrets, and observability in one place. Multi-tenant scaling principles
+scaling the app or launching runner Machines in other current Fly regions. Keep the
+control plane and runner Machines in separate apps/process boundaries even if they share
+an account/org, so secrets and blast radius stay separated. Multi-tenant scaling principles
 (control/data-plane split, pooled→dedicated tenancy spectrum, cell-based scaling) are
 recorded as future direction in `03_SYSTEM_ARCHITECTURE.md` and
 `14_MVP_ROADMAP_AND_BACKLOG.md` (`SCALE-*`).
 
 ### B.5 Cost note
 
-Pay-as-you-go. A single `shared-cpu-1x` / 256 MB control-plane Machine with scale-to-zero
-costs roughly cents per day idle; runner microVMs bill only for their short lifetime.
-There is no perpetual free tier — budget a few dollars/month for a solo deployment.
+Pay-as-you-go. A small always-on control-plane Machine is a low single-digit dollars/month
+order of magnitude, and auto-stop/suspend can reduce idle compute, but stopped Machines,
+rootfs, volumes, IPs, and outbound transfer may still bill. Runner microVMs bill for their
+short lifetime plus any storage/network they consume. There is no broad perpetual free
+tier — budget a few dollars/month for a solo deployment and set budget alerts before SaaS.
 
 ---
 
@@ -295,34 +322,52 @@ The console's **Connection Details** panel gives the connection string. Note the
 postgres://<role>:<password>@<host>-pooler.<region>.aws.neon.tech/<db>?sslmode=require
 ```
 
-### C.3 Create a least-privilege application role
+### C.3 Create least-privilege runtime and migration roles
 
-Do **not** ship the project owner role to the service. Create a dedicated application role
-with only the privileges the control plane needs:
+Do **not** ship the project owner role to the service. Use two DSNs and two roles:
+
+- `devstrap_app` uses Neon's pooled connection string for runtime request handling.
+- `devstrap_migrator` uses the direct/unpooled connection string for migrations, `pg_dump`,
+  logical replication, and any session-level operation.
+
+Create roles with only the privileges each path needs:
 
 ```sql
 CREATE ROLE devstrap_app LOGIN PASSWORD '<generated>';
+CREATE ROLE devstrap_migrator LOGIN PASSWORD '<generated>';
 GRANT CONNECT ON DATABASE <db> TO devstrap_app;
+GRANT CONNECT ON DATABASE <db> TO devstrap_migrator;
 GRANT USAGE ON SCHEMA app TO devstrap_app;
+GRANT USAGE, CREATE ON SCHEMA app TO devstrap_migrator;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA app TO devstrap_app;
+GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON ALL TABLES IN SCHEMA app TO devstrap_migrator;
 ALTER DEFAULT PRIVILEGES IN SCHEMA app
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO devstrap_app;
+ALTER DEFAULT PRIVILEGES IN SCHEMA app
+  GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLES TO devstrap_migrator;
 -- no SUPERUSER, no CREATEROLE, no DDL on production schemas
 ```
 
-Build the service's `DATABASE_URL` from this role, not the owner.
+Build the service's runtime `DATABASE_URL` from `devstrap_app`, not the owner. Keep the
+direct migration/admin DSN separate and unavailable to normal request handlers.
 
 ### C.4 Configure DevStrap with Neon
 
-Store the application-role connection string as a **Fly secret** named `DATABASE_URL`
-(section B.2) so it is injected at runtime and never committed or logged. It is a
-control-plane secret and follows the same custody rules as every other credential here.
+Store the pooled application-role connection string as a **Fly secret** named
+`DATABASE_URL` (section B.2) so it is injected at runtime and never committed or logged.
+Store the direct migrator DSN separately, for example `DATABASE_MIGRATOR_URL`, and expose
+it only to migration jobs. These are control-plane secrets and follow the same custody
+rules as every other credential here.
 
 ### C.5 Branching and multi-tenancy
 
 - **Branching** — Neon branches are copy-on-write database clones; use one per preview/CI
   environment so test runs never touch production data. A test Fly app simply points its
   `DATABASE_URL` at the branch's connection string.
+- **Connection model** — Neon pooled connections run through PgBouncer transaction mode.
+  Use them for runtime request handling, but use direct connections for migrations,
+  `LISTEN/NOTIFY`, session advisory locks, prepared-statement-sensitive workloads, `pg_dump`,
+  logical replication, and admin tasks.
 - **Tenancy model** — for the eventual SaaS, choose between **schema-per-tenant**
   (stronger isolation, heavier migration fan-out) and **shared tables with a `tenant_id`
   column** (simpler operations, isolation enforced in app + row-level security). This is a
@@ -331,9 +376,11 @@ control-plane secret and follows the same custody rules as every other credentia
 
 ### C.6 Cost note
 
-Neon's free tier (generous storage and compute-hour allowance, scale-to-zero)
-covers a solo control plane; paid tiers add more branches, larger compute, and longer
-history when the SaaS direction is built.
+Neon's free tier currently covers a solo/preview control plane with scale-to-zero,
+compute-hour allowance, and per-project storage limits. Launch/paid plans are usage-based
+for CU-hours and storage and add higher limits, branches/history, and operational features
+when the SaaS direction is built. Account for cold starts after scale-to-zero and keep
+budget alerts on CU-hours, storage, branches, and egress.
 
 ---
 
@@ -396,11 +443,33 @@ Checklist:
 
 | Platform        | Free tier                                             | Notes                                          |
 | --------------- | ----------------------------------------------------- | ---------------------------------------------- |
-| Cloudflare R2   | 10 GB-month storage + monthly op allowances; **zero egress** | Card required to enable; solo fleet stays free |
-| Fly.io          | None (pay-as-you-go)                                   | Small control Machine ~cents/day idle; runners bill per task |
-| Neon (Postgres) | One project, scale-to-zero compute + storage allowance | Paid tiers add branches/compute/history        |
+| Cloudflare R2   | 10 GB-month Standard storage, 1M Class A ops, 10M Class B ops; **zero egress** | Standard: $0.015/GB-month, Class A $4.50/M, Class B $0.36/M; polling/listing can dominate |
+| Fly.io          | None broad/perpetual for new deployments (pay-as-you-go) | Estimate Machines, rootfs, volumes, IPs, and egress; runners bill per task |
+| Neon (Postgres) | Free plan with scale-to-zero, CU-hour allowance, and per-project storage/egress limits | Paid Launch/Scale add CU/storage/branch/history capacity; use pooled runtime + direct migration DSNs |
 
-### D.5 Cross-references
+### D.5 Provider alternatives and decision
+
+The audited recommendation is **keep Fly.io + Cloudflare R2 + Neon** as the documented
+direction. It fits DevStrap's Go-first binary, low-idle personal fleet, encrypted
+object-store hub, and future per-task runner isolation.
+
+- **Tigris** is the closest R2 alternative because it is Fly-native, S3-compatible, has
+  zero egress, and offers global data placement. Prefer it if one-vendor Fly integration
+  and placement behavior matter more than R2's lower Standard storage/operation pricing
+  and larger free tier.
+- **Cloudflare Workers + Durable Objects/D1 + R2** is credible for a future serverless
+  HTTP/SSE/control edge, especially if live push becomes important. It is not the primary
+  plan because DevStrap is Go-first and direct R2 avoids operating a service for the
+  single-owner fleet.
+- **Supabase** is attractive if DevStrap needs Auth/Storage/BaaS in addition to Postgres.
+  It is less ideal as the default simple control DB when Neon scale-to-zero and branching
+  are enough.
+- **Render/Railway** are simpler app-hosting options for trusted deployments, but they do
+  not replace microVM-style runner isolation for untrusted multi-tenant code.
+- **Hetzner/self-hosted** remains the cheapest always-on solo option but lacks the managed
+  global/scale-to-zero/microVM runner story.
+
+### D.6 Cross-references
 
 - `03_SYSTEM_ARCHITECTURE.md` — Hub backend interface; the *Hosting & scaling (FUTURE)*
   subsection that selects Fly.io + R2 + managed Postgres (`SCALE-*`); the planned HTTP/SSE
@@ -414,7 +483,7 @@ Checklist:
 - `13_CLI_DAEMON_API.md` — the planned `devstrap sync --hub-s3 <bucket>` flag and the
   `--hub-file` test-only backend.
 - `15_SECURITY_THREAT_MODEL.md` — the two-plane zero-knowledge hub trust model and
-  multi-tenant isolation by construction (`HUB-*`, `SCALE-*`).
+  confidentiality-by-construction caveat (`HUB-*`, `SCALE-*`).
 - `AUDIT_RECOMMENDATIONS_2026-06-28.md` — the `HUB-*` (cloud zero-knowledge hub on R2) and
   `SCALE-*` (multi-user hosting on Fly.io + R2 + managed Postgres) workstreams that drive
   this guide.

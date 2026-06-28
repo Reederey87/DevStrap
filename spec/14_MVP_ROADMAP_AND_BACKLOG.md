@@ -351,37 +351,35 @@ devstrap status
 
 > Reframed (2026-06-28) as the **cloud zero-knowledge hub** (`HUB-*`). The chosen backend is **Cloudflare R2 from the start** (S3 API, zero egress, namespaced by `workspace_id`), not a NAS-first phase. The hub stays pluggable behind one `Hub` interface; the file-backed local backend remains **only for tests**. The hub is two planes and sees only ciphertext + a signed map: (a) the **event log** = the namespace map, and (b) a **content-addressed encrypted blob store** = env + non-git/draft content (`age_blob:<sha256>`). It cannot read code, secrets, or drafts. Repo content never transits the hub — it rides git's own blobless clone/fetch from the existing remote.
 
-Entry gate (review before starting M7): require a real two-machine path-drift usage signal before building a bespoke `devstraphub`; a hidden manifest git repo (see `spec/01` / `spec/04`) may substitute for a bespoke service.
-
-Decision note: re-evaluate whether a hidden manifest git repo (see `spec/01` / `spec/04`) is a faster hub than a bespoke service before building `devstraphub`.
+Entry gate (review before starting M7): require the logical Hub interface and file-backed conformance suite first, then implement the R2/S3 direct backend. Hidden-manifest Git and home/VPS hub approaches are historical alternatives, not the current target. The bespoke HTTP/SSE `cmd/devstraphub` relay remains deferred until live push or multi-tenant routing requires a service.
 
 Dependency gate: encrypted blob upload/download must not ship until Milestone 4 has device key identities plus per-device env-decryption approval. The local trust plane now supports manual device enrollment/approval for capture recipients; production blob sync still requires automatic remote enrollment and fingerprint confirmation.
 
 Deliverables:
 
-- small HTTP hub;
-- event push/pull;
-- encrypted blob upload/download;
-- device heartbeat.
+- `internal/hub` logical interface with event + blob planes and a file-backed conformance backend;
+- cursor-based event push/pull with snapshot-required recovery;
+- Cloudflare R2/S3 direct backend with immutable event objects, conditional puts, paged cursor pulls, and content-addressed encrypted blob upload/download;
+- event payload validation before apply, fail-closed verification after enrollment, and device heartbeat/trust metadata.
 
 Tasks:
 
 ```text
-[ ] Implement event table in hub
-[ ] Implement device registration
-[ ] Implement auth token
-[ ] Implement sync push/pull
-[ ] Implement encrypted blob store
-[ ] Implement conflict detection
-[ ] Implement namespace sync across two machines
+[ ] Extract Hub interface and run the same conformance tests against FileHub and an S3/R2-compatible backend
+[ ] Define R2 object keys: workspaces/<ws>/events/<hlc-padded>/<device>/<seq>/<event>.json and workspaces/<ws>/blobs/<sha256>
+[ ] Implement conditional event PUT, ListObjectsV2 pagination, limit/next_cursor pulls, and snapshot-required recovery
+[ ] Implement encrypted blob PUT/GET/HEAD and local blob ref-counting
+[ ] Validate incoming project payloads before apply (e.g. git_repo remote_url/remote_key are non-empty and validated)
+[ ] Implement remote device registration/fingerprint confirmation and fail-closed event verification for enrolled workspaces
+[ ] Implement namespace + blob sync across two machines with no .git or plaintext secret bytes in the hub
 ```
 
 Acceptance:
 
 ```text
 Add project on Mac A.
-Skeleton appears on Linux B after sync.
-Hydrate on Linux B.
+One `devstrap sync` on Linux B materializes the repo through blobless clone from its git remote.
+Env/draft blobs hydrate from encrypted age_blob:<sha256> content.
 Status shows both devices.
 ```
 
@@ -471,13 +469,13 @@ Build these early:
 
 Workstreams added by the second-pass design & implementation audit (`AUDIT_RECOMMENDATIONS_2026-06-27.md`). Ordered by leverage; IDs reference that document.
 
-### P0 — security-relevant, do now
-- **Agent isolation is security theater** (`AGEN-01`, `AGEN-02`/`SECU-02`): argv-substring policy is bypassable by any interpreter, and `HOME`/`SSH_AUTH_SOCK` are forwarded into the agent subprocess. Strip credential env; move toward allowlist + OS sandbox.
-- **Secret hydration re-emits unescaped values** (`SECR-01`): escape `$`/backtick when writing env files.
-- **Key custody silent downgrade** (`SECR-04`/`SECU-01`): downgrades to a plaintext age key on ANY keychain error, not only unavailability.
-- **`agent pr` is GitHub-only** (`FORGE-01`): fails post-push on non-GitHub forges.
-- **No-remote repo corrupts the namespace** (`NOVCS-01`): classify as `local_git`, enforce non-empty `remote_key`.
-- **CI fragility** (`CI-01`): pin `govulncheck`, split it out of the "Go tests" job.
+### P0 — security-relevant rebaseline
+- **Agent wrapper is still not a sandbox** (`AGEN-01`, `AGEN-03`): argv-substring policy is bypassable by any interpreter. Credential env stripping (`AGEN-02`/`SECU-02`) is shipped, but strong enforcement still needs allowlists plus OS sandboxing (Seatbelt / bubblewrap-landlock-seccomp).
+- **Secret hydration unsafe writer** (`SECR-01/02/05`) is shipped: safe quoting, generated header, `0600` atomic write, and ignore-before-write are implemented. Remaining work is routing ignore updates through the planned `.devstrapignore` compiler.
+- **Key custody silent downgrade** (`SECR-04`/`SECU-01`) is shipped for present-but-failing keychains; Linux Secret Service/headless integration coverage remains under `XP-03`.
+- **Forge-aware `agent pr`** (`FORGE-01/02/03`) is shipped for GitHub/GitLab/Gitea/Azure key folding and graceful fallback. Remaining work is `doctor` probes, self-hosted overrides, native Bitbucket/Azure clients where useful, and broader fake-CLI tests (`FORGE-04/05`).
+- **No-remote repo corruption** (`NOVCS-01`) is shipped: scanner classifies no-remote/unvalidated remotes as `local_git`; remaining non-git work is `plain_folder`, `promote`, and draft bundle materialization (`NOVCS-02..05`, `DRAFT-*`).
+- **CI fragility** (`CI-01`) is shipped: `govulncheck` is pinned/split.
 
 ### Cross-machine working-state sync (the "forgot to push" feature)
 - **Layer A — git-state validation plane** (Phase 0): `repo.gitstate.observed` events + `device_gitstate` sidecar table + `status --all-devices`/`doctor`.
@@ -489,8 +487,8 @@ Workstreams added by the second-pass design & implementation audit (`AUDIT_RECOM
 - Forge-agnostic PR via a `Forge` interface (`FORGE-02..05`): `gh`/`glab`/`tea`, token allowlist, Azure key folding, `doctor` probe.
 
 ### Sync hub (Phase 2)
-- HTTP/SSE zero-knowledge hub `cmd/devstraphub` + `HTTPHub` client; mTLS device certs; full-state snapshot exchange before retention GC (audit Section 6).
-- Wire the resume cursor (`ARCH2-02`): `sync` currently replays from HLC 0.
+- Logical Hub interface + file-backed conformance backend + R2/S3 direct production backend first; HTTP/SSE `cmd/devstraphub` relay and mTLS device certs are deferred until live push or multi-tenant routing needs a service.
+- Wire the resume cursor (`ARCH2-02`) and full-state snapshot exchange before retention GC; `sync` currently replays from HLC 0.
 
 ### Architecture & hygiene epics
 - Extract `internal/engine` from `internal/cli` (`ARCH2-01`) before the daemon phase.
@@ -513,19 +511,22 @@ Workstreams added by the cloud-sync architecture pass (`AUDIT_RECOMMENDATIONS_20
 - Encrypted working-tree/draft bundles (`draft.snapshot.created`) build on the 2026-06-27 Layer C; conflicts use detect-don't-merge with dual-copy as the safe default (no byte-merge of opaque files; CRDTs solve a different problem).
 
 ### HUB-* — cloud zero-knowledge hub
-- Ship `cmd/devstraphub` as the **two-plane** zero-knowledge hub: (a) event log = the namespace map; (b) content-addressed encrypted blob store = env + non-git/draft content. The hub sees only ciphertext + a signed map.
-- **Cloudflare R2 backend from the start** (S3 API, zero egress, namespaced by `workspace_id`; zero-knowledge via client-side age encryption). **No NAS-first phase.** Keep the backend pluggable behind one `Hub` interface; retain a file-backed local backend **only for tests**.
-- mTLS device certs, full-state snapshot exchange before retention GC, and wire the resume cursor (`ARCH2-02`, `sync` currently replays from HLC 0).
-- **Device trust must fail closed** once enrollment exists (today `SECU-03` fails open). Revoke ⇒ re-encrypt affected blobs to the reduced recipient set + flag secrets for rotation (age has no native revocation).
+- Ship the **logical** two-plane zero-knowledge Hub first: (a) event log = the namespace map; (b) content-addressed encrypted blob store = env + non-git/draft content. Implementations are file-backed tests, direct R2/S3 production, and later HTTP/SSE relay if needed.
+- **Cloudflare R2 backend from the start** (S3 API, zero egress, namespaced by `workspace_id`; client-side age encryption). **No NAS-first phase.** Keep the backend pluggable behind one `Hub` interface; retain a file-backed local backend **only for tests**.
+- R2 event log must use immutable unique object keys, conditional puts, cursor pagination, snapshots, and cost-aware polling/backoff. Never append by overwriting one manifest object.
+- SaaS/runners require temporary prefix-scoped R2 credentials or presigned URLs; bucket-wide long-lived keys are acceptable only for single-owner self-hosted mode.
+- Full-state snapshot exchange before retention GC, and wire the resume cursor (`ARCH2-02`, `sync` currently replays from HLC 0). HTTP/SSE mTLS relay remains deferred.
+- **Device trust must fail closed** once enrollment exists (today `SECU-03` fails open for non-destructive event types). Revoke ⇒ re-encrypt affected blobs to the reduced recipient set + flag secrets for rotation (age has no native revocation).
 
 ### XP-* — cross-platform core first
 - Ship a **portable Go core on macOS + Ubuntu** with OS-specific magic deferred: no native daemon, no StrapFS this cycle. Eager-clone on `sync` plus periodic reconciliation cover the loop without a resident watcher.
 - Validates the GMKtec Ubuntu box and graphics-laptop targets alongside the Mac Minis.
 
 ### SCALE-* — multi-user / multi-tenant scaling (future direction, documented not built)
-- **Chosen stack:** Fly.io for compute (control plane + agent runners — Firecracker microVM isolation, 35+ regions, scale-to-zero/suspend-resume, runs the Go binary natively) + Cloudflare R2 for the sync hub (namespaced by `workspace_id`; zero-knowledge ⇒ tenant isolation by construction) + managed Postgres (Neon/Supabase) for the control-plane DB. Runner escape-hatch: **E2B** (self-hostable microVM agent sandboxes).
-- **Rejected as primary:** Railway (shared-kernel containers — fine for the control plane or a trusted single instance, not for untrusted multi-tenant code); Vercel (strong if the stack were Next.js/TS via Sandbox + Functions/Workflows, but DevStrap is Go-first, so its TS/Python sandbox SDKs are an awkward fit); Hetzner (cheapest always-on box, good for the solo MVP, but no microVM/global/scale-to-zero).
-- **Scaling model:** control/data-plane split, tenancy spectrum (pooled → dedicated/BYOC), cell-based scaling; Coder is the reference architecture for agents-on-your-infra at scale.
+- **Chosen stack remains sound:** Fly.io for Go-native compute and per-task runner Machines + Cloudflare R2 for the encrypted sync data plane + Neon managed Postgres as the low-idle control-plane DB default. R2 gives low storage cost and free egress; Neon gives scale-to-zero/branching; Fly runs the Go binary and isolates runner tasks with VMs. No immediate provider switch is recommended.
+- **Provider constraints:** use current Fly region/pricing docs rather than fixed region counts or "near-zero" claims; runners must be separated from the control-plane app, receive only per-task scoped credentials, and be destroyed after untrusted tasks. Neon needs two DSNs when hosted: pooled runtime and direct migration/admin. R2 gives confidentiality by encryption, but integrity/availability still need scoped credentials, signatures, snapshots, backups, and budget alerts.
+- **Alternatives:** Tigris is a credible Fly-native S3 alternative when global data placement/one-vendor integration outweighs R2's lower cost/free-tier advantage. Cloudflare Workers/Durable Objects/D1 + R2 is a credible serverless HTTP/SSE/control-edge alternative if the project later accepts a non-Go edge runtime. Supabase is attractive when Auth/Storage/BaaS are needed; Render/Railway are simpler app-hosting options but do not replace microVM runner isolation for untrusted multi-tenant code; Hetzner remains a cheap solo/self-host option, not the hosted default.
+- **Scaling model:** control/data-plane split, tenancy spectrum (pooled → dedicated/BYOC), cell-based scaling, data-residency placement across Fly/Neon/R2 jurisdiction choices; Coder is the reference architecture for agents-on-your-infra at scale.
 
 ### Deferred (2026-06-28)
 - **StrapFS / FUSE / macFUSE / FSKit / Apple File Provider** — no lazy virtual filesystem in this design; remains Backlog V2.

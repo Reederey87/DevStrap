@@ -26,7 +26,7 @@ path: work/nclh/foc-models
 type: git_repo
 remote: git@github.com:org/foc-models.git
 default_branch: main
-materialization_policy: lazy
+materialization_policy: eager
 env_profile: snowflake-dev
 tooling_profile: python-uv-snowflake
 agent_policy: guarded
@@ -328,7 +328,7 @@ On dangerous conflicts, write a `conflicts` row and never auto-overwrite local f
 
 ## Hub storage
 
-The hub is **two planes**, both zero-knowledge: (a) the append-only, signed, HLC-ordered event log — the namespace map; and (b) a content-addressed encrypted blob store (`age_blob:<sha256>`) for env and non-git/draft content. The hub sees only ciphertext plus a signed map — it cannot read code, secrets, or drafts. Repo content rides git's own transport and never enters the hub.
+The hub is **two planes**, both zero-knowledge: (a) the append-only, signed, HLC-ordered event log — the namespace map; and (b) a content-addressed encrypted blob store (`age_blob:<sha256>`) for env and non-git/draft content. The hub sees only ciphertext plus a signed map — it cannot read code, secrets, or drafts. Repo content rides git's own transport and never enters the hub. Confidentiality comes from client-side encryption; integrity and availability come from signed event/hash chains, scoped credentials, snapshots, and backups.
 
 Hub stores:
 
@@ -413,11 +413,12 @@ Recommendation:
 
 ```text
 Phase 1: local-only SQLite.
-Phase 2: home-hub HTTP event log.
-Phase 3: hosted hub or object-store adapter.
+Phase 2: logical Hub interface + file-backed conformance backend.
+Phase 3: Cloudflare R2 / S3 direct backend with immutable event objects and encrypted blobs.
+Phase 4: HTTP/SSE relay only if live push or multi-tenant routing requires a service.
 ```
 
-**2026-06-28 update (`HUB-*`):** the chosen production backend is now **Cloudflare R2 from the start** (S3 API, zero egress, namespaced by `workspace_id`), realized as Option C (object-store) behind a single pluggable `Hub` interface. Zero-knowledge is preserved by client-side age encryption, so R2 only ever holds ciphertext blobs plus the signed, HLC-ordered event log (the two-plane model in Hub storage). There is **no NAS-first / home-hub-first phase**; the Option A/B/D variants above are retained as historical alternatives, and the file-backed adapter (`devstrap sync --hub-file`) is kept **only for tests**. Future compute for the control plane and agent runners is documented (not built) in `03_SYSTEM_ARCHITECTURE.md`; see `AUDIT_RECOMMENDATIONS_2026-06-28.md`.
+**2026-06-28 update (`HUB-*`):** the chosen production backend is now **Cloudflare R2 from the start** (S3 API, zero egress, namespaced by `workspace_id`), realized as Option C (object-store) behind a single pluggable `Hub` interface. R2 event-log objects must be immutable, unique, lexicographically sortable, and created conditionally; steady-state pulls use cursor pagination, not unbounded prefix scans or a single overwritten manifest. There is **no NAS-first / home-hub-first phase**; the Option A/B/D variants above are retained as historical alternatives, and the file-backed adapter (`devstrap sync --hub-file`) is kept **only for tests**. Future compute for the control plane and agent runners is documented (not built) in `03_SYSTEM_ARCHITECTURE.md`; see `AUDIT_RECOMMENDATIONS_2026-06-28.md`.
 
 ## Conflict model
 

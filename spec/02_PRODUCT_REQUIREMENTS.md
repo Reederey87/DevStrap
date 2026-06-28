@@ -96,7 +96,7 @@ When I get a new Mac or Linux box, I want to run one command and have my full co
 Acceptance:
 
 - `~/Code` tree is created;
-- known projects appear as skeletons or hydrated repos;
+- target sync model: after `devstrap sync` completes, known git projects are eagerly materialized through blobless clone; skeletons are only transient/failure state;
 - device is registered;
 - secrets provider is connected;
 - missing prerequisites are reported.
@@ -170,15 +170,13 @@ Do not build these first:
 - `devstrap init ~/Code`
 - `devstrap scan ~/Code --adopt`
 - namespace entries for Git repos and draft projects;
-- skeleton directory creation;
+- skeleton directory creation as a safe pre-materialization/failure state;
 - repo hydration using Git;
 - safe fetch/pull behavior;
 - fresh worktree creation from remote branch;
 - env capture/hydrate with encrypted local store;
 - device registration;
 - local SQLite state;
-- Mac LaunchAgent daemon;
-- Linux-compatible abstractions;
 - basic status and doctor commands.
 
 ### Should have
@@ -186,8 +184,17 @@ Do not build these first:
 - Cursor and VS Code open adapters;
 - 1Password / Apple Password adapter;
 - Doppler adapter;
-- GitHub CLI integration for PR creation;
-- shell `cd` hydration hook;
+- forge-aware PR/MR creation (`gh`/`glab`/`tea` with graceful fallback);
+- eager `devstrap sync` materialization and portable `devstrap run-loop`;
+- Linux-compatible abstractions;
+- shell `cd` hydration hook.
+
+### Deferred from current MVP
+
+- Mac LaunchAgent daemon and Linux systemd installer;
+- native FSEvents/inotify watcher installers;
+- production R2/S3 hub backend and hosted control plane;
+- StrapFS / FUSE / File Provider lazy filesystem layer.
 - universal ignore compiler;
 - TUI status view.
 
@@ -288,4 +295,4 @@ From `AUDIT_RECOMMENDATIONS_2026-06-28.md`, extending (not replacing) the 2026-0
 
 - **Eager-clone materialization (`EAGER-*`):** the target sync model is eager, not lazy. `devstrap sync` clones every clonable repo up front via blobless/partial clone (`--filter=blob:none`) from its existing remote, so the whole `~/Code` tree is present afterward. There is no FUSE/placeholder/lazy-VFS layer in this design — StrapFS stays explicitly deferred. Repo content rides Git's own transport and never passes through the DevStrap hub. The success metrics above are updated to reflect this.
 - **Dropbox-for-code fleet promise:** the primary persona runs a personal fleet (multiple Macs, an Ubuntu box, a graphics laptop, a NAS); the same `~/Code` namespace must appear automatically on every enrolled device. Content is split by type — repo content via Git, env + non-git/draft folders via age-encrypted content-addressed blobs, the project map via the signed HLC-ordered event log — and `node_modules`/build artifacts are never synced (rebuilt on hydrate). See `07_NAMESPACE_AND_SYNC_MODEL.md` and `09_SECRETS_AND_ENVIRONMENT.md`.
-- **Multi-user / SaaS is a documented-not-built future direction (`SCALE-*`):** a hosted multi-tenant product remains possible — control/data-plane split, a pooled→dedicated tenancy spectrum, and a zero-knowledge hub that gives tenant isolation by construction — but it is not committed for the personal MVP and adds no scope here. It stays a non-goal (see "Non-goals for MVP"); hosting and scaling choices are documented, not built, in `03_SYSTEM_ARCHITECTURE.md` and `14_MVP_ROADMAP_AND_BACKLOG.md`.
+- **Multi-user / SaaS is a documented-not-built future direction (`SCALE-*`):** a hosted multi-tenant product remains possible — control/data-plane split, a pooled→dedicated tenancy spectrum, and a zero-knowledge hub where client-side encryption gives tenant confidentiality by construction while integrity/availability still require signed verification, scoped credentials, snapshots, and backups — but it is not committed for the personal MVP and adds no scope here. It stays a non-goal (see "Non-goals for MVP"); hosting and scaling choices are documented, not built, in `03_SYSTEM_ARCHITECTURE.md` and `14_MVP_ROADMAP_AND_BACKLOG.md`.

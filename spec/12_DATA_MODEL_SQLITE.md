@@ -93,7 +93,7 @@ CREATE TABLE namespace_entries (
 );
 ```
 
-`path_key` is normalized for case-insensitive conflict detection. `source_event_*` records the event coordinates that produced the active namespace entry so same-path/different-remote conflicts can be reconciled deterministically across pull windows.
+`path_key` is normalized for case-insensitive conflict detection. `source_event_*` records the event coordinates that produced the active namespace entry so same-path/different-remote conflicts can be reconciled deterministically across pull windows. Current storage still defaults `materialization_policy` to `lazy`; the `EAGER-*` workstream should migrate the default/created rows to `eager` while retaining `lazy` as a future opt-out for StrapFS/manual workflows.
 
 ### git_repos
 
@@ -181,7 +181,7 @@ CREATE TABLE device_gitstate (
 );
 ```
 
-(migration `00008_gitstate_mirror.sql`.) `sync_cursors`, `event_delivery`, `device_sync_state`, and `jobs` are defined but **not yet wired** — `sync` replays full history from HLC 0 (`ARCH2-02`, `DATA-02`); either wire cursor-based resume or mark them deferred.
+Status: planned. No `device_gitstate` migration exists yet as of 2026-06-28; add it as `00008_gitstate_mirror.sql` when the Layer A working-state validation plane lands. `sync_cursors`, `event_delivery`, `device_sync_state`, and `jobs` are defined but **not yet wired** — `sync` replays full history from HLC 0 (`ARCH2-02`, `DATA-02`); either wire cursor-based resume or mark them deferred.
 
 ### env_profiles
 
@@ -208,6 +208,7 @@ CREATE TABLE secret_bindings (
   provider_ref TEXT,
   encrypted_value_ref TEXT,
   required INTEGER NOT NULL DEFAULT 1,
+  needs_rotation INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(env_profile_id, var_name),
@@ -455,6 +456,7 @@ internal/state/migrations/
   00004_device_signing_keys.sql
   00005_namespace_active_index.sql
   00006_workspace_singleton.sql
+  00007_secret_binding_rotation.sql
 ```
 
 CLI:
@@ -474,6 +476,7 @@ internal/state/migrations/00003_namespace_source_events.sql
 internal/state/migrations/00004_device_signing_keys.sql
 internal/state/migrations/00005_namespace_active_index.sql
 internal/state/migrations/00006_workspace_singleton.sql
+internal/state/migrations/00007_secret_binding_rotation.sql
 ```
 
 Migrations can be applied by `devstrap init` or explicitly with `devstrap db migrate`.
@@ -501,7 +504,7 @@ devstrap export --encrypted --output devstrap-snapshot.tar.age
 - the **event log** (the signed, HLC-ordered namespace map), resumed via the `sync_cursors` / `event_delivery` shape above;
 - the **content-addressed encrypted blob store** (env + non-git/draft bundles), indexed locally by `blobs`.
 
-The chosen (`HUB-*`) production backend is **Cloudflare R2** (S3-compatible API, zero egress), keyed under a per-workspace prefix so each tenant's objects are namespaced by `workspace_id` (e.g. `s3://<bucket>/<workspace_id>/events/...` and `.../blobs/<sha256>`). Because all payloads are age-encrypted client-side and the map is signed, the backend stores only ciphertext plus a signed map and cannot read code, secrets, or drafts — tenant isolation by construction. A **file-backed local backend remains only for tests** (`devstrap sync --hub-file <path>`); there is no NAS-first phase. Repo content never transits the hub — it rides git's own transport via blobless clone/fetch from each repo's existing remote. Hub connection settings (backend kind, bucket, region/endpoint, workspace prefix) are configuration, not schema, and never include plaintext credentials in `state.db`.
+The chosen (`HUB-*`) production backend is **Cloudflare R2** (S3-compatible API, zero egress), keyed under a per-workspace prefix so each workspace's objects are namespaced by `workspace_id` (e.g. `s3://<bucket>/workspaces/<workspace_id>/events/...` and `.../blobs/<sha256>`). Because all payloads are age-encrypted client-side and the map is signed, the backend stores only ciphertext plus a signed map and cannot read code, secrets, or drafts. This gives confidentiality by construction; integrity and availability still require scoped credentials, signed hash-chain verification, snapshots/backups, and retention rules. A **file-backed local backend remains only for tests** (`devstrap sync --hub-file <path>`); there is no NAS-first phase. Repo content never transits the hub — it rides git's own transport via blobless clone/fetch from each repo's existing remote. Hub connection settings (backend kind, bucket, region/endpoint, workspace prefix) are configuration, not schema, and never include plaintext credentials in `state.db`.
 
 ## Audit implementation notes (2026-06-28)
 

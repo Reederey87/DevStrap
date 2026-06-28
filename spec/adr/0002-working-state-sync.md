@@ -21,7 +21,7 @@ The Git project's own FAQ is categorical: no part of a repository may be live-sy
 
 ## Consequences
 
-- New events `repo.gitstate.observed` and `repo.wip.pushed`; new `device_gitstate` table (migration `00008`); new `gitstate`/`wip` CLI commands; reserved `refs/devstrap/wip/*` namespace.
+- New events `repo.gitstate.observed` and `repo.wip.pushed`; planned `device_gitstate` sidecar table (future migration `00008_gitstate_mirror.sql`, not present as of 2026-06-28); new `gitstate`/`wip` CLI commands; reserved `refs/devstrap/wip/*` namespace.
 - A test must assert the fresh-worktree resolver refuses any `refs/devstrap/wip/*` base.
 - Layer A alone is a "smoke detector, not fire brigade" — it must ship together with (or quickly before) Layer B, and must surface staleness explicitly.
 - Remote snapshots are attributed-but-unverified until Phase-2 device enrollment; flag clearly.

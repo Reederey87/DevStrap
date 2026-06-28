@@ -16,6 +16,7 @@ tracks_code: [cmd/**, internal/cli/**, internal/platform/**]
 ## Command groups
 
 ```text
+Implemented:
 devstrap init
 devstrap version
 devstrap scan
@@ -26,23 +27,32 @@ devstrap open
 devstrap hydrate
 devstrap add
 devstrap env
+devstrap run
 devstrap worktree
 devstrap agent
 devstrap devices
+devstrap conflicts
 devstrap doctor
+
+Planned:
 devstrap ignore
 devstrap daemon
 devstrap hub
 devstrap export
+devstrap materialize
+devstrap run-loop
+devstrap promote
+devstrap gitstate
+devstrap wip
 ```
 
 ## Initial commands
 
-Current repository status as of `2026-06-25`:
+Current repository status as of `2026-06-28`:
 
 ```text
-Implemented: devstrap init, scan, add, hydrate, open, sync --hub-file, worktree new/status/finalize/list/remove/cleanup, env capture/hydrate/bind, run, agent run/list/show/pr, devices list/approve/revoke/lost/rename, status, doctor, version, db migrate/status/backup/down
-Planned: production sync hub, env check, OS-enforced agent sandboxing, automatic remote device enrollment/fingerprint confirmation, daemon, export
+Implemented: devstrap init, version, scan, add, hydrate, open, sync --hub-file, status, doctor, conflicts, db migrate/status/backup/down, env capture/hydrate/bind, run, worktree new/status/finalize/list/remove/cleanup/unlock, agent run/list/show/pr, devices enroll/list/approve/revoke/lost/rename
+Planned: production R2/S3 sync hub, materialize, run-loop, ignore compiler, env check, OS-enforced agent sandboxing, automatic remote device enrollment/fingerprint confirmation, daemon/socket API, export, promote, gitstate, wip
 ```
 
 ### init
@@ -143,12 +153,19 @@ devstrap sync --hub-file ~/.devstrap/test-hub/events.json
 devstrap sync --hub-s3 devstrap-hub                  # planned: one bucket, tenants separated by key prefix
 ```
 
-Does:
+Current implementation does:
 
 - push local events;
 - pull remote events;
+- apply namespace events idempotently;
+- support `--namespace-only` and `--dry-run`;
+- leave filesystem materialization/fetch reconciliation unimplemented.
+
+Planned `EAGER-*` behavior adds:
+
 - reconcile skeletons;
-- fetch repos if policy allows;
+- fetch or blobless-clone repos if policy allows;
+- hydrate env/draft blobs;
 - never overwrite dirty worktrees.
 
 Options:
@@ -248,7 +265,7 @@ devstrap agent pr arun_01jz...
 devstrap agent cleanup --merged
 ```
 
-Current implementation supports `agent run/list/show/pr`. `agent run` creates a fresh upstream worktree, runs an explicit generic command with a sanitized no-secret default environment, applies wrapper-level command and file path policy (`readonly`, `cautious`, `guarded`, or explicit `yolo-local`), records the run in SQLite, captures a `0600` log, and stores a Git status/diff summary. The file path policy denies explicit sensitive-path and outside-worktree references for non-`yolo-local` runs; it is a preflight wrapper policy, not an OS sandbox. `agent pr` refuses stale recorded bases unless `--allow-stale-base` is passed, pushes the agent branch, and calls `gh pr create`; `--dry-run` reports the planned PR without pushing. Non-generic engines, project-env allowlists, OS-enforced sandboxing, and `agent cleanup` remain future work.
+Current implementation supports `agent run/list/show/pr`. `agent run` creates a fresh upstream worktree, runs an explicit generic command with a sanitized no-secret default environment, applies wrapper-level command and file path policy (`readonly`, `cautious`, `guarded`, or explicit `yolo-local`), records the run in SQLite, captures a `0600` log, and stores a Git status/diff summary. The file path policy denies explicit sensitive-path and outside-worktree references for non-`yolo-local` runs; it is a preflight wrapper policy, not an OS sandbox. `agent pr` refuses stale recorded bases unless `--allow-stale-base` is passed, pushes the agent branch, and creates a PR/MR through the detected forge CLI (`gh`/`glab`/`tea`) when available; unsupported forges get the pushed branch and compare URL instead of a failed hardcoded GitHub path. `--dry-run` reports the planned PR without pushing. Non-generic engines, project-env allowlists, OS-enforced sandboxing, `agent cleanup`, self-hosted forge overrides, and forge-specific `doctor` probes remain future work.
 
 ## Device commands
 

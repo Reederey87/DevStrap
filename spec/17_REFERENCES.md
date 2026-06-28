@@ -167,13 +167,18 @@ These sources back the cloud-sync architecture cycle: the "Dropbox experience fo
 ### Object storage backends (pluggable Hub blob store)
 
 - Cloudflare R2 — chosen from the start: S3-compatible API, zero egress fees, namespaced by `workspace_id`: https://developers.cloudflare.com/r2/ ; pricing/egress: https://developers.cloudflare.com/r2/pricing/
+- Cloudflare R2 consistency and S3 compatibility — strong global consistency for object writes/listing; conditional puts and paged listing are available, but append-only semantics are a DevStrap object-key/hash-chain responsibility: https://developers.cloudflare.com/r2/reference/consistency/ ; https://developers.cloudflare.com/r2/api/s3/api/
+- Cloudflare R2 temporary credentials — hosted clients/runners should receive short-lived bucket/prefix/operation-scoped credentials instead of bucket-wide long-lived keys: https://developers.cloudflare.com/r2/api/s3/temporary-credentials/
+- Cloudflare R2 data location and jurisdictions — bucket location/jurisdiction is a provisioning decision and may not be changeable later: https://developers.cloudflare.com/r2/reference/data-location/
+- Tigris — Fly-native S3-compatible object storage alternative with zero egress/global placement tradeoffs: https://www.tigrisdata.com/pricing/ ; https://fly.io/docs/tigris/
 - Backblaze B2 (S3-compatible): https://www.backblaze.com/docs/cloud-storage-s3-compatible-api
 - Amazon S3 API reference: https://docs.aws.amazon.com/AmazonS3/latest/API/Welcome.html
 - MinIO (self-hostable, S3-compatible; useful for a non-cloud Hub backend): https://min.io/docs/minio/linux/index.html
 
 ### Agent-runner sandboxes (microVM isolation for the future control plane)
 
-- Fly Machines — chosen compute: Firecracker microVMs, many regions, scale-to-zero/suspend-resume, runs the Go binary natively: https://fly.io/docs/machines/ ; https://fly.io/
+- Fly Machines — chosen compute: Firecracker microVMs, global regions, scale-to-zero/suspend-resume, runs the Go binary natively: https://fly.io/docs/machines/ ; regions: https://fly.io/docs/reference/regions/ ; pricing: https://fly.io/docs/about/pricing/
+- Fly app secrets and suspend/resume — app-wide secrets are injected into Machines; runner apps must receive only per-task scoped credentials, and destroy-after-task is safer than suspending untrusted tasks with memory state: https://fly.io/docs/apps/secrets/ ; https://fly.io/docs/reference/suspend-resume/
 - E2B — self-hostable microVM agent sandboxes (runner escape-hatch): https://e2b.dev/docs
 - Modal sandboxes: https://modal.com/docs/guide/sandbox
 - Daytona dev-environment runtime: https://www.daytona.io/docs/
@@ -186,5 +191,8 @@ These sources back the cloud-sync architecture cycle: the "Dropbox experience fo
 - Control plane vs. application/data plane split: https://docs.aws.amazon.com/whitepapers/latest/saas-architecture-fundamentals/control-plane-vs.-application-plane.html
 - SaaS tenant-isolation strategies (pooled → siloed/dedicated → BYOC tenancy spectrum): https://docs.aws.amazon.com/whitepapers/latest/saas-tenant-isolation-strategies/saas-tenant-isolation-strategies.html
 - Cell-based architecture (reducing scope of impact): https://docs.aws.amazon.com/wellarchitected/latest/reducing-scope-of-impact-with-cell-based-architecture/reducing-scope-of-impact-with-cell-based-architecture.html
-- Managed Postgres options for the control-plane DB: https://neon.tech/docs ; https://supabase.com/docs/guides/database
+- Managed Postgres options for the control-plane DB: Neon pricing/plans/scale-to-zero/connection pooling (`pooled` runtime DSN vs direct migration/admin DSN): https://neon.com/pricing ; https://neon.com/docs/introduction/plans ; https://neon.com/docs/introduction/scale-to-zero ; https://neon.com/docs/connect/connection-pooling
+- Supabase managed Postgres/BaaS alternative: https://supabase.com/pricing ; https://supabase.com/docs/guides/database
+- Render and Railway app-hosting alternatives for simpler trusted deployments: https://render.com/pricing ; https://railway.com/pricing
+- Cloudflare Workers/Durable Objects/D1 + R2 alternative for a future serverless edge control/hub layer if the project accepts a non-Go edge runtime: https://developers.cloudflare.com/workers/platform/pricing/ ; https://developers.cloudflare.com/durable-objects/platform/pricing/ ; https://developers.cloudflare.com/d1/platform/pricing/
 - Full per-finding sources: `AUDIT_RECOMMENDATIONS_2026-06-28.md`.

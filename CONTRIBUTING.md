@@ -9,8 +9,9 @@ By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 - Read `spec/00_START_HERE.md` and the relevant spec before changing behavior.
 - **External contributors:** fork the repository, create a topic branch, and open a pull request against `main`.
 - **Maintainers:** create a topic branch from the fetched `origin/main` (never a local branch) and open a pull request against `main`.
-- `main` is protected: pull requests require green CI, an approving review, CODEOWNERS review, resolved conversations, and linear history; direct pushes, force-pushes, and deletions are blocked.
-- Do not commit directly to `main`. A maintainer reviews and squash-merges PRs once CI is green; the head branch is deleted automatically.
+- `main` is protected: pull requests require green CI, resolved conversations, and linear history; direct pushes, force-pushes, and deletions are blocked.
+- CODEOWNERS is advisory while DevStrap is solo-maintained. It should still request relevant review, but 1 approving review plus required CODEOWNERS review are not branch-gated until a second active maintainer with write access exists.
+- Do not commit directly to `main`. A maintainer reviews external-contributor PRs and squash-merges once CI is green; maintainer-authored PRs may be squash-merged by the maintainer after green CI. The head branch is deleted automatically.
 
 ## Local Checks
 
