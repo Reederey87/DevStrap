@@ -1,0 +1,26 @@
+# End-to-end CLI loop exercised through the real binary: argv parsing,
+# cli.Execute, and the os.Exit/ExitCode contract.
+
+env DEVSTRAP_HOME=$WORK/home
+env DEVSTRAP_ROOT=$WORK/Code
+# Force the file-backed key store so init does not block on an OS keychain
+# unlock prompt in this headless subprocess.
+env DEVSTRAP_NO_KEYCHAIN=1
+
+# status before init must fail with a clear message and a non-zero exit code.
+! exec devstrap status
+stderr 'workspace is not initialized'
+
+# init succeeds, then status --json reports a valid, empty workspace.
+exec devstrap init $WORK/Code
+exec devstrap status --json
+stdout '"project_count": 0'
+stdout '"device_id"'
+
+# version always works and prints a version line.
+exec devstrap version
+stdout 'devstrap'
+
+# doctor reports prerequisites and no held locks after a clean init.
+exec devstrap doctor
+stdout 'repo locks: none held'

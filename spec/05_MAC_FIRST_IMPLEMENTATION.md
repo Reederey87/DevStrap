@@ -1,3 +1,7 @@
+---
+last_reviewed: 2026-06-28
+tracks_code: [internal/platform/**, internal/cli/open.go, .github/**]
+---
 # Mac-First Implementation Guide
 
 ## Goal
@@ -12,7 +16,7 @@ Daemon:     ~/Library/LaunchAgents/com.devstrap.devstrapd.plist
 State:      ~/.devstrap/state.db
 Socket:     ~/.devstrap/devstrapd.sock
 Managed:    ~/Code
-Watcher:    FSEvents through fsnotify/native adapter
+Watcher:    fsnotify/kqueue now; native FSEvents target
 Secrets:    macOS Keychain + external CLI providers
 ```
 
@@ -42,7 +46,7 @@ LaunchDaemon is only needed later if you need system-wide service behavior befor
 
   <key>ProgramArguments</key>
   <array>
-    <string>/opt/homebrew/bin/devstrapd</string>
+    <string>{{ .ExecutablePath }}</string>
     <string>serve</string>
   </array>
 
@@ -50,13 +54,21 @@ LaunchDaemon is only needed later if you need system-wide service behavior befor
   <true/>
 
   <key>KeepAlive</key>
-  <true/>
+  <dict>
+    <key>Crashed</key>
+    <true/>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
 
   <key>StandardOutPath</key>
-  <string>/Users/USER/.devstrap/logs/devstrapd.out.log</string>
+  <string>{{ .Home }}/.devstrap/logs/devstrapd.out.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/Users/USER/.devstrap/logs/devstrapd.err.log</string>
+  <string>{{ .Home }}/.devstrap/logs/devstrapd.err.log</string>
 </dict>
 </plist>
 ```
@@ -64,23 +76,20 @@ LaunchDaemon is only needed later if you need system-wide service behavior befor
 Install command:
 
 ```bash
-mkdir -p ~/Library/LaunchAgents ~/.devstrap/logs
-cp com.devstrap.devstrapd.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.devstrap.devstrapd.plist
-launchctl enable gui/$(id -u)/com.devstrap.devstrapd
-launchctl kickstart -k gui/$(id -u)/com.devstrap.devstrapd
+devstrap daemon install
 ```
 
 Uninstall command:
 
 ```bash
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.devstrap.devstrapd.plist
-rm ~/Library/LaunchAgents/com.devstrap.devstrapd.plist
+devstrap daemon uninstall
 ```
+
+The installer renders the plist with Go `text/template` using `os.UserHomeDir()` and `os.Executable()`. Do not hardcode `/Users/USER`, `~`, or Homebrew paths; launchd does not expand them in plist fields. `devstrapd serve` runs in the foreground under launchd and never self-daemonizes.
 
 ## Filesystem watcher
 
-Use a Go watcher abstraction for MVP. Prefer a native FSEvents-backed Mac adapter when reliable recursive tree semantics matter. `fsnotify` is still useful as a cross-platform interface and already supports Linux inotify, but its macOS backend is kqueue rather than FSEvents, so the spec must not rely on fsnotify alone for FSEvents behavior.
+Use a Go watcher abstraction for MVP. The current Darwin adapter uses fsnotify/kqueue and debounces bursts into reconciliation hints. Prefer a native FSEvents-backed Mac adapter later when reliable recursive tree semantics matter. `fsnotify` is useful as the current cross-platform adapter and already supports Linux inotify, but its macOS backend is kqueue rather than FSEvents, so the spec must not rely on fsnotify alone for FSEvents behavior.
 
 Important implementation rule:
 
@@ -102,6 +111,8 @@ Therefore:
 Watcher event → enqueue reconciliation job
 Periodic scan → validate actual state
 ```
+
+Watcher events are debounced and batched before enqueueing reconciliation. The current fsnotify adapter defaults to a 250 ms debounce with a 2 s maximum latency and skips `.git`, `node_modules`, `.devstrap`, and `vendor` trees. The ignore compiler should feed richer watcher exclusions later so `.venv`, `dist`, `build`, and other generated trees do not exhaust watcher budgets or trigger hydration storms.
 
 ## Reconciler behavior
 
@@ -203,7 +214,8 @@ Future:
 
 For device identity and personal encryption keys:
 
-- store device private key in macOS Keychain;
+- target: store device private key in macOS Keychain;
+- current CLI foundation: store private age and Ed25519 signing identities through the platform keychain adapter, using macOS Keychain when available and `~/.devstrap/keys` with mode `0600` as a fallback, while persisting only public keys in SQLite;
 - store encrypted env bundles in Hub/local cache;
 - decrypt only on approved device;
 - never log secret values.
@@ -247,7 +259,7 @@ Reasons:
 - requires Mac app/extension architecture;
 - better suited to cloud-file-provider semantics;
 - more difficult to map to Git-aware repo hydration;
-- not needed to solve stale main, env, worktree, and path problems.
+- not needed to solve stale default branch, env, worktree, and path problems.
 
 Possible later use:
 
@@ -305,7 +317,17 @@ Production distribution should include:
 - Daemon recreates skeleton folders from namespace state.
 - Scanner adopts existing Git repos.
 - `devstrap open <path> --cursor` hydrates and opens repo.
-- `devstrap worktree new <path> --fresh-main` fetches origin and creates worktree from remote SHA.
-- Env capture/hydrate works with encrypted local store.
+- `devstrap worktree new <path> --fresh-upstream` fetches origin and creates worktree from remote SHA.
+- Env capture/hydrate now stores and restores encrypted local blobs, provider ref hydration delegates to `op inject`, and runtime injection delegates encrypted profiles or 1Password refs through `devstrap run`.
 - Dirty repos are detected and not overwritten.
 - Logs are readable under `~/.devstrap/logs`.
+
+## Audit follow-ups (2026-06-27)
+
+Platform findings (`PLAT-*`, from `AUDIT_RECOMMENDATIONS_2026-06-27.md`):
+
+- **Watcher exclusion diverges from the scanner prune list (`PLAT-01`):** the fsnotify watcher would recursively register watches inside `.venv`/`dist`/`build`/`target`/`__pycache__`. Unify on the single `spec/11` ignore compiler.
+- **No ENOSPC/EMFILE handling (`PLAT-02`):** the watcher treats every Add/Errors failure as fatal with no fallback; add degraded polling + periodic reconciliation.
+- **Watcher/PollWatcher unwired; no periodic reconciliation backstop (`PLAT-03`).**
+- **No Chmod-only / OS-junk event filtering (`PLAT-04`).**
+- **`ServiceSpec` seam too thin to render the launchd plist (`PLAT-05`);** flesh out the adapter so installers can be generated. A native FSEvents watcher remains a follow-up.

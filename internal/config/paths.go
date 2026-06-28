@@ -28,3 +28,7 @@ func (p Paths) StateDB() string {
 func (p Paths) LogDir() string {
 	return filepath.Join(p.Home, "logs")
 }
+
+func (p Paths) KeyDir() string {
+	return filepath.Join(p.Home, "keys")
+}

@@ -1,3 +1,7 @@
+---
+last_reviewed: 2026-06-28
+tracks_code: [cmd/**, internal/**, spec/**]
+---
 # Architecture Decision: Mac-First Managed Code Namespace
 
 ## Decision
@@ -77,10 +81,10 @@ DevStrap does **not** own:
 The user pain is not only remote file sync. It is:
 
 - inconsistent project paths;
-- stale branches;
+- stale local default branches;
 - missing env variables;
 - scattered worktrees;
-- agent work starting from stale main;
+- agent work starting from stale local default branches;
 - different machines having different readiness states.
 
 A managed namespace + daemon solves those without waiting for a kernel/filesystem-level implementation.
@@ -124,7 +128,9 @@ Problems:
 - OS-specific native dependencies differ;
 - `.env` files expose secrets;
 - generated folders explode sync volume;
-- stale main and bad agent worktrees remain unsolved.
+- stale local default branches and bad agent worktrees remain unsolved.
+
+The legitimate need behind this idea — "I forgot to push and I'm now on another machine" — is real and is the core product promise, but it is served **git-natively, never by live-syncing `.git`**: a signed read-only git-state **validation plane** (so every machine knows where every other machine's working tree stands), plus auto-**WIP pushes** to a reserved `refs/devstrap/wip/*` ref namespace over git's own integrity-checked transport, plus encrypted **draft bundles** for non-git folders. The git project's own guidance is that no part of a repository may be live-synced by a file-sync engine (torn `.git/index`, conflict-copied refs, `gc`-pruned objects = data loss). Continuous working-tree file-sync (Mutagen/Syncthing-style) is therefore **explicitly rejected**; see `07_NAMESPACE_AND_SYNC_MODEL.md` (working-state plane) and `04_CHALLENGE_MATRIX.md`.
 
 ### Alternative B — Another manifest Git repo
 
@@ -150,24 +156,39 @@ Rejected for product feel, acceptable for Phase 0.
 
 A CLI-only tool is useful but will not feel like Dropbox. The daemon is needed to notice new projects, reconcile state, create skeletons, and sync across machines.
 
+### Alternative F — Reuse an existing sync substrate (Syncthing/Mutagen) or a hidden manifest Git repo for namespace + blob transport
+
+Deferred, **gated** — not foreclosed.
+
+Instead of hand-rolling `devstraphub` (HLC + content-hash chain + Ed25519 signatures + HTTP/SSE), the namespace event log and encrypted blobs could ride an existing local-first sync engine, or a hidden manifest Git repo (Alternative B as a transport adapter). This is the strongest argument *against* building the bespoke sync stack, and it must be re-evaluated at the M7 entry gate in `14_MVP_ROADMAP_AND_BACKLOG.md` (which already concedes "a hidden manifest git repo may substitute for a bespoke service"). Adopting F would retire much of the bespoke `internal/sync` surface.
+
+Rejected only as the *default*, because a thin zero-knowledge hub gives end-to-end encryption (age, per-device recipients) and signed-event integrity guarantees that a generic file-sync engine does not, and because the bespoke hub is forge-agnostic by construction. The decision is contingent on a real two-machine drift signal, not assumed.
+
+### Alternative G — devcontainer/DevPod-style committed config as the cross-device source of truth
+
+Deferred.
+
+A committed per-repo config could define the portable workspace, letting existing tools (DevPod, devcontainers) reconstruct environments instead of a custom namespace + hub. Rejected as the *primary* model because it is per-repo rather than a cross-repo `~/Code` namespace, and does not address local-only/draft folders, secrets hydration, or the fresh-worktree agent invariant. Worth borrowing from for the per-project env/tooling descriptor.
+
 ## Final recommendation
 
 Build in this order:
 
 ```text
 1. CLI proof: scan, adopt, hydrate, open, worktree, env.
-2. Local daemon: watcher, reconciler, skeletons, LaunchAgent.
-3. Multi-device hub: event sync, device status, encrypted blobs.
-4. Agent workspaces: branch/worktree per task, policy, logs, PR.
+2. Thin agent runner: branch/worktree per task, scoped env, logs, diff summary, PR gate.
+3. Local daemon: watcher, reconciler, skeletons, LaunchAgent.
+4. Multi-device hub: event sync, device status, encrypted blobs.
 5. StrapFS: optional virtual filesystem layer.
 ```
 
 ## Non-negotiable architecture rules
 
-1. **Never branch agents from local main.** Always fetch and branch from `origin/main` or configured upstream ref.
+1. **Never branch agents from a local default branch.** Always resolve the remote default branch, fetch it, and branch from `origin/<default_branch>` or an explicitly configured upstream ref.
 2. **Never sync plaintext secrets by default.** Use secret references or encrypted bundles.
 3. **Never sync dependency folders.** Recreate `.venv`, `node_modules`, build output locally.
 4. **Never silently overwrite dirty worktrees.** Detect, warn, branch, stash, or skip.
 5. **Always maintain one canonical project path.** The namespace path is the product.
 6. **Keep platform-specific code behind adapters.** Mac and Linux should share the core.
-
+7. **Keep the human working-state plane separate from the agent plane.** Cross-machine "forgot to push" recovery lives under the reserved `refs/devstrap/wip/*` ref namespace and encrypted draft bundles; the fresh-worktree base resolver must never read them. Validation (read-only git-state) and recovery (WIP refs) are human-convenience; agents always base from `origin/<default_branch>`.
+8. **Treat the hub as semi-trusted.** It transports opaque, signed, end-to-end-encrypted payloads; it never sees plaintext code/secrets and is never trusted to order or authenticate events.

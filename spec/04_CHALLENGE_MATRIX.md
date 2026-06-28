@@ -1,3 +1,7 @@
+---
+last_reviewed: 2026-06-28
+tracks_code: [cmd/**, internal/**]
+---
 # Challenge Matrix and Viable Approaches
 
 This document lists the hard problems and practical ways to solve each one.
@@ -40,29 +44,30 @@ Important constraint:
 
 - IDE indexers can accidentally trigger hydration of many repos. Lazy-on-access needs hydration thresholds and indexer detection.
 
-## 3. Stale main before agent work
+## 3. Stale default branch before agent work
 
-Problem: agent worktrees are created from outdated local main.
+Problem: agent worktrees are created from outdated local default branch.
 
 Recommended solution:
 
-- agent/worktree commands never branch from local main;
+- agent/worktree commands never branch from local default branch;
 - always `git fetch origin <default_branch> --prune` first;
-- resolve `origin/main` SHA;
+- resolve `origin/<default_branch>` SHA;
 - create worktree from that SHA;
 - record `base_ref` and `base_sha`.
 
 Command pattern:
 
 ```bash
-git fetch origin main --prune
-BASE=$(git rev-parse origin/main)
+DEFAULT=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@')
+git fetch origin "$DEFAULT" --prune
+BASE=$(git rev-parse "origin/$DEFAULT")
 git worktree add ~/.devstrap/worktrees/repo/task -b agent/task "$BASE"
 ```
 
 Extra protection:
 
-- before PR, check whether origin/main moved;
+- before PR, check whether origin/<default_branch> moved;
 - warn or auto-rebase;
 - never auto-push without showing diff/test result.
 
@@ -118,14 +123,44 @@ Docker: docker compose pull/build
 
 ## 6. Git repo corruption from raw file sync
 
-Problem: generic sync can conflict `.git/index`, lock files, packs, and refs.
+Problem: generic sync can conflict `.git/index`, lock files, packs, and refs. This is not theoretical — the Git project's own FAQ states no part of a repository may be live-synced by a file-sync engine; the failure modes include torn `.git/index`, conflict-copied refs (`refs/heads/main 2`), and **`gc`-pruned unreferenced objects = permanent data loss**.
 
 Recommended solution:
 
-- DevStrap never syncs hydrated Git working tree bytes across devices;
+- DevStrap never syncs hydrated Git working tree bytes or `.git` internals across devices;
 - Git remote is the source of truth;
-- DevStrap syncs only namespace metadata and draft projects;
+- DevStrap syncs only namespace metadata and (planned) encrypted draft/working-state bundles;
 - worktree state is device-local unless committed/pushed.
+
+**Decision: continuous working-tree file-sync (Mutagen/Syncthing-style) is rejected** — it reintroduces this entire corruption class and violates the fresh-worktree-from-remote invariant. Do not relitigate.
+
+## 6b. "Forgot to push, now on another machine" (cross-machine working state)
+
+Problem: the user's real pain — uncommitted/unpushed work stranded on machine A while they sit at machine B — is the core "Dropbox for code" promise, but must be solved **without** live-syncing `.git`.
+
+Recommended solution — a git-native, three-layer human-convenience plane, strictly walled off from the agent plane (agents always base from `origin/<default_branch>`):
+
+- **Layer A — validation (Phase 0):** signed read-only `repo.gitstate.observed` snapshots (dirty/untracked/unmerged/ahead/behind/stash counts) so every device knows where every other device's tree stands; `status --all-devices`/`doctor` warn and always render snapshot age (never silent all-clear).
+- **Layer B — WIP recovery (Phase 1):** `git stash create` → push to `refs/devstrap/wip/<device>/<path_key>` over git's integrity-checked transport (forge-agnostic); machine B `wip apply` on demand, never as a branch/base.
+- **Layer C — encrypted bundle (Phase 3):** for non-git/draft folders only, via `draft.snapshot.created` + age encryption.
+
+See `07_NAMESPACE_AND_SYNC_MODEL.md` (working-state plane) and `AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 5.
+
+## 6c. Non-VCS / remote-less / multi-remote projects
+
+Problem: a real `~/Code` is full of folders with no remote (just `git init`), no git at all (scripts, assets, notebooks), or a non-`origin`/multi-remote setup. Today a no-remote repo is mis-adopted as a clonable `git_repo` and breaks hydration on every other device.
+
+Recommended solution:
+
+- classify a remote-less repo as `local_git` (never a clonable `git_repo`); enforce non-empty `remote_key` for `git_repo` in both `add` and `scan --adopt`;
+- emit `plain_folder` for structure-only dirs; sync local-only content via the encrypted bundle path (Layer C); add a `promote` command for `plain → draft/local_git → git_repo`;
+- preflight `worktree`/`agent` with a clear "requires a remote" error. See `AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 2 (`NOVCS-*`).
+
+## 6d. Non-GitHub forges
+
+Problem: clone/fetch/push are forge-neutral, but `agent pr` is hardcoded to `gh` and fails post-push on GitLab/Bitbucket/Gitea/self-hosted/Azure.
+
+Recommended solution: detect the forge from the `origin` host; route PR/MR creation through a `Forge` interface (`gh`/`glab`/`tea`) with a forge-aware token allowlist; fail gracefully (print branch + compare/MR URL) on unknown forges. See `AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 3 (`FORGE-*`).
 
 ## 7. Draft projects not in Git yet
 
@@ -415,4 +450,3 @@ Recommended solution:
 - never destructive by default;
 - quarantine deletes;
 - `devstrap doctor` and `devstrap explain <path>`.
-

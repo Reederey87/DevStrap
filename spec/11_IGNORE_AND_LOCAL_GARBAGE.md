@@ -1,3 +1,7 @@
+---
+last_reviewed: 2026-06-28
+tracks_code: [internal/scan/**, .gitignore]
+---
 # Ignore Rules and Local Garbage
 
 ## Problem
@@ -161,6 +165,21 @@ pnpm install
 cargo build
 ```
 
+## Scan scale rules
+
+`devstrap scan --adopt` must prune ignored and generated trees during the filesystem walk, not after collecting all paths.
+
+Rules:
+
+- never descend into `.git` internals, `node_modules`, `.venv`, `dist`, `build`, `target`, `.gradle`, or configured ignored directories;
+- bound parallelism to `GOMAXPROCS`;
+- batch namespace writes in one short `BEGIN IMMEDIATE` transaction per scan batch;
+- use mtime/inode markers for incremental rescans;
+- treat watcher events as hints and periodic scan as the source of truth;
+- benchmark against a large `~/Code` fixture and keep the first visible tree target under 5 minutes.
+
+Current implementation prunes the default generated directories before descent, warns on secret-looking filenames, reports symlink escapes, detects duplicate remotes, and has direct scanner coverage plus CLI integration coverage for generated-folder pruning during scan/adopt. Incremental mtime/inode markers, configured ignore files, parallel walking, and large benchmark fixtures remain future hardening work.
+
 ## Large artifact strategy
 
 Rules:
@@ -219,3 +238,6 @@ Loose:
 - less enforcement;
 - still block private keys by default.
 
+## Audit follow-ups (2026-06-27)
+
+**The single `.devstrapignore` compiler described here does not exist yet** (audit coverage gap). Prune/secret lists are hardcoded and divergent across three places — `internal/scan` (`shouldPruneDir`/`isSecretName`), the platform watcher, and the agent deny list — which is the root cause of `PLAT-01`, `PLAT-04`, and `AGEN-05`; OS junk (`.DS_Store`, `.AppleDouble`, `Thumbs.db`) is filtered nowhere. Build one canonical compiler that emits the `.gitignore` managed block, the draft-sync ignore set, the watcher exclusion set, and the agent denylist from a single source.

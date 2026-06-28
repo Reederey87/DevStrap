@@ -26,3 +26,8 @@ promt.md
 !.env.example
 !.env.template
 !.env.schema
+
+
+# Agents files
+CLAUDE.md
+AGENTS.md

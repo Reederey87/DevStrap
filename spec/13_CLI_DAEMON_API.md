@@ -1,3 +1,7 @@
+---
+last_reviewed: 2026-06-28
+tracks_code: [cmd/**, internal/cli/**, internal/platform/**]
+---
 # CLI and Daemon API
 
 ## CLI principles
@@ -13,8 +17,10 @@
 
 ```text
 devstrap init
+devstrap version
 devstrap scan
 devstrap status
+devstrap db
 devstrap sync
 devstrap open
 devstrap hydrate
@@ -32,11 +38,11 @@ devstrap export
 
 ## Initial commands
 
-Current repository status as of `2026-06-24`:
+Current repository status as of `2026-06-25`:
 
 ```text
-Implemented: devstrap init, devstrap status, devstrap doctor, devstrap version
-Planned: scan, sync, open, hydrate, add, env, worktree, agent, devices, daemon, hub, export
+Implemented: devstrap init, scan, add, hydrate, open, sync --hub-file, worktree new/status/finalize/list/remove/cleanup, env capture/hydrate/bind, run, agent run/list/show/pr, devices list/approve/revoke/lost/rename, status, doctor, version, db migrate/status/backup/down
+Planned: production sync hub, env check, OS-enforced agent sandboxing, automatic remote device enrollment/fingerprint confirmation, daemon, export
 ```
 
 ### init
@@ -58,9 +64,28 @@ Options:
 
 ```bash
 --workspace-name artem-main
---no-daemon
 --dry-run
 ```
+
+`init` normalizes the root to an absolute clean path, creates `~/.devstrap/config.yaml` with mode `0600` if missing, and does not overwrite an existing config file.
+
+### db
+
+```bash
+devstrap db migrate
+devstrap db status
+devstrap db backup ~/.devstrap/backups/state-20260624.db
+devstrap db down
+```
+
+Rules:
+
+- `migrate` applies all embedded Goose migrations;
+- `status` prints schema version, SQLite `quick_check`, and SQLite `foreign_key_check`;
+- `backup` uses `VACUUM INTO`, not file copy;
+- state DB and backups are mode `0600`.
+
+`doctor` reports schema version, SQLite `quick_check`, SQLite `foreign_key_check`, local age device-key health, and local Ed25519 signing-key health when the state database exists.
 
 ### scan
 
@@ -78,12 +103,27 @@ Detects:
 - env templates;
 - toolchains.
 
+Current implementation:
+
+- prunes generated folders before descent;
+- records secret-looking filename warnings but never file values;
+- only persists a discovered git remote after it passes validation, so an unvalidated/dangerous origin (e.g. `ext::`) is never stored for a later materialization step;
+- normalizes SSH, HTTPS, `ssh://`, absolute, and `file://` remotes;
+- `--adopt` writes namespace, git repo, draft project, and device project state rows;
+- escaping symlinks are hard-excluded (never adopted) and surfaced as conflict rows; dangling/IO symlink errors are advisory warnings only;
+- `--quarantine` moves secret-looking files out of the managed tree into a dated `~/.devstrap/quarantine/<YYYYMMDD>/` directory (mode `0600`) instead of leaving them in place.
+
 ### status
 
 ```bash
 devstrap status
-devstrap status --devices
 devstrap status --json
+```
+
+Current Phase-0 status shows workspace name, root path, project count, local device ID, and adopted project rows. Future daemon-backed status adds:
+
+```bash
+devstrap status --devices
 ```
 
 Example:
@@ -99,7 +139,7 @@ work/acme/data                  this       skeleton   mapped   unknown  not hydr
 ### sync
 
 ```bash
-devstrap sync
+devstrap sync --hub-file ~/.devstrap/test-hub/events.json
 ```
 
 Does:
@@ -119,6 +159,8 @@ Options:
 --dry-run
 ```
 
+Current implementation supports the file-backed test hub only. It requires `--hub-file`, pushes all local events, pulls hub events from the beginning, applies namespace events idempotently, supports `--namespace-only` and `--dry-run`, and reports that hydration/fetch reconciliation is not implemented yet.
+
 ### open
 
 ```bash
@@ -131,6 +173,8 @@ Does:
 - hydrate if skeleton;
 - validate env/tooling;
 - open editor.
+
+Current implementation hydrates if needed, refuses unknown namespace paths, checks that `cursor` or `code` exists, starts the editor without tying it to the CLI context, and releases the child process handle. Env/tooling validation is still future work.
 
 ### hydrate
 
@@ -147,10 +191,20 @@ Options:
 --no-bootstrap
 ```
 
+Current implementation uses partial clone by default, supports `--full` and `--lfs`, refuses to clone into non-empty non-skeleton directories, stages clones in hidden sibling temp directories, promotes only after clone success plus a second target validation, preserves the original skeleton on clone failure, and updates local materialization/dirty state.
+
 ### add
 
 ```bash
-devstrap add git@github.com:acme/api.git --path work/acme/api
+devstrap add git@github.com:acme/api.git --path work/acme/api --lfs-policy auto
+```
+
+Options:
+
+```bash
+--path
+--default-branch
+--lfs-policy auto|never|agent|always
 ```
 
 ## Env commands
@@ -159,37 +213,50 @@ devstrap add git@github.com:acme/api.git --path work/acme/api
 devstrap env capture work/acme/api .env
 devstrap env hydrate work/acme/api --write .env.local
 devstrap env check work/acme/api
-devstrap env bind work/acme/api --provider 1password --profile acme-dev
+devstrap env bind work/acme/api .env.refs --provider 1password --profile acme-dev
 devstrap run work/acme/api -- uv run pytest
 ```
+
+Current implementation supports `env capture`, `env hydrate`, `env bind`, and top-level `run`. Capture parses a local env file with a non-interpolating grammar, refuses dangerous names, rejects interpolation-looking values unless `--literal` is passed, encrypts the bundle to the local device age recipient, writes a `0600` age blob under `~/.devstrap/blobs`, stores only `age_blob:<sha256>` references in `secret_bindings`, and appends the captured file path to project `.gitignore` when possible. Hydrate decrypts the local age blob with the local device identity or resolves 1Password provider refs through `op inject`, writes only to an explicit `--write` target, creates the file atomically with mode `0600`, refuses to overwrite unless `--force` is passed, and appends the hydrated target to project `.gitignore` when possible. Bind stores 1Password `op://` provider refs without resolving plaintext. `run` injects encrypted profiles directly into the subprocess environment or delegates provider refs to `op run --env-file <temp-refs-file> -- <command>`.
 
 ## Worktree commands
 
 ```bash
-devstrap worktree new work/acme/api --fresh-main --name fix-tests
-devstrap worktree list work/acme/api
-devstrap worktree remove wt_01jz...
-devstrap worktree cleanup --merged
+devstrap worktree new work/acme/api --fresh-upstream --name fix-tests
+devstrap worktree status wt_01jz...
+devstrap worktree finalize wt_01jz... [--allow-stale-base]
+devstrap worktree list
+devstrap worktree remove wt_01jz... [--force]
+devstrap worktree cleanup --merged [--force]
+devstrap worktree unlock work/acme/api [--force]
 ```
+
+Current implementation requires `--fresh-upstream` for `worktree new`, fetches `origin/<default_branch>` before resolving the base SHA, writes a per-repo lock under `~/.devstrap/locks`, records worktree metadata, honors the stored LFS policy by either running `git lfs pull` or warning about pointer files, and refuses dirty worktree removal unless `--force` is explicit. `worktree remove --force` handles manually deleted worktree paths by running `git worktree prune` from the main checkout and marking the DB row removed. `worktree status <id>` re-fetches the recorded base ref and reports whether the worktree is fresh or stale. `worktree finalize <id>` reuses the same stale-base check and exits non-zero if the base moved unless `--allow-stale-base` is set. `cleanup --merged` removes clean, merged worktrees, prunes stale missing paths, reports a skipped count for unreadable or dirty worktrees, and only removes a merged-but-dirty worktree when `--force` is set. `worktree unlock <path>` reports the holder of a project's repo operation lock and clears it when the holder is dead/stale (or when `--force` is set), providing a recovery path after a crash; `doctor` also lists held locks. The default-branch resolution for `worktree new` confirms the remote default authoritatively via `git ls-remote --symref origin HEAD`, repairing a missing `origin/HEAD` with `git remote set-head origin --auto` and warning if the result is not authoritative.
 
 ## Agent commands
 
 ```bash
-devstrap agent run work/acme/api --engine cursor --task "fix failing tests"
+devstrap agent run work/acme/api --engine generic --task "fix failing tests" -- npm test
 devstrap agent list
 devstrap agent show arun_01jz...
 devstrap agent pr arun_01jz...
 devstrap agent cleanup --merged
 ```
 
+Current implementation supports `agent run/list/show/pr`. `agent run` creates a fresh upstream worktree, runs an explicit generic command with a sanitized no-secret default environment, applies wrapper-level command and file path policy (`readonly`, `cautious`, `guarded`, or explicit `yolo-local`), records the run in SQLite, captures a `0600` log, and stores a Git status/diff summary. The file path policy denies explicit sensitive-path and outside-worktree references for non-`yolo-local` runs; it is a preflight wrapper policy, not an OS sandbox. `agent pr` refuses stale recorded bases unless `--allow-stale-base` is passed, pushes the agent branch, and calls `gh pr create`; `--dry-run` reports the planned PR without pushing. Non-generic engines, project-env allowlists, OS-enforced sandboxing, and `agent cleanup` remain future work.
+
 ## Device commands
 
 ```bash
 devstrap devices list
+devstrap devices enroll dev_01jz... --name gmk-ubuntu --os linux --arch arm64 --age-recipient age1...
 devstrap devices approve dev_01jz...
 devstrap devices revoke dev_01jz...
+devstrap devices lost dev_01jz...
 devstrap devices rename dev_01jz... gmk-ubuntu
 ```
+
+Current implementation manually enrolls remote device records with age recipients, lists and renames device records, and updates non-local device trust state to `approved`, `revoked`, or `lost`. Env capture encrypts local bundles to the local recipient plus approved remote recipients. It refuses to change the current local device trust state so a user cannot revoke the only active local root by accident. Automatic remote enrollment, out-of-band fingerprint confirmation UX, and bundle re-encryption hooks remain future work.
 
 ## Doctor command
 
@@ -199,12 +266,16 @@ devstrap doctor
 
 Checks:
 
-- daemon running;
-- database accessible;
+- database existence and migration status;
+- SQLite `quick_check`;
+- local device age public/private identity match;
+- state-home permissions;
 - managed root exists;
 - Git installed;
-- SSH auth works;
+- Go installed;
 - GitHub CLI optional;
+- daemon running;            # future daemon phase
+- SSH auth works;            # future Git materialization phase
 - secret providers installed/authenticated;
 - ignored generated folders;
 - stale conflicts;
@@ -255,7 +326,26 @@ Example hydrate request:
 }
 ```
 
-Example status response:
+Current Phase-0 JSON status response. It includes the workspace name, root path, project count, the local `device_id`, and a `projects` array of adopted rows (each with id, path, path_key, type, materialization_policy, status, and the optional git/local fields remote_url, default_branch, materialization_state, dirty_state):
+
+```json
+{
+  "workspace_name": "personal",
+  "root_path": "/Users/me/Code",
+  "project_count": 1,
+  "device_id": "dev_01jz...",
+  "projects": [
+    {
+      "id": "prj_01jz...", "path": "work/acme/api", "path_key": "work/acme/api",
+      "type": "git_repo", "materialization_policy": "lazy", "status": "active",
+      "remote_url": "git@github.com:acme/api.git", "default_branch": "main",
+      "materialization_state": "available", "dirty_state": "clean"
+    }
+  ]
+}
+```
+
+Future project-level status response:
 
 ```json
 {
@@ -306,7 +396,11 @@ Rules:
 - redact secrets;
 - include job id;
 - include project path;
-- use structured JSON logs internally;
+- use `log/slog` with a single configured handler;
+- use a `ReplaceAttr` redaction choke point for secret-like attributes;
+- emit text logs for interactive TTY output and JSON logs for daemon/service files;
+- bind verbosity to `DEVSTRAP_LOG_LEVEL`, `--quiet`, and `--verbose`;
+- rotate and retain logs under `~/.devstrap/logs`;
 - human summaries in CLI.
 
 ## Exit codes
@@ -323,3 +417,36 @@ Rules:
 8 network/sync error
 9 policy violation
 ```
+
+## Audit follow-ups (2026-06-27)
+
+### CLI consistency (`CLI-01..04`)
+- `--json` is silently ignored by most commands and never applies to error output (`CLI-01`); route all machine-readable output (and errors) through one JSON path.
+- `scan --json --quarantine` interleaves human progress into the JSON stream, producing invalid JSON (`CLI-02`); send progress to stderr.
+- `run`/`agent run` collapse subprocess exit codes to a generic 1 (`CLI-03`); propagate the child's exit code.
+- Exit-code taxonomy is overloaded (`CLI-04`): usage errors and overwrite-conflicts both map to `exitInvalidConfig`, and Cobra arg errors map to 1. Disambiguate.
+
+### Daemon socket API (reserved for M5)
+The local Unix-socket API and job model are **design intent, not shipped** (`ARCH2-04`); `exitDaemonUnavailable=3` is reserved but never returned. The planned API still needs peer-credential checks / root rejection, message framing, and version negotiation (`CLI-05`).
+
+### Planned commands (not yet registered)
+Referenced by the new workstreams; intentionally absent from the live command tree the drift test checks until implemented:
+
+```text
+devstrap conflicts [--json]                            # inspect recorded conflicts (PROD-02)
+devstrap promote <path> --draft|--git-remote <url>     # plain -> draft -> git (NOVCS-03)
+devstrap gitstate capture [--fetch]                    # working-state validation plane (Section 5)
+devstrap status --all-devices                          # cross-device git-state view
+devstrap wip push|status|fetch|show|apply|drop <proj>  # WIP recovery (Phase 1)
+```
+
+PR creation becomes forge-agnostic (`gh`/`glab`/`tea`) with a `--forge` override (`FORGE-01`).
+
+## Audit implementation notes (2026-06-28)
+
+- **CLI-02**: `scan --quarantine` progress lines now go to stderr, preserving valid JSON on stdout.
+- **CLI-03**: `run` and `agent run` propagate child exit codes as `100+N` (new `childExitBase`).
+- **CLI-04**: Added `exitUsage = 10` for bad-flag/missing-flag/arg-count errors; `childExitBase = 100` for child process exit codes.
+- **PROD-01**: `deriveDisplayStatus` maps materialization+dirty states to user-facing labels; `status` output uses it.
+- **PROD-02**: New `devstrap conflicts` command lists open conflicts; `status` shows open-conflict count.
+- **ARCH2-04**: Reserved `exitDaemonUnavailable` code for M5 daemon.

@@ -1,4 +1,12 @@
-# DevStrap / Workspace Passport — Start Here
+---
+last_reviewed: 2026-06-28
+tracks_code: [cmd/**, internal/**, .github/**, AGENTS.md, README.md, go.mod, go.sum]
+---
+# DevStrap — Start Here
+
+> A second-pass design & implementation audit (2026-06-27) is recorded at the repo root in `AUDIT_RECOMMENDATIONS_2026-06-27.md`. It drives the new workstreams referenced throughout the specs: cross-machine working-state sync, non-VCS/remote-less project support, forge-agnostic PR creation, and the zero-knowledge sync hub.
+
+"Workspace Passport" is the core-concept tagline — the portable, managed code namespace that appears identically on every device — not a separate product name (see `spec/adr/0001-product-naming.md`).
 
 ## Selected architecture
 
@@ -14,6 +22,9 @@ A local daemon keeps the namespace consistent.
 Repos are skeletons until materialized.
 Secrets are referenced or encrypted, not blindly copied.
 Agents always get fresh worktrees from fetched remote refs.
+Local-only / remote-less folders are first-class, synced via encrypted bundles — never adopted as broken clonable git repos.
+The materialization layer is forge-agnostic (GitHub/GitLab/Bitbucket/Gitea/self-hosted); only PR/MR creation is forge-specific.
+"Forgot to push" is solved git-natively (git-state validation + WIP refs), never by file-sync; this human plane never feeds agent base resolution.
 ```
 
 This gives the Dropbox-like experience you want without starting with the hardest possible engineering problem: implementing a reliable cross-platform filesystem.
@@ -26,7 +37,7 @@ Point it at ~/Code.
 Authenticate Git + secrets.
 The same project tree appears.
 Opening a project hydrates it.
-Starting an agent creates a fresh, isolated worktree from origin/main.
+Starting an agent creates a fresh, isolated worktree from the fetched remote default branch.
 ```
 
 ## Why not FUSE or Apple File Provider first?
@@ -61,23 +72,26 @@ Phase 1: Mac daemon
   - Cursor/VS Code open commands
 
 Phase 2: Multi-device sync
-  - DevStrap Hub event log
-  - device registration
+  - DevStrap Hub event log (zero-knowledge HTTP/SSE; cursor=HLC; 410->snapshot)
+  - device registration (mTLS device certs, trust-state revocation)
   - namespace sync
-  - encrypted env/draft blobs
+  - encrypted env/draft blobs (content-addressed age_blob:<sha256>)
   - device status
+  - cross-machine working-state: git-state validation plane + WIP refs (refs/devstrap/wip/*)
 
 Phase 3: Agent workspaces
   - one branch/worktree per task
-  - fresh origin/main base
-  - command/file policy
-  - logs and PR workflow
+  - fresh remote-default base
+  - command/file policy (OS-enforced sandbox is a follow-up)
+  - logs and forge-agnostic PR/MR workflow (gh/glab/tea)
 
 Phase 4: Optional StrapFS
   - macOS: File Provider or macFUSE/FSKit evaluation
   - Linux: FUSE
   - Windows future: WinFsp
 ```
+
+**These phases describe capability layers, not the build order.** The actual, deliberately re-ordered sequencing — the thin agent runner ships *before* the daemon and hub — is canonical in `14_MVP_ROADMAP_AND_BACKLOG.md`; defer to it rather than reading the list above as a schedule. **Current position:** Phase 0 CLI and the Phase 3 agent loop are shipped; the Phase 1 daemon is gated; Phase 2 multi-device sync is a file-backed spike (`devstrap sync --hub-file`), not a production hub.
 
 ## Recommended implementation stack
 
@@ -100,30 +114,58 @@ Why Go: one portable binary, good process management, solid cross-platform files
 
 ## Current repository state
 
-Last validated: `2026-06-24`.
+Last validated: `2026-06-27`.
 
 Implemented in this repository:
 
 - Go module: `github.com/Reederey87/DevStrap`.
 - CLI entrypoint: `cmd/devstrap`.
-- Commands: `version`, `init`, `status`, `doctor`.
-- Local state package with embedded Goose SQLite migration.
-- Initial SQLite schema matching `12_DATA_MODEL_SQLITE.md`.
-- README, MIT license, `.gitignore`, GitHub Actions CI, and concise `AGENTS.md`.
+- Commands: `version`, `init`, `scan`, `add`, `hydrate`, `open`, `sync --hub-file`, `worktree new/status/finalize/list/remove/cleanup`, `env capture/hydrate/bind`, `run`, `agent run/list/show/pr`, `devices list/approve/revoke/lost/rename`, `status`, `doctor`, and `db migrate/status/backup/down`.
+- Structured `slog` setup with CLI/env log-level control, secret-key/value redaction helpers, and no whole-context log attributes.
+- Local state package with embedded Goose SQLite migrations.
+- SQLite open path with per-connection pragmas, WAL, busy timeout, asserted foreign-key enforcement, startup `foreign_key_check`, `0600` database mode, and single-writer pool.
+- Generated stable local `ws_<uuidv7>` workspace identity persisted during `init`, with a database-enforced singleton workspace invariant for the Phase 0 MVP.
+- Event-ordering schema for HLC, sync cursors, event delivery, hashes/signatures, tombstones, and namespace source-event metadata.
+- Generated stable local `dev_<uuidv7>` device identity persisted during `init`, plus age X25519 and Ed25519 signing identities whose public keys are stored in SQLite and whose private identities are kept out of SQLite/config in the OS keychain/Secret Service when available, falling back to `~/.devstrap/keys` with mode `0600` when the system keyring is unavailable.
+- Namespace path normalization with NFC display normalization, case-folded `path_key`, and unsafe path rejection.
+- Filesystem scan/adopt workflow with generated-folder pruning, secret-looking filename warnings, symlink escape warnings/conflicts, Git remote normalization, duplicate remote reporting, and project status rows.
+- Git add/hydrate/open workflow using skeleton directories, sibling temp-dir clone staging with atomic promotion after success, partial clone by default, configurable LFS policy, metadata-backed repo operation locks, git subprocess timeouts, prompt disabling, sanitized git environment, protocol allowlist, typed Git error classification with transient network retry for clone/fetch, and URL credential redaction in git errors.
+- Shared child-process environment sanitizer with explicit allowlists and non-overridable dangerous-name stripping, wired into Git subprocesses and editor launch.
+- Initial `internal/platform` adapter seams for watcher, service manager, keychain, and editor launch, with build-tagged platform detection, a polling watcher fallback for unsupported platforms, fsnotify-backed watcher adapters for Darwin/Linux with debounce/coalescing, explicit unsupported service/keychain placeholders, and `open` routed through the editor adapter.
+- Hardened `.env` parser plus `devstrap env capture/hydrate/bind` and `devstrap run` flows: capture refuses interpolation unless `--literal`, encrypts parsed values to the local age recipient, stores only `age_blob:<sha256>` refs in SQLite, writes `0600` ciphertext blobs, and gitignores captured env files; hydrate decrypts local encrypted blobs or resolves 1Password refs through `op inject`, writes the requested env file atomically with mode `0600`, refuses overwrites unless `--force`, and gitignores the hydrated target; bind stores 1Password `op://` refs without resolving plaintext; run injects encrypted profiles into subprocess env or delegates provider refs to `op run`.
+- Fresh upstream worktree creation that holds the repo operation lock, fetches `origin/<default_branch>`, resolves base SHA from the remote ref, honors stored LFS policy with pull-or-warn behavior, records worktree metadata, exposes `worktree status` stale-base detection, and gates `worktree finalize` on the recorded base unless `--allow-stale-base` is explicit.
+- Thin generic agent runner that creates a fresh worktree, runs explicit argv commands with a sanitized no-secret default environment and wrapper-level command/file path policy, captures a `0600` log, records `agent_runs`, summarizes Git status/diff, and gates `agent pr` on the recorded base before pushing/creating a GitHub PR.
+- Device trust-state CLI for listing, renaming, approving, revoking, and marking non-local devices lost, with refusal to revoke the current local device.
+- In-process/file-backed sync spike with mutex-protected HLC send/receive, persisted local HLC/sequence stamping, local event signatures, signed-event verification when the source signing key is known, logical-counter overflow handling, clock-skew rejection, append-only event helpers, HLC-gated project delete tombstones, deterministic replay ordering, duplicate event idempotency, and order-independent same-path/different-remote conflict reconciliation.
+- User-facing `devstrap sync --hub-file <path>` for the file-backed test hub; `add` and `scan --adopt` stamp local project events, sync pushes local events, pulls hub events, applies namespace events idempotently, and reports that hydration/fetch reconciliation remains future work.
+- Value-level secret redaction in `internal/redact` (a `Secret` capability type plus URL/userinfo stripping, a token-shape scrubber, and a line-buffering scrubbing writer) wired into sync event payloads, CLI error output, the persisted agent log, and slog attributes.
+- Scan boundary hardening: only validated remotes are persisted, escaping symlinks are typed and hard-excluded with use-time revalidation before materialization, and `scan --quarantine` isolates secret-looking files in a dated `0600` quarantine.
+- Authoritative default-branch resolution for fresh worktrees (`ls-remote --symref` with `set-head --auto` repair and a non-authoritative warning), `worktree cleanup --force`, `worktree unlock <path>`, and `doctor` repo-lock reporting.
+- Sync apply-path clock-skew quarantine, local-clock advance on receive, `project.renamed` handling, delete-vs-dirty conflicts, and tombstone GC; plus `secret_bindings.needs_rotation` flagging on device revoke/lost surfaced in `doctor`.
+- A `DEVSTRAP_NO_KEYCHAIN` gate forcing the file-backed key store for headless/CI runs.
+- Focused tests for `internal/cli`, `internal/config`, `internal/git`, `internal/logging`, `internal/pathkey`, `internal/redact`, `internal/scan`, `internal/specdrift`, `internal/sync`, and `internal/state`, plus a `rogpeppe/go-internal` testscript end-to-end harness exercising `cmd/devstrap` through the real binary.
+- Spec frontmatter and a Go-based `cmd/spec-drift` CI gate that maps changed code/config paths to tracked spec files and requires the work log on code/spec/doc changes, plus a command-doc drift test that keeps the spec command list in sync with the binary, and a product-naming ADR at `spec/adr/0001-product-naming.md`.
+- README, MIT license, `.gitignore`, GitHub Actions CI with separate spec-drift, test, and golangci-lint jobs, `CONTRIBUTING.md`, `SECURITY.md`, `CODEOWNERS`, Dependabot, issue/PR templates, and concise `AGENTS.md`.
 
 Not implemented yet:
 
-- scanner/adoption workflow;
-- Git hydration/open/worktree commands;
-- env capture/hydrate and encryption;
-- daemon, local socket API, watcher, LaunchAgent/systemd installers;
-- sync hub and encrypted blob exchange;
-- agent runner and policy enforcement.
+- synced encrypted env bundle exchange, production remote device registration, and out-of-band fingerprint confirmation;
+- daemon, local socket API, FSEvents-specific Mac watcher, LaunchAgent/systemd installers;
+- production sync hub, remote device registration/fingerprint UX, encrypted blob exchange, and real cross-root skeleton reconciliation;
+- OS-enforced agent sandboxing, project-env allowlists, and non-generic engine adapters;
+- cross-machine working-state sync — git-state validation plane (`repo.gitstate.observed`), WIP refs (`refs/devstrap/wip/*`), and encrypted working-tree bundles (audit Section 5);
+- non-VCS / remote-less / multi-remote project handling — `local_git`/`plain_folder` content sync; a no-remote repo is currently mis-adopted as a clonable `git_repo` (audit Section 2, `NOVCS-01`);
+- forge-agnostic PR/MR creation — `agent pr` is currently `gh`-only and fails post-push on non-GitHub remotes (audit Section 3, `FORGE-01`);
+- zero-knowledge sync hub — HTTP/SSE wire protocol, mTLS device certs, full-state snapshot exchange (audit Section 6).
 
 Local validation performed:
 
 ```bash
-go test ./...
+gofmt -w cmd internal
+golangci-lint run
+go run ./cmd/spec-drift --base origin/main --head HEAD
+GOCACHE=/tmp/devstrap-gocache go test ./...
+GOCACHE=/tmp/devstrap-gocache go test -race ./...
 ```
 
 The project intentionally remains Go-first. Node/npm can be added later as a packaging or installer channel if useful, but the runtime should stay Go.
@@ -137,9 +179,9 @@ devstrap init ~/Code
 devstrap scan ~/Code --adopt
 devstrap status
 devstrap open work/nclh/foc-models --cursor
-devstrap worktree new work/nclh/foc-models --fresh-main --name route-tests
+devstrap worktree new work/nclh/foc-models --fresh-upstream --name route-tests
 devstrap env capture work/nclh/foc-models .env
-devstrap env hydrate work/nclh/foc-models
+devstrap env hydrate work/nclh/foc-models --write .env.local
 devstrap sync
 ```
 
@@ -151,8 +193,10 @@ The first killer loop:
 3. Machine B receives the namespace update.
 4. The same folder path appears as a skeleton.
 5. Opening it clones/fetches/hydrates it.
-6. Agent work starts from fresh origin/main, not stale local main.
+6. Agent work starts from fresh remote default branch, not stale local default branch.
 ```
+
+The branch workflow that backs this invariant — trunk `main`, integration branch `dev`, and the rule that agents and worktrees always base from the fetched `origin/<default_branch>`, never any local branch — is defined canonically in `AGENTS.md`. Refer to it there rather than restating the model here.
 
 ## Document map
 
@@ -173,3 +217,4 @@ The first killer loop:
 - `15_SECURITY_THREAT_MODEL.md` — assets, threats, mitigations.
 - `16_TEST_PLAN.md` — unit, integration, e2e, chaos, and cross-platform tests.
 - `17_REFERENCES.md` — useful platform and tool references.
+- `18_WORK_LOG.md` — concise end-of-cycle implementation tracking and handoff notes.
