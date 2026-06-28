@@ -3,10 +3,20 @@ updates:
   - package-ecosystem: gomod
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     open-pull-requests-limit: 5
+    # Batch the monthly Go dependency bumps into a single PR to reduce churn.
+    groups:
+      go-dependencies:
+        patterns:
+          - "*"
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
+      interval: monthly
     open-pull-requests-limit: 5
+    # Batch the monthly GitHub Actions bumps into a single PR.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
