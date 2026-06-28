@@ -215,7 +215,7 @@ func Extract(ciphertext []byte, identity, dest string) error {
 		if err != nil {
 			return fmt.Errorf("read tar entry: %w", err)
 		}
-		if strings.ContainsAny(hdr.Name, `\\`) || filepath.IsAbs(hdr.Name) || strings.HasPrefix(filepath.Clean("/"+hdr.Name), "/..") {
+		if strings.ContainsAny(hdr.Name, `\\`) || filepath.IsAbs(hdr.Name) {
 			return fmt.Errorf("refusing tar path outside extract root: %s", hdr.Name)
 		}
 		target := filepath.Join(cleanDest, filepath.FromSlash(hdr.Name))
@@ -232,7 +232,21 @@ func Extract(ciphertext []byte, identity, dest string) error {
 				return fmt.Errorf("create parent %s: %w", hdr.Name, err)
 			}
 			if _, err := os.Stat(target); err == nil {
-				continue // dual-copy safety: never overwrite existing files
+				// Dual-copy: preserve both versions on conflict (DRAFT-01).
+				conflict := target + ".devstrap-conflict"
+				//nolint:gosec // Path validated within cleanDest; size bounded by tar header.
+				cf, err := os.OpenFile(conflict, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+				if err != nil {
+					return fmt.Errorf("create conflict %s: %w", hdr.Name, err)
+				}
+				if _, err := io.Copy(cf, io.LimitReader(tr, hdr.Size)); err != nil {
+					_ = cf.Close()
+					return fmt.Errorf("write conflict %s: %w", hdr.Name, err)
+				}
+				if err := cf.Close(); err != nil {
+					return fmt.Errorf("close conflict %s: %w", hdr.Name, err)
+				}
+				continue
 			}
 			//nolint:gosec // The path is validated within cleanDest and the size is bounded by the tar header.
 			out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)

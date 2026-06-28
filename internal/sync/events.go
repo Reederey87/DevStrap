@@ -154,7 +154,7 @@ func NewDraftSnapshotEvent(typ, payloadJSON string) state.Event {
 	}
 }
 
-func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) error {
+func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) (int64, error) {
 	sort.Slice(events, func(i, j int) bool {
 		if events[i].HLC == events[j].HLC {
 			if events[i].DeviceID == events[j].DeviceID {
@@ -166,6 +166,7 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) err
 	})
 	now := time.Now().UnixMilli()
 	maxSkewMS := defaultReceiveMaxSkew.Milliseconds()
+	var maxAppliedHLC int64
 	for _, event := range events {
 		// SYNC-03: quarantine remote events with implausible HLC values
 		// (non-positive or below the epoch floor) so they cannot win every
@@ -173,7 +174,7 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) err
 		physical := event.HLC >> hlcLogicalBits
 		if event.HLC <= 0 || physical < epochFloorMS {
 			if err := quarantineSkewedEvent(ctx, st, event, physical-now); err != nil {
-				return err
+				return 0, err
 			}
 			continue
 		}
@@ -182,10 +183,11 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) err
 		// Skipping (not aborting) keeps the rest of the batch converging.
 		if offset := physical - now; offset > maxSkewMS {
 			if err := quarantineSkewedEvent(ctx, st, event, offset); err != nil {
-				return err
+				return 0, err
 			}
 			continue
 		}
+		var inserted bool
 		if err := st.WithTx(ctx, func(tx *state.Tx) error {
 			// Re-stamp the workspace_id with the local workspace so the events
 			// FK constraint is satisfied. Remote events carry the origin
@@ -200,7 +202,8 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) err
 			if err := tx.EnsureRemoteDeviceTx(ctx, event.DeviceID); err != nil {
 				return err
 			}
-			inserted, err := tx.InsertEvent(ctx, event)
+			var err error
+			inserted, err = tx.InsertEvent(ctx, event)
 			if err != nil {
 				return err
 			}
@@ -214,7 +217,7 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) err
 		}); err != nil {
 			if errors.Is(err, state.ErrEventHashChain) {
 				if conflictErr := insertEventHashChainConflict(ctx, st, event, err); conflictErr != nil {
-					return errors.Join(err, conflictErr)
+					return 0, errors.Join(err, conflictErr)
 				}
 				// SYNC-05/CODE-01: record the conflict and continue so the
 				// rest of the batch (and other devices' events) still apply,
@@ -224,10 +227,13 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) err
 				// growth results.
 				continue
 			}
-			return err
+			return 0, err
+		}
+		if inserted && event.HLC > maxAppliedHLC {
+			maxAppliedHLC = event.HLC
 		}
 	}
-	return nil
+	return maxAppliedHLC, nil
 }
 
 func quarantineSkewedEvent(ctx context.Context, st *state.Store, event state.Event, offsetMS int64) error {

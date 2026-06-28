@@ -72,17 +72,22 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 		}
 		return err
 	}
-	if err := dssync.ApplyEvents(ctx, store, remoteEvents); err != nil {
+	appliedMaxHLC, err := dssync.ApplyEvents(ctx, store, remoteEvents)
+	if err != nil {
 		return err
 	}
-	if maxHLC := maxEventHLC(remoteEvents); maxHLC > cursor {
-		if err := store.AdvanceHubCursor(ctx, hubID, maxHLC); err != nil {
+	if appliedMaxHLC > cursor {
+		if err := store.AdvanceHubCursor(ctx, hubID, appliedMaxHLC); err != nil {
 			return err
 		}
 	}
 	// DRAFT-02: pull referenced blobs from the hub and cache them locally.
-	if err := pullReferencedBlobs(ctx, hub, remoteEvents, opts.paths()); err != nil {
+	missingBlobs, err := pullReferencedBlobs(ctx, hub, remoteEvents, opts.paths())
+	if err != nil {
 		return appError{code: exitNetwork, err: fmt.Errorf("pull blobs: %w", err)}
+	}
+	if missingBlobs > 0 {
+		_, _ = fmt.Fprintf(stdout, "warning: %d referenced blob(s) missing from hub; materialization may be incomplete\n", missingBlobs)
 	}
 	if namespaceOnly {
 		_, err = fmt.Fprintf(stdout, "Synced namespace events: pushed %d, pulled %d\n", len(localEvents), len(remoteEvents))
@@ -103,17 +108,6 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 	return err
 }
 
-// maxEventHLC returns the highest HLC among events, or 0 for an empty slice.
-func maxEventHLC(events []state.Event) int64 {
-	var max int64
-	for _, e := range events {
-		if e.HLC > max {
-			max = e.HLC
-		}
-	}
-	return max
-}
-
 // pushReferencedBlobs pushes locally-cached blobs referenced by events to the
 // hub (DRAFT-02 blob plane).
 func pushReferencedBlobs(ctx context.Context, hub dssync.Hub, events []state.Event, paths config.Paths) error {
@@ -124,7 +118,7 @@ func pushReferencedBlobs(ctx context.Context, hub dssync.Hub, events []state.Eve
 		}
 		cached, err := readEnvBlob(paths, ref)
 		if err != nil {
-			continue
+			return fmt.Errorf("push blob %s: cannot read local cache: %w", ref, err)
 		}
 		if err := hub.PutBlob(ctx, blobHashHex(ref), bytes.NewReader(cached)); err != nil {
 			return fmt.Errorf("push blob %s: %w", ref, err)
@@ -135,7 +129,8 @@ func pushReferencedBlobs(ctx context.Context, hub dssync.Hub, events []state.Eve
 
 // pullReferencedBlobs fetches blobs referenced by remote events from the hub and
 // caches them locally (DRAFT-02 blob plane).
-func pullReferencedBlobs(ctx context.Context, hub dssync.Hub, events []state.Event, paths config.Paths) error {
+func pullReferencedBlobs(ctx context.Context, hub dssync.Hub, events []state.Event, paths config.Paths) (int, error) {
+	missing := 0
 	for _, event := range events {
 		ref, ok := blobRefFromEvent(event)
 		if !ok {
@@ -146,18 +141,19 @@ func pullReferencedBlobs(ctx context.Context, hub dssync.Hub, events []state.Eve
 		}
 		reader, err := hub.GetBlob(ctx, blobHashHex(ref))
 		if err != nil {
+			missing++
 			continue
 		}
 		ciphertext, err := io.ReadAll(reader)
 		_ = reader.Close()
 		if err != nil {
-			return fmt.Errorf("read blob %s: %w", ref, err)
+			return missing, fmt.Errorf("read blob %s: %w", ref, err)
 		}
 		if err := writeEnvBlob(paths, ref, ciphertext); err != nil {
-			return fmt.Errorf("cache blob %s: %w", ref, err)
+			return missing, fmt.Errorf("cache blob %s: %w", ref, err)
 		}
 	}
-	return nil
+	return missing, nil
 }
 
 // blobRefFromEvent extracts an age_blob:<sha256> reference from an event

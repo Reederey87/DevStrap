@@ -27,6 +27,28 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-06-28 — Code review fixes for cloud-sync PR (#16)
+
+Changed:
+- **C1**: Fixed HUB-04 rewrap dead code in `devices.go` — the early `return err` after the rotation warning prevented `rewrapBlobsOnRevoke` from running when `flagged > 0` (the exact case it was built for). Wrapped the warning in an `if` block so execution falls through to rewrap.
+- **C2**: Added `internal/draftbundle/draftbundle_test.go` — 13 tests covering Pack/Extract round-trip, secret-file refusal (`.env`, `id_rsa`), size/file-count limit enforcement, recipient requirement, bad-identity rejection, dual-copy-on-conflict, node_modules exclusion, `.devstrap` dir skip, empty dir, nested directories, and blob-ref format.
+- **I1**: Changed `ApplyEvents` to return `(int64, error)` where int64 is the max HLC of actually-inserted events; cursor now advances only past applied events, not quarantined/conflicted ones (prevents permanent loss of skipped events).
+- **I3**: `hasEnrolledDevices` now only swallows the specific "no such table" error (early bootstrap); all other DB errors propagate so HUB-03 fail-closed verification is not silently downgraded.
+- **I4**: `pushReferencedBlobs` returns an error when a referenced blob can't be read from local cache, preventing dangling blob references on the hub.
+- **I5**: `pullReferencedBlobs` now returns `(int, error)` with a count of missing blobs; caller prints a warning so hub data loss is surfaced.
+- **I6**: `draftbundle.Extract` now writes incoming files to `<name>.devstrap-conflict` on conflict instead of silently dropping them (true dual-copy per DRAFT-01).
+- **M1**: Removed incorrect tar traversal guard (`filepath.Clean("/"+hdr.Name)` doesn't catch `../`); the `pathWithin` check is the real guard.
+
+Validated:
+- `gofmt -w cmd internal`
+- `golangci-lint run` — 0 issues
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` — passed (20 specs, 35 changed files)
+- `DEVSTRAP_NO_KEYCHAIN=1 go test ./...` — all 19 packages pass
+- `DEVSTRAP_NO_KEYCHAIN=1 go test -race ./internal/sync/... ./internal/draftbundle/... ./internal/cli/... ./internal/state/...` — all pass
+
+Follow-ups:
+- None (all critical and important review issues addressed)
+
 ## 2026-06-28 — Cloud-sync audit implementation: EAGER/DRAFT/HUB/XP workstreams
 
 Changed:

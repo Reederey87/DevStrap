@@ -132,8 +132,9 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 					return err
 				}
 				if flagged > 0 {
-					_, err = fmt.Fprintf(stdout, "warning: %d secret value(s) must be rotated at their source; rewrapping recipients does not revoke %s's historical access\n", flagged, args[0])
-					return err
+					if _, err := fmt.Fprintf(stdout, "warning: %d secret value(s) must be rotated at their source; rewrapping recipients does not revoke %s's historical access\n", flagged, args[0]); err != nil {
+						return err
+					}
 				}
 				// HUB-04: re-encrypt affected blobs to the reduced recipient
 				// set (age has no native revocation). Limits future exposure;

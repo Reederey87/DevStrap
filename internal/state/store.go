@@ -2262,9 +2262,14 @@ func hasEnrolledDevices(ctx context.Context, exec sqlExecutor) (bool, error) {
 	if err := exec.QueryRowContext(ctx, `
 SELECT COUNT(*) FROM devices WHERE trust_state = 'approved';
 `).Scan(&count); err != nil {
-		// The devices table may not exist yet during early bootstrap; treat
-		// that as "not enrolled".
-		return false, nil
+		// The devices table may not exist yet during early bootstrap (before
+		// migration 00004); treat only that specific error as "not enrolled".
+		// All other errors (locked DB, corruption, etc.) must propagate so
+		// HUB-03 fail-closed verification is not silently downgraded.
+		if strings.Contains(err.Error(), "no such table") {
+			return false, nil
+		}
+		return false, fmt.Errorf("check enrolled devices: %w", err)
 	}
 	return count > 0, nil
 }
