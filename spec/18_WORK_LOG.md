@@ -27,6 +27,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-06-28 — Dependabot policy: monthly + grouped
+
+Changed:
+- `.github/dependabot.yml`: switched both ecosystems (gomod, github-actions) from `weekly` to `monthly`, and added `groups` so each ecosystem's monthly bumps arrive as a single batched PR instead of many (reduces review churn). `open-pull-requests-limit` left at 5.
+- Repo housekeeping this cycle: merged the open dependency PRs into `main` — `actions/checkout` v5→v7 (#5), `golang.org/x/text` 0.36→0.38 (#6), `modernc.org/sqlite` 1.50.1→1.53.0 (#8, rebased), `fsnotify` 1.9→1.10.1 (#9); `go build`/`go mod tidy` clean on `main`.
+
+Validated:
+- `GOCACHE=/tmp/devstrap-gocache go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `.github/dependabot.yml` parses as valid YAML.
+
+Follow-ups:
+- `golangci/golangci-lint-action` bump (#7) still open — it edits `.github/workflows/ci.yml`, which the CLI OAuth token cannot merge without the `workflow` scope; merge via the GitHub UI or grant the scope (`gh auth refresh -s workflow`).
+- Dependency-only PRs currently trip the spec-drift "mapped spec unchanged" gate (go.mod maps to spec/18's `[**]`), so they need an admin merge; consider exempting dependency manifests / Dependabot authors from that gate in `internal/specdrift`.
+
 ## 2026-06-28 — Release pipeline (GoReleaser + RC flow)
 
 Changed:
