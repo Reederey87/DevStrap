@@ -27,6 +27,26 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-06-28 — Cloud-sync architecture: spec refresh + new audit and provisioning guide (docs only)
+
+Changed:
+- Documentation only; no `cmd/`/`internal/` code modified. Encoded the cloud-sync direction across the spec set and added two supporting docs.
+- Decisions encoded: file-sync split by content type (repo content via git blobless clone — never the hub; env + non-git/draft via age-encrypted `age_blob:<sha256>` blobs; namespace map via signed HLC event log; `node_modules` rebuilt on hydrate, not synced); eager clone-everything materialization on `devstrap sync` with StrapFS/FUSE deferred; two-plane zero-knowledge `devstraphub` (event log + content-addressed encrypted blob store); Cloudflare R2 as the chosen production hub backend from the start (file-backed backend tests-only, no NAS-first phase) behind a pluggable `Hub` interface; cross-platform core first (macOS + Ubuntu), native daemon/StrapFS deferred; device-revoke re-encryption + secret rotation; fail-closed event verification (SECU-03).
+- Updated `spec/00`–`spec/17` (frontmatter `last_reviewed: 2026-06-28`); added `AUDIT_RECOMMENDATIONS_2026-06-28.md` to relevant `tracks_code`; added `spec/19` to the document map.
+- New `AUDIT_RECOMMENDATIONS_2026-06-28.md` drives the build: workstreams EAGER-* (eager-clone materialization + sync cursor), DRAFT-* (`.devstrapignore` compiler, encrypted draft bundles, non-git hydrate, node_modules rebuild), HUB-* (pluggable Hub + R2 zero-knowledge backend, fail-closed verification, device-revoke re-encryption, blob GC), XP-* (Ubuntu parity, portable scan/sync loop), SCALE-* (future multi-user: control/data-plane split, R2 per-`workspace_id`, rented microVM runner sandboxes, cell-based scaling), plus an explicit Deferred section.
+- New `spec/19_CLOUD_PROVISIONING_GUIDE.md` — register/configure the chosen stack: Cloudflare R2 (storage), Fly.io (compute: control plane + ephemeral Firecracker runner microVMs), Neon (control-plane Postgres) — sign-up, resource creation, least-privilege credentials, DevStrap config via the existing encrypted-secrets path, provisioning order/checklist, credential-custody rules.
+- Hosting/scaling decision: Fly.io + Cloudflare R2 + Neon (Railway/Vercel/Hetzner evaluated and rejected; reasons in `spec/03`). The LLM/Claude-API provider for the agent runner is explicitly out of scope of this cycle.
+
+Validated:
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/cli -run TestEveryCommandIsDocumented` (command-doc drift green; new CLI flags/commands documented as planned)
+- `GOCACHE=/tmp/devstrap-gocache go run ./cmd/spec-drift --base origin/main --head HEAD`
+- No code changed this cycle, so `gofmt`/`golangci-lint`/`go test -race ./...` were not re-run.
+
+Follow-ups:
+- Implement the EAGER-*/DRAFT-*/HUB-* workstreams in a later code cycle (sync materialization + cursor, `.devstrapignore` compiler, encrypted draft bundles, R2 hub backend).
+- Reconcile `dev`↔`main` divergence: `origin/dev` is behind `origin/main` and missing the merged #4 audit; this branch was based on `origin/main`.
+- SCALE-* (multi-user/SaaS) remains documented-not-built.
+
 ## 2026-06-28 — Implement second-pass audit recommendations (P0 + medium severity)
 
 Changed:

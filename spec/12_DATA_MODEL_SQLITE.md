@@ -1,6 +1,6 @@
 ---
 last_reviewed: 2026-06-28
-tracks_code: [internal/state/**]
+tracks_code: [internal/state/**, AUDIT_RECOMMENDATIONS_2026-06-28.md]
 ---
 # SQLite Data Model
 
@@ -127,6 +127,8 @@ CREATE TABLE draft_projects (
   FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id) ON DELETE CASCADE
 );
 ```
+
+`draft_projects` backs the non-git / draft folder content sync (`DRAFT-*`, see `07_NAMESPACE_AND_SYNC_MODEL.md` and `09_SECRETS_AND_ENVIRONMENT.md`). Draft content is captured via a `.devstrapignore` compiler (node_modules / build artifacts excluded, rebuilt on hydrate), packed into age-encrypted content-addressed bundles, and referenced by `current_snapshot_id` — never blanket file-synced and never carried as `.git`. `max_bytes`/`max_files` are intended caps but are **not yet enforced** (`DRAFT-04`): nothing rejects an oversized draft capture today. Enforce them at capture time (refuse the snapshot when the packed tree exceeds the cap) or mark them deferred.
 
 ### device_project_state
 
@@ -318,7 +320,7 @@ CREATE TABLE sync_cursors (
 );
 ```
 
-### event_delivery
+`sync_cursors` is the planned (`DATA-02`, `HUB-*`) per-peer resume point for cursor-based incremental sync: one row per remote peer (or hub) holding the highest applied HLC/seq so a pull requests only events after `last_hlc_applied` instead of replaying full history from HLC 0. The cloud hub exposes the same shape as an opaque `cursor=<HLC>` over its event-log plane (`410 -> snapshot` when the cursor is too old, see `07_NAMESPACE_AND_SYNC_MODEL.md`). Until wired, sync ignores this table and replays from 0 (`ARCH2-02`).
 
 ```sql
 CREATE TABLE event_delivery (
@@ -333,7 +335,7 @@ CREATE TABLE event_delivery (
 );
 ```
 
-### jobs
+`event_delivery` is the planned (`DATA-02`, `HUB-*`) per-event, per-device apply ledger that complements `sync_cursors`: it records `sync_state` (`pending`/`applied`/`failed`) and `applied_at` for individual events so re-delivery and partial-failure recovery are idempotent without scanning the whole `events` table. Mutable delivery/apply state lives here precisely because `events` rows are insert-only (see above). Until wired it is unused; the file-backed sync spike applies events directly and tracks progress only through the local writer clock in `device_sync_state`.
 
 ```sql
 CREATE TABLE jobs (
@@ -369,6 +371,29 @@ CREATE TABLE conflicts (
   FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id) ON DELETE SET NULL
 );
 ```
+
+### blobs (content-addressed encrypted blob index — planned)
+
+Planned (`HUB-*`, `DRAFT-*`) local index of the content-addressed encrypted blob store — the hub's second plane (env values + non-git/draft bundles), all age-encrypted client-side and named `age_blob:<sha256>`. The hub sees only ciphertext; this table is the local bookkeeping for what each blob is, whether it is cached locally and/or uploaded, and when it may be reclaimed.
+
+```sql
+CREATE TABLE blobs (
+  sha256 TEXT PRIMARY KEY,                 -- content address; refs are 'age_blob:<sha256>'
+  workspace_id TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  ref_count INTEGER NOT NULL DEFAULT 0,    -- live references from secret_bindings + draft snapshots
+  local_cached INTEGER NOT NULL DEFAULT 0, -- ciphertext present on this device
+  hub_uploaded INTEGER NOT NULL DEFAULT 0, -- pushed to the hub blob store
+  recipient_set_hash TEXT,                 -- age recipients the blob is encrypted to; changes on re-encrypt
+  created_at TEXT NOT NULL,
+  last_referenced_at TEXT,
+  gc_eligible_at TEXT,                     -- set when ref_count hits 0; reclaimed only after the grace period
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+);
+```
+
+`ref_count` is incremented when a `secret_bindings.encrypted_value_ref` or a `draft_projects.current_snapshot_id` (and its packed bundle) points at the blob, and decremented when those references are tombstoned, rotated, or superseded. Garbage collection is **ref-count + grace-period**, never immediate: when `ref_count` drops to 0 the GC job stamps `gc_eligible_at = now`, and a blob is deleted (locally and from the hub) only after the grace period elapses with `ref_count` still 0. The grace window protects against in-flight references during a concurrent sync and against the device-revoke re-encrypt flow, which rewrites affected blobs to the reduced recipient set (new `recipient_set_hash`) and flags secrets for rotation (age has no native revocation, see `15_SECURITY_THREAT_MODEL.md`). Content addressing makes blob writes idempotent: re-capturing identical content reuses the existing row.
 
 ## Indexes
 
@@ -468,6 +493,15 @@ Workspace export:
 ```bash
 devstrap export --encrypted --output devstrap-snapshot.tar.age
 ```
+
+## Hub backend (planned)
+
+`state.db` is per-device local state. The shared, cross-device data lives in the zero-knowledge **devstraphub**, addressed behind a single pluggable `Hub` interface with two planes (see `03_SYSTEM_ARCHITECTURE.md` and `07_NAMESPACE_AND_SYNC_MODEL.md`):
+
+- the **event log** (the signed, HLC-ordered namespace map), resumed via the `sync_cursors` / `event_delivery` shape above;
+- the **content-addressed encrypted blob store** (env + non-git/draft bundles), indexed locally by `blobs`.
+
+The chosen (`HUB-*`) production backend is **Cloudflare R2** (S3-compatible API, zero egress), keyed under a per-workspace prefix so each tenant's objects are namespaced by `workspace_id` (e.g. `s3://<bucket>/<workspace_id>/events/...` and `.../blobs/<sha256>`). Because all payloads are age-encrypted client-side and the map is signed, the backend stores only ciphertext plus a signed map and cannot read code, secrets, or drafts — tenant isolation by construction. A **file-backed local backend remains only for tests** (`devstrap sync --hub-file <path>`); there is no NAS-first phase. Repo content never transits the hub — it rides git's own transport via blobless clone/fetch from each repo's existing remote. Hub connection settings (backend kind, bucket, region/endpoint, workspace prefix) are configuration, not schema, and never include plaintext credentials in `state.db`.
 
 ## Audit implementation notes (2026-06-28)
 

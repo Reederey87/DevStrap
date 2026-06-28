@@ -67,6 +67,45 @@ ephemeral  hydrate for agent/cloud task, then cleanup
 
 Current hydrate implementation uses lazy skeleton directories and clones into a hidden sibling temp directory named like `.repo.devstrap-tmp-*` on the same filesystem as the final target. It validates the target before staging and revalidates it immediately before promotion, so a late local file blocks promotion without removing the dirty target. Clone failures leave the original skeleton in place and the caller cleans staged temp directories before returning.
 
+### Eager clone-everything on sync (EAGER-*, planned)
+
+The 2026-06-28 cloud-sync direction (`AUDIT_RECOMMENDATIONS_2026-06-28.md`, `EAGER-*`) makes the "Dropbox experience for code" the materialization default: after `devstrap sync` the whole `~/Code` tree is present, not skeletons. This is deliberately **eager clone-everything**, not a FUSE/placeholder/lazy-VFS scheme — StrapFS stays explicitly deferred (Phase 4, see `00_START_HERE.md`).
+
+Decisions:
+
+- Repo content is materialized by **git's own transport**, not the DevStrap hub. Each project is a blobless/partial clone (`git clone --filter=blob:none`) from its **existing remote**; repo content never traverses the hub. Missing blobs are still fetched on demand by git when an editor or build touches them.
+- Eager sync reuses the shipped partial-clone machinery: `--filter=blob:none`, sibling temp-dir staging, and atomic promotion after a successful clone. It is the same code path as lazy hydrate, driven for every namespace entry instead of on first open.
+- The materialization layer stays forge-agnostic; only PR/MR creation is forge-specific (see "Git provider integration").
+- Content type dictates transport (cross-spec invariant, see `07_NAMESPACE_AND_SYNC_MODEL.md`): repo content rides git; env vars and non-git/draft folders ride age-encrypted, content-addressed `age_blob:<sha256>` blobs through the hub; the project map rides the signed, HLC-ordered event log. DevStrap **never** blanket file-syncs, and **never** file-syncs `.git` (file-syncing a `.git` directory corrupts the repo).
+- `node_modules`, build artifacts, and other derived trees are **never synced**; they are rebuilt on hydrate (see "Post-hydrate dependency rebuild").
+
+This makes the materialization `mode` effectively `eager` for synced projects. The `lazy`/`manual`/`ephemeral` modes above remain available for opt-out and for agent/cloud-task workflows.
+
+## Post-hydrate dependency rebuild (DRAFT-*, planned)
+
+Derived dependency trees (`node_modules`, virtualenvs, `target/`, `dist/`, build caches) are **never synced** — they are large, OS/arch-specific, and reproducible from manifests. Instead, hydrate runs a **post-hydrate dependency rebuild hook** that regenerates them locally per-OS, keeping cross-platform devices (macOS + Ubuntu, and the planned NAS/Linux fleet) consistent without shipping platform-specific binaries.
+
+Detection and rebuild are manifest-driven:
+
+```text
+package-lock.json / npm-shrinkwrap.json  -> npm install / npm ci
+pnpm-lock.yaml                           -> pnpm install --frozen-lockfile
+yarn.lock                                -> yarn install --immutable
+uv.lock / pyproject.toml                 -> uv sync
+poetry.lock                              -> poetry install
+requirements.txt                         -> python -m venv + pip install -r
+```
+
+Rules:
+
+- the rebuild is **opt-in/gated** (per-project policy, e.g. `materialization.rebuild_on_hydrate: ask|always|never`) and never runs untrusted lifecycle scripts implicitly; the default for synced projects asks before running;
+- the hook runs **after** atomic promotion of the cloned/hydrated tree, in the project root, with the shared sanitized child-process environment (no secrets injected unless an env profile is explicitly bound);
+- the package-manager binary is resolved from the chosen tool adapter; a missing tool produces a typed, actionable warning rather than a hard failure, and the tree is left dependency-less;
+- rebuild output is captured to a `0600` log; rebuilds are best-effort and never block the rest of `devstrap sync`;
+- the rebuild map is OS-aware so the same project resolves to the correct toolchain on macOS and Linux, keeping Mac-specific behavior behind adapters (see `00_START_HERE.md`).
+
+`node_modules` and equivalents stay gitignored and `.devstrapignore`-excluded so they are never adopted, never event-logged, and never bundled into `age_blob:<sha256>` content (cross-reference `11_IGNORE_AND_LOCAL_GARBAGE.md`).
+
 ## Safe update behavior
 
 `devstrap sync` must be conservative.

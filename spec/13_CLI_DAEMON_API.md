@@ -140,6 +140,7 @@ work/acme/data                  this       skeleton   mapped   unknown  not hydr
 
 ```bash
 devstrap sync --hub-file ~/.devstrap/test-hub/events.json
+devstrap sync --hub-s3 devstrap-hub                  # planned: one bucket, tenants separated by key prefix
 ```
 
 Does:
@@ -153,13 +154,17 @@ Does:
 Options:
 
 ```bash
+--hub-file <path>     # file-backed test hub (current)
+--hub-s3 <bucket>     # planned: Cloudflare R2 / S3 zero-knowledge hub backend
 --namespace-only
---fetch
---hydrate-eager
+--fetch               # planned
+--hydrate-eager       # planned default: eager blobless clone of the whole tree
 --dry-run
 ```
 
 Current implementation supports the file-backed test hub only. It requires `--hub-file`, pushes all local events, pulls hub events from the beginning, applies namespace events idempotently, supports `--namespace-only` and `--dry-run`, and reports that hydration/fetch reconciliation is not implemented yet.
+
+Planned (`EAGER-*`/`HUB-*`, audit `AUDIT_RECOMMENDATIONS_2026-06-28.md`): `sync` becomes the materialization entrypoint. `--hydrate-eager` defaults to on, so a single `devstrap sync` eagerly blobless/partial-clones every mapped repo (`git clone --filter=blob:none`) from its existing remote, decrypts env and non-git/draft `age_blob:<sha256>` content, and rebuilds `node_modules`/build artifacts on hydrate rather than syncing them. The hub pull switches from from-the-beginning replay to cursor-based pagination (HLC cursor; `410 -> snapshot`), and the command prints a real materialize summary (repos cloned/fetched, blobs decrypted, skeletons reconciled, conflicts detected). Repo content always rides git's own transport and never traverses the hub; only the signed namespace map (event log) and ciphertext blobs do. `--hub-s3 <bucket>` selects the pluggable Cloudflare R2 / S3 zero-knowledge backend; `--hub-file` remains for tests only. No FUSE/placeholder/lazy-VFS layer is part of this design — StrapFS stays deferred.
 
 ### open
 
@@ -174,7 +179,7 @@ Does:
 - validate env/tooling;
 - open editor.
 
-Current implementation hydrates if needed, refuses unknown namespace paths, checks that `cursor` or `code` exists, starts the editor without tying it to the CLI context, and releases the child process handle. Env/tooling validation is still future work.
+Current implementation hydrates if needed, refuses unknown namespace paths, checks that `cursor` or `code` exists, starts the editor without tying it to the CLI context, and releases the child process handle. Env/tooling validation is still future work. Planned (`DRAFT-*`): `open` (and `hydrate`) extend beyond `git_repo` projects to materialize `local_git`/`plain_folder`/draft types from decrypted `age_blob:<sha256>` bundles.
 
 ### hydrate
 
@@ -191,7 +196,7 @@ Options:
 --no-bootstrap
 ```
 
-Current implementation uses partial clone by default, supports `--full` and `--lfs`, refuses to clone into non-empty non-skeleton directories, stages clones in hidden sibling temp directories, promotes only after clone success plus a second target validation, preserves the original skeleton on clone failure, and updates local materialization/dirty state.
+Current implementation uses partial clone by default, supports `--full` and `--lfs`, refuses to clone into non-empty non-skeleton directories, stages clones in hidden sibling temp directories, promotes only after clone success plus a second target validation, preserves the original skeleton on clone failure, and updates local materialization/dirty state. Planned (`DRAFT-*`): `hydrate` extends beyond `git_repo` projects to materialize `local_git`/`plain_folder`/draft content from decrypted `age_blob:<sha256>` bundles, while `node_modules`/build artifacts are rebuilt (npm/pnpm/uv install) rather than synced.
 
 ### add
 
@@ -430,14 +435,14 @@ Rules:
 The local Unix-socket API and job model are **design intent, not shipped** (`ARCH2-04`); `exitDaemonUnavailable=3` is reserved but never returned. The planned API still needs peer-credential checks / root rejection, message framing, and version negotiation (`CLI-05`).
 
 ### Planned commands (not yet registered)
-Referenced by the new workstreams; intentionally absent from the live command tree the drift test checks until implemented:
+Referenced by the new workstreams; intentionally absent from the live command tree the drift test checks until implemented (`devstrap conflicts` has since shipped — see the 2026-06-28 implementation notes — and is documented under `status`):
 
 ```text
-devstrap conflicts [--json]                            # inspect recorded conflicts (PROD-02)
-devstrap promote <path> --draft|--git-remote <url>     # plain -> draft -> git (NOVCS-03)
+devstrap promote <path> --draft|--git-remote <url>     # plain -> draft -> git (NOVCS-03 / DRAFT-*)
 devstrap gitstate capture [--fetch]                    # working-state validation plane (Section 5)
 devstrap status --all-devices                          # cross-device git-state view
 devstrap wip push|status|fetch|show|apply|drop <proj>  # WIP recovery (Phase 1)
+devstrap sync --hub-s3 <bucket>                        # Cloudflare R2 / S3 zero-knowledge hub backend (HUB-*)
 ```
 
 PR creation becomes forge-agnostic (`gh`/`glab`/`tea`) with a `--forge` override (`FORGE-01`).
@@ -450,3 +455,13 @@ PR creation becomes forge-agnostic (`gh`/`glab`/`tea`) with a `--forge` override
 - **PROD-01**: `deriveDisplayStatus` maps materialization+dirty states to user-facing labels; `status` output uses it.
 - **PROD-02**: New `devstrap conflicts` command lists open conflicts; `status` shows open-conflict count.
 - **ARCH2-04**: Reserved `exitDaemonUnavailable` code for M5 daemon.
+
+## Cloud-sync CLI (2026-06-28)
+
+The cloud-sync architecture (`AUDIT_RECOMMENDATIONS_2026-06-28.md`) shapes the sync/materialization commands. None of the following is shipped yet; all are planned and marked as such above:
+
+- **Eager materialization (`EAGER-*`)**: `devstrap sync --hydrate-eager` (planned default) clones the whole `~/Code` tree up front via blobless/partial clone — no FUSE, placeholder, or lazy-VFS layer (StrapFS stays deferred). After sync the full tree is present on disk.
+- **Two-plane zero-knowledge hub (`HUB-*`)**: the hub carries only (a) the signed, HLC-ordered namespace map (event log) and (b) content-addressed `age_blob:<sha256>` ciphertext for env and non-git/draft content. Repo content never traverses the hub — it rides git transport from the existing remote. `--hub-s3 <bucket>` selects the Cloudflare R2 / S3 backend behind one pluggable Hub interface; `--hub-file` stays for tests only.
+- **Content-type split (`DRAFT-*`)**: env plus non-git/draft folders sync as age-encrypted blobs; `node_modules`/build artifacts are never synced and are rebuilt on hydrate. `hydrate`/`open` extend to `local_git`/`plain_folder`/draft project types; `devstrap promote` walks a folder from plain -> draft -> git (`NOVCS-03`).
+- **Conflicts stay detect-don't-merge**: HLC ordering plus tombstones; `devstrap conflicts` (shipped) surfaces them. Files are never byte-merged.
+- **Device trust**: revocation re-encrypts affected blobs to the reduced recipient set and flags secrets for rotation; once device enrollment exists, event verification must fail closed (`SECU-03`).

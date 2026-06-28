@@ -15,6 +15,16 @@ Agents never work in the user's primary working tree.
 Agents never branch from stale local default branch.
 ```
 
+### Independence from the cross-machine sync plane (2026-06-28)
+
+The cloud-sync architecture (eager blobless clone of repo content, age-encrypted env/draft blobs, the signed HLC-ordered namespace map, and the cross-machine working-state plane — git-state validation + `refs/devstrap/wip/*`) is purely a *human* device-mirroring plane. It must **never** feed agent base resolution. Regardless of what the sync plane has materialized or observed on this device:
+
+- agents always fetch and base fresh from `origin/<default_branch>` (the authoritative remote ref), never from synced working-state, WIP refs, encrypted draft bundles, or any local branch;
+- repo content reaches the worktree over git's own transport (blobless clone/fetch from the existing remote), not through the DevStrap hub;
+- a stale, dirty, or mid-sync device state has no effect on the SHA an agent worktree is created from.
+
+This keeps agents reproducible and deterministic even while the surrounding `~/Code` tree is being synced across the owner's fleet (audit `AUDIT_RECOMMENDATIONS_2026-06-28.md`, `EAGER-*`/`DRAFT-*`/`HUB-*`).
+
 ## Agent run lifecycle
 
 ```text

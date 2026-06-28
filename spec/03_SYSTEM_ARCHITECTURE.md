@@ -128,19 +128,48 @@ Responsibilities:
 
 ### `devstraphub`
 
-Small sync service.
+The **two-plane, zero-knowledge** sync service (`HUB-*`, see `AUDIT_RECOMMENDATIONS_2026-06-28.md`). It is deliberately split by content type so that no single channel ever blanket-syncs files or touches `.git` (which would corrupt repos):
+
+**Plane A — the namespace map (event log).** An append-only, Ed25519-signed, HLC-ordered event log. This is the *map of all projects* in the workspace: paths, types, remotes, env/tooling/ignore profiles, draft metadata, and tombstones. Each device replays from its last cursor to reconstruct the identical `~/Code` tree.
+
+**Plane B — the encrypted blob store (content-addressed).** A content-addressed store of age-encrypted `age_blob:<sha256>` blobs holding env profiles and non-git / draft / plain-folder content. Blobs are encrypted client-side to the enrolled device recipient set before upload; the hub stores opaque ciphertext keyed by its SHA-256.
+
+What never flows through the hub:
+
+- **Repo content rides git's own transport**, not the hub — a blobless/partial clone/fetch (`git clone --filter=blob:none`) from the project's *existing* remote (`08_GIT_MATERIALIZATION_AND_WORKTREES.md`). Repo bytes never pass through `devstraphub`.
+- **`node_modules` / build artifacts are never synced** — they are rebuilt on hydrate (`npm`/`pnpm`/`uv install`), per the `.devstrapignore` compiler (`11_IGNORE_AND_LOCAL_GARBAGE.md`).
 
 Responsibilities:
 
-- store append-only namespace events;
-- store encrypted blobs for env bundles and draft projects;
-- store device heartbeats;
-- never store plaintext secrets;
+- store the append-only, signed, HLC-ordered namespace event log (Plane A);
+- store content-addressed age-encrypted env + draft/non-git blobs (Plane B);
+- store device heartbeats and enrollment/trust metadata;
+- never store plaintext secrets, code, or drafts — **the hub sees only ciphertext plus a signed map**;
 - support offline-first sync.
 
-MVP hub can be self-hosted on a Mac Mini, Linux box, or small VPS. Later it can become a hosted SaaS.
+Because the hub only ever holds ciphertext blobs plus a signed event map, it cannot read code, secrets, or drafts; tenant isolation for any future multi-user deployment therefore falls out of the encryption model rather than from access control alone.
 
-Wire protocol (see `07_NAMESPACE_AND_SYNC_MODEL.md` and `AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 6): a thin, **zero-knowledge**, store-and-forward relay over HTTPS — `POST /v1/{ws}/events`, `GET /v1/{ws}/events?after=<hlc>`, SSE `GET /v1/{ws}/stream` (Last-Event-ID=HLC, a live hint only), content-addressed `PUT/GET /v1/{ws}/blobs/{sha256}`, `410 Gone` → full-state snapshot. The hub is **semi-trusted**: it sees only signed, end-to-end-encrypted payloads plus routing metadata, never plaintext code/secrets, and is never trusted to order or authenticate (correctness lives off the wire via HLC + content/prev-hash chain + Ed25519). Device auth via mTLS client certs derived from the device identity, rejecting revoked/lost devices. As a single Go binary it ships in the same module, reusing `internal/state`, `internal/sync`, and `internal/devicekeys`.
+**Hub backend is pluggable behind one interface** (`HUB-*`). The chosen **production backend is Cloudflare R2 from the start** (S3-compatible API, zero egress, namespaced by `workspace_id`; zero-knowledge via client-side age encryption — there is no NAS-first phase). A **file-backed local backend remains only for tests** (today's `devstrap sync --hub-file` spike). An **HTTP/SSE hub service** (the wire protocol below) is the later networked backend. See the `Hub` boundary under *Platform adapter boundaries*.
+
+Wire protocol — *planned* networked backend (see `07_NAMESPACE_AND_SYNC_MODEL.md`, `AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 6, and `AUDIT_RECOMMENDATIONS_2026-06-28.md`): a thin, **zero-knowledge**, store-and-forward relay over HTTPS — `POST /v1/{ws}/events`, `GET /v1/{ws}/events?after=<hlc>`, SSE `GET /v1/{ws}/stream` (Last-Event-ID=HLC, a live hint only), content-addressed `PUT/GET /v1/{ws}/blobs/{sha256}`, `410 Gone` → full-state snapshot. The hub is **semi-trusted**: it sees only signed, end-to-end-encrypted payloads plus routing metadata, never plaintext code/secrets, and is never trusted to order or authenticate (correctness lives off the wire via HLC + content/prev-hash chain + Ed25519). Device auth via mTLS client certs derived from the device identity, rejecting revoked/lost devices. As a single Go binary it ships in the same module, reusing `internal/state`, `internal/sync`, and `internal/devicekeys`.
+
+#### Hosting & scaling (FUTURE direction — documented, not built)
+
+This subsection records the target deployment shape (`SCALE-*`, `AUDIT_RECOMMENDATIONS_2026-06-28.md` decision 6). None of it is implemented this cycle; the cross-platform Go core and the R2/file-backed hub backends come first.
+
+Chosen stack:
+
+- **Compute — Fly.io** for the control plane and agent runners. Firecracker microVM isolation suits running untrusted agent code, 35+ regions give global reach, scale-to-zero / suspend-resume keeps idle cost near zero, and it runs the Go binary natively. **E2B** (self-hostable microVM agent sandboxes) is the runner escape-hatch.
+- **Sync hub — Cloudflare R2** (as above), namespaced by `workspace_id`; because the hub is zero-knowledge, tenant isolation holds by construction.
+- **Control-plane DB — managed Postgres** (Neon / Supabase) for non-secret control-plane metadata.
+
+Rejected as the *primary* platform, with reasons:
+
+- **Railway** — shared-kernel containers; fine for the control plane or a single trusted self-hosted instance, but not safe for untrusted multi-tenant code.
+- **Vercel** — strong *if* the stack were Next.js/TS (Sandbox + Functions/Workflows), but DevStrap is Go-first, so its TS/Python sandbox SDKs are an awkward fit.
+- **Hetzner** — cheapest always-on box and good for the solo MVP, but no microVM isolation, no global footprint, no scale-to-zero.
+
+Multi-tenant scaling principles (for the eventual SaaS): a **control-plane / data-plane split**, a **tenancy spectrum** from pooled to dedicated/BYOC, and **cell-based scaling**. **Coder** is the reference architecture for running agents on the operator's own infrastructure at scale.
 
 ### No-daemon mode (correctness guarantee)
 
@@ -160,16 +189,18 @@ Every `devstrap` CLI command works correctly without the daemon. State is materi
 7. Skeleton directory appears on other devices.
 ```
 
-### Project opened on another machine
+### Project materialized on another machine (eager clone on sync)
+
+Materialization is **eager, not lazy** (`EAGER-*`, `AUDIT_RECOMMENDATIONS_2026-06-28.md`): `devstrap sync` clones everything up front (blobless/partial clone), so after a sync the whole `~/Code` tree is present rather than a skeleton awaiting first open. There is no FUSE / placeholder / lazy-VFS magic in this design — StrapFS stays explicitly deferred.
 
 ```text
-1. User runs devstrap open experiments/fs2.
-2. Daemon checks namespace entry.
-3. If Git repo: clone/fetch/materialize.
-4. If draft: download/decrypt draft blob.
-5. Env profile is checked/hydrated.
-6. Tooling profile is checked.
-7. Editor opens.
+1. Machine B runs devstrap sync.
+2. It replays the namespace map (Plane A) to learn every project, path, type, and remote.
+3. For each Git repo: blobless/partial clone (git clone --filter=blob:none) from the project's existing remote — repo content rides git's own transport, never the hub.
+4. For each draft / non-git / plain folder: download + age-decrypt its content-addressed blob (Plane B).
+5. Env profiles are hydrated from their encrypted blobs (or resolved via provider refs).
+6. node_modules / build artifacts are rebuilt on hydrate (npm/pnpm/uv install), never synced.
+7. The whole ~/Code tree is now present; later `devstrap open` just launches the editor.
 ```
 
 ### Agent starts a task
@@ -296,7 +327,27 @@ type EditorAdapter interface {
     Name() string
     Open(ctx context.Context, dir, editor string) error
 }
+
+// Hub is the pluggable two-plane backend boundary (HUB-*).
+// Implementations: file-backed (tests only), Cloudflare R2 (production),
+// HTTP/SSE hub service (later networked backend). All are zero-knowledge:
+// they handle signed events + age-encrypted blobs only, never plaintext.
+type Hub interface {
+    Name() string
+    // Plane A: append-only, signed, HLC-ordered namespace event log.
+    PushEvents(ctx context.Context, ws string, events []SignedEvent) error
+    PullEvents(ctx context.Context, ws string, afterHLC string) ([]SignedEvent, error)
+    // Plane B: content-addressed age-encrypted blob store (age_blob:<sha256>).
+    PutBlob(ctx context.Context, ws, sha256 string, ciphertext []byte) error
+    GetBlob(ctx context.Context, ws, sha256 string) ([]byte, error)
+}
 ```
+
+Hub backends:
+
+- **file-backed**: the `devstrap sync --hub-file` spike — **tests only**, never production;
+- **Cloudflare R2**: the chosen **production** backend from the start (S3 API, zero egress, namespaced by `workspace_id`);
+- **HTTP/SSE hub service**: the later networked backend implementing the wire protocol above.
 
 Mac implementation:
 

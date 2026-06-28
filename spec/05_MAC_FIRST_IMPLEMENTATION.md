@@ -8,6 +8,12 @@ tracks_code: [internal/platform/**, internal/cli/open.go, .github/**]
 
 Build a Mac solution that feels native enough to solve the daily pain, while keeping the core portable to Linux.
 
+## Sequencing note (2026-06-28): cross-platform core first
+
+The 2026-06-28 cloud-sync decisions (see `AUDIT_RECOMMENDATIONS_2026-06-28.md`, workstream `XP-*`) re-order this guide's build sequence: ship the **portable Go core first on both macOS and Ubuntu**, before any native macOS magic. The "Dropbox experience for code" — one identical `~/Code` tree on every device in the fleet (two Mac Minis, an incoming GMKtec Ubuntu box, a graphics laptop, a NAS) — is delivered this cycle by the portable core (eager blobless clone on `devstrap sync`, age-encrypted env/draft blobs, and the signed HLC-ordered namespace map), not by a daemon or virtual filesystem.
+
+Consequently, treat the daemon, native FSEvents watcher, LaunchAgent, Endpoint Security, File Provider, and FUSE/StrapFS content below as **later layers, not this-cycle work**. The Mac-specific adapter seams in `internal/platform` stay valuable as the eventual home for that behavior and as the proof that Mac specifics stay behind adapters so Ubuntu remains first-class — but they are deferred. Materialization in the cross-platform core is **eager clone-everything on `devstrap sync`** (partial/blobless clone up front); there is no placeholder/lazy-VFS step in this design.
+
 ## Recommended Mac MVP
 
 ```text
@@ -331,3 +337,11 @@ Platform findings (`PLAT-*`, from `AUDIT_RECOMMENDATIONS_2026-06-27.md`):
 - **Watcher/PollWatcher unwired; no periodic reconciliation backstop (`PLAT-03`).**
 - **No Chmod-only / OS-junk event filtering (`PLAT-04`).**
 - **`ServiceSpec` seam too thin to render the launchd plist (`PLAT-05`);** flesh out the adapter so installers can be generated. A native FSEvents watcher remains a follow-up.
+
+## Audit follow-ups (2026-06-28)
+
+Cross-platform findings (`XP-*`, from `AUDIT_RECOMMENDATIONS_2026-06-28.md`):
+
+- **Ship the portable Go core on macOS + Ubuntu before any native magic (`XP-01`):** the eager-clone materialization (`EAGER-*`), encrypted env/draft sync (`DRAFT-*`), and cloud hub backend (`HUB-*`) must run identically on both platforms via portable Go. No native daemon, FSEvents watcher, LaunchAgent installer, or StrapFS is in scope this cycle.
+- **Keep Mac specifics behind adapters so Ubuntu stays first-class (`XP-02`):** the `internal/platform` watcher/service/keychain/editor seams remain the only place macOS behavior may diverge; the Linux fsnotify/inotify + periodic-reconciliation path must reach feature parity for the eager-sync loop.
+- **Defer the native daemon and StrapFS (`XP-03`, Deferred section):** the LaunchAgent/FSEvents/Endpoint Security/File Provider/FUSE material above is explicitly deferred. Materialization stays eager clone-everything on `devstrap sync`; there is no placeholder/lazy-VFS layer in this design.
