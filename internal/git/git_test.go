@@ -512,7 +512,7 @@ func TestCloneWithOptionsInitializesSubmodules(t *testing.T) {
 		c.Env = append(os.Environ(), gitEnv...)
 		out, err := c.CombinedOutput()
 		if err != nil {
-			return fmt.Errorf("git %v: %v\n%s", args, err, out)
+			return fmt.Errorf("git %v: %w\n%s", args, err, out)
 		}
 		return nil
 	}

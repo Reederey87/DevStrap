@@ -343,3 +343,89 @@ func TestApplyEventsPermanentInvalidDoesNotHoldCursor(t *testing.T) {
 		t.Fatalf("safeCursor = %d, want %d (cursor not held by permanent-invalid event)", safeCursor, 10<<hlcLogicalBits)
 	}
 }
+
+// PROD-06: a remote conflict.resolved event marks the matching open conflict
+// row resolved on the receiving device so the open-conflict count converges
+// across devices. Matching is by the stable (namespace_id, type, details_json)
+// fingerprint, NOT the per-device conflict id.
+func TestApplyConflictResolvedEventMarksRowResolved(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newSyncStore(t)
+
+	// Seed an open conflict as it would exist on the receiving device.
+	// Seed an open conflict as it would exist on the receiving device. An
+	// empty namespace_id is allowed (the column is nullable) and exercises the
+	// COALESCE fingerprint match without needing a namespace_entries row.
+	const (
+		nsID    = ""
+		cType   = "same_path_different_remote"
+		details = `{"path":"work/acme/api"}`
+	)
+	if err := st.InsertConflict(ctx, nsID, cType, details); err != nil {
+		t.Fatal(err)
+	}
+	open, err := st.OpenConflicts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("open conflicts before apply = %d, want 1", len(open))
+	}
+	localID := open[0].ID
+
+	// A remote device emits conflict.resolved with ITS OWN conflict id (which
+	// differs from the local id) but the same stable fingerprint.
+	payload, err := json.Marshal(ConflictResolvedPayload{
+		ConflictID:  "cnf_remote_different_id",
+		NamespaceID: nsID,
+		Type:        cType,
+		DetailsJSON: details,
+		Action:      "keep-local",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eid, err := id.New("evt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved := state.Event{
+		ID:          eid,
+		DeviceID:    "device-b",
+		HLC:         10 << hlcLogicalBits,
+		Type:        EventConflictResolved,
+		PayloadJSON: string(payload),
+		ContentHash: state.ContentHash(string(payload)),
+	}
+	if _, err := ApplyEvents(ctx, st, []state.Event{resolved}); err != nil {
+		t.Fatalf("ApplyEvents conflict.resolved: %v", err)
+	}
+
+	// The local row is now resolved despite the mismatched conflict id.
+	got, err := st.ConflictByID(ctx, localID)
+	if err != nil {
+		t.Fatalf("ConflictByID: %v", err)
+	}
+	if got.Status != "resolved" {
+		t.Fatalf("conflict status = %q, want resolved", got.Status)
+	}
+	if open, _ := st.OpenConflicts(ctx); len(open) != 0 {
+		t.Fatalf("open conflicts after apply = %d, want 0", len(open))
+	}
+
+	// A duplicate conflict.resolved event for the already-resolved row is an
+	// idempotent no-op (does not error, does not resurrect the row).
+	dup2, err := id.New("evt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dup := resolved
+	dup.ID = dup2
+	dup.HLC = 11 << hlcLogicalBits
+	if _, err := ApplyEvents(ctx, st, []state.Event{dup}); err != nil {
+		t.Fatalf("duplicate conflict.resolved should be a no-op: %v", err)
+	}
+	if got, _ := st.ConflictByID(ctx, localID); got.Status != "resolved" {
+		t.Fatalf("conflict status after duplicate = %q, want resolved", got.Status)
+	}
+}

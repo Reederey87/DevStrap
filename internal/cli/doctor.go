@@ -218,7 +218,7 @@ func checkBloblessCaveat(ctx context.Context, store *state.Store) []checkResult 
 	if gitRepos == 0 {
 		return nil
 	}
-	return []checkResult{{Name: "blobless clone caveat", Status: checkOK, Detail: fmt.Sprintf("%d git repo(s) use blobless clones; historical blobs need the remote online (lazy fetch)", gitRepos), Remedy: "enable materialization.maintenance for a post-clone prefetch; stay online for first blame/log -p"}}
+	return []checkResult{{Name: "blobless clone caveat", Status: checkOK, Detail: fmt.Sprintf("%d git repo(s) may use blobless clones; historical blobs need the remote online (lazy fetch)", gitRepos), Remedy: "enable materialization.maintenance for a post-clone prefetch; stay online for first blame/log -p"}}
 }
 
 func checkDeviceKeys(ctx context.Context, paths config.Paths, store *state.Store) []checkResult {

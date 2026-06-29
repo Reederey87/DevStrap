@@ -104,7 +104,7 @@ func TestConflictsListShowResolve(t *testing.T) {
 	}
 
 	// resolve with no keep-* flag is a usage error.
-	_, stderr, err = executeForTest("--home", home, "conflicts", "resolve", conflictID)
+	_, _, err = executeForTest("--home", home, "conflicts", "resolve", conflictID)
 	if err == nil {
 		t.Fatal("expected usage error when no keep-* flag is set")
 	}

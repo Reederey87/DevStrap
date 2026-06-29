@@ -1899,6 +1899,23 @@ UPDATE conflicts SET status = 'resolved', resolution_json = ?, updated_at = ? WH
 	return nil
 }
 
+// ResolveConflictByFingerprint marks the open conflict matching the stable
+// (namespace_id, type, details_json) fingerprint resolved (PROD-06). Used by
+// the conflict.resolved event apply handler so cross-device convergence does
+// not depend on per-device conflict IDs. It is idempotent: a duplicate event
+// for an already-resolved (or absent) row affects zero rows and returns nil.
+func (tx *Tx) ResolveConflictByFingerprint(ctx context.Context, namespaceID, typ, detailsJSON, resolutionJSON string) error {
+	now := timestampNow()
+	_, err := tx.tx.ExecContext(ctx, `
+UPDATE conflicts SET status = 'resolved', resolution_json = ?, updated_at = ?
+WHERE workspace_id = ? AND COALESCE(namespace_id, '') = COALESCE(?, '') AND type = ? AND details_json = ? AND status = 'open';
+`, nullEmpty(resolutionJSON), now, tx.workspaceID, nullEmpty(namespaceID), typ, detailsJSON)
+	if err != nil {
+		return fmt.Errorf("resolve conflict by fingerprint: %w", err)
+	}
+	return nil
+}
+
 func insertConflict(ctx context.Context, exec sqlExecutor, workspaceID, namespaceID, typ, detailsJSON string) error {
 	var existingID string
 	err := exec.QueryRowContext(ctx, `

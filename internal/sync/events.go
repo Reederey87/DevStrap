@@ -55,11 +55,15 @@ type RenamePayload struct {
 
 // ConflictResolvedPayload carries a conflict.resolved event (PROD-06): the
 // user's local resolution decision is audited and synced so every device sees
-// the same outcome and the open-conflict count converges.
+// the same outcome and the open-conflict count converges. ConflictID is the
+// origin device's local row id (per-device, NOT stable across devices); the
+// apply handler matches on the stable (namespace_id, type, details_json)
+// fingerprint instead.
 type ConflictResolvedPayload struct {
 	ConflictID  string `json:"conflict_id"`
 	NamespaceID string `json:"namespace_id,omitempty"`
 	Type        string `json:"type"`
+	DetailsJSON string `json:"details_json"`
 	Action      string `json:"action"` // keep-local | keep-remote | keep-both
 }
 
@@ -415,6 +419,22 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 		return nil
 	case EventConflictCreated:
 		return tx.InsertConflict(ctx, "", "remote_conflict", event.PayloadJSON)
+	case EventConflictResolved:
+		// PROD-06: mark the matching open conflict resolved on the receiving
+		// device so the open-conflict count converges. Conflict IDs are
+		// per-device, so match on the stable (namespace_id, type, details_json)
+		// fingerprint. The UPDATE is idempotent (WHERE status='open'): a
+		// duplicate event for an already-resolved row is a no-op.
+		var payload ConflictResolvedPayload
+		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+			return fmt.Errorf("decode event %s: %w", event.ID, err)
+		}
+		resolution, _ := json.Marshal(map[string]string{
+			"action":       payload.Action,
+			"resolved_by":  event.DeviceID,
+			"resolved_hlc": fmt.Sprintf("%d", event.HLC),
+		})
+		return tx.ResolveConflictByFingerprint(ctx, payload.NamespaceID, payload.Type, payload.DetailsJSON, string(resolution))
 	case EventDraftSnapshotCreated:
 		var payload DraftSnapshotPayload
 		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {

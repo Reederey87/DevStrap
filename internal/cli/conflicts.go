@@ -131,18 +131,24 @@ func newConflictsResolveCommand(stdout io.Writer, opts *options) *cobra.Command 
 			if err != nil {
 				return err
 			}
-			if err := store.ResolveConflict(cmd.Context(), c.ID, string(raw)); err != nil {
-				return err
-			}
-			// Audit the decision as an HLC event so every device converges on
-			// the same outcome and the open-conflict count stays down (PROD-06).
+			// PROD-06: emit the sync event BEFORE marking the row resolved so a
+			// failure between the two operations is recoverable. If the event
+			// emits but the resolve fails, the row stays open and the user can
+			// retry `resolve` (re-emitting a duplicate event, which the apply
+			// handler treats idempotently). If the resolve succeeded first and
+			// the event then failed, the "already resolved" guard would block
+			// retry and cross-device convergence would be lost.
 			if _, err := dssync.CreateConflictResolvedEvent(cmd.Context(), store, dssync.ConflictResolvedPayload{
 				ConflictID:  c.ID,
 				NamespaceID: c.NamespaceID,
 				Type:        c.Type,
+				DetailsJSON: c.DetailsJSON,
 				Action:      action,
 			}); err != nil {
 				return fmt.Errorf("record conflict.resolved event: %w", err)
+			}
+			if err := store.ResolveConflict(cmd.Context(), c.ID, string(raw)); err != nil {
+				return err
 			}
 			_, _ = fmt.Fprintf(stdout, "Conflict %s resolved (%s).\n", c.ID, action)
 			if action == "keep-both" {

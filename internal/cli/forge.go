@@ -142,7 +142,8 @@ func resolveSSHHostAlias(alias string) string {
 	if err != nil {
 		return ""
 	}
-	f, err := os.Open(filepath.Join(home, ".ssh", "config"))
+	//nolint:gosec // Intentional read of the user's own ~/.ssh/config to resolve forge host aliases (GIT-05); home is from os.UserHomeDir and the path is a fixed, well-known location.
+	f, err := os.Open(filepath.Clean(filepath.Join(home, ".ssh", "config")))
 	if err != nil {
 		return ""
 	}
@@ -334,18 +335,25 @@ func createForgePR(ctx context.Context, dir, remoteURL, baseBranch, headBranch, 
 }
 
 // forgeCompareURL constructs a best-effort compare/MR URL for manual PR
-// creation on unknown forges.
+// creation on unknown forges. The SSH-alias-resolved host (GIT-05) is used for
+// the URL so a configured alias like `work-gitlab` maps to the real,
+// browser-usable host; the raw host is still used to trim the canonical key
+// (CanonicalRemoteKey does not resolve aliases).
 func forgeCompareURL(remoteURL, baseBranch, headBranch string) string {
 	key, err := dsgit.CanonicalRemoteKey(remoteURL)
 	if err != nil {
 		return ""
 	}
-	host := forgeHost(remoteURL)
-	if host == "" {
+	rawHost := forgeHost(remoteURL)
+	if rawHost == "" {
 		return ""
 	}
-	// Extract owner/repo from the remote key (host/owner/repo form).
-	rest := strings.TrimPrefix(key, host+"/")
+	host := resolveForgeHost(remoteURL)
+	if host == "" {
+		host = rawHost
+	}
+	// Extract owner/repo from the remote key (rawHost/owner/repo form).
+	rest := strings.TrimPrefix(key, rawHost+"/")
 	scheme := "https"
 	switch {
 	case strings.Contains(host, "github."):
