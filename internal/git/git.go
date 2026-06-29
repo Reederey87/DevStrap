@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net/url"
 	"os"
 	"os/exec"
@@ -22,10 +23,25 @@ type Runner struct {
 	Timeout       time.Duration
 	RetryAttempts int
 	RetryBackoff  time.Duration
+	// RetryCap bounds the per-sleep backoff so exponential growth cannot exceed
+	// a sane ceiling (QUAL-06).
+	RetryCap time.Duration
+	// MaxElapsed bounds the total wall-clock time of a single operation's
+	// retry loop (across all attempts). Zero means no aggregate budget (bounded
+	// only by RetryAttempts and the per-command Timeout). Set by callers that
+	// need a hung operation to fail fast instead of wedging a worker slot
+	// (QUAL-06).
+	MaxElapsed time.Duration
 }
 
 func NewRunner() Runner {
-	return Runner{Bin: "git", Timeout: 2 * time.Minute, RetryAttempts: 3, RetryBackoff: 200 * time.Millisecond}
+	return Runner{
+		Bin:           "git",
+		Timeout:       2 * time.Minute,
+		RetryAttempts: 3,
+		RetryBackoff:  200 * time.Millisecond,
+		RetryCap:      5 * time.Second,
+	}
 }
 
 var (
@@ -114,6 +130,11 @@ func (r Runner) Clone(ctx context.Context, remote, dest string, partial bool) er
 		attempts = 1
 	}
 	backoff := r.RetryBackoff
+	cap := r.RetryCap
+	if cap <= 0 {
+		cap = 5 * time.Second
+	}
+	start := time.Now()
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt++ {
 		// GIT-02: a mid-clone network failure (early EOF / RPC failed /
@@ -140,7 +161,11 @@ func (r Runner) Clone(ctx context.Context, remote, dest string, partial bool) er
 		if !errors.Is(err, ErrNetwork) || attempt == attempts {
 			return err
 		}
-		if err := sleepBackoff(ctx, backoff, attempt); err != nil {
+		// QUAL-06: stop retrying once the aggregate operation budget is spent.
+		if r.MaxElapsed > 0 && time.Since(start) >= r.MaxElapsed {
+			return err
+		}
+		if err := sleepBackoff(ctx, backoff, cap, attempt); err != nil {
 			return err
 		}
 	}
@@ -187,6 +212,11 @@ func (r Runner) runWithNetworkRetry(ctx context.Context, dir string, args ...str
 		attempts = 1
 	}
 	backoff := r.RetryBackoff
+	cap := r.RetryCap
+	if cap <= 0 {
+		cap = 5 * time.Second
+	}
+	start := time.Now()
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt++ {
 		_, err := r.Run(ctx, dir, args...)
@@ -197,22 +227,28 @@ func (r Runner) runWithNetworkRetry(ctx context.Context, dir string, args ...str
 		if !errors.Is(err, ErrNetwork) || attempt == attempts {
 			return err
 		}
-		if err := sleepBackoff(ctx, backoff, attempt); err != nil {
+		// QUAL-06: stop retrying once the aggregate operation budget is spent.
+		if r.MaxElapsed > 0 && time.Since(start) >= r.MaxElapsed {
+			return err
+		}
+		if err := sleepBackoff(ctx, backoff, cap, attempt); err != nil {
 			return err
 		}
 	}
 	return lastErr
 }
 
-// sleepBackoff waits for the configured network-retry backoff (linear in the
-// attempt number) or until ctx is cancelled. A non-positive backoff returns
-// immediately so the next attempt runs without delay. QUAL-06 will replace this
-// with capped exponential backoff plus full jitter.
-func sleepBackoff(ctx context.Context, backoff time.Duration, attempt int) error {
-	if backoff <= 0 {
+// sleepBackoff waits for a full-jitter capped-exponential backoff delay or
+// until ctx is cancelled (QUAL-06). A non-positive base returns immediately so
+// the next attempt runs without delay. Without jitter, parallel materialize
+// workers retry in lockstep at identical boundaries (a synchronized thundering
+// herd that amplifies load on a struggling forge); full jitter spreads retries
+// uniformly across [1, min(cap, base*2^(attempt-1))], the AWS-recommended scheme.
+func sleepBackoff(ctx context.Context, base, cap time.Duration, attempt int) error {
+	if base <= 0 {
 		return nil
 	}
-	timer := time.NewTimer(backoff * time.Duration(attempt))
+	timer := time.NewTimer(jitterDelay(base, cap, attempt, rand.Int63n))
 	select {
 	case <-ctx.Done():
 		timer.Stop()
@@ -220,6 +256,23 @@ func sleepBackoff(ctx context.Context, backoff time.Duration, attempt int) error
 	case <-timer.C:
 		return nil
 	}
+}
+
+// jitterDelay computes a full-jitter capped-exponential backoff delay for the
+// given attempt. The result is uniform in [1, min(cap, base*2^(attempt-1))].
+// It takes a randFn so it is deterministic under a seeded RNG in tests.
+func jitterDelay(base, cap time.Duration, attempt int, randFn func(n int64) int64) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	maxN := int64(cap)
+	if exp := int64(base) * (int64(1) << uint(attempt-1)); exp < maxN {
+		maxN = exp
+	}
+	if maxN < 1 {
+		maxN = 1
+	}
+	return time.Duration(randFn(maxN) + 1)
 }
 
 // DefaultBranchSource records how ResolveDefaultBranch determined the branch,

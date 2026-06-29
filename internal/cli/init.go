@@ -11,6 +11,7 @@ import (
 	"github.com/Reederey87/DevStrap/internal/config"
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/platform"
+	"github.com/Reederey87/DevStrap/internal/scan"
 	"github.com/Reederey87/DevStrap/internal/state"
 	"github.com/spf13/cobra"
 )
@@ -18,6 +19,7 @@ import (
 func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var workspaceName string
 	var dryRun bool
+	var scanAdopt bool
 
 	cmd := &cobra.Command{
 		Use:   "init [root]",
@@ -83,13 +85,42 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 
-			_, err = fmt.Fprintf(stdout, "Initialized DevStrap workspace %q at %s\n", workspaceName, paths.Root)
-			return err
+			// PROD-03: an optional --scan adopts existing repos in the root on
+			// the very first command, delivering the "my tree just appeared"
+			// epiphany without a multi-screen wizard. Non-interactive: it runs
+			// the existing scan/adopt path inline.
+			adopted := 0
+			if scanAdopt {
+				result, err := scan.Walk(cmd.Context(), paths.Root, scan.Options{IncludePlainFolders: true})
+				if err != nil {
+					return fmt.Errorf("scan on init: %w", err)
+				}
+				adopted, err = adoptFindings(cmd.Context(), store, paths.Root, result)
+				if err != nil {
+					return fmt.Errorf("adopt on init: %w", err)
+				}
+			}
+
+			if _, err := fmt.Fprintf(stdout, "Initialized DevStrap workspace %q at %s\n", workspaceName, paths.Root); err != nil {
+				return err
+			}
+			if scanAdopt {
+				if _, err := fmt.Fprintf(stdout, "Adopted %d existing project(s).\n", adopted); err != nil {
+					return err
+				}
+			}
+			// PROD-03: always print a short next-steps hint (clig.dev: suggest
+			// the next command and surface state after every action).
+			if _, err := fmt.Fprintf(stdout, "Next: devstrap status • devstrap scan --adopt • devstrap sync --hub-file <path>\n"); err != nil {
+				return err
+			}
+			return nil
 		},
 	}
 
 	cmd.Flags().StringVar(&workspaceName, "workspace-name", "", "workspace name")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show planned changes without writing")
+	cmd.Flags().BoolVar(&scanAdopt, "scan", false, "scan the root and adopt existing repos on init")
 	return cmd
 }
 

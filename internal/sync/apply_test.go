@@ -255,3 +255,91 @@ func hasConflictType(conflicts []state.Conflict, typ string) bool {
 	}
 	return false
 }
+
+// SYNC-01: the sync cursor is a low-water mark. A transiently-skipped event
+// (here a hash-chain break) with a LOWER HLC than a valid event from another
+// device must hold the returned safe cursor below it, so it is re-delivered
+// next pull instead of being permanently stranded once the higher-HLC event
+// advances the cursor past it.
+func TestApplyEventsLowWaterMarkCursorHoldsBelowSkippedEvent(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newSyncStore(t)
+
+	// device-x: event at a low HLC with a bogus prev_event_hash → hash-chain
+	// break, never inserted.
+	broken, err := NewProjectEvent("device-x", EventProjectAdded, 10<<hlcLogicalBits, ProjectPayload{
+		Path: "work/acme/broken", Type: "git_repo", RemoteKey: "github.com/acme/broken",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	broken.PrevEventHash = "sha256:bogus"
+
+	// device-b: valid first event at a higher HLC → applied.
+	valid, err := NewProjectEvent("device-b", EventProjectAdded, 20<<hlcLogicalBits, ProjectPayload{
+		Path: "work/acme/valid", Type: "git_repo", RemoteKey: "github.com/acme/valid",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	safeCursor, err := ApplyEvents(ctx, st, []state.Event{broken, valid})
+	if err != nil {
+		t.Fatalf("ApplyEvents should not abort on a hash-chain break: %v", err)
+	}
+	// The valid (higher-HLC) event was still applied — the batch converged.
+	projects, err := st.ListProjects(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projects) != 1 || projects[0].Path != "work/acme/valid" {
+		t.Fatalf("projects = %+v, want only the valid project applied", projects)
+	}
+	// SYNC-01: the safe cursor must be held below the broken event's HLC so it
+	// is re-delivered next pull. Without the low-water mark the cursor would
+	// advance to 20<<hlcLogicalBits and permanently strand the broken event.
+	if safeCursor >= 10<<hlcLogicalBits {
+		t.Fatalf("safeCursor = %d, want < %d (held below the skipped event)", safeCursor, 10<<hlcLogicalBits)
+	}
+	// A hash-chain conflict was recorded (deduped on re-delivery).
+	conflicts, err := st.OpenConflicts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasConflictType(conflicts, "event_hash_chain_break") {
+		t.Fatalf("conflicts = %+v, want event_hash_chain_break", conflicts)
+	}
+}
+
+// SYNC-01: a permanently-invalid event (HLC <= 0) is quarantined but does NOT
+// hold back the cursor — it will never be re-applied, so holding at a
+// non-positive cursor would strand every higher event.
+func TestApplyEventsPermanentInvalidDoesNotHoldCursor(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newSyncStore(t)
+
+	// device-x: permanently-invalid event (HLC = 0) → quarantined, not applied.
+	poison, err := NewProjectEvent("device-x", EventProjectAdded, 0, ProjectPayload{
+		Path: "work/acme/poison", Type: "git_repo", RemoteKey: "github.com/acme/poison",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// device-b: valid event at a small positive HLC → applied.
+	valid, err := NewProjectEvent("device-b", EventProjectAdded, 10<<hlcLogicalBits, ProjectPayload{
+		Path: "work/acme/valid", Type: "git_repo", RemoteKey: "github.com/acme/valid",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	safeCursor, err := ApplyEvents(ctx, st, []state.Event{poison, valid})
+	if err != nil {
+		t.Fatalf("ApplyEvents should not abort on a quarantined event: %v", err)
+	}
+	// The valid event was applied and the cursor advanced to its HLC — the
+	// permanently-invalid HLC=0 event did not hold it back.
+	if safeCursor != 10<<hlcLogicalBits {
+		t.Fatalf("safeCursor = %d, want %d (cursor not held by permanent-invalid event)", safeCursor, 10<<hlcLogicalBits)
+	}
+}

@@ -75,12 +75,16 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 		}
 		return err
 	}
-	appliedMaxHLC, err := dssync.ApplyEvents(ctx, store, remoteEvents)
+	// SYNC-01: ApplyEvents returns a low-water-mark safe cursor — the highest
+	// HLC safe to advance to, never past a transiently-skipped (quarantined or
+	// hash-chain-broken) event in this batch. Advancing past such an event
+	// would permanently strand it, since Pull only returns HLC > cursor.
+	safeCursor, err := dssync.ApplyEvents(ctx, store, remoteEvents)
 	if err != nil {
 		return err
 	}
-	if appliedMaxHLC > cursor {
-		if err := store.AdvanceHubCursor(ctx, hubID, appliedMaxHLC); err != nil {
+	if safeCursor > cursor {
+		if err := store.AdvanceHubCursor(ctx, hubID, safeCursor); err != nil {
 			return err
 		}
 	}

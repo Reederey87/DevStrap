@@ -27,6 +27,25 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-06-29 — PASS4 audit Phase A quick wins (part 2)
+
+Changed:
+- Continued the PASS4 audit quick wins: SYNC-01 (P1, low-water-mark cursor), QUAL-06 (P2, jitter + aggregate retry budget), PROD-03 (P2, guided init).
+- **SYNC-01**: `ApplyEvents` now returns a low-water-mark safe cursor instead of `maxAppliedHLC`. It tracks `lowestUnappliedHLC` over every transiently-skipped event (skew-ahead quarantine and hash-chain breaks) and returns `min(maxAppliedHLC, lowestUnappliedHLC-1)`, so a skipped event with a lower HLC than a higher-HLC applied event is never permanently stranded — the hub pull cursor never advances past it, so it is re-delivered next cycle. Permanently-invalid events (HLC<=0 / below epoch floor) are recorded as conflicts but do NOT hold the cursor (they will never re-apply, and holding at a non-positive cursor would strand every higher event). `runSyncCycle` advances the cursor to the returned safe value. The misleading "will be re-delivered next pull" comment was corrected.
+- **QUAL-06**: git network retry backoff switched from deterministic linear (`base*attempt`) to full-jitter capped exponential (`jitterDelay`: uniform in `[1, min(cap, base*2^(attempt-1))]`), the AWS-recommended scheme, so parallel materialize workers no longer retry in lockstep (thundering herd) against a struggling forge. `Runner` gained `RetryCap` (default 5s) and `MaxElapsed` (optional aggregate wall-clock budget per operation; when set, the retry loop stops once elapsed). `sleepBackoff` takes the cap; `jitterDelay` is a pure function taking a `randFn` for deterministic seeded-RNG testing.
+- **PROD-03**: `devstrap init` gained a `--scan` flag that runs the existing scan/adopt path inline after workspace creation, so a user with a populated `~/Code` sees their tree adopted on the very first command (the "epiphany" moment). The adopt logic was extracted into a shared `adoptFindings` helper used by both `scan --adopt` and `init --scan`. `init` always prints a short next-steps hint (`devstrap status • devstrap scan --adopt • devstrap sync --hub-file <path>`) per clig.dev guidance.
+- Tests: `TestApplyEventsLowWaterMarkCursorHoldsBelowSkippedEvent` / `TestApplyEventsPermanentInvalidDoesNotHoldCursor` (SYNC-01), `TestJitterDelayFullJitterBounded` (QUAL-06), `init_scan.txtar` (PROD-03).
+
+Validated:
+- `gofmt -w cmd internal`, `go vet ./internal/git/ ./internal/cli/ ./internal/sync/`
+- `GOCACHE=/tmp/devstrap-gocache DEVSTRAP_NO_KEYCHAIN=1 go test ./... -count=1` (all green)
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+
+Follow-ups:
+- Remaining Phase A: SEC-04 (fail-closed bootstrap — the fail-closed-once-enrolled logic is already implemented; the pre-enrollment bootstrap-window closure requires an out-of-band pinning ceremony + authenticated snapshot and changes the core sync-without-enroll demo flow, so it is deferred as L-effort), SEC-02 (encrypt namespace map, L), SEC-05 (sign releases, infra). Then Phases B–E.
+- SYNC-03 (P2/S) deferred: raising `epochFloorMS` + adding the past-direction staleness bound requires updating all deterministic sync tests to use realistic HLC physical components (they currently use `physical=0`), a coordinated refactor.
+- QUAL-06 materialize-pass aggregate context deadline not yet wired (the per-operation `MaxElapsed` field is in place for callers to opt into); deferred to avoid breaking slow CI clones.
+
 ## 2026-06-29 — PASS4 audit Phase A quick wins (part 1)
 
 Changed:

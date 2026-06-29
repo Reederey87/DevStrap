@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"slices"
@@ -434,4 +435,34 @@ func writeFakeGit(t *testing.T, script string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// QUAL-06: jitterDelay produces full-jitter capped-exponential backoff. Delays
+// must stay within [1, min(cap, base*2^(attempt-1))] and the cap must clamp
+// exponential growth.
+func TestJitterDelayFullJitterBounded(t *testing.T) {
+	base := 200 * time.Millisecond
+	cap := 5 * time.Second
+	rng := rand.New(rand.NewSource(42)) // deterministic
+	randFn := rng.Int63n
+
+	for attempt := 1; attempt <= 6; attempt++ {
+		d := jitterDelay(base, cap, attempt, randFn)
+		upper := int64(cap)
+		if exp := int64(base) * (int64(1) << uint(attempt-1)); exp < upper {
+			upper = exp
+		}
+		if d < 1 || d > time.Duration(upper) {
+			t.Fatalf("attempt %d: delay %s outside [1, %s]", attempt, d, time.Duration(upper))
+		}
+	}
+	// Once base*2^n exceeds cap, the delay is clamped to [1, cap].
+	big := jitterDelay(base, cap, 30, randFn)
+	if big > cap {
+		t.Fatalf("delay %s exceeds cap %s", big, cap)
+	}
+	// Zero/negative base short-circuits (no delay).
+	if d := jitterDelay(0, cap, 1, randFn); d != 0 {
+		t.Fatalf("zero base delay = %s, want 0", d)
+	}
 }
