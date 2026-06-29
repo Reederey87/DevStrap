@@ -37,12 +37,11 @@ type checkResult struct {
 
 func newDoctorCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var fixFlag bool
-	var noNetwork bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check local prerequisites and workspace health",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			results := runDoctorChecks(cmd.Context(), opts, noNetwork)
+			results := runDoctorChecks(cmd.Context(), opts)
 			if fixFlag {
 				results = applyDoctorFixes(cmd.Context(), opts, results)
 			}
@@ -53,7 +52,7 @@ func newDoctorCommand(stdout io.Writer, opts *options) *cobra.Command {
 					return err
 				}
 			} else {
-				renderDoctorResults(stdout, cmd.ErrOrStderr(), results)
+				renderDoctorResults(stdout, results)
 			}
 			errs := 0
 			for _, r := range results {
@@ -68,12 +67,11 @@ func newDoctorCommand(stdout io.Writer, opts *options) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&fixFlag, "fix", false, "apply safe remediations (create state home, run migrations, clear stale locks)")
-	cmd.Flags().BoolVar(&noNetwork, "no-network", false, "skip network-dependent checks")
 	return cmd
 }
 
 // runDoctorChecks collects all health checks into a graded result list (PROD-02).
-func runDoctorChecks(ctx context.Context, opts *options, noNetwork bool) []checkResult {
+func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 	paths := opts.paths()
 	var results []checkResult
 	if info, ok := debug.ReadBuildInfo(); ok {
@@ -256,20 +254,22 @@ func applyDoctorFixes(ctx context.Context, opts *options, results []checkResult)
 		}
 		projectID := strings.TrimSuffix(name, ".lock")
 		if _, exists, stale, err := readRepoLock(paths.Home, projectID); err == nil && exists && stale {
-			if ok, _ := clearRepoLock(paths.Home, projectID, true); ok {
+			if ok, lerr := clearRepoLock(paths.Home, projectID, true); ok {
 				fixed = append(fixed, "cleared stale lock "+projectID)
+			} else if lerr != nil {
+				fixed = append(fixed, fmt.Sprintf("failed to clear stale lock %s: %v", projectID, lerr))
 			}
 		}
 	}
 	if len(fixed) > 0 {
 		// Re-run checks to reflect the post-fix state.
-		return runDoctorChecks(ctx, opts, false)
+		return runDoctorChecks(ctx, opts)
 	}
 	return results
 }
 
 // renderDoctorResults prints a graded table and a summary line.
-func renderDoctorResults(stdout, stderr io.Writer, results []checkResult) {
+func renderDoctorResults(stdout io.Writer, results []checkResult) {
 	ok, warn, errs := 0, 0, 0
 	for _, r := range results {
 		switch r.Status {

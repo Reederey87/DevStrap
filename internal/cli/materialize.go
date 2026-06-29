@@ -269,7 +269,21 @@ func extractDraftBundle(ctx context.Context, store *state.Store, opts *options, 
 	if err != nil {
 		return fmt.Errorf("read local device identity: %w", err)
 	}
-	return draftbundle.Extract(ciphertext, identity.Private, localPath)
+	// QUAL-01: use the same aggregate decompression budget Pack applied so a
+	// bundle packed within per-project (or default) limits is never rejected
+	// on extract. Accommodate the recorded packed size/count with at least the
+	// Pack-side defaults so a customized larger limit is honored on receive.
+	limits := draftbundle.Limits{
+		MaxBytes: draftbundle.MaxBundleBytes,
+		MaxFiles: draftbundle.MaxBundleFiles,
+	}
+	if snapshot.ByteSize > limits.MaxBytes {
+		limits.MaxBytes = snapshot.ByteSize
+	}
+	if snapshot.FileCount > limits.MaxFiles {
+		limits.MaxFiles = snapshot.FileCount
+	}
+	return draftbundle.ExtractWithLimits(ciphertext, identity.Private, localPath, limits)
 }
 
 // rebuildDependencies detects the project toolchain and runs the appropriate

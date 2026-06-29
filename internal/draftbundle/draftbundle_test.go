@@ -344,7 +344,7 @@ func TestExtractRejectsOversizedBundle(t *testing.T) {
 	id, recipient := helperAgeIdentity(t)
 	bomb := craftBombBundle(t, recipient, 1, 256)
 	dest := t.TempDir()
-	err := ExtractWithLimits(bomb, id, dest, Limits{MaxBytes: 100, MaxFiles: maxBundleFiles})
+	err := ExtractWithLimits(bomb, id, dest, Limits{MaxBytes: 100, MaxFiles: MaxBundleFiles})
 	if !errors.Is(err, ErrBundleTooLarge) {
 		t.Fatalf("ExtractWithLimits = %v, want ErrBundleTooLarge", err)
 	}

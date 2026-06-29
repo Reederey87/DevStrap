@@ -36,9 +36,9 @@ import (
 // a giant encrypted blob. Per-project overrides live in draft_projects.
 const MaxBundleBytes = 100 * 1024 * 1024 // 100 MiB
 
-// maxBundleFiles is the default file-count ceiling for both Pack and Extract
+// MaxBundleFiles is the default file-count ceiling for both Pack and Extract
 // (DRAFT-04 / QUAL-01).
-const maxBundleFiles = 5000
+const MaxBundleFiles = 5000
 
 // ErrBundleTooLarge signals that an extraction exceeded the aggregate
 // decompression budget (QUAL-01), aborting a gzip/tar bomb authored by a
@@ -73,7 +73,7 @@ func Pack(dir string, matcher *ignore.Matcher, limits Limits, recipients []strin
 		limits.MaxBytes = MaxBundleBytes
 	}
 	if limits.MaxFiles <= 0 {
-		limits.MaxFiles = maxBundleFiles
+		limits.MaxFiles = MaxBundleFiles
 	}
 	ageRecipients := make([]age.Recipient, 0, len(recipients))
 	for _, raw := range recipients {
@@ -194,11 +194,11 @@ func Pack(dir string, matcher *ignore.Matcher, limits Limits, recipients []strin
 // Extract age-decrypts the bundle with the local device identity, then
 // gunzips and untars it into dest (DRAFT-02 hydrate) with a default aggregate
 // extraction budget (QUAL-01): at most MaxBundleBytes total uncompressed bytes
-// and maxBundleFiles files, aborting a gzip/tar decompression bomb authored by
+// and MaxBundleFiles files, aborting a gzip/tar decompression bomb authored by
 // a compromised-but-trusted device. Files are written 0600; directories 0750.
 // Existing files are not overwritten (dual-copy conflict safety, decision #7).
 func Extract(ciphertext []byte, identity, dest string) error {
-	return ExtractWithLimits(ciphertext, identity, dest, Limits{MaxBytes: MaxBundleBytes, MaxFiles: maxBundleFiles})
+	return ExtractWithLimits(ciphertext, identity, dest, Limits{MaxBytes: MaxBundleBytes, MaxFiles: MaxBundleFiles})
 }
 
 // ExtractWithLimits is like Extract but with a caller-supplied aggregate
@@ -210,7 +210,7 @@ func ExtractWithLimits(ciphertext []byte, identity, dest string, limits Limits) 
 		limits.MaxBytes = MaxBundleBytes
 	}
 	if limits.MaxFiles <= 0 {
-		limits.MaxFiles = maxBundleFiles
+		limits.MaxFiles = MaxBundleFiles
 	}
 	ageIdentity, err := age.ParseX25519Identity(identity)
 	if err != nil {
@@ -264,12 +264,11 @@ func ExtractWithLimits(ciphertext []byte, identity, dest string, limits Limits) 
 				return fmt.Errorf("%w: %d files exceeds limit %d", ErrBundleTooLarge, fileCount, limits.MaxFiles)
 			}
 			remaining := limits.MaxBytes - totalBytes
-			if remaining <= 0 {
-				return fmt.Errorf("%w: %d bytes exceeds limit %d", ErrBundleTooLarge, totalBytes, limits.MaxBytes)
-			}
 			// QUAL-01: abort (do not truncate) when this entry alone would
 			// exceed the remaining budget, so a single huge file is caught as
-			// a bomb rather than silently shortened.
+			// a bomb rather than silently shortened. A zero-size entry (e.g. a
+			// trailing .gitkeep) passes even when the budget is exactly
+			// exhausted (0 > 0 is false), matching Pack's strict-`>` accounting.
 			if hdr.Size > remaining {
 				return fmt.Errorf("%w: entry %s (%d bytes) exceeds remaining budget %d", ErrBundleTooLarge, hdr.Name, hdr.Size, remaining)
 			}
