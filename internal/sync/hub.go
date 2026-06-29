@@ -46,6 +46,10 @@ var ErrInvalidBlobKey = errors.New("invalid blob key")
 //     digest. Writes are idempotent: a blob already present is a no-op.
 //   - GetBlob returns the blob as a stream the caller must close. A missing
 //     blob returns an error wrapping os.ErrNotExist.
+//   - DeleteBlob removes a content-addressed blob. It is the reclamation
+//     primitive that makes blob/event GC possible (HUB-12) and lets device
+//     revoke delete superseded ciphertext so a revoked key can no longer fetch
+//     it (SEC-01). A missing blob is not an error (idempotent delete).
 //
 // The object-key contract is immutable: events and blobs are addressed by
 // content-derived, collision-resistant identifiers and are never overwritten in
@@ -55,6 +59,7 @@ type Hub interface {
 	Pull(ctx context.Context, afterHLC int64) ([]state.Event, error)
 	PutBlob(ctx context.Context, sha256Hex string, r io.Reader) error
 	GetBlob(ctx context.Context, sha256Hex string) (io.ReadCloser, error)
+	DeleteBlob(ctx context.Context, sha256Hex string) error
 }
 
 // FileHub is a file-backed test Hub (HUB-01). The event log is a single JSON
@@ -165,6 +170,20 @@ func (h FileHub) GetBlob(_ context.Context, sha256Hex string) (io.ReadCloser, er
 		return nil, fmt.Errorf("open blob: %w", err)
 	}
 	return f, nil
+}
+
+// DeleteBlob removes a content-addressed blob (SEC-01/HUB-12). A missing blob is
+// not an error (idempotent delete), so revoke/GC can call it unconditionally for
+// superseded ciphertext.
+func (h FileHub) DeleteBlob(_ context.Context, sha256Hex string) error {
+	if err := validateBlobKey(sha256Hex); err != nil {
+		return err
+	}
+	err := os.Remove(h.blobPath(sha256Hex))
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete blob: %w", err)
+	}
+	return nil
 }
 
 func (h FileHub) blobDir() string {

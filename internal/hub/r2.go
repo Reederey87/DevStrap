@@ -47,6 +47,10 @@ type S3Client interface {
 	GetObject(ctx context.Context, key string) ([]byte, error)
 	// ObjectExists reports whether an object exists at key.
 	ObjectExists(ctx context.Context, key string) (bool, error)
+	// DeleteObject removes the object at key. A missing object is not an error
+	// (idempotent delete) so blob/event GC (HUB-12) and revoke cleanup (SEC-01)
+	// can call it unconditionally for superseded ciphertext.
+	DeleteObject(ctx context.Context, key string) error
 	// ListObjectsV2 returns object keys under prefix, lexicographically after
 	// startAfter, up to maxKeys. When truncated, it returns the next key to
 	// continue from.
@@ -219,6 +223,17 @@ func (h R2Hub) GetBlob(ctx context.Context, sha256Hex string) (io.ReadCloser, er
 		return nil, err
 	}
 	return io.NopCloser(bytesReader(data)), nil
+}
+
+// DeleteBlob removes a content-addressed blob from the hub (SEC-01/HUB-12). A
+// missing blob is not an error (idempotent delete). On revoke, after a blob is
+// rewrapped to the reduced recipient set and its references repointed, the old
+// ciphertext is deleted so the revoked device can no longer fetch it.
+func (h R2Hub) DeleteBlob(ctx context.Context, sha256Hex string) error {
+	if !isValidHexKey(sha256Hex) {
+		return dssync.ErrInvalidBlobKey
+	}
+	return h.retry().do(ctx, func() error { return h.S3.DeleteObject(ctx, h.blobKey(sha256Hex)) })
 }
 
 // isValidHexKey checks for a 64-char hex digest with no path separators.

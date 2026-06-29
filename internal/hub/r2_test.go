@@ -128,6 +128,28 @@ func TestR2BlobNotFound(t *testing.T) {
 	}
 }
 
+// TestR2HubDeleteBlob (SEC-01/HUB-12): DeleteBlob removes a content-addressed
+// blob and is idempotent on a missing blob so revoke/GC can call it
+// unconditionally for superseded ciphertext.
+func TestR2HubDeleteBlob(t *testing.T) {
+	ctx := context.Background()
+	h := newTestR2Hub(t)
+	hash := strings.Repeat("a", 64)
+	if err := h.PutBlob(ctx, hash, bytes.NewReader([]byte("encrypted-blob"))); err != nil {
+		t.Fatalf("PutBlob: %v", err)
+	}
+	if err := h.DeleteBlob(ctx, hash); err != nil {
+		t.Fatalf("DeleteBlob: %v", err)
+	}
+	if _, err := h.GetBlob(ctx, hash); err == nil {
+		t.Fatal("expected error after delete")
+	}
+	// Idempotent: deleting a missing blob is not an error.
+	if err := h.DeleteBlob(ctx, strings.Repeat("c", 64)); err != nil {
+		t.Fatalf("idempotent delete of missing blob: %v", err)
+	}
+}
+
 func TestR2InvalidBlobKey(t *testing.T) {
 	ctx := context.Background()
 	h := newTestR2Hub(t)
