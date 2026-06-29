@@ -41,6 +41,7 @@ Validated:
 - `gofmt -w cmd internal`, `go vet ./internal/git/ ./internal/cli/ ./internal/sync/`
 - `GOCACHE=/tmp/devstrap-gocache DEVSTRAP_NO_KEYCHAIN=1 go test ./... -count=1` (all green)
 - `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- Subagent code review (PR #20) found one MAJOR: `rewrapBlobsOnRevoke` deleted old hub ciphertext even when the rewrapped-blob push failed (hub data loss). Fixed by gating the delete on a successful push (extracted `rewrapHubCleanup` with early-return gating) + added `TestRewrapHubCleanupKeepsOldBlobOnPushFailure`/`TestRewrapHubCleanupDeletesOldBlobOnSuccess`; also clamped `R2Retry.sleep` exp to `[1,cap]` for overflow robustness. Re-validated full suite + spec-drift green.
 
 Follow-ups:
 - Remaining Phase A: SEC-04 (fail-closed bootstrap — the fail-closed-once-enrolled logic is already implemented; the pre-enrollment bootstrap-window closure requires an out-of-band pinning ceremony + authenticated snapshot and changes the core sync-without-enroll demo flow, so it is deferred as L-effort), SEC-02 (encrypt namespace map, L), SEC-05 (sign releases, infra). Then Phases B–E.
