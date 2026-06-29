@@ -379,7 +379,9 @@ func (r R2Retry) sleep(ctx context.Context, p R2Retry, attempt int, class s3Erro
 		cap = 20 * time.Second
 	}
 	exp := base * time.Duration(1<<(attempt-1))
-	if exp > cap {
+	// QUAL-06: clamp overflow (attempt large enough that 2^(attempt-1)
+	// overflows int64) to cap so jitter never receives a non-positive bound.
+	if exp > cap || exp <= 0 {
 		exp = cap
 	}
 	jitter := p.Jitter

@@ -82,16 +82,12 @@ func rewrapBlobsOnRevoke(ctx context.Context, store *state.Store, opts *options,
 		}
 		// SEC-01: push the rewrapped blob to the hub and delete the old
 		// ciphertext so the revoked device can no longer fetch it. The old blob
-		// is deleted only once no binding/snapshot still references it.
+		// is deleted only once no binding/snapshot still references it AND the
+		// rewrapped blob was successfully pushed — otherwise deleting the old
+		// ciphertext would leave the hub with neither copy (data loss for any
+		// device that later needs to fetch it).
 		if hub != nil {
-			if err := hub.PutBlob(ctx, blobHashHex(newRef), bytes.NewReader(newCiphertext)); err != nil {
-				logging.Logger(ctx).Warn("rewrap: failed to push rewrapped blob to hub", "ref", newRef, "err", err.Error())
-			}
-			if blobRefStillReferenced(ctx, store, ref) {
-				logging.Logger(ctx).Warn("rewrap: old blob still referenced, not deleting from hub", "ref", ref)
-			} else if err := hub.DeleteBlob(ctx, blobHashHex(ref)); err != nil {
-				logging.Logger(ctx).Warn("rewrap: failed to delete old blob from hub", "ref", ref, "err", err.Error())
-			}
+			rewrapHubCleanup(ctx, hub, store, ref, newRef, newCiphertext)
 		}
 		rewrapped++
 	}
@@ -132,6 +128,25 @@ func blobRefStillReferenced(ctx context.Context, store *state.Store, ref string)
 		}
 	}
 	return false
+}
+
+// rewrapHubCleanup pushes the rewrapped blob to the hub and, only on a
+// successful push AND when no binding still references the old ref, deletes the
+// old ciphertext (SEC-01). If the push fails the old ciphertext is kept so the
+// hub never ends up with neither copy. Failures are logged, not fatal, so a
+// single blob's hub hiccup does not abort the whole revoke rewrap pass.
+func rewrapHubCleanup(ctx context.Context, hub dssync.Hub, store *state.Store, oldRef, newRef string, newCiphertext []byte) {
+	if err := hub.PutBlob(ctx, blobHashHex(newRef), bytes.NewReader(newCiphertext)); err != nil {
+		logging.Logger(ctx).Warn("rewrap: failed to push rewrapped blob to hub; keeping old ciphertext", "ref", newRef, "err", err.Error())
+		return
+	}
+	if blobRefStillReferenced(ctx, store, oldRef) {
+		logging.Logger(ctx).Warn("rewrap: old blob still referenced, not deleting from hub", "ref", oldRef)
+		return
+	}
+	if err := hub.DeleteBlob(ctx, blobHashHex(oldRef)); err != nil {
+		logging.Logger(ctx).Warn("rewrap: failed to delete old blob from hub", "ref", oldRef, "err", err.Error())
+	}
 }
 
 // gcUnreferencedBlobs removes locally-cached blobs that are no longer
