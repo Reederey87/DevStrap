@@ -213,8 +213,13 @@ func TestInitStatusAndDBCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("doctor stdout = %q stderr = %q err = %v", stdout, stderr, err)
 	}
-	if !strings.Contains(stdout, "sqlite foreign_key_check: ok") || !strings.Contains(stdout, "device key: ok") || !strings.Contains(stdout, "device signing key: ok") {
-		t.Fatalf("doctor stdout = %q, want device key checks ok", stdout)
+	// PROD-02: doctor is now a graded report. A healthy workspace has the
+	// device-key and DB-integrity checks present and zero errors.
+	if !strings.Contains(stdout, "foreign_key_check") || !strings.Contains(stdout, "device key") || !strings.Contains(stdout, "device signing key") {
+		t.Fatalf("doctor stdout = %q, want device key + db checks present", stdout)
+	}
+	if !strings.Contains(stdout, "0 error(s)") {
+		t.Fatalf("doctor stdout = %q, want 0 errors on a healthy workspace", stdout)
 	}
 }
 

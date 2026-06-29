@@ -27,6 +27,24 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-06-29 — PASS4 audit Phase A/D quick wins (part 3)
+
+Changed:
+- Continued PASS4 quick wins: PROD-01 (P1), PROD-02 (P1), SYNC-04 (P2), QUAL-01 (P1).
+- **PROD-01**: added `devstrap clone <url> [path]` — a one-shot quick path that derives a namespace path from the remote (`work/<org>/<repo>`, overridable), runs the existing add + eager materialize (blobless clone + env hydrate) + optional `--open`/`--vscode`. Extracted a shared `addProject` helper from `add` so clone is a thin orchestrator over existing internals. Registered in `root.go`; documented in `spec/13` (command-doc drift gate satisfied).
+- **PROD-02**: `doctor` is now a severity-graded health report. Each check returns `{name, status: ok|warning|error, detail, remedy}`; rendered as a graded table + summary line, with a non-zero exit on any error (CI-gateable). `--json` emits the check array; `--fix` applies safe remediations (create missing state home, run pending migrations, clear stale repo locks via `clearRepoLock`) and re-runs checks; `--no-network` flag added. Checks cover git (required)/gh/go (optional), state home, schema version, SQLite quick_check/foreign_key_check, secrets needing rotation, device age + Ed25519 key health, and held repo locks (stale = warning).
+- **SYNC-04**: the push side is now cursor-bounded. `runSyncCycle` reads a per-hub `push:<hubID>` watermark, fetches only local-origin events with `HLC > pushCursor` via the new `Store.LocalPendingEvents(ctx, afterHLC)`, pushes them, and advances the watermark. Remote-origin events are no longer re-uploaded every cycle (the hub already holds them from their origin device), so a no-op sync pushes zero instead of the whole log.
+- **QUAL-01**: `draftbundle.Extract` now enforces an aggregate decompression budget (max total uncompressed bytes + max file count) via the new `ExtractWithLimits`, aborting a gzip/tar decompression bomb authored by a compromised-but-trusted device with `ErrBundleTooLarge` (the per-file `LimitReader` alone did not bound total size/count). `Extract` delegates with the Pack-side defaults (100 MiB / 5000 files). Added Go native fuzz targets `FuzzParseBytes` (envfile) and `FuzzCompile` (ignore) with seed corpora from existing table tests; they run as ordinary tests on `go test` and fuzz under `-fuzz`.
+- Tests: `TestDeriveClonePath` + `clone.txtar` (PROD-01), `doctor.txtar` + updated `TestInitStatusAndDBCommands`/`init_status.txtar` for the graded format (PROD-02), `sync_push_cursor.txtar` (SYNC-04), `TestExtractRejectsTooManyFiles`/`TestExtractRejectsOversizedBundle` (QUAL-01), `FuzzParseBytes`/`FuzzCompile` seed corpus (QUAL-01).
+
+Validated:
+- `gofmt -w cmd internal`, `go vet`, `DEVSTRAP_NO_KEYCHAIN=1 go test ./... -count=1` (all green), `go test -race` on touched packages, `spec-drift` passes.
+- golangci-lint not installed in this environment.
+
+Follow-ups:
+- QUAL-01 CI fuzz step (`go test -fuzz=... -fuzztime=30s`) and `FuzzCanonicalRemoteKey`/`FuzzExtract` not yet wired (the fuzz targets exist and pass seed corpora; the CI step + the git/draftbundle fuzz targets remain).
+- Remaining: SEC-02 (encrypt namespace map, L), SEC-04 (bootstrap pinning, deferred), SEC-05 (release signing), SYNC-02/HUB-11 (compaction, L), SYNC-06 (tombstone GC), SYNC-03 (needs HLC test refactor), QUAL-02 (property tests), GIT-04/05/06, HUB-14/15/16, PROD-04/05/06, and Phase E.
+
 ## 2026-06-29 — PASS4 audit Phase A quick wins (part 2)
 
 Changed:

@@ -46,7 +46,18 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 		return err
 	}
 	defer closeStore(store)
-	localEvents, err := store.PendingEvents(ctx)
+	hub := dssync.FileHub{Path: hubFile}
+	hubID := "file:" + hubFile
+	// SYNC-04: push cursor bounds the push side so a sync cycle re-uploads
+	// only new local-origin events (HLC > push cursor), not the entire event
+	// log including remote-origin events the hub already holds from their
+	// origin device. The push cursor is a per-hub "push:<hubID>" row in
+	// hub_cursors.
+	pushCursor, err := store.HubCursor(ctx, "push:"+hubID)
+	if err != nil {
+		return err
+	}
+	localEvents, err := store.LocalPendingEvents(ctx, pushCursor)
 	if err != nil {
 		return err
 	}
@@ -54,14 +65,25 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 		_, err = fmt.Fprintf(stdout, "Would push %d local events to %s and pull namespace events\n", len(localEvents), hubFile)
 		return err
 	}
-	hub := dssync.FileHub{Path: hubFile}
-	hubID := "file:" + hubFile
 	// DRAFT-02: push local blobs referenced by pending events to the hub.
 	if err := pushReferencedBlobs(ctx, hub, localEvents, opts.paths()); err != nil {
 		return appError{code: exitNetwork, err: fmt.Errorf("push blobs: %w", err)}
 	}
 	if err := hub.Push(ctx, localEvents); err != nil {
 		return appError{code: exitNetwork, err: err}
+	}
+	// SYNC-04: advance the push cursor to the highest pushed local HLC so the
+	// next cycle only pushes newly-originated events.
+	if len(localEvents) > 0 {
+		var maxPushHLC int64
+		for _, e := range localEvents {
+			if e.HLC > maxPushHLC {
+				maxPushHLC = e.HLC
+			}
+		}
+		if err := store.AdvanceHubCursor(ctx, "push:"+hubID, maxPushHLC); err != nil {
+			return err
+		}
 	}
 	// EAGER-02: cursor-based incremental pull.
 	cursor, err := store.HubCursor(ctx, hubID)

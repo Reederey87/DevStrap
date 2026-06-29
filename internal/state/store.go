@@ -2335,6 +2335,38 @@ ORDER BY hlc ASC, device_id ASC, id ASC;
 	return events, rows.Err()
 }
 
+// LocalPendingEvents returns events originated by the local device with HLC
+// strictly greater than afterHLC (SYNC-04). It bounds the push side of sync so
+// a cycle re-uploads only new local-origin events, not the entire event log
+// (including remote-origin events the hub already holds from their origin
+// device). The push cursor is stored per hub as a "push:<hubID>" row in
+// hub_cursors.
+func (s *Store) LocalPendingEvents(ctx context.Context, afterHLC int64) ([]Event, error) {
+	device, err := s.CurrentDevice(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read current device for local pending events: %w", err)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, workspace_id, device_id, COALESCE(seq, 0), hlc, type, payload_json, content_hash, COALESCE(device_sig, ''), COALESCE(prev_event_hash, ''), created_at
+FROM events
+WHERE device_id = ? AND hlc > ?
+ORDER BY hlc ASC, id ASC;
+`, device.ID, afterHLC)
+	if err != nil {
+		return nil, fmt.Errorf("list local pending events: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var events []Event
+	for rows.Next() {
+		var e Event
+		if err := rows.Scan(&e.ID, &e.WorkspaceID, &e.DeviceID, &e.Seq, &e.HLC, &e.Type, &e.PayloadJSON, &e.ContentHash, &e.DeviceSig, &e.PrevEventHash, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan event: %w", err)
+		}
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+
 // HubCursor returns the last HLC applied from the given hub source (EAGER-02).
 // Returns 0 when no cursor exists yet (a fresh device pulls from the beginning).
 func (s *Store) HubCursor(ctx context.Context, hubID string) (int64, error) {

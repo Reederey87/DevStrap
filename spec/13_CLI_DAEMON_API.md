@@ -51,7 +51,7 @@ devstrap wip
 Current repository status as of `2026-06-28`:
 
 ```text
-Implemented: devstrap init, version, scan, add, hydrate, open, sync --hub-file, materialize, draft snapshot create, run-loop, status, doctor, conflicts, db migrate/status/backup/down, env capture/hydrate/bind, run, worktree new/status/finalize/list/remove/cleanup/unlock, agent run/list/show/pr, devices enroll/list/approve/revoke/lost/rename
+Implemented: devstrap init, version, scan, add, clone, hydrate, open, sync --hub-file, materialize, draft snapshot create, run-loop, status, doctor, conflicts, db migrate/status/backup/down, env capture/hydrate/bind, run, worktree new/status/finalize/list/remove/cleanup/unlock, agent run/list/show/pr, devices enroll/list/approve/revoke/lost/rename
 Planned: production R2/S3 SDK wiring, env check, OS-enforced agent sandboxing, automatic remote device enrollment/fingerprint confirmation, daemon/socket API, export, promote, gitstate, wip
 ```
 
@@ -95,7 +95,7 @@ Rules:
 - `backup` uses `VACUUM INTO`, not file copy;
 - state DB and backups are mode `0600`.
 
-`doctor` reports schema version, SQLite `quick_check`, SQLite `foreign_key_check`, local age device-key health, and local Ed25519 signing-key health when the state database exists.
+`doctor` (`PROD-02`) is a severity-graded health report: each check returns `{name, status: ok|warning|error, detail, remedy}`, rendered as a graded table with a summary line and a non-zero exit code when any check is error (so it can gate CI). Checks cover git/gh/go tools (git required, gh/go optional), state home + permissions, schema version, SQLite `quick_check`/`foreign_key_check`, secrets needing rotation, local age + Ed25519 device-key health, and held repo locks (stale = warning). `--json` emits the check array; `--fix` applies safe remediations (create the missing state home, run pending migrations, clear stale repo locks) and re-runs the checks; `--no-network` skips network-dependent checks.
 
 ### scan
 
@@ -225,6 +225,24 @@ Options:
 
 ```bash
 --path
+--default-branch
+--lfs-policy auto|never|agent|always
+```
+
+### clone
+
+```bash
+devstrap clone git@github.com:acme/api.git
+devstrap clone git@github.com:acme/api.git work/acme/api --open
+```
+
+`clone` (`PROD-01`) is the one-shot quick path that collapses onboarding to a single command: it derives a namespace path from the remote (`work/<org>/<repo>`, overridable via a positional arg), runs the existing `add` + eager `materialize` (blobless clone + env hydrate), and optionally `--open`/`--vscode` the result. It reuses `addProject` + `materializeOne` internals — a thin orchestrator, not new core logic.
+
+Options:
+
+```bash
+--open                # open in Cursor after materialization
+--vscode              # open in VS Code after materialization
 --default-branch
 --lfs-policy auto|never|agent|always
 ```

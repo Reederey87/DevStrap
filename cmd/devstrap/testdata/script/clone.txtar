@@ -1,0 +1,25 @@
+# PROD-01: devstrap clone is a one-shot add + eager materialize path that
+# collapses onboarding to a single command.
+
+env DEVSTRAP_NO_KEYCHAIN=1
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+# Set up a bare git remote (HEAD on main) with one commit.
+exec git init --bare -b main $WORK/remote.git
+exec git clone $WORK/remote.git $WORK/src
+exec sh -c 'echo hello > $WORK/src/README.md && cd $WORK/src && git add README.md && git commit -m init && git branch -M main && git push origin main'
+
+# init then clone in one command (explicit path for stable assertions).
+exec devstrap --home=$WORK/home --root=$WORK/Code init
+exec devstrap --home=$WORK/home --root=$WORK/Code clone $WORK/remote.git work/test/proj
+stdout 'added work/test/proj'
+stdout 'cloned work/test/proj'
+stdout 'Open with: devstrap open'
+
+# The repo must be present on disk with its content.
+exec sh -c 'test -d $WORK/Code/work/test/proj/.git'
+exec sh -c 'cat $WORK/Code/work/test/proj/README.md'
+stdout 'hello'

@@ -1,6 +1,11 @@
 package draftbundle
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -271,5 +276,76 @@ func TestPackSkipDevstrapDir(t *testing.T) {
 	}
 	if snap.FileCount != 1 {
 		t.Errorf("file count = %d, want 1 (.devstrap excluded)", snap.FileCount)
+	}
+}
+
+// craftBombBundle builds a raw tar→gzip→age bundle with fileCount regular
+// entries of fileSize bytes each, encrypted to the test identity. It bypasses
+// Pack's limits so Extract's aggregate guard (QUAL-01) can be exercised against
+// a malicious bundle a compromised-but-trusted device could author.
+func craftBombBundle(t *testing.T, recipient string, fileCount int, fileSize int64) []byte {
+	t.Helper()
+	var tarbuf bytes.Buffer
+	gw := gzip.NewWriter(&tarbuf)
+	tw := tar.NewWriter(gw)
+	body := make([]byte, fileSize)
+	for i := 0; i < fileCount; i++ {
+		if err := tw.WriteHeader(&tar.Header{
+			Name:     fmt.Sprintf("bomb/file%d", i),
+			Mode:     0o600,
+			Size:     fileSize,
+			Typeflag: tar.TypeReg,
+		}); err != nil {
+			t.Fatalf("write tar header: %v", err)
+		}
+		if _, err := tw.Write(body); err != nil {
+			t.Fatalf("write tar body: %v", err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("close gzip: %v", err)
+	}
+	r, err := age.ParseX25519Recipient(recipient)
+	if err != nil {
+		t.Fatalf("parse recipient: %v", err)
+	}
+	var enc bytes.Buffer
+	aw, err := age.Encrypt(&enc, r)
+	if err != nil {
+		t.Fatalf("age encrypt: %v", err)
+	}
+	if _, err := aw.Write(tarbuf.Bytes()); err != nil {
+		t.Fatalf("write ciphertext: %v", err)
+	}
+	if err := aw.Close(); err != nil {
+		t.Fatalf("close age: %v", err)
+	}
+	return enc.Bytes()
+}
+
+// TestExtractRejectsTooManyFiles (QUAL-01): a bundle with more entries than the
+// extraction budget's file-count ceiling is aborted with ErrBundleTooLarge.
+func TestExtractRejectsTooManyFiles(t *testing.T) {
+	id, recipient := helperAgeIdentity(t)
+	bomb := craftBombBundle(t, recipient, 10, 1)
+	dest := t.TempDir()
+	err := ExtractWithLimits(bomb, id, dest, Limits{MaxBytes: MaxBundleBytes, MaxFiles: 3})
+	if !errors.Is(err, ErrBundleTooLarge) {
+		t.Fatalf("ExtractWithLimits = %v, want ErrBundleTooLarge", err)
+	}
+}
+
+// TestExtractRejectsOversizedBundle (QUAL-01): a bundle whose total
+// uncompressed bytes exceed the budget is aborted (decompression bomb guard).
+func TestExtractRejectsOversizedBundle(t *testing.T) {
+	id, recipient := helperAgeIdentity(t)
+	bomb := craftBombBundle(t, recipient, 1, 256)
+	dest := t.TempDir()
+	err := ExtractWithLimits(bomb, id, dest, Limits{MaxBytes: 100, MaxFiles: maxBundleFiles})
+	if !errors.Is(err, ErrBundleTooLarge) {
+		t.Fatalf("ExtractWithLimits = %v, want ErrBundleTooLarge", err)
 	}
 }

@@ -1,0 +1,21 @@
+# SYNC-04: the push side has a per-hub cursor so a sync cycle re-uploads only
+# new local-origin events. A second sync with no new local activity pushes zero.
+
+env DEVSTRAP_NO_KEYCHAIN=1
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+exec git init --bare -b main $WORK/remote.git
+
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA init
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/proj $WORK/remote.git
+
+# First sync: one local-origin event is pushed.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+stdout 'pushed 1'
+
+# Second sync: no new local events — the push cursor bounds it to zero.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+stdout 'pushed 0'

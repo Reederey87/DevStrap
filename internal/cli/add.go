@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -23,58 +24,14 @@ func newAddCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if nsPath == "" {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("--path is required")}
 			}
-			remoteKey, err := dsgit.CanonicalRemoteKey(args[0])
-			if err != nil {
-				return appError{code: exitInvalidConfig, err: err}
-			}
-			if defaultBranch == "" {
-				defaultBranch = "main"
-			}
-			if lfsPolicy == "" {
-				lfsPolicy = "auto"
-			}
-			if !validLFSPolicy(lfsPolicy) {
-				return appError{code: exitInvalidConfig, err: fmt.Errorf("unsupported lfs policy %q", lfsPolicy)}
-			}
 			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
 			defer closeStore(store)
-			localPath := filepath.Join(opts.paths().Root, filepath.FromSlash(nsPath))
-			if err := ensureHydratableTarget(localPath); err != nil {
-				return err
-			}
-			event, err := dssync.CreateProjectEvent(cmd.Context(), store, dssync.EventProjectAdded, dssync.ProjectPayload{
-				Path:          nsPath,
-				Type:          "git_repo",
-				RemoteURL:     args[0],
-				RemoteKey:     remoteKey,
-				DefaultBranch: defaultBranch,
-			})
+			project, err := addProject(cmd.Context(), store, opts, args[0], nsPath, defaultBranch, lfsPolicy)
 			if err != nil {
-				return err
-			}
-			project, err := store.UpsertProject(cmd.Context(), state.UpsertProjectParams{
-				Path:                  nsPath,
-				Type:                  "git_repo",
-				RemoteURL:             args[0],
-				RemoteKey:             remoteKey,
-				DefaultBranch:         defaultBranch,
-				LFSPolicy:             lfsPolicy,
-				MaterializationPolicy: "lazy",
-				LocalPath:             localPath,
-				MaterializationState:  "skeleton",
-				DirtyState:            "unknown",
-				SourceEventHLC:        event.HLC,
-				SourceEventDeviceID:   event.DeviceID,
-				SourceEventID:         event.ID,
-			})
-			if err != nil {
-				return err
-			}
-			if err := writeSkeleton(localPath, project.Path, args[0]); err != nil {
-				return err
+				return appError{code: exitInvalidConfig, err: err}
 			}
 			_, err = fmt.Fprintf(stdout, "Added %s -> %s\n", project.Path, args[0])
 			return err
@@ -84,4 +41,60 @@ func newAddCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&defaultBranch, "default-branch", "", "default branch fallback")
 	cmd.Flags().StringVar(&lfsPolicy, "lfs-policy", "auto", "Git LFS policy for agent worktrees: auto, never, agent, or always")
 	return cmd
+}
+
+// addProject validates the remote, creates a project.added event, upserts the
+// namespace entry, and writes the skeleton directory. Shared by `devstrap add`
+// and `devstrap clone` (PROD-01) so clone is a thin orchestrator over the
+// existing add path rather than new core logic.
+func addProject(ctx context.Context, store *state.Store, opts *options, remote, nsPath, defaultBranch, lfsPolicy string) (state.NamespaceEntry, error) {
+	remoteKey, err := dsgit.CanonicalRemoteKey(remote)
+	if err != nil {
+		return state.NamespaceEntry{}, err
+	}
+	if defaultBranch == "" {
+		defaultBranch = "main"
+	}
+	if lfsPolicy == "" {
+		lfsPolicy = "auto"
+	}
+	if !validLFSPolicy(lfsPolicy) {
+		return state.NamespaceEntry{}, fmt.Errorf("unsupported lfs policy %q", lfsPolicy)
+	}
+	localPath := filepath.Join(opts.paths().Root, filepath.FromSlash(nsPath))
+	if err := ensureHydratableTarget(localPath); err != nil {
+		return state.NamespaceEntry{}, err
+	}
+	event, err := dssync.CreateProjectEvent(ctx, store, dssync.EventProjectAdded, dssync.ProjectPayload{
+		Path:          nsPath,
+		Type:          "git_repo",
+		RemoteURL:     remote,
+		RemoteKey:     remoteKey,
+		DefaultBranch: defaultBranch,
+	})
+	if err != nil {
+		return state.NamespaceEntry{}, err
+	}
+	project, err := store.UpsertProject(ctx, state.UpsertProjectParams{
+		Path:                  nsPath,
+		Type:                  "git_repo",
+		RemoteURL:             remote,
+		RemoteKey:             remoteKey,
+		DefaultBranch:         defaultBranch,
+		LFSPolicy:             lfsPolicy,
+		MaterializationPolicy: "lazy",
+		LocalPath:             localPath,
+		MaterializationState:  "skeleton",
+		DirtyState:            "unknown",
+		SourceEventHLC:        event.HLC,
+		SourceEventDeviceID:   event.DeviceID,
+		SourceEventID:         event.ID,
+	})
+	if err != nil {
+		return state.NamespaceEntry{}, err
+	}
+	if err := writeSkeleton(localPath, project.Path, remote); err != nil {
+		return state.NamespaceEntry{}, err
+	}
+	return project, nil
 }

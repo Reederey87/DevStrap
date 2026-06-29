@@ -21,6 +21,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -34,6 +35,15 @@ import (
 // MaxBundleBytes bounds a single draft bundle so a runaway draft cannot produce
 // a giant encrypted blob. Per-project overrides live in draft_projects.
 const MaxBundleBytes = 100 * 1024 * 1024 // 100 MiB
+
+// maxBundleFiles is the default file-count ceiling for both Pack and Extract
+// (DRAFT-04 / QUAL-01).
+const maxBundleFiles = 5000
+
+// ErrBundleTooLarge signals that an extraction exceeded the aggregate
+// decompression budget (QUAL-01), aborting a gzip/tar bomb authored by a
+// compromised-but-trusted device.
+var ErrBundleTooLarge = errors.New("draft bundle exceeds extraction budget (decompression bomb guard)")
 
 // Limits are the enforced size and file-count bounds for a draft bundle
 // (DRAFT-04).
@@ -63,7 +73,7 @@ func Pack(dir string, matcher *ignore.Matcher, limits Limits, recipients []strin
 		limits.MaxBytes = MaxBundleBytes
 	}
 	if limits.MaxFiles <= 0 {
-		limits.MaxFiles = 5000
+		limits.MaxFiles = maxBundleFiles
 	}
 	ageRecipients := make([]age.Recipient, 0, len(recipients))
 	for _, raw := range recipients {
@@ -182,10 +192,26 @@ func Pack(dir string, matcher *ignore.Matcher, limits Limits, recipients []strin
 }
 
 // Extract age-decrypts the bundle with the local device identity, then
-// gunzips and untars it into dest (DRAFT-02 hydrate). Files are written 0600;
-// directories 0750. Existing files are not overwritten (dual-copy conflict
-// safety, decision #7).
+// gunzips and untars it into dest (DRAFT-02 hydrate) with a default aggregate
+// extraction budget (QUAL-01): at most MaxBundleBytes total uncompressed bytes
+// and maxBundleFiles files, aborting a gzip/tar decompression bomb authored by
+// a compromised-but-trusted device. Files are written 0600; directories 0750.
+// Existing files are not overwritten (dual-copy conflict safety, decision #7).
 func Extract(ciphertext []byte, identity, dest string) error {
+	return ExtractWithLimits(ciphertext, identity, dest, Limits{MaxBytes: MaxBundleBytes, MaxFiles: maxBundleFiles})
+}
+
+// ExtractWithLimits is like Extract but with a caller-supplied aggregate
+// extraction budget (QUAL-01). The running total uncompressed bytes and entry
+// count are tracked across the whole tar stream — not just per file — so a
+// bomb that spreads across many small entries or one huge entry is caught.
+func ExtractWithLimits(ciphertext []byte, identity, dest string, limits Limits) error {
+	if limits.MaxBytes <= 0 {
+		limits.MaxBytes = MaxBundleBytes
+	}
+	if limits.MaxFiles <= 0 {
+		limits.MaxFiles = maxBundleFiles
+	}
 	ageIdentity, err := age.ParseX25519Identity(identity)
 	if err != nil {
 		return fmt.Errorf("parse age identity: %w", err)
@@ -207,6 +233,8 @@ func Extract(ciphertext []byte, identity, dest string) error {
 	if err := os.MkdirAll(cleanDest, 0o750); err != nil {
 		return fmt.Errorf("create extract dest: %w", err)
 	}
+	var totalBytes int64
+	var fileCount int64
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -228,37 +256,68 @@ func Extract(ciphertext []byte, identity, dest string) error {
 				return fmt.Errorf("create dir %s: %w", hdr.Name, err)
 			}
 		case tar.TypeReg:
+			// QUAL-01: aggregate decompression-budget guard. Count every
+			// regular entry and bound the running total so a bomb cannot
+			// exhaust disk via many small files or one huge file.
+			fileCount++
+			if fileCount > limits.MaxFiles {
+				return fmt.Errorf("%w: %d files exceeds limit %d", ErrBundleTooLarge, fileCount, limits.MaxFiles)
+			}
+			remaining := limits.MaxBytes - totalBytes
+			if remaining <= 0 {
+				return fmt.Errorf("%w: %d bytes exceeds limit %d", ErrBundleTooLarge, totalBytes, limits.MaxBytes)
+			}
+			// QUAL-01: abort (do not truncate) when this entry alone would
+			// exceed the remaining budget, so a single huge file is caught as
+			// a bomb rather than silently shortened.
+			if hdr.Size > remaining {
+				return fmt.Errorf("%w: entry %s (%d bytes) exceeds remaining budget %d", ErrBundleTooLarge, hdr.Name, hdr.Size, remaining)
+			}
+			copyLimit := hdr.Size
+			if copyLimit < 0 {
+				copyLimit = 0
+			}
 			if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 				return fmt.Errorf("create parent %s: %w", hdr.Name, err)
 			}
 			if _, err := os.Stat(target); err == nil {
 				// Dual-copy: preserve both versions on conflict (DRAFT-01).
 				conflict := target + ".devstrap-conflict"
-				//nolint:gosec // Path validated within cleanDest; size bounded by tar header.
+				//nolint:gosec // Path validated within cleanDest; size bounded by the aggregate budget.
 				cf, err := os.OpenFile(conflict, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 				if err != nil {
 					return fmt.Errorf("create conflict %s: %w", hdr.Name, err)
 				}
-				if _, err := io.Copy(cf, io.LimitReader(tr, hdr.Size)); err != nil {
+				n, err := io.Copy(cf, io.LimitReader(tr, copyLimit))
+				if err != nil {
 					_ = cf.Close()
 					return fmt.Errorf("write conflict %s: %w", hdr.Name, err)
 				}
 				if err := cf.Close(); err != nil {
 					return fmt.Errorf("close conflict %s: %w", hdr.Name, err)
 				}
+				totalBytes += n
+				if totalBytes > limits.MaxBytes {
+					return fmt.Errorf("%w: %d bytes exceeds limit %d", ErrBundleTooLarge, totalBytes, limits.MaxBytes)
+				}
 				continue
 			}
-			//nolint:gosec // The path is validated within cleanDest and the size is bounded by the tar header.
+			//nolint:gosec // Path validated within cleanDest; size bounded by the aggregate budget.
 			out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 			if err != nil {
 				return fmt.Errorf("create %s: %w", hdr.Name, err)
 			}
-			if _, err := io.Copy(out, io.LimitReader(tr, hdr.Size)); err != nil {
+			n, err := io.Copy(out, io.LimitReader(tr, copyLimit))
+			if err != nil {
 				_ = out.Close()
 				return fmt.Errorf("write %s: %w", hdr.Name, err)
 			}
 			if err := out.Close(); err != nil {
 				return fmt.Errorf("close %s: %w", hdr.Name, err)
+			}
+			totalBytes += n
+			if totalBytes > limits.MaxBytes {
+				return fmt.Errorf("%w: %d bytes exceeds limit %d", ErrBundleTooLarge, totalBytes, limits.MaxBytes)
 			}
 		default:
 			// Skip symlinks, devices, and other special types for safety.
