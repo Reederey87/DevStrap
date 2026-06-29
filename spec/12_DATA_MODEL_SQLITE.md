@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-28
+last_reviewed: 2026-06-29
 tracks_code: [internal/state/**, AUDIT_RECOMMENDATIONS_2026-06-28.md]
 ---
 # SQLite Data Model
@@ -395,6 +395,8 @@ CREATE TABLE blobs (
 ```
 
 `ref_count` is incremented when a `secret_bindings.encrypted_value_ref` or a `draft_projects.current_snapshot_id` (and its packed bundle) points at the blob, and decremented when those references are tombstoned, rotated, or superseded. Garbage collection is **ref-count + grace-period**, never immediate: when `ref_count` drops to 0 the GC job stamps `gc_eligible_at = now`, and a blob is deleted (locally and from the hub) only after the grace period elapses with `ref_count` still 0. The grace window protects against in-flight references during a concurrent sync and against the device-revoke re-encrypt flow, which rewrites affected blobs to the reduced recipient set (new `recipient_set_hash`) and flags secrets for rotation (age has no native revocation, see `15_SECURITY_THREAT_MODEL.md`). Content addressing makes blob writes idempotent: re-capturing identical content reuses the existing row.
+
+**Blob reclamation status (`HUB-05`/`HUB-12`/`SEC-01`):** the `Hub.DeleteBlob` / `S3Client.DeleteObject` reclamation primitive is shipped (idempotent deletes; a missing blob is not an error), enabling both the ref-count GC job and device-revoke hub-side cleanup. Device revoke/lost (`devstrap devices revoke|lost --hub-file`) now pulls non-cached blobs from the hub (with `SEC-03` content-hash verification), rewraps to the reduced recipient set, pushes the new blob, and deletes the old ciphertext from the hub (guarded by a `blobRefStillReferenced` check) so a revoked key can no longer fetch it; without `--hub-file`, rewrap is local-only and hub cleanup is deferred to the next sync. Fetched blobs are hash-verified against their signed `age_blob:<sha256>` ref (`SEC-03`) so an untrusted hub cannot substitute bytes. The R2/S3 backend wraps every call in a retry/backoff seam with throttle/transient/terminal error classification (`HUB-10`), and the write path relies solely on the conditional put (`HUB-09`).
 
 ## Indexes
 

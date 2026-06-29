@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-28
+last_reviewed: 2026-06-29
 tracks_code: [cmd/**, internal/**, .github/**, AGENTS.md, README.md, go.mod, go.sum, AUDIT_RECOMMENDATIONS_2026-06-28.md, AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md]
 ---
 # DevStrap — Start Here
@@ -164,7 +164,7 @@ Not implemented yet:
 - cross-machine working-state sync — git-state validation plane (`repo.gitstate.observed`), WIP refs (`refs/devstrap/wip/*`), and encrypted working-tree bundles (audit Section 5);
 - non-VCS / remote-less / multi-remote content sync — scanner classification, `.devstrapignore` compiler, encrypted draft bundles, and type-dispatch materialization are now shipped (`DRAFT-*`); the post-hydrate dependency rebuild is opt-in (`DEVSTRAP_REBUILD_DEPS`);
 - forge hardening beyond the shipped PR/MR routing — `agent pr` now detects GitHub/GitLab/Gitea/Bitbucket/Azure and routes through `gh`/`glab`/`tea` or graceful compare-URL fallback, but `doctor` still needs forge-specific CLI probes, explicit self-hosted overrides, and broader hermetic test coverage (`FORGE-04/05`);
-- zero-knowledge sync hub — the logical `Hub` interface (`HUB-01`), Cloudflare R2/S3 backend with immutable keying (`HUB-02/06`), fail-closed enrollment verification (`HUB-03`), device-revoke blob re-encryption (`HUB-04`), and blob ref-count/GC (`HUB-05`) are shipped; the real AWS SDK v2 S3 client wiring, full-state snapshot exchange, and the bespoke HTTP/SSE relay remain deferred.
+- zero-knowledge sync hub — the logical `Hub` interface (`HUB-01`), Cloudflare R2/S3 backend with immutable keying (`HUB-02/06`), fail-closed enrollment verification (`HUB-03`), device-revoke blob re-encryption with hub-side ciphertext delete (`HUB-04`/`SEC-01`), blob ref-count/GC (`HUB-05`), the `DeleteBlob` reclamation primitive (`HUB-12`), R2 retry/backoff with error classification (`HUB-10`), and blob content-hash verification on fetch (`SEC-03`) are shipped; the real AWS SDK v2 S3 client wiring, full-state snapshot exchange, and the bespoke HTTP/SSE relay remain deferred.
 
 Cloud-sync workstreams from the 2026-06-28 audit (`AUDIT_RECOMMENDATIONS_2026-06-28.md`), now built:
 
@@ -173,7 +173,7 @@ Cloud-sync workstreams from the 2026-06-28 audit (`AUDIT_RECOMMENDATIONS_2026-06
 - cloud hub backend (`HUB-*`) — the two-plane zero-knowledge `Hub` interface (event log + content-addressed encrypted blob store) with the Cloudflare R2/S3 backend (`internal/hub`) and the file-backed backend retained for tests;
 - cross-platform hardening (`XP-*`) — portable `devstrap run-loop` (scan → sync → materialize, no daemon); e2e testscript proving two-device materialization; headless key custody test; NFC/case-fold path invariant test;
 - multi-user future (`SCALE-*`) — documented-not-built hosting/scaling direction (Fly.io compute + R2 hub + managed Postgres control plane; control/data-plane split and cell-based tenancy);
-- fail-closed event verification on enrollment (`HUB-03`) — once any approved device exists, all non-local events require valid signatures from approved devices; device revoke re-encrypts affected blobs to the reduced recipient set and flags secrets for rotation (`HUB-04`).
+- fail-closed event verification on enrollment (`HUB-03`) — once any approved device exists, all non-local events require valid signatures from approved devices; device revoke re-encrypts affected blobs to the reduced recipient set, deletes superseded hub ciphertext when `--hub-file` is given, and flags secrets for rotation (`HUB-04`/`SEC-01`).
 
 Local validation performed:
 
