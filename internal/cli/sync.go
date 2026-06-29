@@ -3,12 +3,15 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 
 	"github.com/Reederey87/DevStrap/internal/config"
+	"github.com/Reederey87/DevStrap/internal/logging"
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
 	"github.com/spf13/cobra"
@@ -149,11 +152,39 @@ func pullReferencedBlobs(ctx context.Context, hub dssync.Hub, events []state.Eve
 		if err != nil {
 			return missing, fmt.Errorf("read blob %s: %w", ref, err)
 		}
+		// SEC-03: the blob_ref comes from a signed namespace event, so the hub
+		// is an untrusted bit-bucket. Recompute sha256 of the fetched
+		// ciphertext and reject on mismatch so a malicious or buggy hub cannot
+		// substitute arbitrary bytes under a valid content-addressed key. Do
+		// not cache a mismatched blob; surface it as a missing/tampered blob.
+		if err := verifyBlobContentHash(ref, ciphertext); err != nil {
+			logging.Logger(ctx).Warn("blob content-address verification failed; not caching",
+				"ref", ref, "err", err.Error())
+			missing++
+			continue
+		}
 		if err := writeEnvBlob(paths, ref, ciphertext); err != nil {
 			return missing, fmt.Errorf("cache blob %s: %w", ref, err)
 		}
 	}
 	return missing, nil
+}
+
+// verifyBlobContentHash asserts that ciphertext hashes to the sha256 embedded
+// in the age_blob:<sha256> ref (SEC-03). The ref is sourced from a signed
+// namespace event, so this turns content-addressing into a client-side
+// integrity check the hub cannot bypass: a hub that returns wrong bytes under
+// a valid key is detected as tampering.
+func verifyBlobContentHash(ref string, ciphertext []byte) error {
+	want := blobHashHex(ref)
+	if want == "" {
+		return fmt.Errorf("blob ref %s has no content hash", ref)
+	}
+	sum := sha256.Sum256(ciphertext)
+	if got := hex.EncodeToString(sum[:]); got != want {
+		return fmt.Errorf("blob %s failed content-address verification: got %s (hub tampering?)", ref, got)
+	}
+	return nil
 }
 
 // blobRefFromEvent extracts an age_blob:<sha256> reference from an event

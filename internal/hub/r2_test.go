@@ -133,6 +133,56 @@ func TestR2InvalidBlobKey(t *testing.T) {
 	}
 }
 
+// countS3 wraps an S3Client and counts ObjectExists (HEAD) and PutObject calls
+// so tests can assert HUB-09: the write path must not issue a redundant
+// ObjectExists before the conditional put.
+type countS3 struct {
+	S3Client
+	heads int
+	puts  int
+}
+
+func (c *countS3) PutObject(ctx context.Context, key string, body []byte, ifNoneMatch bool) error {
+	c.puts++
+	return c.S3Client.PutObject(ctx, key, body, ifNoneMatch)
+}
+
+func (c *countS3) ObjectExists(ctx context.Context, key string) (bool, error) {
+	c.heads++
+	return c.S3Client.ObjectExists(ctx, key)
+}
+
+// TestR2WritePathSkipsObjectExists (HUB-09): Push and PutBlob rely solely on
+// the conditional put and never issue a redundant ObjectExists/HEAD, even when
+// re-pushing a duplicate event or blob. A 412 PreconditionFailed is classified
+// as an idempotent dedup hit.
+func TestR2WritePathSkipsObjectExists(t *testing.T) {
+	ctx := context.Background()
+	c := &countS3{S3Client: newMemS3()}
+	h := R2Hub{S3: c, WorkspaceID: "ws_test"}
+	e := makeEvent("evt_001", "dev_a", 100, 1, "project.added", `{"path":"a"}`)
+	if err := h.Push(ctx, []state.Event{e}); err != nil {
+		t.Fatalf("Push 1: %v", err)
+	}
+	// Re-pushing the same event is an idempotent no-op via 412, no HEAD.
+	if err := h.Push(ctx, []state.Event{e}); err != nil {
+		t.Fatalf("Push 2 (dup): %v", err)
+	}
+	if c.heads != 0 {
+		t.Errorf("Push issued %d ObjectExists calls, want 0 (HUB-09)", c.heads)
+	}
+	blob := []byte("encrypted-blob-content")
+	if err := h.PutBlob(ctx, strings.Repeat("a", 64), bytes.NewReader(blob)); err != nil {
+		t.Fatalf("PutBlob 1: %v", err)
+	}
+	if err := h.PutBlob(ctx, strings.Repeat("a", 64), bytes.NewReader(blob)); err != nil {
+		t.Fatalf("PutBlob 2 (dup): %v", err)
+	}
+	if c.heads != 0 {
+		t.Errorf("PutBlob issued %d ObjectExists calls, want 0 (HUB-09)", c.heads)
+	}
+}
+
 func TestR2Pagination(t *testing.T) {
 	ctx := context.Background()
 	h := newTestR2Hub(t)

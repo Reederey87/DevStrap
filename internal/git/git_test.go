@@ -224,6 +224,57 @@ exit 128
 	}
 }
 
+// TestCloneRetryCleansPartialDestination (GIT-02): a transient mid-clone
+// network failure leaves the destination partially populated. git does not
+// remove a directory it did not create (dest is a pre-existing MkdirTemp dir),
+// so a naive retry of the same argv would fail with "destination path already
+// exists and is not empty". Clone must reset dest to a clean, empty directory
+// before retrying so the second attempt succeeds.
+func TestCloneRetryCleansPartialDestination(t *testing.T) {
+	countPath := filepath.Join(t.TempDir(), "count")
+	dest := filepath.Join(t.TempDir(), "repo")
+	// Pre-create dest as hydrate does (os.MkdirTemp), so git treats it as
+	// pre-existing and would NOT clean it on failure.
+	if err := os.MkdirAll(dest, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	script := writeFakeGit(t, fmt.Sprintf(`#!/bin/sh
+count=0
+if [ -f %[1]q ]; then count=$(cat %[1]q); fi
+count=$((count + 1))
+echo "$count" > %[1]q
+dest=""
+for a in "$@"; do dest="$a"; done
+if [ "$count" -lt 2 ]; then
+  # Simulate a mid-clone network failure: leave dest partially populated.
+  mkdir -p "$dest"
+  echo "partial" > "$dest/partial-file"
+  echo "fatal: the remote end hung up unexpectedly" >&2
+  exit 128
+fi
+# Second attempt succeeds into a clean dest.
+mkdir -p "$dest/.git"
+exit 0
+`, countPath))
+	r := Runner{Bin: script, Timeout: 5 * time.Second, RetryAttempts: 2, RetryBackoff: time.Millisecond}
+	if err := r.Clone(context.Background(), "https://example.test/org/repo.git", dest, true); err != nil {
+		t.Fatalf("Clone err = %v, want retry success into clean dest", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "partial-file")); err == nil {
+		t.Fatalf("partial file from failed attempt remains in dest; retry did not clean it (GIT-02)")
+	}
+	if _, err := os.Stat(filepath.Join(dest, ".git")); err != nil {
+		t.Fatalf("successful retry did not populate dest: %v", err)
+	}
+	raw, err := os.ReadFile(countPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(raw)) != "2" {
+		t.Fatalf("retry count = %q, want 2", raw)
+	}
+}
+
 func TestUsesLFSDetectsGitAttributes(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, ".gitattributes"), []byte("# no-op\n*.bin filter=lfs diff=lfs merge=lfs -text\n"), 0o644); err != nil {

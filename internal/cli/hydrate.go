@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	dsgit "github.com/Reederey87/DevStrap/internal/git"
 	"github.com/Reederey87/DevStrap/internal/pathkey"
@@ -109,11 +111,75 @@ func hydrateProjectUnlocked(ctx context.Context, store *state.Store, opts *optio
 		return "", err
 	}
 	cleanupTmp = false
-	dirty, _ := r.DirtyState(ctx, localPath)
-	if err := store.UpdateProjectLocalState(ctx, project.ID, localPath, "available", string(dirty)); err != nil {
+	// GIT-01: verify the clone produced a usable checkout before recording it
+	// available/clean. A broken/stale remote whose advertised HEAD points at a
+	// ref absent from the fetched refs leaves an empty/detached checkout
+	// ("remote HEAD refers to nonexistent ref, unable to checkout"); DirtyState
+	// on that empty tree returns clean, so without this guard the project would
+	// be silently recorded as available/clean and the "tree is really present
+	// on disk" promise would break invisibly. A legitimately empty repo (no
+	// commits yet, unborn branch) is distinct: it is a valid, present repo and
+	// is recorded as available. Attempt one self-heal (re-resolve the remote
+	// default branch and check it out); only a repo that has commits but no
+	// resolvable HEAD after self-heal is recorded as materialized-empty.
+	if !headResolvable(ctx, r, localPath) {
+		selfHealCheckout(ctx, r, localPath)
+	}
+	matState, dirty := "available", "unknown"
+	switch {
+	case headResolvable(ctx, r, localPath):
+		if d, derr := r.DirtyState(ctx, localPath); derr == nil {
+			dirty = string(d)
+		}
+	case repoHasCommits(ctx, r, localPath):
+		// Commits exist but HEAD cannot resolve even after self-heal: the
+		// remote HEAD is broken. Record an honest state, not available/clean.
+		matState = "materialized-empty"
+	default:
+		// No commits at all: a legitimately empty repo (fresh remote, nothing
+		// pushed yet). It is present and clean; record it as available so
+		// hydrating a brand-new remote succeeds.
+		dirty = "clean"
+	}
+	if err := store.UpdateProjectLocalState(ctx, project.ID, localPath, matState, dirty); err != nil {
 		return "", err
 	}
+	if matState == "materialized-empty" {
+		return localPath, appError{code: exitGit, err: fmt.Errorf("%s cloned but checkout is empty (remote HEAD may be broken); recorded as materialized-empty", project.Path)}
+	}
 	return localPath, nil
+}
+
+// headResolvable reports whether the repo at localPath has a resolvable HEAD
+// (GIT-01). Both a legitimately empty repo (unborn branch) and a broken-HEAD
+// clone fail this check; repoHasCommits distinguishes them.
+func headResolvable(ctx context.Context, r dsgit.Runner, localPath string) bool {
+	_, err := r.Run(ctx, localPath, "rev-parse", "--verify", "HEAD")
+	return err == nil
+}
+
+// repoHasCommits reports whether the repo at localPath has any commits
+// reachable from any ref (GIT-01). This distinguishes a legitimately empty
+// repo (no commits, unborn branch) from a broken-HEAD clone that has commits
+// on branches HEAD does not point at.
+func repoHasCommits(ctx context.Context, r dsgit.Runner, localPath string) bool {
+	out, err := r.Run(ctx, localPath, "rev-list", "--count", "--all")
+	if err != nil {
+		return false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(out))
+	return err == nil && n > 0
+}
+
+// selfHealCheckout attempts to repair an empty checkout by re-resolving the
+// remote default branch and checking it out (GIT-01). Failures are best-effort
+// and swallowed; the caller records an honest state regardless of outcome.
+func selfHealCheckout(ctx context.Context, r dsgit.Runner, localPath string) {
+	branch, _, err := r.ResolveDefaultBranch(ctx, localPath, "")
+	if err != nil || branch == "" {
+		return
+	}
+	_, _ = r.Run(ctx, localPath, "checkout", branch)
 }
 
 func cloneTempDir(targetPath string) (string, error) {

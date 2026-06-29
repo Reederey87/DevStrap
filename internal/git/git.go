@@ -108,13 +108,54 @@ func (r Runner) Clone(ctx context.Context, remote, dest string, partial bool) er
 	if err := ValidateRemote(remote); err != nil {
 		return err
 	}
+	args := cloneArgs(remote, dest, partial)
+	attempts := r.RetryAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	backoff := r.RetryBackoff
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		// GIT-02: a mid-clone network failure (early EOF / RPC failed /
+		// connection reset, all classified ErrNetwork) leaves dest partially
+		// populated. git does not remove a directory it did not create (dest
+		// is a pre-existing os.MkdirTemp dir), so a naive retry of the same
+		// argv fails with "destination path already exists and is not empty"
+		// and turns a recoverable transient failure into a fatal one. Reset
+		// dest to a clean, empty directory before every retry so the clone is
+		// idempotent and a transient mid-clone failure is recoverable.
+		if attempt > 1 {
+			if err := os.RemoveAll(dest); err != nil {
+				return fmt.Errorf("clean clone destination for retry: %w", err)
+			}
+			if err := os.MkdirAll(dest, 0o750); err != nil {
+				return fmt.Errorf("recreate clone destination for retry: %w", err)
+			}
+		}
+		_, err := r.Run(ctx, "", args...)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !errors.Is(err, ErrNetwork) || attempt == attempts {
+			return err
+		}
+		if err := sleepBackoff(ctx, backoff, attempt); err != nil {
+			return err
+		}
+	}
+	return lastErr
+}
+
+// cloneArgs builds the argv for a git clone with optional blobless partial
+// clone (GIT-02).
+func cloneArgs(remote, dest string, partial bool) []string {
 	args := []string{"clone"}
 	if partial {
 		args = append(args, "--filter=blob:none")
 	}
 	args = append(args, "--", remote, dest)
-	err := r.runWithNetworkRetry(ctx, "", args...)
-	return err
+	return args
 }
 
 func (r Runner) Fetch(ctx context.Context, dir, remote, branch string) error {
@@ -156,18 +197,29 @@ func (r Runner) runWithNetworkRetry(ctx context.Context, dir string, args ...str
 		if !errors.Is(err, ErrNetwork) || attempt == attempts {
 			return err
 		}
-		if backoff <= 0 {
-			continue
-		}
-		timer := time.NewTimer(backoff * time.Duration(attempt))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
+		if err := sleepBackoff(ctx, backoff, attempt); err != nil {
+			return err
 		}
 	}
 	return lastErr
+}
+
+// sleepBackoff waits for the configured network-retry backoff (linear in the
+// attempt number) or until ctx is cancelled. A non-positive backoff returns
+// immediately so the next attempt runs without delay. QUAL-06 will replace this
+// with capped exponential backoff plus full jitter.
+func sleepBackoff(ctx context.Context, backoff time.Duration, attempt int) error {
+	if backoff <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(backoff * time.Duration(attempt))
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // DefaultBranchSource records how ResolveDefaultBranch determined the branch,

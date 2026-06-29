@@ -79,6 +79,8 @@ func deriveDisplayStatus(materialization, dirty string) string {
 		return "skeleton"
 	case materialization == "hydrating":
 		return "hydrating"
+	case materialization == "materialized-empty":
+		return "empty checkout"
 	case dirty == "dirty" || dirty == "diverged":
 		return "dirty"
 	case dirty == "clean" && materialization == "hydrated":

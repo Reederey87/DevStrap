@@ -87,20 +87,20 @@ func (h R2Hub) Push(ctx context.Context, events []state.Event) error {
 			return ctx.Err()
 		}
 		key := h.eventKey(event)
-		// HUB-06: conditional put (If-None-Match: *) so a duplicate event is
-		// a no-op, never an overwrite of an existing event object.
-		exists, err := h.S3.ObjectExists(ctx, key)
-		if err != nil {
-			return fmt.Errorf("check event %s: %w", event.ID, err)
-		}
-		if exists {
-			continue // idempotent
-		}
 		raw, err := json.Marshal(event)
 		if err != nil {
 			return fmt.Errorf("marshal event %s: %w", event.ID, err)
 		}
+		// HUB-06/HUB-09: the conditional put (If-None-Match: *) is itself the
+		// atomic, idempotent guard for event append, so no separate
+		// ObjectExists/HEAD is needed. Dropping the HEAD halves the per-event
+		// request count on the hot push path and removes the check-then-act
+		// race a concurrent writer could win between the HEAD and the PUT. A
+		// 412 PreconditionFailed is a duplicate event and a no-op.
 		if err := h.S3.PutObject(ctx, key, raw, true); err != nil {
+			if errors.Is(err, ErrPreconditionFailed) {
+				continue // idempotent dedup hit
+			}
 			return fmt.Errorf("put event %s: %w", event.ID, err)
 		}
 	}
@@ -156,18 +156,19 @@ func (h R2Hub) PutBlob(ctx context.Context, sha256Hex string, r io.Reader) error
 		return dssync.ErrInvalidBlobKey
 	}
 	key := h.blobKey(sha256Hex)
-	exists, err := h.S3.ObjectExists(ctx, key)
-	if err != nil {
-		return fmt.Errorf("check blob %s: %w", sha256Hex, err)
-	}
-	if exists {
-		return nil // idempotent: content-addressed blob already present
-	}
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return fmt.Errorf("read blob: %w", err)
 	}
+	// HUB-09: rely on the conditional put alone; a separate ObjectExists/HEAD
+	// only doubles request cost and reopens a TOCTOU window the conditional
+	// put already closes. For a content-addressed blob a 412
+	// PreconditionFailed is definitionally a dedup hit (same sha256 = same
+	// ciphertext), so it is treated as idempotent success.
 	if err := h.S3.PutObject(ctx, key, data, true); err != nil {
+		if errors.Is(err, ErrPreconditionFailed) {
+			return nil
+		}
 		return fmt.Errorf("put blob %s: %w", sha256Hex, err)
 	}
 	return nil
@@ -217,6 +218,13 @@ func (r *byteReader) Read(p []byte) (int, error) {
 
 // ErrNotImplemented signals an S3Client method that has no production wiring yet.
 var ErrNotImplemented = errors.New("s3 operation not implemented")
+
+// ErrPreconditionFailed signals that a conditional PutObject (If-None-Match: *)
+// was rejected because the object already exists (R2 error 10031 / HTTP 412).
+// For content-addressed blobs and immutable event keys a 412 is definitionally
+// an idempotent dedup hit, not an error (HUB-09): the same sha256 yields the
+// same ciphertext, and a duplicate event key is the same event.
+var ErrPreconditionFailed = errors.New("object already exists (conditional put failed)")
 
 // R2Config configures the Cloudflare R2 backend credentials and endpoint
 // (HUB-07). Two credential modes are supported:

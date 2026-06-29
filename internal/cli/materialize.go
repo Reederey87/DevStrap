@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -20,6 +21,12 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 )
+
+// ErrPartialMaterialize signals that the materialize pass completed but one or
+// more projects failed (QUAL-03). The batch is never aborted by a single
+// failure (EAGER-04), but the command exits non-zero so CI/cron gates and
+// `devstrap materialize && ...` chains can detect a failed clone/hydrate.
+var ErrPartialMaterialize = errors.New("one or more projects failed to materialize")
 
 // materializeConcurrency returns the bounded worker count for the eager
 // materialization pass (EAGER-04). It is capped so clone-everything across a
@@ -60,6 +67,11 @@ func newMaterializeCommand(stdout io.Writer, opts *options) *cobra.Command {
 			_, _ = fmt.Fprintf(stdout, "Materialized %d/%d projects\n", results.succeeded, results.total)
 			if results.failed > 0 {
 				_, _ = fmt.Fprintf(stdout, "%d project(s) failed; run 'devstrap doctor' or 'devstrap status' for details\n", results.failed)
+				// QUAL-03: exit non-zero when any project failed so automation
+				// and CI gating on `devstrap materialize` can detect partial
+				// failure. The batch still completes (EAGER-04 isolation); only
+				// the exit code changes.
+				return appError{code: exitGeneric, err: fmt.Errorf("%w: %d/%d projects failed", ErrPartialMaterialize, results.failed, results.total)}
 			}
 			return nil
 		},

@@ -28,7 +28,10 @@ func (m *memS3) PutObject(_ context.Context, key string, body []byte, ifNoneMatc
 	defer m.mu.Unlock()
 	if ifNoneMatch {
 		if _, ok := m.objects[key]; ok {
-			return fmt.Errorf("condition failed: object already exists")
+			// HUB-09: surface a typed precondition error so R2Hub can classify
+			// a duplicate conditional put as an idempotent no-op instead of a
+			// hard failure.
+			return ErrPreconditionFailed
 		}
 	}
 	m.objects[key] = body
