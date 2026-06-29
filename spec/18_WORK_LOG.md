@@ -36,16 +36,18 @@ Changed:
 - **HUB-09**: `R2Hub.Push`/`PutBlob` dropped the redundant `ObjectExists` (HEAD) pre-check; the conditional put (`If-None-Match: *`) is the atomic guard. Added a typed `ErrPreconditionFailed` (R2 412/10031) returned by the `memS3` double and classified as an idempotent dedup hit, halving Class B request volume and closing the TOCTOU race.
 - **SEC-03**: `pullReferencedBlobs` now recomputes sha256 of fetched ciphertext and rejects on mismatch against the signed `age_blob:<sha256>` ref (`verifyBlobContentHash`), so a malicious/buggy hub cannot substitute bytes under a valid content-addressed key. Mismatched blobs are not cached and surface as missing/tampered.
 - **GIT-01**: `hydrateProjectUnlocked` verifies a resolvable HEAD after promote; if HEAD is unresolvable it self-heals (re-resolve remote default branch + checkout) and records an honest `materialized-empty` state (surfaced in `status` as "empty checkout") when commits exist but HEAD is broken. A legitimately empty repo (no commits) is still recorded as `available` so hydrating a fresh remote succeeds.
-- Tests: `TestCloneRetryCleansPartialDestination` (GIT-02), `TestR2WritePathSkipsObjectExists` (HUB-09), `TestVerifyBlobContentHash` (SEC-03), `materialize_nonzero_on_failure.txtar` (QUAL-03).
+- **HUB-10**: `R2Hub` now wraps every S3 call (`Push`/`Pull`/`PutBlob`/`GetBlob`) in an `R2Retry` seam with throttle/transient/terminal error classification and capped exponential backoff + full jitter; the context is honored between attempts. `ErrS3Throttle`/`ErrS3Transient` sentinels; terminal errors (incl. 412, not-found, auth) fail fast. A zero-value `R2Retry` uses a default policy; tests inject a deterministic jitter + tiny delays. The real aws-sdk-go-v2 standard retryer will slot behind this seam when the SDK is wired.
+- **SEC-06**: `redact.tokenPatterns` extended with GitLab (`glpat-`), Stripe (`sk_live_`/`rk_live_`), generic `Bearer <token>`, and a JSON-secret-field redactor (`jsonSecretField`) that masks the value of any field named like a secret (secret/token/password/private_key/api_key/authorization) while preserving the key — catching GCP service-account `private_key` (base64 on one JSON line) and Snowflake config passwords the bare token-prefix patterns miss.
+- Tests: `TestCloneRetryCleansPartialDestination` (GIT-02), `TestR2WritePathSkipsObjectExists` (HUB-09), `TestR2PushRetriesThrottling`/`TestR2PushRetriesTransient`/`TestR2PushDoesNotRetryTerminal`/`TestR2RetryRespectsContextCancellation` (HUB-10), `TestVerifyBlobContentHash` (SEC-03), `TestScrubExtendedTokenShapes`/`TestScrubJSONSecretFields` (SEC-06), `materialize_nonzero_on_failure.txtar` (QUAL-03).
 - Note: the PASS4 audit reuses `GIT-01`/`GIT-02` IDs (empty-checkout / clone-retry) that collide with the second-pass audit's same-named findings; spec prose will reference the PASS4 audit file to disambiguate. Specs are reconciled in the end-of-session review (AGENTS.md).
 
 Validated:
-- `gofmt -w cmd internal`, `go vet ./internal/hub/... ./internal/git/... ./internal/cli/...`
+- `gofmt -w cmd internal`, `go vet ./internal/hub/... ./internal/git/... ./internal/cli/... ./internal/redact/...`
 - `GOCACHE=/tmp/devstrap-gocache DEVSTRAP_NO_KEYCHAIN=1 go test ./...` (all green)
-- New tests green: GIT-02, HUB-09, SEC-03, QUAL-03 testscript.
+- New tests green: GIT-02, HUB-09, HUB-10, SEC-03, SEC-06, QUAL-03 testscript.
 
 Follow-ups:
-- Remaining Phase A: HUB-10 (R2 retry+backoff), SEC-06 (wider secret redaction), SEC-01 (hub-side revoke delete via `DeleteBlob`), SEC-04 (fail-closed bootstrap), SEC-02 (encrypt namespace map), SEC-05 (sign releases). Then Phases B–E.
+- Remaining Phase A: SEC-01 (hub-side revoke delete via `DeleteBlob`), SEC-04 (fail-closed bootstrap), SEC-02 (encrypt namespace map), SEC-05 (sign releases). Then Phases B–E.
 - SEC-03 sender-authentication (Ed25519 producer signature over bundles) is a larger sub-item; hash-verification (the headline "verify blob hashes on fetch") is done, producer-signature deferred.
 
 ## 2026-06-28 — README rebuild with brand banner + app icon

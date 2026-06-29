@@ -23,8 +23,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
@@ -56,6 +58,21 @@ type S3Client interface {
 type R2Hub struct {
 	S3          S3Client
 	WorkspaceID string
+	// Retry configures R2Hub-level retry, backoff, and error classification for
+	// S3 operations (HUB-10). A zero value uses a default policy: throttling
+	// (429/503 SlowDown) and transient (500/connection-reset) errors are retried
+	// with capped exponential backoff plus full jitter; terminal errors (auth,
+	// precondition, not-found, malformed) fail fast. A real aws-sdk-go-v2
+	// client wires its own standard retryer; this seam works with any S3Client
+	// (including the in-memory conformance double) and is exercised via fault
+	// injection before the SDK is wired.
+	Retry R2Retry
+}
+
+// retry returns the effective retry policy, defaulting a zero-value R2Retry
+// (HUB-10).
+func (h R2Hub) retry() R2Retry {
+	return h.Retry.policy()
 }
 
 // Compile-time assertion that R2Hub satisfies dssync.Hub (HUB-01/HUB-02).
@@ -96,8 +113,10 @@ func (h R2Hub) Push(ctx context.Context, events []state.Event) error {
 		// ObjectExists/HEAD is needed. Dropping the HEAD halves the per-event
 		// request count on the hot push path and removes the check-then-act
 		// race a concurrent writer could win between the HEAD and the PUT. A
-		// 412 PreconditionFailed is a duplicate event and a no-op.
-		if err := h.S3.PutObject(ctx, key, raw, true); err != nil {
+		// 412 PreconditionFailed is a duplicate event and a no-op. HUB-10:
+		// throttling/transient S3 errors are retried with backoff; a 412 is
+		// terminal (not retried) and handled as a dedup hit below.
+		if err := h.retry().do(ctx, func() error { return h.S3.PutObject(ctx, key, raw, true) }); err != nil {
 			if errors.Is(err, ErrPreconditionFailed) {
 				continue // idempotent dedup hit
 			}
@@ -114,16 +133,26 @@ func (h R2Hub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, error) 
 	startAfter := fmt.Sprintf("%s%020d", h.eventsPrefix(), afterHLC)
 	var out []state.Event
 	for {
-		keys, next, err := h.S3.ListObjectsV2(ctx, h.eventsPrefix(), startAfter, 1000)
-		if err != nil {
+		// HUB-10: retry list/get on throttling/transient S3 errors with backoff.
+		var keys []string
+		var next string
+		if err := h.retry().do(ctx, func() error {
+			var lerr error
+			keys, next, lerr = h.S3.ListObjectsV2(ctx, h.eventsPrefix(), startAfter, 1000)
+			return lerr
+		}); err != nil {
 			return nil, fmt.Errorf("list events: %w", err)
 		}
 		for _, key := range keys {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			raw, err := h.S3.GetObject(ctx, key)
-			if err != nil {
+			var raw []byte
+			if err := h.retry().do(ctx, func() error {
+				var gerr error
+				raw, gerr = h.S3.GetObject(ctx, key)
+				return gerr
+			}); err != nil {
 				return nil, fmt.Errorf("get event object %s: %w", key, err)
 			}
 			var event state.Event
@@ -164,8 +193,9 @@ func (h R2Hub) PutBlob(ctx context.Context, sha256Hex string, r io.Reader) error
 	// only doubles request cost and reopens a TOCTOU window the conditional
 	// put already closes. For a content-addressed blob a 412
 	// PreconditionFailed is definitionally a dedup hit (same sha256 = same
-	// ciphertext), so it is treated as idempotent success.
-	if err := h.S3.PutObject(ctx, key, data, true); err != nil {
+	// ciphertext), so it is treated as idempotent success. HUB-10: retry
+	// throttling/transient errors; 412 is terminal and handled as a dedup hit.
+	if err := h.retry().do(ctx, func() error { return h.S3.PutObject(ctx, key, data, true) }); err != nil {
 		if errors.Is(err, ErrPreconditionFailed) {
 			return nil
 		}
@@ -178,8 +208,14 @@ func (h R2Hub) GetBlob(ctx context.Context, sha256Hex string) (io.ReadCloser, er
 	if !isValidHexKey(sha256Hex) {
 		return nil, dssync.ErrInvalidBlobKey
 	}
-	data, err := h.S3.GetObject(ctx, h.blobKey(sha256Hex))
-	if err != nil {
+	// HUB-10: retry on throttling/transient errors; a missing blob
+	// (ErrBlobNotFound) is terminal and returned immediately.
+	var data []byte
+	if err := h.retry().do(ctx, func() error {
+		var gerr error
+		data, gerr = h.S3.GetObject(ctx, h.blobKey(sha256Hex))
+		return gerr
+	}); err != nil {
 		return nil, err
 	}
 	return io.NopCloser(bytesReader(data)), nil
@@ -225,6 +261,129 @@ var ErrNotImplemented = errors.New("s3 operation not implemented")
 // an idempotent dedup hit, not an error (HUB-09): the same sha256 yields the
 // same ciphertext, and a duplicate event key is the same event.
 var ErrPreconditionFailed = errors.New("object already exists (conditional put failed)")
+
+// ErrS3Throttle signals an R2/S3 throttling response (429 TooManyRequests / 503
+// SlowDown) that is retryable after backoff (HUB-10).
+var ErrS3Throttle = errors.New("s3 throttling (429/503 slow down)")
+
+// ErrS3Transient signals an R2/S3 transient response (InternalError / connection
+// reset) that is retryable after a short backoff (HUB-10).
+var ErrS3Transient = errors.New("s3 transient (500/connection reset)")
+
+// s3ErrorClass classifies an S3 operation error for retry purposes (HUB-10).
+type s3ErrorClass int
+
+const (
+	s3Terminal  s3ErrorClass = iota // auth, precondition, not-found, malformed — fail fast
+	s3Transient                     // 500 / connection reset — retry, short backoff
+	s3Throttle                      // 429 / 503 SlowDown — retry, longer backoff
+)
+
+func classifyS3Error(err error) s3ErrorClass {
+	switch {
+	case errors.Is(err, ErrS3Throttle):
+		return s3Throttle
+	case errors.Is(err, ErrS3Transient):
+		return s3Transient
+	default:
+		// ErrPreconditionFailed, ErrBlobNotFound, auth/malformed errors, and any
+		// unclassified error are terminal — never retried.
+		return s3Terminal
+	}
+}
+
+// R2Retry configures R2Hub-level retry behavior (HUB-10): throttling and
+// transient S3 errors are retried with capped exponential backoff plus full
+// jitter; terminal errors fail fast. A real aws-sdk-go-v2 client wires its own
+// standard retryer (retry.NewStandard + a token-bucket RateLimiter so retries
+// cannot create a runaway billing loop); this seam is the R2Hub-level policy
+// that works with any S3Client and is tested via fault injection.
+type R2Retry struct {
+	MaxAttempts   int           // total attempts including the first; 0 => default (3)
+	BaseDelay     time.Duration // base delay for transient errors; 0 => 50ms
+	ThrottleDelay time.Duration // base delay for throttling errors; 0 => 1s
+	Cap           time.Duration // max backoff delay; 0 => 20s
+	// Jitter returns a non-negative int64 in [0, n). Defaults to math/rand.Int63n.
+	// Tests inject a deterministic source (e.g. always 0) for fast retries.
+	Jitter func(n int64) int64
+}
+
+// policy returns r with defaults filled in for zero fields (HUB-10).
+func (r R2Retry) policy() R2Retry {
+	if r.MaxAttempts > 0 {
+		return r
+	}
+	return R2Retry{
+		MaxAttempts:   3,
+		BaseDelay:     50 * time.Millisecond,
+		ThrottleDelay: 1 * time.Second,
+		Cap:           20 * time.Second,
+	}
+}
+
+// do runs fn with retry, backoff, and full jitter (HUB-10). Throttling and
+// transient errors are retried up to MaxAttempts; terminal errors fail fast on
+// the first attempt. The context is honored between attempts so a stuck
+// operation is bounded by ctx cancellation/deadline.
+func (r R2Retry) do(ctx context.Context, fn func() error) error {
+	p := r.policy()
+	var lastErr error
+	for attempt := 1; attempt <= p.MaxAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		class := classifyS3Error(err)
+		if class == s3Terminal || attempt == p.MaxAttempts {
+			return err
+		}
+		if err := r.sleep(ctx, p, attempt, class); err != nil {
+			return err
+		}
+	}
+	return lastErr
+}
+
+// sleep backs off before a retry using capped exponential growth with full
+// jitter (HUB-10): d = uniform[0, min(Cap, base*2^(attempt-1))]. Throttling
+// uses a longer base than transient errors, matching AWS standard retry mode.
+func (r R2Retry) sleep(ctx context.Context, p R2Retry, attempt int, class s3ErrorClass) error {
+	base := p.BaseDelay
+	if class == s3Throttle {
+		base = p.ThrottleDelay
+	}
+	if base <= 0 {
+		base = 50 * time.Millisecond
+	}
+	cap := p.Cap
+	if cap <= 0 {
+		cap = 20 * time.Second
+	}
+	exp := base * time.Duration(1<<(attempt-1))
+	if exp > cap {
+		exp = cap
+	}
+	jitter := p.Jitter
+	if jitter == nil {
+		jitter = rand.Int63n
+	}
+	d := time.Duration(jitter(int64(exp) + 1))
+	if d < 0 {
+		d = 0
+	}
+	timer := time.NewTimer(d)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
 
 // R2Config configures the Cloudflare R2 backend credentials and endpoint
 // (HUB-07). Two credential modes are supported:

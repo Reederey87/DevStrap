@@ -3,9 +3,12 @@ package hub
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/Reederey87/DevStrap/internal/state"
 )
@@ -208,5 +211,100 @@ func TestR2Pagination(t *testing.T) {
 	}
 	if len(keys) != 3 {
 		t.Errorf("page size = %d, want 3", len(keys))
+	}
+}
+
+// faultS3 wraps an S3Client and injects a configured error on the first failN
+// PutObject calls, then delegates. Used to exercise HUB-10 retry/recovery.
+type faultS3 struct {
+	S3Client
+	mu     sync.Mutex
+	calls  int
+	failN  int
+	inject error
+}
+
+func (f *faultS3) PutObject(ctx context.Context, key string, body []byte, ifNoneMatch bool) error {
+	f.mu.Lock()
+	f.calls++
+	n := f.calls
+	failN := f.failN
+	inject := f.inject
+	f.mu.Unlock()
+	if n <= failN {
+		return inject
+	}
+	return f.S3Client.PutObject(ctx, key, body, ifNoneMatch)
+}
+
+func (f *faultS3) CallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+func fastRetry() R2Retry {
+	return R2Retry{
+		MaxAttempts:   3,
+		BaseDelay:     time.Millisecond,
+		ThrottleDelay: time.Millisecond,
+		Cap:           10 * time.Millisecond,
+		Jitter:        func(int64) int64 { return 0 },
+	}
+}
+
+// TestR2PushRetriesThrottling (HUB-10): a throttling error on the first two
+// PutObject attempts is retried with backoff and the third attempt succeeds.
+func TestR2PushRetriesThrottling(t *testing.T) {
+	ctx := context.Background()
+	f := &faultS3{S3Client: newMemS3(), failN: 2, inject: ErrS3Throttle}
+	h := R2Hub{S3: f, WorkspaceID: "ws_test", Retry: fastRetry()}
+	e := makeEvent("evt_001", "dev_a", 100, 1, "project.added", `{"path":"a"}`)
+	if err := h.Push(ctx, []state.Event{e}); err != nil {
+		t.Fatalf("Push: %v, want retry recovery", err)
+	}
+	if f.CallCount() < 3 {
+		t.Fatalf("PutObject calls = %d, want >=3 (retried)", f.CallCount())
+	}
+}
+
+// TestR2PushRetriesTransient (HUB-10): a transient error is retried and recovers.
+func TestR2PushRetriesTransient(t *testing.T) {
+	ctx := context.Background()
+	f := &faultS3{S3Client: newMemS3(), failN: 1, inject: ErrS3Transient}
+	h := R2Hub{S3: f, WorkspaceID: "ws_test", Retry: fastRetry()}
+	e := makeEvent("evt_001", "dev_a", 100, 1, "project.added", `{"path":"a"}`)
+	if err := h.Push(ctx, []state.Event{e}); err != nil {
+		t.Fatalf("Push: %v, want retry recovery", err)
+	}
+	if f.CallCount() < 2 {
+		t.Fatalf("PutObject calls = %d, want >=2 (retried)", f.CallCount())
+	}
+}
+
+// TestR2PushDoesNotRetryTerminal (HUB-10): an unclassified/terminal error (e.g.
+// auth) is not retried; Push fails fast on the first attempt.
+func TestR2PushDoesNotRetryTerminal(t *testing.T) {
+	ctx := context.Background()
+	f := &faultS3{S3Client: newMemS3(), failN: 5, inject: errors.New("s3 auth error")}
+	h := R2Hub{S3: f, WorkspaceID: "ws_test", Retry: fastRetry()}
+	err := h.Push(ctx, []state.Event{makeEvent("evt_001", "dev_a", 100, 1, "project.added", `{"path":"a"}`)})
+	if err == nil {
+		t.Fatal("Push: want terminal error, got nil")
+	}
+	if f.CallCount() != 1 {
+		t.Fatalf("PutObject calls = %d, want 1 (no retry on terminal)", f.CallCount())
+	}
+}
+
+// TestR2RetryRespectsContextCancellation (HUB-10): a cancelled context aborts
+// the retry loop rather than sleeping through the backoff.
+func TestR2RetryRespectsContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := R2Retry{MaxAttempts: 3, BaseDelay: time.Minute, ThrottleDelay: time.Minute, Jitter: func(int64) int64 { return 0 }}
+	err := r.do(ctx, func() error { return ErrS3Throttle })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("do with cancelled ctx = %v, want context.Canceled", err)
 	}
 }
