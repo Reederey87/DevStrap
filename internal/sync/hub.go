@@ -36,10 +36,14 @@ var ErrInvalidBlobKey = errors.New("invalid blob key")
 // Event plane:
 //   - Push appends locally-originated events. Duplicate event IDs are ignored
 //     (idempotent), so re-pushing already-delivered events is safe.
-//   - Pull returns events with HLC strictly greater than afterHLC in
-//     deterministic order (HLC, device_id, id). If afterHLC falls below the
-//     retention horizon, Pull returns ErrSnapshotRequired so the caller performs
-//     a full-state snapshot exchange before resuming incremental pulls.
+//   - Pull returns events with HLC greater than or equal to afterHLC in
+//     deterministic order (HLC, device_id, id). The inclusive boundary (HUB-13)
+//     means a same-HLC event from another device that arrives after the cursor
+//     was advanced to that HLC is still delivered on the next pull; ApplyEvents
+//     dedups by event ID, so re-delivering the boundary is a no-op for already-
+//     applied events. If afterHLC falls below the retention horizon, Pull
+//     returns ErrSnapshotRequired so the caller performs a full-state snapshot
+//     exchange before resuming incremental pulls.
 //
 // Blob plane:
 //   - PutBlob stores a content-addressed encrypted blob keyed by its sha256 hex
@@ -106,7 +110,7 @@ func (h FileHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, error
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if event.HLC > afterHLC {
+		if event.HLC >= afterHLC {
 			out = append(out, event)
 		}
 	}

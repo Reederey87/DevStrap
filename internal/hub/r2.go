@@ -163,7 +163,7 @@ func (h R2Hub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, error) 
 			if err := json.Unmarshal(raw, &event); err != nil {
 				return nil, fmt.Errorf("decode event object %s: %w", key, err)
 			}
-			if event.HLC > afterHLC {
+			if event.HLC >= afterHLC {
 				out = append(out, event)
 			}
 		}

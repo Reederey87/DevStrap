@@ -62,21 +62,32 @@ func TestR2PullCursorIncremental(t *testing.T) {
 	if err := h.Push(ctx, events); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
-	// EAGER-02: cursor-based pull returns only events after the cursor.
+	// EAGER-02 cursor-based pull + HUB-13 inclusive boundary: Pull(afterHLC)
+	// returns events with HLC >= afterHLC, so a same-HLC late arrival is not
+	// dropped. Pull(100) includes the boundary evt_001 (HLC=100) plus evt_002.
 	pulled, err := h.Pull(ctx, 100)
 	if err != nil {
 		t.Fatalf("Pull(100): %v", err)
 	}
-	if len(pulled) != 1 || pulled[0].ID != "evt_002" {
-		t.Errorf("Pull(100) = %v, want only evt_002", pulled)
+	if len(pulled) != 2 {
+		t.Errorf("Pull(100) = %d events, want 2 (inclusive boundary + newer)", len(pulled))
 	}
-	// Pull past everything returns nothing.
+	// Pull at the max HLC re-delivers the boundary event (deduped by
+	// ApplyEvents); it is not empty because the boundary is inclusive.
 	pulled, err = h.Pull(ctx, 200)
 	if err != nil {
 		t.Fatalf("Pull(200): %v", err)
 	}
+	if len(pulled) != 1 || pulled[0].ID != "evt_002" {
+		t.Errorf("Pull(200) = %v, want the boundary evt_002 (inclusive)", pulled)
+	}
+	// Pull past everything returns nothing.
+	pulled, err = h.Pull(ctx, 201)
+	if err != nil {
+		t.Fatalf("Pull(201): %v", err)
+	}
 	if len(pulled) != 0 {
-		t.Errorf("Pull(200) = %d events, want 0", len(pulled))
+		t.Errorf("Pull(201) = %d events, want 0", len(pulled))
 	}
 }
 
