@@ -22,6 +22,7 @@ const (
 	EventProjectDeleted       = "project.deleted"
 	EventProjectRenamed       = "project.renamed"
 	EventConflictCreated      = "conflict.created"
+	EventConflictResolved     = "conflict.resolved"      // PROD-06
 	EventDraftSnapshotCreated = "draft.snapshot.created" // DRAFT-02
 )
 
@@ -50,6 +51,16 @@ type ProjectPayload struct {
 type RenamePayload struct {
 	OldPath string `json:"old_path"`
 	NewPath string `json:"new_path"`
+}
+
+// ConflictResolvedPayload carries a conflict.resolved event (PROD-06): the
+// user's local resolution decision is audited and synced so every device sees
+// the same outcome and the open-conflict count converges.
+type ConflictResolvedPayload struct {
+	ConflictID  string `json:"conflict_id"`
+	NamespaceID string `json:"namespace_id,omitempty"`
+	Type        string `json:"type"`
+	Action      string `json:"action"` // keep-local | keep-remote | keep-both
 }
 
 // DraftSnapshotPayload carries a draft.snapshot.created event's content-addressed
@@ -153,6 +164,21 @@ func NewDraftSnapshotEvent(typ, payloadJSON string) state.Event {
 		PayloadJSON: payloadJSON,
 		ContentHash: state.ContentHash(payloadJSON),
 	}
+}
+
+// CreateConflictResolvedEvent builds and inserts a conflict.resolved event
+// (PROD-06) recording the user's resolution decision so it syncs to every
+// device and the open-conflict count converges.
+func CreateConflictResolvedEvent(ctx context.Context, st *state.Store, payload ConflictResolvedPayload) (state.Event, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return state.Event{}, err
+	}
+	return st.InsertLocalEvent(ctx, state.Event{
+		Type:        EventConflictResolved,
+		PayloadJSON: string(raw),
+		ContentHash: state.ContentHash(string(raw)),
+	})
 }
 
 // ApplyEvents sorts and applies a batch of remote events. It returns

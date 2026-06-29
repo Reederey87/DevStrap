@@ -48,6 +48,30 @@ func newHydrateCommand(stdout io.Writer, opts *options) *cobra.Command {
 	return cmd
 }
 
+// submodulePolicy resolves the per-clone submodule materialization policy
+// (GIT-06) from config: always|auto|never. "auto" and "always" both pass
+// --recurse-submodules (a no-op when the repo has no submodules); "never"
+// skips submodule initialization so a blobless clone stays minimal.
+func submodulePolicy(opts *options) string {
+	p := strings.ToLower(strings.TrimSpace(opts.v.GetString("materialization.submodules")))
+	switch p {
+	case "never":
+		return "never"
+	default:
+		if p == "" {
+			return "auto"
+		}
+		return p
+	}
+}
+
+// maintenanceEnabled reports whether an opt-in one-time `git maintenance run
+// --auto` should run after clone (GIT-06) so blobless clones do not trigger
+// per-object lazy-fetch storms on the first blame/log -p.
+func maintenanceEnabled(opts *options) bool {
+	return opts.v.GetBool("materialization.maintenance")
+}
+
 func hydrateProject(ctx context.Context, opts *options, nsPath string, partial bool) (string, error) {
 	store, err := opts.openState(ctx)
 	if err != nil {
@@ -102,7 +126,15 @@ func hydrateProjectUnlocked(ctx context.Context, store *state.Store, opts *optio
 		}
 	}()
 	r := dsgit.NewRunner()
-	if err := r.Clone(ctx, project.RemoteURL, tmpPath, partial); err != nil {
+	// GIT-06: initialize submodules unless the policy is "never" so the
+	// working tree is structurally complete; with a blobless clone, keep the
+	// submodules blobless too (--also-filter-submodules).
+	submodules := submodulePolicy(opts) != "never"
+	if err := r.CloneWithOptions(ctx, project.RemoteURL, tmpPath, dsgit.CloneOptions{
+		Partial:              partial,
+		Submodules:           submodules,
+		AlsoFilterSubmodules: partial && submodules,
+	}); err != nil {
 		_ = store.UpdateProjectLocalState(ctx, project.ID, localPath, "failed", "unknown")
 		return "", err
 	}
@@ -146,6 +178,13 @@ func hydrateProjectUnlocked(ctx context.Context, store *state.Store, opts *optio
 	}
 	if matState == "materialized-empty" {
 		return localPath, appError{code: exitGit, err: fmt.Errorf("%s cloned but checkout is empty (remote HEAD may be broken); recorded as materialized-empty", project.Path)}
+	}
+	// GIT-06: opt-in one-time maintenance so a blobless clone does not trigger
+	// per-object lazy-fetch storms on the first blame/log -p. Best-effort:
+	// older git or a missing promisor makes this a no-op/error; never fail
+	// materialization on it.
+	if maintenanceEnabled(opts) {
+		_ = r.MaintenanceRun(ctx, localPath)
 	}
 	return localPath, nil
 }

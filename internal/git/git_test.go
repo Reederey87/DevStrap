@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -464,5 +465,95 @@ func TestJitterDelayFullJitterBounded(t *testing.T) {
 	// Zero/negative base short-circuits (no delay).
 	if d := jitterDelay(0, cap, 1, randFn); d != 0 {
 		t.Fatalf("zero base delay = %s, want 0", d)
+	}
+}
+
+func TestCloneArgsSubmodules(t *testing.T) {
+	cases := []struct {
+		name string
+		opts CloneOptions
+		want []string
+	}{
+		{name: "plain", opts: CloneOptions{}, want: []string{"clone", "--", "r", "d"}},
+		{name: "partial", opts: CloneOptions{Partial: true}, want: []string{"clone", "--filter=blob:none", "--", "r", "d"}},
+		{name: "submodules", opts: CloneOptions{Submodules: true}, want: []string{"clone", "--recurse-submodules", "--", "r", "d"}},
+		{name: "partial+submodules", opts: CloneOptions{Partial: true, Submodules: true, AlsoFilterSubmodules: true}, want: []string{"clone", "--filter=blob:none", "--also-filter-submodules", "--recurse-submodules", "--", "r", "d"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := cloneArgs("r", "d", c.opts)
+			if !slices.Equal(got, c.want) {
+				t.Fatalf("cloneArgs = %#v, want %#v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestCloneWithOptionsInitializesSubmodules (GIT-06) clones a superproject
+// that has a submodule with --recurse-submodules and verifies the submodule
+// working tree is present on disk. Uses the real git binary against local
+// file-path remotes.
+func TestCloneWithOptionsInitializesSubmodules(t *testing.T) {
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	tmp := t.TempDir()
+	gitEnv := []string{
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
+		"GIT_CONFIG_NOSYSTEM=true",
+		"HOME=" + tmp,
+		"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=protocol.file.allow", "GIT_CONFIG_VALUE_0=always",
+	}
+	run := func(dir string, args ...string) error {
+		c := exec.Command(gitBin, args...)
+		c.Dir = dir
+		c.Env = append(os.Environ(), gitEnv...)
+		out, err := c.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("git %v: %v\n%s", args, err, out)
+		}
+		return nil
+	}
+	// Submodule remote.
+	sub := filepath.Join(tmp, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(sub, "init"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "README.md"), []byte("sub\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(sub, "add", "README.md"); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(sub, "commit", "-m", "sub init"); err != nil {
+		t.Fatal(err)
+	}
+	// Superproject remote.
+	main := filepath.Join(tmp, "main")
+	if err := os.MkdirAll(main, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(main, "init"); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(main, "submodule", "add", sub, "vendor/sub"); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(main, "commit", "-m", "add submodule"); err != nil {
+		t.Fatal(err)
+	}
+	// Clone with submodules.
+	dest := filepath.Join(tmp, "dest")
+	r := Runner{Bin: gitBin, Timeout: 30 * time.Second}
+	if err := r.CloneWithOptions(context.Background(), main, dest, CloneOptions{Submodules: true}); err != nil {
+		t.Fatalf("CloneWithOptions: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "vendor", "sub", "README.md")); err != nil {
+		t.Fatalf("submodule not materialized: %v", err)
 	}
 }

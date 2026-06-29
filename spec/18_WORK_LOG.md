@@ -27,6 +27,25 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-06-29 — PASS4 audit Phase A/D quick wins (part 4)
+
+Changed:
+- Continued PASS4 quick wins: GIT-05 (P2), PROD-06 (P2), GIT-06 (P2).
+- **GIT-05**: forge detection now supports self-hosted GitLab/Gitea/Forgejo. New `ResolveForge` with documented precedence — `--forge` flag > per-project `git_repos.forge_kind` column > `[forge] host = kind` config map > `DetectForge` heuristic. Added migration `00010_repo_forge_kind.sql` (new `forge_kind` column, schema version 10), `Store.SetProjectForgeKind`, and threaded `ForgeKind` through `UpsertProjectParams`/`ProjectStatus`/`GitRepo` + the UPSERTs and SELECTs. SSH host aliases (`~/.ssh/config` `Host`->`HostName`) are resolved before detection so `git@work-gitlab:org/repo` maps to the real host. `agent pr` gained a `--forge` flag; `doctor` now iterates adopted git-repo remotes, resolves the forge, and warns when the matching CLI (`gh`/`glab`/`tea`) is missing or the forge is unknown.
+- **PROD-06**: `conflicts` is now a command group (`list`/`show`/`resolve`) instead of a list-only leaf. `resolve <id>` accepts exactly one of `--keep-local`/`--keep-remote`/`--keep-both`, marks the row `resolved` (so the `status` open-conflict count converges), records the decision in `resolution_json`, and emits a signed `conflict.resolved` HLC event (`CreateConflictResolvedEvent`) so every device sees the same outcome. `devstrap conflicts` with no subcommand still lists.
+- **GIT-06**: the materialize/hydrate clone path now initializes submodules (`--recurse-submodules` + `--also-filter-submodules` for blobless submodules) under a `materialization.submodules` policy (`auto` default / `never`). Added `git.CloneOptions` + `CloneWithOptions` (keeping `Clone` as a thin wrapper) and a `Runner.MaintenanceRun` helper; an opt-in `materialization.maintenance` config runs a one-time `git maintenance run --auto` after clone so blobless clones do not trigger per-object lazy-fetch storms. `doctor` surfaces the blobless-clone offline caveat (historical blobs need the promisor online).
+- Tests: `TestParseForgeKind`/`TestResolveForgePrecedence`/`TestSSHHostMatch`/`TestResolveSSHHostAlias`/`TestDetectForgeResolvesSSHAlias` + a `--forge gitlab` fake-CLI override test (GIT-05); `TestResolveActionValidation`/`TestConflictsListShowResolve` (PROD-06); `TestCloneArgsSubmodules`/`TestCloneWithOptionsInitializesSubmodules` (real-git submodule clone) (GIT-06); updated `TestInitStatusAndDBCommands`/`TestMigrateEnsureSummaryAndVersion`/`TestMigrationDownAndUp` for schema version 10.
+
+Validated:
+- `gofmt -w cmd internal`, `go vet`, `DEVSTRAP_NO_KEYCHAIN=1 go test ./... -count=1` (all green), `spec-drift` passes (20 specs, 52 changed files).
+- golangci-lint not installed in this environment.
+
+Follow-ups:
+- GIT-05: per-project forge override has no `set` CLI yet (the column is writable via `SetProjectForgeKind`); native Bitbucket/Azure PR clients; broader FORGE-05 hermetic fake-CLI tests.
+- PROD-06: `--keep-both` records the dual-copy intent and clears the row; it does not auto-clone the remote variant under a sibling path (no network/ambiguity risk). Honoring a prior resolution to suppress re-conflict on re-sync is a sync-engine follow-up.
+- GIT-06: per-project `materialization.submodules` column (currently config-level only); `git maintenance start` (scheduled) vs the one-time `run --auto`; submodule hydrate-state recording.
+- Remaining: SEC-02 (encrypt namespace map, L), SEC-04 (bootstrap pinning, deferred), SEC-05 (release signing), SYNC-02/HUB-11 (compaction, L), SYNC-06 (tombstone GC), SYNC-03 (needs HLC test refactor), SYNC-05 (folded hash + signed head), QUAL-02 (property tests), SEC-07/08, HUB-14/15/16, GIT-04 (worktree GC), GIT-03 (XL sandbox), PROD-04/05, and Phase E.
+
 ## 2026-06-29 — PASS4 audit Phase A/D quick wins (part 3)
 
 Changed:

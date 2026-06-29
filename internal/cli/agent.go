@@ -189,6 +189,7 @@ func newAgentPRCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var dryRun bool
 	var title string
 	var body string
+	var forgeFlag string
 	cmd := &cobra.Command{
 		Use:   "pr <agent-run-id>",
 		Short: "Create a PR/MR after the stale-base gate (forge-agnostic: gh/glab/tea)",
@@ -209,6 +210,12 @@ func newAgentPRCommand(stdout io.Writer, opts *options) *cobra.Command {
 			wt, err := store.WorktreeByID(cmd.Context(), run.WorktreeID)
 			if err != nil {
 				return err
+			}
+			// GIT-05: resolve the per-project forge override so a self-hosted
+			// GitLab/Gitea remote routes to glab/tea instead of degrading.
+			var projectForge string
+			if p, err := store.ProjectByID(cmd.Context(), run.NamespaceID); err == nil {
+				projectForge = p.ForgeKind
 			}
 			drift, err := finalizationBaseDrift(cmd.Context(), wt)
 			if err != nil {
@@ -231,7 +238,7 @@ func newAgentPRCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := pushAgentBranch(cmd.Context(), wt.Path, wt.Branch); err != nil {
 				return err
 			}
-			url, err := createAgentPR(cmd.Context(), wt.Path, baseBranch, wt.Branch, title, body)
+			url, err := createAgentPR(cmd.Context(), wt.Path, baseBranch, wt.Branch, title, body, forgeFlag, projectForge, forgeHostMap(opts.v))
 			if err != nil {
 				return err
 			}
@@ -243,6 +250,7 @@ func newAgentPRCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show the PR command without pushing or creating it")
 	cmd.Flags().StringVar(&title, "title", "", "PR title")
 	cmd.Flags().StringVar(&body, "body", "", "PR body")
+	cmd.Flags().StringVar(&forgeFlag, "forge", "", "forge kind override (github|gitlab|gitea|bitbucket|azure) for self-hosted instances (GIT-05)")
 	return cmd
 }
 
@@ -507,7 +515,7 @@ func pushAgentBranch(ctx context.Context, dir, branch string) error {
 	return nil
 }
 
-func createAgentPR(ctx context.Context, dir, baseBranch, headBranch, title, body string) (string, error) {
+func createAgentPR(ctx context.Context, dir, baseBranch, headBranch, title, body, forgeOverride, projectForge string, hostMap map[string]ForgeKind) (string, error) {
 	// FORGE-01: detect the forge from the remote URL and route PR creation
 	// accordingly (gh/glab/tea), with graceful degradation for unknown forges.
 	remoteURL, err := dsgit.NewRunner().RemoteURL(ctx, dir)
@@ -516,5 +524,5 @@ func createAgentPR(ctx context.Context, dir, baseBranch, headBranch, title, body
 	}
 	// AGEN-06: scrub the PR body so token-shaped secrets never reach the forge.
 	scrubbedBody := redact.Scrub(body)
-	return createForgePR(ctx, dir, remoteURL, baseBranch, headBranch, title, scrubbedBody)
+	return createForgePR(ctx, dir, remoteURL, baseBranch, headBranch, title, scrubbedBody, forgeOverride, projectForge, hostMap)
 }

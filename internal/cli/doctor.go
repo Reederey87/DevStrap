@@ -93,6 +93,8 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 			results = append(results, checkDB(ctx, store)...)
 			results = append(results, checkSecretsRotation(ctx, store)...)
 			results = append(results, checkDeviceKeys(ctx, paths, store)...)
+			results = append(results, checkForgeCLIs(ctx, opts, store)...)
+			results = append(results, checkBloblessCaveat(ctx, store)...)
 		}
 	} else if os.IsNotExist(err) {
 		results = append(results, checkResult{Name: "state database", Status: checkWarn, Detail: "missing", Remedy: "run `devstrap init` (or doctor --fix)"})
@@ -164,6 +166,59 @@ func checkSecretsRotation(ctx context.Context, store *state.Store) []checkResult
 		return []checkResult{{Name: "secrets needing rotation", Status: checkWarn, Detail: fmt.Sprintf("%d (rotate at source after a device revoke)", rotate), Remedy: "rotate the flagged secrets at their source"}}
 	}
 	return []checkResult{{Name: "secrets needing rotation", Status: checkOK, Detail: "0"}}
+}
+
+// checkForgeCLIs iterates adopted git-repo remotes, resolves the forge for
+// each (with --forge/project/host-map overrides), and warns when the matching
+// forge CLI (gh/glab/tea) is missing or the forge is unknown — so the failure
+// surfaces in doctor rather than only at `agent pr` time (GIT-05).
+func checkForgeCLIs(ctx context.Context, opts *options, store *state.Store) []checkResult {
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return nil
+	}
+	hostMap := forgeHostMap(opts.v)
+	var out []checkResult
+	seen := make(map[string]bool)
+	for _, p := range projects {
+		if p.Type != "git_repo" || p.RemoteURL == "" {
+			continue
+		}
+		kind := ResolveForge(p.RemoteURL, "", p.ForgeKind, hostMap)
+		cli := forgeCLI(kind)
+		if cli == "" {
+			if !seen["unknown"] {
+				out = append(out, checkResult{Name: "forge cli", Status: checkWarn, Detail: fmt.Sprintf("unknown forge for %s", forgeHost(p.RemoteURL)), Remedy: "set a [forge] host map, git_repos.forge_kind, or pass --forge (GIT-05)"})
+				seen["unknown"] = true
+			}
+			continue
+		}
+		if _, err := exec.LookPath(cli); err != nil {
+			out = append(out, checkResult{Name: "forge cli " + cli, Status: checkWarn, Detail: fmt.Sprintf("missing (%s for %s)", cli, forgeHost(p.RemoteURL)), Remedy: fmt.Sprintf("install %s for %s PR creation", cli, kind)})
+		}
+	}
+	return out
+}
+
+// checkBloblessCaveat surfaces the offline caveat for blobless clones (GIT-06):
+// `git blame`/`log -p` on a partial clone trigger per-object lazy fetches that
+// need the promisor remote online. It is informational (ok) so it is visible in
+// the graded report without inflating the warning count.
+func checkBloblessCaveat(ctx context.Context, store *state.Store) []checkResult {
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return nil
+	}
+	gitRepos := 0
+	for _, p := range projects {
+		if p.Type == "git_repo" {
+			gitRepos++
+		}
+	}
+	if gitRepos == 0 {
+		return nil
+	}
+	return []checkResult{{Name: "blobless clone caveat", Status: checkOK, Detail: fmt.Sprintf("%d git repo(s) use blobless clones; historical blobs need the remote online (lazy fetch)", gitRepos), Remedy: "enable materialization.maintenance for a post-clone prefetch; stay online for first blame/log -p"}}
 }
 
 func checkDeviceKeys(ctx context.Context, paths config.Paths, store *state.Store) []checkResult {

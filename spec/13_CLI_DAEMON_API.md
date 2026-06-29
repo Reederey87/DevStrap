@@ -51,7 +51,7 @@ devstrap wip
 Current repository status as of `2026-06-28`:
 
 ```text
-Implemented: devstrap init, version, scan, add, clone, hydrate, open, sync --hub-file, materialize, draft snapshot create, run-loop, status, doctor, conflicts, db migrate/status/backup/down, env capture/hydrate/bind, run, worktree new/status/finalize/list/remove/cleanup/unlock, agent run/list/show/pr, devices enroll/list/approve/revoke/lost/rename
+Implemented: devstrap init, version, scan, add, clone, hydrate, open, sync --hub-file, materialize, draft snapshot create, run-loop, status, doctor, conflicts list/show/resolve, db migrate/status/backup/down, env capture/hydrate/bind, run, worktree new/status/finalize/list/remove/cleanup/unlock, agent run/list/show/pr, devices enroll/list/approve/revoke/lost/rename
 Planned: production R2/S3 SDK wiring, env check, OS-enforced agent sandboxing, automatic remote device enrollment/fingerprint confirmation, daemon/socket API, export, promote, gitstate, wip
 ```
 
@@ -246,6 +246,17 @@ Options:
 --default-branch
 --lfs-policy auto|never|agent|always
 ```
+
+### conflicts
+
+```bash
+devstrap conflicts                              # list open conflicts (default)
+devstrap conflicts list
+devstrap conflicts show <id>
+devstrap conflicts resolve <id> --keep-local|--keep-remote|--keep-both
+```
+
+`conflicts` (`PROD-06`) is a command group that turns the detect-don't-merge model from a read-only count into an actionable resolution surface. `list` (the default when `conflicts` is run with no subcommand) shows open conflict rows; `show <id>` prints one conflict's details and status; `resolve <id>` accepts exactly one of `--keep-local` (keep the local version, discard the remote variant), `--keep-remote` (keep the remote version, discard the local), or `--keep-both` (dual-copy: the local entry stays and the remote variant is re-added under a sibling path). Resolving marks the row `resolved` (so the `status` open-conflict count converges), records the decision in `resolution_json`, and emits a signed `conflict.resolved` HLC event so every device sees the same outcome. Namespace files are never byte-merged; the dual-copy safe default mirrors the draft-bundle conflict behavior.
 
 ## Env commands
 
@@ -488,7 +499,7 @@ PR creation becomes forge-agnostic (`gh`/`glab`/`tea`) with a `--forge` override
 - **CLI-03**: `run` and `agent run` propagate child exit codes as `100+N` (new `childExitBase`).
 - **CLI-04**: Added `exitUsage = 10` for bad-flag/missing-flag/arg-count errors; `childExitBase = 100` for child process exit codes.
 - **PROD-01**: `deriveDisplayStatus` maps materialization+dirty states to user-facing labels; `status` output uses it.
-- **PROD-02**: New `devstrap conflicts` command lists open conflicts; `status` shows open-conflict count.
+- **PROD-02/PROD-06**: `devstrap conflicts` is a command group (`list`/`show`/`resolve --keep-local|--keep-remote|--keep-both`) that surfaces and resolves open conflicts; `status` shows the open-conflict count and it converges as rows are resolved.
 - **ARCH2-04**: Reserved `exitDaemonUnavailable` code for M5 daemon.
 
 ## Cloud-sync CLI (2026-06-28)

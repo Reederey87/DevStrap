@@ -120,11 +120,26 @@ func (r Runner) Run(ctx context.Context, dir string, args ...string) (string, er
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+// CloneOptions controls git clone behavior (GIT-06).
+type CloneOptions struct {
+	Partial              bool // --filter=blob:none (blobless clone)
+	Submodules           bool // --recurse-submodules so the tree is fully present
+	AlsoFilterSubmodules bool // --also-filter-submodules (keep submodules blobless too; only meaningful with Partial)
+}
+
 func (r Runner) Clone(ctx context.Context, remote, dest string, partial bool) error {
+	return r.CloneWithOptions(ctx, remote, dest, CloneOptions{Partial: partial})
+}
+
+// CloneWithOptions runs a git clone with the given options and the GIT-02
+// clean-destination retry. When Submodules is set the clone initializes
+// submodules so the working tree is structurally complete (GIT-06); with
+// Partial + AlsoFilterSubmodules the submodules are blobless too.
+func (r Runner) CloneWithOptions(ctx context.Context, remote, dest string, opts CloneOptions) error {
 	if err := ValidateRemote(remote); err != nil {
 		return err
 	}
-	args := cloneArgs(remote, dest, partial)
+	args := cloneArgs(remote, dest, opts)
 	attempts := r.RetryAttempts
 	if attempts <= 0 {
 		attempts = 1
@@ -173,11 +188,17 @@ func (r Runner) Clone(ctx context.Context, remote, dest string, partial bool) er
 }
 
 // cloneArgs builds the argv for a git clone with optional blobless partial
-// clone (GIT-02).
-func cloneArgs(remote, dest string, partial bool) []string {
+// clone (GIT-02) and submodule materialization (GIT-06).
+func cloneArgs(remote, dest string, opts CloneOptions) []string {
 	args := []string{"clone"}
-	if partial {
+	if opts.Partial {
 		args = append(args, "--filter=blob:none")
+		if opts.AlsoFilterSubmodules {
+			args = append(args, "--also-filter-submodules")
+		}
+	}
+	if opts.Submodules {
+		args = append(args, "--recurse-submodules")
 	}
 	args = append(args, "--", remote, dest)
 	return args
@@ -196,6 +217,16 @@ func (r Runner) Fetch(ctx context.Context, dir, remote, branch string) error {
 	}
 	args = append(args, "--prune")
 	return r.runWithNetworkRetry(ctx, dir, args...)
+}
+
+// MaintenanceRun runs a one-time `git maintenance run --auto` (commit-graph +
+// prefetch) so common history ops (blame, log -p) do not trigger per-object
+// lazy fetches on a blobless clone (GIT-06). It is best-effort: older git or a
+// missing promisor makes this a no-op or error, and the caller should not fail
+// materialization on it.
+func (r Runner) MaintenanceRun(ctx context.Context, dir string) error {
+	_, err := r.Run(ctx, dir, "maintenance", "run", "--auto")
+	return err
 }
 
 func (r Runner) RemoteURL(ctx context.Context, dir string) (string, error) {
