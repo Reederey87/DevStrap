@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-29
+last_reviewed: 2026-06-30
 tracks_code: [internal/childenv/**, internal/cli/**, internal/devicekeys/**, internal/envbundle/**, internal/git/**, internal/hub/**, internal/redact/**, internal/sync/**, internal/logging/**]
 ---
 # Security Threat Model
@@ -130,6 +130,8 @@ Mitigation:
 - no raw Git mirror by default.
 
 Hub-backend trust model (`HUB-*`): the hub is a **two-plane zero-knowledge store** — (1) a signed, HLC-ordered append-only event log (the namespace map) and (2) a content-addressed encrypted blob store (`age_blob:<sha256>`) for env values and non-git/draft content. Repo content never transits the hub; it rides git's own transport via blobless clone/fetch from each project's existing remote. The backend is pluggable behind one Hub interface: the chosen production backend is **Cloudflare R2** (S3 API, client-side age encryption, namespaced by `workspace_id`) — any S3-compatible store reuses the same interface — and a file-backed local backend exists **only for tests**. Either backend sees only ciphertext plus the signed map — it cannot read code, secrets, or drafts.
+
+R2/S3 credential custody (shipped, `P5-HUB-01`): the live `aws-sdk-go-v2` S3 adapter is wired behind `hub: r2://<bucket>` (or `s3://`). The bucket and endpoint are non-secret config (the bucket is the URI host; the endpoint comes from the URI `?endpoint=` override or `DEVSTRAP_HUB_S3_ENDPOINT`). The secret access key is supplied via env/config only (`DEVSTRAP_HUB_S3_ACCESS_KEY_ID`/`DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY`, with `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` fallbacks), never in the URI, `state.db`, or logs. The adapter is built with `s3.New(s3.Options{...})` (not `config.LoadDefaultConfig`) plus an inline `aws.CredentialsProviderFunc`, so the SSO/IMDS/STS chain and the `credentials` module are never pulled in. The SDK retryer is disabled (`aws.NopRetryer{}`) so `R2Hub.Retry` is the single retry layer (no double-retry or runaway billing loop); throttling/transient S3 errors are retried with capped backoff + jitter, while auth/precondition/not-found errors fail fast. Hosted temporary prefix-scoped credentials remain a documented future (`CredentialMode == "hosted"`).
 
 Residual risk: a malicious approved device can decrypt bundles it is authorized to receive until revoked, and **age has no native revocation**. Bound this by per-profile recipient scoping, re-encrypting every affected bundle to the reduced recipient set after revocation, and requiring provider/service-side value rotation for secrets that may already have been exposed.
 

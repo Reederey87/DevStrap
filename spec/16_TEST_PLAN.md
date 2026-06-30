@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-28
+last_reviewed: 2026-06-30
 tracks_code: [cmd/**, internal/**, .github/**, go.mod, go.sum]
 ---
 # Test Plan
@@ -343,9 +343,11 @@ Proves the "Dropbox experience for code" round trip: one `devstrap sync` on Devi
 10. assert NO .git bytes ever transit the hub: the hub backend saw only the signed namespace map + age_blob:<sha256> ciphertext; repo content rode git's own transport
 ```
 
-## Hub backend tests (planned, `HUB-*`)
+## Hub backend tests (`HUB-*`)
 
 The cloud hub is pluggable behind one `Hub` interface with two planes — a signed HLC-ordered namespace-map event log and a content-addressed encrypted blob store (`age_blob:<sha256>`). The same conformance suite must pass against every backend: a file-backed local backend retained ONLY for tests, and Cloudflare R2 (S3 API) as the production backend.
+
+Shipped conformance (`P5-HUB-01`): `internal/hub`'s shared `assertHubRoundTrip` runs the contract below against both the in-memory `memS3` double (`TestR2ConformanceMemS3`) and the production `aws-sdk-go-v2` `S3Adapter` against a live bucket (`TestR2MinIOConformance` in `internal/hub/r2_minio_test.go`). The MinIO/R2 test is **env-gated** (not a build tag): it skips unless `DEVSTRAP_HUB_S3_ENDPOINT` (plus `DEVSTRAP_HUB_S3_ACCESS_KEY_ID`/`DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY`) is set, so the file always compiles (a refactor cannot silently break it and `go mod tidy` keeps the SDK a stable direct require) while CI stays hermetic. The `mapS3Error` sentinel translation is hermetically unit-tested in `s3client_awssdk_test.go` to protect the coverage floor while the gated test is skipped in CI. Run the live test against a 2024+ MinIO image (for `If-None-Match: *` conditional-put support): `docker run -p 9000:9000 minio/minio server /data`, then `DEVSTRAP_HUB_S3_ENDPOINT=http://localhost:9000 DEVSTRAP_HUB_S3_ACCESS_KEY_ID=minioadmin DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY=minioadmin go test -run TestR2MinIOConformance ./internal/hub`.
 
 ### Hub interface conformance (both backends)
 

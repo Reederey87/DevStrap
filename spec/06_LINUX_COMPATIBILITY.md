@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-28
+last_reviewed: 2026-06-30
 tracks_code: [internal/platform/**, .github/**]
 ---
 # Linux Compatibility Plan
@@ -23,7 +23,7 @@ inotify watcher               (deferred OS layer)
 ~/.devstrap state             (portable core, runs now)
 ```
 
-The portable core — `init`, `scan/adopt`, `add`, `hydrate`, `open`, `worktree`, `env`, and the file-backed `devstrap sync --hub-file` spike — must run identically on Ubuntu and macOS this cycle from the single Go binary. The `devstrap sync` eager blobless clone-everything flow (`EAGER-*`) and the cloud hub backend (`HUB-*`) are the cross-platform sync targets that land next, also platform-neutral. The systemd user service and native inotify watcher are deferred OS-specific layers (see "systemd user service" and "Linux watcher" below); the product is usable on Ubuntu through the foreground CLI before they land.
+The portable core — `init`, `scan/adopt`, `add`, `hydrate`, `open`, `worktree`, `env`, and the file-backed `devstrap sync --hub-file` spike — must run identically on Ubuntu and macOS this cycle from the single Go binary. The `devstrap sync` eager blobless clone-everything flow (`EAGER-*`) and the cloud hub backend (`HUB-*`) are shipped and platform-neutral (the live R2/S3 adapter landed in `P5-HUB-01`). The systemd user service and native inotify watcher are deferred OS-specific layers (see "systemd user service" and "Linux watcher" below); the product is usable on Ubuntu through the foreground CLI before they land.
 
 ## Platform-neutral core
 
@@ -238,7 +238,7 @@ Recommended:
 - watcher detects new folders and Git repos.
 - same namespace event stream syncs with Mac.
 
-Current repository implementation covers the portable CLI pieces for init, scan/adopt, add, hydrate, env capture/hydrate/bind, provider-backed env runtime injection through `op run`, provider file hydration through `op inject`, status, fresh worktree creation, the file-backed `devstrap sync --hub-file` spike, platform adapter interfaces, build-tagged platform detection, and a polling watcher fallback. These already run from the one portable binary on both platforms. The systemd service, native inotify watcher, the cloud hub backend (`HUB-*`), and the `devstrap sync` eager blobless clone-everything materialization (`EAGER-*`) remain future work shared across macOS and Ubuntu — not Linux-specific.
+Current repository implementation covers the portable CLI pieces for init, scan/adopt, add, hydrate, env capture/hydrate/bind, provider-backed env runtime injection through `op run`, provider file hydration through `op inject`, status, fresh worktree creation, the file-backed `devstrap sync --hub-file` spike, platform adapter interfaces, build-tagged platform detection, and a polling watcher fallback. These already run from the one portable binary on both platforms. The systemd service and native inotify watcher remain future work shared across macOS and Ubuntu — not Linux-specific. (The cloud hub backend `HUB-*` and the `devstrap sync` eager blobless clone-everything materialization `EAGER-*` are now shipped; the live R2/S3 adapter landed in `P5-HUB-01`.)
 
 ## Audit follow-ups (2026-06-27)
 

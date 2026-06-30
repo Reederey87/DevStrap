@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-28
+last_reviewed: 2026-06-30
 tracks_code: [internal/childenv/**, internal/cli/env.go, internal/devicekeys/**, internal/envbundle/**, internal/envfile/**, internal/platform/**]
 ---
 # Secrets and Environment Design
@@ -64,7 +64,7 @@ Because blobs are encrypted client-side to the enrolled device recipient set bef
 
 Device revoke/lost still re-encrypts affected bundles to the reduced recipient set and flags exposed values for rotation (see *Device trust* and *Encryption*); after re-encryption the new `age_blob:<sha256>` is uploaded and the superseded blob becomes unreferenced and is garbage-collected. The production exchange additionally requires automatic remote enrollment and out-of-band fingerprint confirmation, which remain future work.
 
-Backend is Cloudflare R2 from the start, pluggable behind one `Hub` interface, with a file-backed local backend kept only for tests.
+Backend is Cloudflare R2 from the start, pluggable behind one `Hub` interface, with a file-backed local backend kept only for tests. The R2/S3 `aws-sdk-go-v2` adapter is wired behind `hub: r2://<bucket>` (`P5-HUB-01`); credentials come from `DEVSTRAP_HUB_S3_*` env/config, never the URI or `state.db`.
 
 ## Supported providers
 

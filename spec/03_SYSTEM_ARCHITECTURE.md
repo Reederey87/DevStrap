@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-28
+last_reviewed: 2026-06-30
 tracks_code: [cmd/**, internal/**, .github/**]
 ---
 # System Architecture
@@ -348,7 +348,9 @@ type Hub interface {
 }
 ```
 
-The interface contract is idempotent for duplicate event/blob writes and fails with typed errors such as `ErrSnapshotRequired`, `ErrBlobNotFound`, and `ErrUnauthorizedDevice`. Object keys are planned as:
+The shipped `internal/sync.Hub` interface (`HUB-01`, see `internal/sync/hub.go` and the `R2Hub` S3 adapter in `internal/hub`) is the pragmatic form of this contract: the workspace scope is configured on the hub instance (not passed per-call), `Pull` takes an `afterHLC int64` and returns `[]state.Event`, `PutBlob`/`GetBlob` take a `sha256Hex` string + `io.Reader`/`io.ReadCloser` (no `BlobMeta`), and `HasBlob` is replaced by `DeleteBlob` (idempotent, for GC/revoke, `SEC-01`/`HUB-12`) plus `ListBlobs` (mark-and-sweep enumeration, `P5-HUB-02`). The two-plane zero-knowledge contract above is unchanged.
+
+The interface contract is idempotent for duplicate event/blob writes and fails with typed errors such as `ErrSnapshotRequired`, `ErrBlobNotFound`, and `ErrInvalidBlobKey`. Object keys are:
 
 ```text
 workspaces/<workspace_id>/events/<hlc-padded>/<device_id>/<seq>/<event_id>.json
@@ -358,9 +360,9 @@ workspaces/<workspace_id>/snapshots/<hlc-padded>.json.age
 
 Hub backends:
 
-- **file-backed**: the `devstrap sync --hub-file` spike — **tests only**, never production;
-- **Cloudflare R2**: the chosen **production** backend from the start (S3 API, zero egress, namespaced by `workspace_id`);
-- **HTTP/SSE hub service**: the later networked backend implementing the wire protocol above.
+- **file-backed**: the `devstrap sync --hub-file` (or `hub: file:<path>`) backend — **tests only**, never production;
+- **Cloudflare R2 / S3**: the chosen **production** backend, **shipped** (`P5-HUB-01`) — the `aws-sdk-go-v2` S3 adapter behind `hub: r2://<bucket>` (S3 API, zero egress, namespaced by `workspace_id`);
+- **HTTP/SSE hub service**: the later networked backend implementing the wire protocol above (still deferred).
 
 Mac implementation:
 
@@ -390,7 +392,7 @@ That keeps Mac-first work from painting Linux into a corner.
 
 ## Implementation status
 
-As of `2026-06-25`, the repository contains the Phase 0 Go workspace:
+As of `2026-06-30`, the repository contains the Go workspace:
 
 - `cmd/devstrap` main package;
 - `internal/cli` command skeleton;
@@ -399,6 +401,7 @@ As of `2026-06-25`, the repository contains the Phase 0 Go workspace:
 - `internal/platform` adapter contracts for watcher, service manager, keychain, and editor launch, with build-tagged platform detection, fsnotify-backed Darwin/Linux watchers that debounce bursts into reconciliation hints, an advisory polling watcher fallback for unsupported platforms, system keyring-backed Darwin/Linux keychain adapters with explicit fallback handling, unsupported service placeholders, `devstrap open` routed through the editor adapter, and a test guard keeping `runtime.GOOS` checks inside `internal/platform`;
 - a thin generic agent runner that creates fresh worktrees, runs explicit argv commands with sanitized no-secret env, applies wrapper-level command and file path policy, records `agent_runs`, captures logs/diff summaries, and gates `agent pr` on stale-base detection;
 - CI for macOS/Linux Go tests, race tests, vet, build, vuln scanning, and module hygiene;
-- focused tests for the implemented CLI/config/state/platform packages.
+- focused tests for the implemented CLI/config/state/platform packages;
+- the cloud-sync layer (`P5`/`HUB-*`): `internal/sync` (the `Hub` interface, `FileHub`, event apply/dedup, cursor logic), `internal/hub` (the `R2Hub` two-plane backend with keying/retry/conditional-put/retention-floor logic and the **shipped** `aws-sdk-go-v2` `S3Adapter` behind `hubFromOptions` `r2://` wiring, `P5-HUB-01`), `internal/envbundle`/`internal/ignore`/`internal/childenv`/`internal/git`/`internal/devicekeys`/`internal/redact`, `devstrap sync`/`run-loop`/`hub gc`/`devices revoke`, and an env-gated MinIO conformance test.
 
 The daemon, FSEvents-specific Mac watcher, and service installers are still design targets. Native platform-specific watcher or service-manager code must implement the `internal/platform` interfaces instead of branching through the core.

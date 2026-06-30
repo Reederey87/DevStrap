@@ -30,9 +30,18 @@ func TestR2EventKeyImmutable(t *testing.T) {
 	}
 }
 
-func TestR2PushPullRoundTrip(t *testing.T) {
-	ctx := context.Background()
-	h := newTestR2Hub(t)
+// assertHubRoundTrip runs the hub conformance contract (P5-HUB-01) against any
+// R2Hub/S3Client pair: the event-log plane (push/pull order, HLC cursor with
+// inclusive boundary, conditional-put idempotency) and the blob plane
+// (content-addressed put/get, not-found, ListBlobs, idempotent delete, invalid
+// key). It is shared by the in-memory memS3 test and the live MinIO/R2 test so
+// the production aws-sdk-go-v2 adapter is proven against the SAME contract as
+// the conformance double. Retention-floor, skip-HEAD, pagination, and retry
+// behaviors are memS3/fault-injection-specific and stay in their own tests below.
+func assertHubRoundTrip(t *testing.T, ctx context.Context, h R2Hub) {
+	t.Helper()
+
+	// Event-log plane: push/pull round trip + deterministic (hlc, device, id) order.
 	events := []state.Event{
 		makeEvent("evt_001", "dev_a", 100, 1, "project.added", `{"path":"a"}`),
 		makeEvent("evt_002", "dev_b", 200, 1, "project.added", `{"path":"b"}`),
@@ -48,34 +57,19 @@ func TestR2PushPullRoundTrip(t *testing.T) {
 	if len(pulled) != 3 {
 		t.Fatalf("Pull returned %d events, want 3", len(pulled))
 	}
-	// Deterministic order: HLC, device_id, id.
 	if pulled[0].HLC != 100 || pulled[1].HLC != 150 || pulled[2].HLC != 200 {
 		t.Errorf("Pull order: HLCs = %d %d %d, want 100 150 200", pulled[0].HLC, pulled[1].HLC, pulled[2].HLC)
 	}
-}
 
-func TestR2PullCursorIncremental(t *testing.T) {
-	ctx := context.Background()
-	h := newTestR2Hub(t)
-	events := []state.Event{
-		makeEvent("evt_001", "dev_a", 100, 1, "project.added", `{"path":"a"}`),
-		makeEvent("evt_002", "dev_a", 200, 2, "project.added", `{"path":"b"}`),
-	}
-	if err := h.Push(ctx, events); err != nil {
-		t.Fatalf("Push: %v", err)
-	}
 	// EAGER-02 cursor-based pull + HUB-13 inclusive boundary: Pull(afterHLC)
-	// returns events with HLC >= afterHLC, so a same-HLC late arrival is not
-	// dropped. Pull(100) includes the boundary evt_001 (HLC=100) plus evt_002.
-	pulled, err := h.Pull(ctx, 100)
+	// returns events with HLC >= afterHLC, so a same-HLC late arrival is not dropped.
+	pulled, err = h.Pull(ctx, 150)
 	if err != nil {
-		t.Fatalf("Pull(100): %v", err)
+		t.Fatalf("Pull(150): %v", err)
 	}
 	if len(pulled) != 2 {
-		t.Errorf("Pull(100) = %d events, want 2 (inclusive boundary + newer)", len(pulled))
+		t.Errorf("Pull(150) = %d events, want 2 (inclusive boundary + newer)", len(pulled))
 	}
-	// Pull at the max HLC re-delivers the boundary event (deduped by
-	// ApplyEvents); it is not empty because the boundary is inclusive.
 	pulled, err = h.Pull(ctx, 200)
 	if err != nil {
 		t.Fatalf("Pull(200): %v", err)
@@ -83,7 +77,6 @@ func TestR2PullCursorIncremental(t *testing.T) {
 	if len(pulled) != 1 || pulled[0].ID != "evt_002" {
 		t.Errorf("Pull(200) = %v, want the boundary evt_002 (inclusive)", pulled)
 	}
-	// Pull past everything returns nothing.
 	pulled, err = h.Pull(ctx, 201)
 	if err != nil {
 		t.Fatalf("Pull(201): %v", err)
@@ -91,37 +84,27 @@ func TestR2PullCursorIncremental(t *testing.T) {
 	if len(pulled) != 0 {
 		t.Errorf("Pull(201) = %d events, want 0", len(pulled))
 	}
-}
 
-func TestR2PushIdempotent(t *testing.T) {
-	ctx := context.Background()
-	h := newTestR2Hub(t)
-	e := makeEvent("evt_001", "dev_a", 100, 1, "project.added", `{"path":"a"}`)
-	if err := h.Push(ctx, []state.Event{e}); err != nil {
-		t.Fatalf("Push 1: %v", err)
+	// HUB-06: re-pushing the same event is a no-op (conditional put dedup).
+	if err := h.Push(ctx, []state.Event{events[0]}); err != nil {
+		t.Fatalf("re-Push (dup): %v", err)
 	}
-	// HUB-06: re-pushing the same event is a no-op (conditional put).
-	if err := h.Push(ctx, []state.Event{e}); err != nil {
-		t.Fatalf("Push 2: %v", err)
+	pulled, _ = h.Pull(ctx, 0)
+	if len(pulled) != 3 {
+		t.Errorf("after duplicate push, got %d events, want 3", len(pulled))
 	}
-	pulled, _ := h.Pull(ctx, 0)
-	if len(pulled) != 1 {
-		t.Errorf("after duplicate push, got %d events, want 1", len(pulled))
-	}
-}
 
-func TestR2BlobPutGet(t *testing.T) {
-	ctx := context.Background()
-	h := newTestR2Hub(t)
+	// Blob plane: content-addressed put/get is idempotent and byte-faithful.
+	keyA := strings.Repeat("a", 64)
+	keyB := strings.Repeat("b", 64)
 	data := []byte("encrypted-blob-content")
-	if err := h.PutBlob(ctx, strings.Repeat("a", 64), bytes.NewReader(data)); err != nil {
+	if err := h.PutBlob(ctx, keyA, bytes.NewReader(data)); err != nil {
 		t.Fatalf("PutBlob: %v", err)
 	}
-	// Idempotent: same content-addressed key is a no-op.
-	if err := h.PutBlob(ctx, strings.Repeat("a", 64), bytes.NewReader(data)); err != nil {
-		t.Fatalf("PutBlob 2: %v", err)
+	if err := h.PutBlob(ctx, keyA, bytes.NewReader(data)); err != nil {
+		t.Fatalf("re-PutBlob (idempotent): %v", err)
 	}
-	rc, err := h.GetBlob(ctx, strings.Repeat("a", 64))
+	rc, err := h.GetBlob(ctx, keyA)
 	if err != nil {
 		t.Fatalf("GetBlob: %v", err)
 	}
@@ -130,15 +113,52 @@ func TestR2BlobPutGet(t *testing.T) {
 	if !bytes.Equal(got, data) {
 		t.Errorf("GetBlob = %q, want %q", got, data)
 	}
+
+	// A never-uploaded blob is not found (wraps dssync.ErrBlobNotFound).
+	if _, err := h.GetBlob(ctx, keyB); !errors.Is(err, dssync.ErrBlobNotFound) {
+		t.Errorf("GetBlob missing = %v, want ErrBlobNotFound", err)
+	}
+
+	// P5-HUB-02: ListBlobs enumerates the workspace's blobs by sha256 hex key.
+	if err := h.PutBlob(ctx, keyB, bytes.NewReader([]byte("two"))); err != nil {
+		t.Fatalf("PutBlob keyB: %v", err)
+	}
+	listed, err := h.ListBlobs(ctx)
+	if err != nil {
+		t.Fatalf("ListBlobs: %v", err)
+	}
+	sort.Strings(listed)
+	if len(listed) != 2 || listed[0] != keyA || listed[1] != keyB {
+		t.Errorf("ListBlobs = %v, want [%s %s]", listed, keyA, keyB)
+	}
+
+	// SEC-01/HUB-12: DeleteBlob removes a blob and is idempotent on a missing blob
+	// so revoke/GC can call it unconditionally for superseded ciphertext.
+	if err := h.DeleteBlob(ctx, keyA); err != nil {
+		t.Fatalf("DeleteBlob: %v", err)
+	}
+	if _, err := h.GetBlob(ctx, keyA); !errors.Is(err, dssync.ErrBlobNotFound) {
+		t.Errorf("GetBlob after delete = %v, want ErrBlobNotFound", err)
+	}
+	if err := h.DeleteBlob(ctx, keyA); err != nil {
+		t.Fatalf("idempotent delete of missing blob: %v", err)
+	}
+	if err := h.DeleteBlob(ctx, strings.Repeat("c", 64)); err != nil {
+		t.Fatalf("idempotent delete of never-existing blob: %v", err)
+	}
+
+	// Invalid blob key is rejected.
+	if err := h.PutBlob(ctx, "short", bytes.NewReader([]byte("x"))); err == nil {
+		t.Error("expected error for invalid blob key")
+	}
 }
 
-func TestR2BlobNotFound(t *testing.T) {
-	ctx := context.Background()
-	h := newTestR2Hub(t)
-	_, err := h.GetBlob(ctx, strings.Repeat("b", 64))
-	if err == nil {
-		t.Fatal("expected error for missing blob")
-	}
+// TestR2ConformanceMemS3 runs the shared conformance contract against the
+// in-memory double (HUB-02). The same assertHubRoundTrip is run against a live
+// MinIO/R2 bucket in r2_minio_test.go, proving the production adapter matches
+// the conformance double.
+func TestR2ConformanceMemS3(t *testing.T) {
+	assertHubRoundTrip(t, context.Background(), newTestR2Hub(t))
 }
 
 // P5-HUB-03: a Pull whose cursor is below the retention horizon must return
@@ -161,57 +181,6 @@ func TestR2HubPullRetentionFloor(t *testing.T) {
 	}
 	if len(pulled) != 1 {
 		t.Fatalf("Pull(100) = %d events, want 1", len(pulled))
-	}
-}
-
-// P5-HUB-02: ListBlobs enumerates the workspace's blobs by sha256 hex key.
-func TestR2HubListBlobs(t *testing.T) {
-	ctx := context.Background()
-	h := newTestR2Hub(t)
-	keyA := strings.Repeat("a", 64)
-	keyB := strings.Repeat("b", 64)
-	for _, k := range []string{keyA, keyB} {
-		if err := h.PutBlob(ctx, k, bytes.NewReader([]byte("x"))); err != nil {
-			t.Fatalf("PutBlob %s: %v", k, err)
-		}
-	}
-	got, err := h.ListBlobs(ctx)
-	if err != nil {
-		t.Fatalf("ListBlobs: %v", err)
-	}
-	sort.Strings(got)
-	if len(got) != 2 || got[0] != keyA || got[1] != keyB {
-		t.Fatalf("ListBlobs = %v, want [%s %s]", got, keyA, keyB)
-	}
-}
-
-// TestR2HubDeleteBlob (SEC-01/HUB-12): DeleteBlob removes a content-addressed
-// blob and is idempotent on a missing blob so revoke/GC can call it
-// unconditionally for superseded ciphertext.
-func TestR2HubDeleteBlob(t *testing.T) {
-	ctx := context.Background()
-	h := newTestR2Hub(t)
-	hash := strings.Repeat("a", 64)
-	if err := h.PutBlob(ctx, hash, bytes.NewReader([]byte("encrypted-blob"))); err != nil {
-		t.Fatalf("PutBlob: %v", err)
-	}
-	if err := h.DeleteBlob(ctx, hash); err != nil {
-		t.Fatalf("DeleteBlob: %v", err)
-	}
-	if _, err := h.GetBlob(ctx, hash); err == nil {
-		t.Fatal("expected error after delete")
-	}
-	// Idempotent: deleting a missing blob is not an error.
-	if err := h.DeleteBlob(ctx, strings.Repeat("c", 64)); err != nil {
-		t.Fatalf("idempotent delete of missing blob: %v", err)
-	}
-}
-
-func TestR2InvalidBlobKey(t *testing.T) {
-	ctx := context.Background()
-	h := newTestR2Hub(t)
-	if err := h.PutBlob(ctx, "short", bytes.NewReader([]byte("x"))); err == nil {
-		t.Error("expected error for invalid blob key")
 	}
 }
 

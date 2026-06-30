@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-28
+last_reviewed: 2026-06-30
 tracks_code: [cmd/**, internal/**, README.md]
 ---
 # Product Requirements
@@ -193,7 +193,7 @@ Do not build these first:
 
 - Mac LaunchAgent daemon and Linux systemd installer;
 - native FSEvents/inotify watcher installers;
-- production R2/S3 hub backend and hosted control plane;
+- hosted control plane (the production R2/S3 hub backend is shipped, `P5-HUB-01`);
 - StrapFS / FUSE / File Provider lazy filesystem layer.
 - universal ignore compiler;
 - TUI status view.

@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-28
+last_reviewed: 2026-06-30
 tracks_code: [cmd/**, internal/**, spec/**]
 ---
 # Architecture Decision: Mac-First Managed Code Namespace
@@ -69,7 +69,7 @@ See `07_NAMESPACE_AND_SYNC_MODEL.md` and `08_GIT_MATERIALIZATION_AND_WORKTREES.m
 
 ### Decision 2 — Eager clone-everything materialization (`EAGER-*`)
 
-`devstrap sync` materializes **eagerly**: every project in the namespace map is blobless/partial-cloned up front, so after a sync the whole `~/Code` tree is present on the device. There is **no FUSE/placeholder/lazy-VFS magic** in this design — StrapFS stays explicitly deferred (see Alternatives C/D and the build order below). This trades disk for predictability and debuggability, and keeps the core portable Go on macOS and Ubuntu (`XP-*`). Eager whole-tree materialization on `devstrap sync` is **planned/future**; today's `sync` is the file-backed namespace spike.
+`devstrap sync` materializes **eagerly**: every project in the namespace map is blobless/partial-cloned up front, so after a sync the whole `~/Code` tree is present on the device. There is **no FUSE/placeholder/lazy-VFS magic** in this design — StrapFS stays explicitly deferred (see Alternatives C/D and the build order below). This trades disk for predictability and debuggability, and keeps the core portable Go on macOS and Ubuntu (`XP-*`). Eager whole-tree materialization on `devstrap sync` is **shipped** (`EAGER-*`): `sync` blobless/partial-clones every mapped repo, hydrates env/draft blobs, and rebuilds deps opt-in; `--hub-file` remains the file-backed test backend.
 
 ### Decisions 3–4 — Two-plane zero-knowledge cloud hub (`HUB-*`)
 
@@ -82,7 +82,7 @@ The hub sees **only ciphertext plus a signed map**; it cannot read code, secrets
 
 The chosen cloud backend is **Cloudflare R2 from the start** (S3 API, zero egress, namespaced by `workspace_id`; client-side age encryption gives confidentiality by construction). Integrity and availability still require signed hash chains, fail-closed event verification, scoped credentials, snapshots/backups, and retention discipline. There is **no NAS-first phase**. The `Hub` interface stays pluggable, and the existing file-backed backend (`devstrap sync --hub-file`) is retained **only for tests**.
 
-The cloud hub sync path and R2 backend selection are **planned/future**, not yet shipped; the only implemented transport remains `devstrap sync --hub-file`. See `13_CLI_DAEMON_API.md` and `14_MVP_ROADMAP_AND_BACKLOG.md`.
+The cloud hub sync path and R2 backend selection are **shipped** (`P5-HUB-01`): `hub: r2://<bucket>` (or `s3://`) wires the `aws-sdk-go-v2` S3 adapter behind `hubFromOptions`, with `DEVSTRAP_HUB_S3_*` env/config credentials and `--hub-file` retained for tests. See `13_CLI_DAEMON_API.md` and `14_MVP_ROADMAP_AND_BACKLOG.md`.
 
 ## What DevStrap owns
 

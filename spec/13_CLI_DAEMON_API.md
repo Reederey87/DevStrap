@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-29
+last_reviewed: 2026-06-30
 tracks_code: [cmd/**, internal/cli/**, internal/platform/**]
 ---
 # CLI and Daemon API
@@ -150,7 +150,7 @@ work/acme/data                  this       skeleton   mapped   unknown  not hydr
 
 ```bash
 devstrap sync --hub-file ~/.devstrap/test-hub/events.json
-devstrap sync --hub-s3 devstrap-hub                  # planned: one bucket, tenants separated by key prefix
+devstrap sync   # hub: r2://devstrap-hub (shipped; one bucket, tenants separated by key prefix)
 ```
 
 Current implementation does:
@@ -171,17 +171,17 @@ Planned `EAGER-*` behavior adds:
 Options:
 
 ```bash
---hub-file <path>     # file-backed test hub (current)
---hub-s3 <bucket>     # planned: Cloudflare R2 / S3 zero-knowledge hub backend
+--hub-file <path>     # file-backed test hub (tests only)
+hub: r2://<bucket>    # shipped: Cloudflare R2 / S3 zero-knowledge hub backend (creds via DEVSTRAP_HUB_S3_*)
 --namespace-only
 --fetch               # planned
 --hydrate-eager       # planned default: eager blobless clone of the whole tree
 --dry-run
 ```
 
-Current implementation supports the file-backed test hub only. It requires `--hub-file`, pushes all local events, pulls hub events from the beginning, applies namespace events idempotently, supports `--namespace-only` and `--dry-run`, and reports that hydration/fetch reconciliation is not implemented yet.
+The file-backed test hub uses `--hub-file` (or `hub: file:<path>`); the R2/S3 production backend is selected via `hub: r2://<bucket>` (or `s3://`) with credentials from `DEVSTRAP_HUB_S3_*` env/config (`hub_s3_endpoint`, `hub_s3_region` default `auto`, `hub_s3_access_key_id` with `AWS_ACCESS_KEY_ID` fallback, `hub_s3_secret_access_key` with `AWS_SECRET_ACCESS_KEY` fallback). Both backends push local events past the push cursor, pull hub events from the pull cursor, apply namespace events idempotently, and support `--namespace-only` and `--dry-run`.
 
-Shipped (`EAGER-*`/`HUB-*`, audit `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`): `sync` is the materialization entrypoint. A single `devstrap sync` eagerly blobless/partial-clones every mapped repo (`git clone --filter=blob:none`) from its existing remote, hydrates env profiles, extracts draft bundles, and (opt-in via `DEVSTRAP_REBUILD_DEPS`) rebuilds `node_modules`/build artifacts on hydrate rather than syncing them. The hub pull is cursor-based (HLC cursor via `hub_cursors`, low-water-mark safe cursor `SYNC-01`, inclusive boundary `HUB-13`; `410 -> snapshot`), and the command prints a real materialize summary. `materialize` returns non-zero when any project fails (`ErrPartialMaterialize`, `QUAL-03`) while still completing the batch, so CI/cron gates and `&&` chains detect partial failure. Repo content always rides git's own transport and never traverses the hub; only the signed namespace map (event log) and ciphertext blobs do. `--namespace-only` opts out of materialization. The hub is resolved through one selection seam (`hubFromOptions`, `P5-HUB-01`/`ARCH-03`): `--hub-file` (or a `hub: file:<path>` config value) selects the file-backed test backend, and the `Hub` interface is ready for the Cloudflare R2 / S3 zero-knowledge backend (`internal/hub`, whose keying/retry/conditional-put/`ListBlobs`/retention-floor logic is unit-tested; the production `aws-sdk-go-v2` S3 adapter + MinIO integration test are the remaining `P5-HUB-01` step). No FUSE/placeholder/lazy-VFS layer is part of this design — StrapFS stays deferred.
+Shipped (`EAGER-*`/`HUB-*`, audit `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`): `sync` is the materialization entrypoint. A single `devstrap sync` eagerly blobless/partial-clones every mapped repo (`git clone --filter=blob:none`) from its existing remote, hydrates env profiles, extracts draft bundles, and (opt-in via `DEVSTRAP_REBUILD_DEPS`) rebuilds `node_modules`/build artifacts on hydrate rather than syncing them. The hub pull is cursor-based (HLC cursor via `hub_cursors`, low-water-mark safe cursor `SYNC-01`, inclusive boundary `HUB-13`; `410 -> snapshot`), and the command prints a real materialize summary. `materialize` returns non-zero when any project fails (`ErrPartialMaterialize`, `QUAL-03`) while still completing the batch, so CI/cron gates and `&&` chains detect partial failure. Repo content always rides git's own transport and never traverses the hub; only the signed namespace map (event log) and ciphertext blobs do. `--namespace-only` opts out of materialization. The hub is resolved through one selection seam (`hubFromOptions`, `P5-HUB-01`/`ARCH-03`): `--hub-file` (or a `hub: file:<path>` config value) selects the file-backed test backend, and `hub: r2://<bucket>` (or `s3://`) selects the Cloudflare R2 / S3 zero-knowledge backend — the production `aws-sdk-go-v2` S3 adapter (`internal/hub`, with `NopRetryer` so `R2Hub.Retry` is the single retry layer) is wired in, its keying/retry/conditional-put/`ListBlobs`/retention-floor logic is unit-tested, and the same conformance contract is proven against MinIO via an env-gated integration test. No FUSE/placeholder/lazy-VFS layer is part of this design — StrapFS stays deferred.
 
 ### hub
 
@@ -496,7 +496,7 @@ devstrap promote <path> --draft|--git-remote <url>     # plain -> draft -> git (
 devstrap gitstate capture [--fetch]                    # working-state validation plane (Section 5)
 devstrap status --all-devices                          # cross-device git-state view
 devstrap wip push|status|fetch|show|apply|drop <proj>  # WIP recovery (Phase 1)
-devstrap sync --hub-s3 <bucket>                        # Cloudflare R2 / S3 zero-knowledge hub backend (HUB-*)
+devstrap sync   # hub: r2://<bucket> — shipped R2/S3 zero-knowledge hub backend (HUB-*); the --hub-s3 flag was superseded by the hub: config value
 ```
 
 PR creation becomes forge-agnostic (`gh`/`glab`/`tea`) with a `--forge` override (`FORGE-01`).
@@ -512,10 +512,10 @@ PR creation becomes forge-agnostic (`gh`/`glab`/`tea`) with a `--forge` override
 
 ## Cloud-sync CLI (2026-06-28)
 
-The cloud-sync architecture (`docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`) shapes the sync/materialization commands. None of the following is shipped yet; all are planned and marked as such above:
+The cloud-sync architecture (`docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`) shapes the sync/materialization commands. The eager-clone materialization and R2/S3 hub items below are shipped; the rest remain planned:
 
 - **Eager materialization (`EAGER-*`)**: `devstrap sync --hydrate-eager` (planned default) clones the whole `~/Code` tree up front via blobless/partial clone — no FUSE, placeholder, or lazy-VFS layer (StrapFS stays deferred). After sync the full tree is present on disk.
-- **Two-plane zero-knowledge hub (`HUB-*`)**: the hub carries only (a) the signed, HLC-ordered namespace map (event log) and (b) content-addressed `age_blob:<sha256>` ciphertext for env and non-git/draft content. Repo content never traverses the hub — it rides git transport from the existing remote. `--hub-s3 <bucket>` selects the Cloudflare R2 / S3 backend behind one pluggable Hub interface; `--hub-file` stays for tests only.
+- **Two-plane zero-knowledge hub (`HUB-*`)**: the hub carries only (a) the signed, HLC-ordered namespace map (event log) and (b) content-addressed `age_blob:<sha256>` ciphertext for env and non-git/draft content. Repo content never traverses the hub — it rides git transport from the existing remote. `hub: r2://<bucket>` (or `s3://`) selects the shipped Cloudflare R2 / S3 backend (`aws-sdk-go-v2` adapter behind `hubFromOptions`) behind one pluggable Hub interface; `--hub-file` stays for tests only. Credentials come from `DEVSTRAP_HUB_S3_*` env/config, never the URI.
 - **Content-type split (`DRAFT-*`)**: env plus non-git/draft folders sync as age-encrypted blobs; `node_modules`/build artifacts are never synced and are rebuilt on hydrate. `hydrate`/`open` extend to `local_git`/`plain_folder`/draft project types; `devstrap promote` walks a folder from plain -> draft -> git (`NOVCS-03`).
 - **Conflicts stay detect-don't-merge**: HLC ordering plus tombstones; `devstrap conflicts` (shipped) surfaces them. Files are never byte-merged.
 - **Device trust**: revocation re-encrypts affected blobs to the reduced recipient set and flags secrets for rotation; once device enrollment exists, event verification must fail closed (`SECU-03`).

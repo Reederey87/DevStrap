@@ -35,7 +35,9 @@ func newRunLoopCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// consumer can keep stdout (the sync result stream) clean.
 			stderr := cmd.ErrOrStderr()
 			// P5-HUB-01: fail fast if no hub is resolvable before starting the loop.
-			if _, _, err := hubFromOptions(opts, hubFile); err != nil {
+			// run-loop has no store open at preflight time, so validate config
+			// without building the R2 adapter (hubConfigured, not hubFromOptions).
+			if err := hubConfigured(opts, hubFile); err != nil {
 				return appError{code: exitInvalidConfig, err: err}
 			}
 			if once {

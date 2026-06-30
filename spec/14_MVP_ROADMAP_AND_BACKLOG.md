@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-28
+last_reviewed: 2026-06-30
 tracks_code: [cmd/**, internal/**, .github/**, docs/audits/AUDIT_RECOMMENDATIONS.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md]
 ---
 # MVP Roadmap and Backlog
@@ -357,22 +357,24 @@ Dependency gate: encrypted blob upload/download must not ship until Milestone 4 
 
 Deliverables:
 
-- `internal/hub` logical interface with event + blob planes and a file-backed conformance backend;
-- cursor-based event push/pull with snapshot-required recovery;
-- Cloudflare R2/S3 direct backend with immutable event objects, conditional puts, paged cursor pulls, and content-addressed encrypted blob upload/download;
+- `internal/hub` logical interface with event + blob planes and a file-backed conformance backend — **shipped**;
+- cursor-based event push/pull with snapshot-required recovery — **shipped**;
+- Cloudflare R2/S3 direct backend with immutable event objects, conditional puts, paged cursor pulls, and content-addressed encrypted blob upload/download — **shipped** (`P5-HUB-01`: the `aws-sdk-go-v2` `S3Adapter` behind `hub: r2://<bucket>`);
 - event payload validation before apply, fail-closed verification after enrollment, and device heartbeat/trust metadata.
 
 Tasks:
 
 ```text
-[ ] Extract Hub interface and run the same conformance tests against FileHub and an S3/R2-compatible backend
-[ ] Define R2 object keys: workspaces/<ws>/events/<hlc-padded>/<device>/<seq>/<event>.json and workspaces/<ws>/blobs/<sha256>
-[ ] Implement conditional event PUT, ListObjectsV2 pagination, limit/next_cursor pulls, and snapshot-required recovery
-[ ] Implement encrypted blob PUT/GET/HEAD and local blob ref-counting
-[ ] Validate incoming project payloads before apply (e.g. git_repo remote_url/remote_key are non-empty and validated)
-[ ] Implement remote device registration/fingerprint confirmation and fail-closed event verification for enrolled workspaces
-[ ] Implement namespace + blob sync across two machines with no .git or plaintext secret bytes in the hub
+[x] Extract Hub interface and run the same conformance tests against FileHub and an S3/R2-compatible backend
+[x] Define R2 object keys: workspaces/<ws>/events/<hlc-padded>/<device>/<seq>/<event>.json and workspaces/<ws>/blobs/<sha256>
+[x] Implement conditional event PUT, ListObjectsV2 pagination, limit/next_cursor pulls, and snapshot-required recovery
+[x] Implement encrypted blob PUT/GET/HEAD and local blob ref-counting
+[x] Validate incoming project payloads before apply (e.g. git_repo remote_url/remote_key are non-empty and validated)
+[~] Implement remote device registration/fingerprint confirmation and fail-closed event verification for enrolled workspaces
+[x] Implement namespace + blob sync across two machines with no .git or plaintext secret bytes in the hub
 ```
+
+Status (2026-06-30): the `Hub` interface, `FileHub`/`memS3` conformance, R2/S3 keying, conditional-put/pagination/snapshot recovery, encrypted blob PUT/GET/HEAD, payload validation, fail-closed verification (`HUB-03`), and two-machine namespace+blob sync are shipped. The live R2/S3 production adapter (`aws-sdk-go-v2` behind `hubFromOptions` `r2://`) shipped in `P5-HUB-01` (branch `fix/p5-hub-01`), with an env-gated MinIO conformance test. The one partial item is automatic **remote** device registration / out-of-band fingerprint confirmation (the local trust plane, manual enrollment, and device-revoke rewrap are shipped; see `spec/00_START_HERE.md` "Not implemented yet").
 
 Acceptance:
 
