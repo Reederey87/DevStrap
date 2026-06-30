@@ -27,6 +27,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-06-29 — Fifth-pass design & implementation audit (post-PR-#20)
+
+Changed:
+- Added `AUDIT_RECOMMENDATIONS_2026-06-29_PASS5.md` at the repo root — a fifth-pass audit of trunk `be664ba`, focused on (a) adversarial review of the just-landed PASS4 batch code (forge/conflicts/clone/materialize/run-loop/blob_gc/hub-r2/draftbundle), (b) dimensions PASS4 under-examined (convergence of the new conflict/rename paths, end-to-end hub reachability, CLI scriptability, observability, spec truth, process hygiene), and (c) concrete new features.
+- Produced by a verification-driven 7-dimension multi-agent workflow (per-dimension review → independent adversarial verification of every finding against the live code → consolidation): 43 candidate findings, 41 verified, **36 reported (P1=1, P2=12, P3=23)** after merging overlaps. Uses a `P5-` ID prefix to end the cross-pass ID collisions the audit itself flags (`P5-PROC-01`).
+- Headline findings: `P5-SEC-01` (P1) revoke rewrap deletes the old hub blob without emitting a superseding namespace event → other devices permanently lose draft access; `P5-HUB-01` the R2 backend is unwired (no aws-sdk dependency, dead `R2Config`, `FileHub` hardcoded, no selection seam); `P5-SYNC-01..04` convergence/conflict regressions in the just-landed code (HLC-keyed pull cursor strands cross-batch events; `conflict.resolved` bakes a device-local namespace_id so it can't converge; rename leaves no source tombstone; `conflicts resolve --keep-*` never mutates state); `P5-QUAL-01` the `materialize` exit-code fix backfires on synced local-only projects; `P5-DX-02` the spec-drift gate is blind to prose staleness.
+
+Validated:
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` (green).
+- Docs-only change; no Go code modified (gofmt/build/`go test` n/a). Every finding cites `file:line` against `be664ba` and was independently adversarially verified against the live tree before inclusion.
+
+Follow-ups:
+- Implementing the 36 findings is future work; highest priority: `P5-SEC-01` + envelope encryption (`SEC-07`), `P5-HUB-01` reachability (S3 adapter + `hubFromOptions` + MinIO integration test), `P5-SYNC-02`/`P5-SYNC-04` conflict convergence, `P5-QUAL-01` exit-code fix, and `P5-DX-02` gate hardening.
+- The stale-spec findings (`P5-DOC-01`/`P5-DOC-02`/`P5-DATA-01`) are documentation follow-ups; this cycle adds the audit, not the spec fixes.
+
 ## 2026-06-29 — PASS4 audit Phase A/D quick wins (part 4)
 
 Changed:
