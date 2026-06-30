@@ -204,7 +204,7 @@ if hub != nil {
 
 **Problem.** `rewrapBlobsOnRevoke` iterates `store.AllBlobRefs`, which UNIONs `secret_bindings.encrypted_value_ref` (env) **and** `draft_snapshots.blob_ref` (draft), and calls `rewrapHubCleanup` for each — which unconditionally `PutBlob`s to the hub. But env secret blobs are never part of normal hub sync (only `draft.snapshot.created` blobs are pushed/pulled; synced encrypted env-bundle exchange is documented as unbuilt). So the first time a locally-captured `.env` blob exists, a revoke pushes it to the hub — and, like `P5-SEC-01`, it becomes an event-unreferenced orphan. Confidentiality is preserved (blobs are age-encrypted, hub is zero-knowledge); this is footprint/orphan hygiene, hence P3.
 
-**Evidence.** `internal/state/store.go:1745` `… UNION SELECT DISTINCT blob_ref FROM draft_snapshots …`; `internal/cli/blob_gc.go:139` `hub.PutBlob(...)` for every ref; `internal/cli/sync.go:218-219` `blobRefFromEvent` returns false for everything but `draft.snapshot.created`.
+**Evidence.** `internal/state/store.go:1743-1762` (`AllBlobRefs` UNIONs `secret_bindings.encrypted_value_ref` and `SELECT DISTINCT blob_ref FROM draft_snapshots …`); `internal/cli/blob_gc.go:139` `hub.PutBlob(...)` for every ref; `internal/cli/sync.go:218-219` `blobRefFromEvent` returns false for everything but `draft.snapshot.created`.
 
 **Recommendation.** Scope hub upload/delete in the rewrap path to blobs the hub actually holds (draft-snapshot refs); rewrap env blobs locally only until env-bundle exchange is intentionally implemented.
 
@@ -256,7 +256,7 @@ The HLC primitives are correct (monotonic `Send`, skew-bounded `Receive`, counte
 
 **Problem.** PROD-06's whole point is that a `conflict.resolved` event marks the matching open conflict resolved on every device so the open-conflict count converges, matching on a "stable `(namespace_id, type, details_json)` fingerprint." But `namespace_id` is **not** stable across devices — a project's id is a locally-minted `prj_<uuidv7>`. The two conflict types a user actually resolves — `same_path_different_remote` and `pending_delete_conflict` — are inserted with `namespace_id = existing.ID` (the local `prj_` id). So `ResolveConflictByFingerprint` matches on a per-device id and never fires on the receiving device; the conflict stays open there forever. (Only the existing test passes because it uses an empty `namespace_id`.)
 
-**Evidence.** `internal/sync/events.go:363` `tx.InsertConflict(ctx, existing.ID, "same_path_different_remote", details)` and `events.go:395` (`pending_delete_conflict`); `internal/state/store.go:897` `existingID, _ = id.New("prj")` (per-device); `internal/cli/conflicts.go:143-145` copies the local `prj_` id into the synced payload.
+**Evidence.** `internal/sync/events.go:363` `tx.InsertConflict(ctx, existing.ID, "same_path_different_remote", details)` and `events.go:395` (`pending_delete_conflict`); `internal/state/store.go:897` `existingID, err = id.New("prj")` (per-device); `internal/cli/conflicts.go:143-145` copies the local `prj_` id into the synced payload.
 
 **Recommendation.** Resolve by `(workspace_id, type, details_json)` only — `details_json` already embeds the stable `Path` and event-coordinate winner/loser, so `(type, details_json)` is globally unique and converges. Keep `namespace_id` on the local row for display only.
 
