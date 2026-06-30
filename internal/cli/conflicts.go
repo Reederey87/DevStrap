@@ -147,12 +147,19 @@ func newConflictsResolveCommand(stdout io.Writer, opts *options) *cobra.Command 
 			}); err != nil {
 				return fmt.Errorf("record conflict.resolved event: %w", err)
 			}
+			// P5-SYNC-04: enact the choice on namespace state (emit a dominating
+			// project.* event + mutate locally) so --keep-* is authoritative and
+			// converges, instead of only being recorded.
+			note, err := enactConflictResolution(cmd.Context(), store, opts, c, action)
+			if err != nil {
+				return fmt.Errorf("apply resolution: %w", err)
+			}
 			if err := store.ResolveConflict(cmd.Context(), c.ID, string(raw)); err != nil {
 				return err
 			}
 			_, _ = fmt.Fprintf(stdout, "Conflict %s resolved (%s).\n", c.ID, action)
-			if action == "keep-both" {
-				_, _ = fmt.Fprintln(stdout, "Kept the local entry; re-add the remote variant under a sibling path (e.g. <path>.remote) if you want both to coexist.")
+			if note != "" {
+				_, _ = fmt.Fprintln(stdout, note)
 			}
 			return nil
 		},

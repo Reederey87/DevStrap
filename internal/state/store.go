@@ -2463,6 +2463,24 @@ ORDER BY hlc ASC, id ASC;
 	return events, rows.Err()
 }
 
+// EventByID returns a single event by id. Used by conflict resolution
+// (P5-SYNC-04) to recover the full payload of a losing variant so a chosen
+// remote can be re-asserted with a fresh dominating event.
+func (s *Store) EventByID(ctx context.Context, id string) (Event, error) {
+	var e Event
+	err := s.db.QueryRowContext(ctx, `
+SELECT id, workspace_id, device_id, COALESCE(seq, 0), hlc, type, payload_json, content_hash, COALESCE(device_sig, ''), COALESCE(prev_event_hash, ''), created_at
+FROM events WHERE id = ?;
+`, id).Scan(&e.ID, &e.WorkspaceID, &e.DeviceID, &e.Seq, &e.HLC, &e.Type, &e.PayloadJSON, &e.ContentHash, &e.DeviceSig, &e.PrevEventHash, &e.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Event{}, fmt.Errorf("unknown event %q", id)
+	}
+	if err != nil {
+		return Event{}, fmt.Errorf("read event: %w", err)
+	}
+	return e, nil
+}
+
 // HubCursor returns the last HLC applied from the given hub source (EAGER-02).
 // Returns 0 when no cursor exists yet (a fresh device pulls from the beginning).
 func (s *Store) HubCursor(ctx context.Context, hubID string) (int64, error) {

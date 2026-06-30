@@ -7,7 +7,89 @@ import (
 	"testing"
 
 	"github.com/Reederey87/DevStrap/internal/state"
+	dssync "github.com/Reederey87/DevStrap/internal/sync"
 )
+
+// P5-SYNC-04: `conflicts resolve --keep-remote` is authoritative — it switches
+// the project at the path to the alternate (non-winning) remote variant and
+// closes the conflict, instead of only recording the choice.
+func TestConflictResolveKeepRemoteSwitchesVariant(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init", "--workspace-name", "personal"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+	store, err := state.Open(context.Background(), filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	// Two competing remote events at the same path, different remotes, create a
+	// same_path_different_remote conflict. The deterministic winner is the lower
+	// coordinate (device-x @10).
+	const hlcShift = 16
+	ev1, err := dssync.NewProjectEvent("device-x", dssync.EventProjectAdded, 10<<hlcShift, dssync.ProjectPayload{
+		Path: "work/acme/api", Type: "git_repo", RemoteKey: "github.com/acme/api", RemoteURL: "https://github.com/acme/api",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev2, err := dssync.NewProjectEvent("device-y", dssync.EventProjectAdded, 20<<hlcShift, dssync.ProjectPayload{
+		Path: "work/acme/api", Type: "git_repo", RemoteKey: "gitlab.com/acme/api", RemoteURL: "https://gitlab.com/acme/api",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dssync.ApplyEvents(ctx, store, []state.Event{ev1, ev2}); err != nil {
+		t.Fatalf("apply competing events: %v", err)
+	}
+	open, err := store.OpenConflicts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("open conflicts = %d, want 1", len(open))
+	}
+	conflictID := open[0].ID
+	winner, err := store.ProjectByPath(ctx, "work/acme/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeStore(store)
+
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "conflicts", "resolve", conflictID, "--keep-remote")
+	if err != nil {
+		t.Fatalf("resolve stderr = %q err = %v", stderr, err)
+	}
+	if !strings.Contains(stdout, "resolved (keep-remote)") {
+		t.Fatalf("resolve stdout = %q, want resolved (keep-remote)", stdout)
+	}
+
+	store2, err := state.Open(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(store2)
+	if err := store2.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store2.ProjectByPath(ctx, "work/acme/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RemoteKey == winner.RemoteKey {
+		t.Fatalf("keep-remote did not switch the variant (still %q)", winner.RemoteKey)
+	}
+	if got.RemoteKey != "gitlab.com/acme/api" {
+		t.Fatalf("project remote = %q, want gitlab.com/acme/api", got.RemoteKey)
+	}
+	if remaining, _ := store2.OpenConflicts(ctx); len(remaining) != 0 {
+		t.Fatalf("conflict still open after resolve = %d, want 0", len(remaining))
+	}
+}
 
 func TestResolveActionValidation(t *testing.T) {
 	if _, err := resolveAction(false, false, false); err == nil {

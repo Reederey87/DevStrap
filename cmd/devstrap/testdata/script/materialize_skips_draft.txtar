@@ -1,0 +1,24 @@
+# P5-QUAL-01: `devstrap materialize` must exit 0 when the only non-git project
+# is a draft/local_git that has no synced bundle yet. That is the normal interim
+# state (a freshly-synced device holds the namespace entry but not the content),
+# so it is classified "skipped", not "failed" — re-breaking the QUAL-03 exit-code
+# gate if counted as a failure.
+
+env DEVSTRAP_NO_KEYCHAIN=1
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+exec devstrap --home=$WORK/home --root=$WORK/Code init
+
+# A git repo with NO remote inside the managed root → adopted as local_git
+# (NOVCS-01), never a clonable git_repo.
+exec git init -b main $WORK/Code/work/local
+exec sh -c 'cd $WORK/Code/work/local && echo hi > f.txt && git add f.txt && git commit -m init'
+exec devstrap --home=$WORK/home --root=$WORK/Code scan --adopt
+
+# Materializing the local_git draft has no bundle yet: it is skipped, the
+# command reports it, and exits 0 (no `!` prefix).
+exec devstrap --home=$WORK/home --root=$WORK/Code materialize work/local
+stdout 'skipped'
