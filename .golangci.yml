@@ -12,6 +12,12 @@ linters:
     - staticcheck
     - unconvert
     - errorlint
+    # P4-QUAL-07: resource/leak linters. bodyclose catches unclosed HTTP bodies;
+    # sqlclosecheck catches unclosed sql.Rows/Stmt. (contextcheck was evaluated
+    # but deferred: it requires threading a context through the forge-resolution
+    # chain and flags the deliberately-bounded timeout context in the ssh -G path.)
+    - bodyclose
+    - sqlclosecheck
   settings:
     gosec: {} # TEST-04: no includes allowlist — run all default gosec rules
   exclusions:

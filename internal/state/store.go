@@ -1136,7 +1136,7 @@ SELECT id FROM draft_snapshots WHERE namespace_id = ? AND source_event_id = ?;
 		return err
 	}
 	if _, err := tx.tx.ExecContext(ctx, `
-INSERT INTO draft_snapshots (id, namespace_id, blob_ref, byte_size, file_count, source_event_hlc, source_event_device_id, source_event_id, created_at)
+INSERT OR IGNORE INTO draft_snapshots (id, namespace_id, blob_ref, byte_size, file_count, source_event_hlc, source_event_device_id, source_event_id, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
 `, snapID, namespaceID, blobRef, byteSize, fileCount, event.HLC, event.DeviceID, event.ID, now); err != nil {
 		return fmt.Errorf("insert draft snapshot: %w", err)
@@ -1710,7 +1710,7 @@ SELECT id FROM draft_snapshots WHERE namespace_id = ? AND source_event_id = ?;
 			return nil // idempotent: this event's snapshot is already recorded
 		}
 		if _, err := tx.tx.ExecContext(ctx, `
-INSERT INTO draft_snapshots (id, namespace_id, blob_ref, byte_size, file_count, source_event_hlc, source_event_device_id, source_event_id, created_at)
+INSERT OR IGNORE INTO draft_snapshots (id, namespace_id, blob_ref, byte_size, file_count, source_event_hlc, source_event_device_id, source_event_id, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
 `, snapID, namespaceID, blobRef, byteSize, fileCount, event.HLC, event.DeviceID, event.ID, now); err != nil {
 			return fmt.Errorf("insert draft snapshot: %w", err)

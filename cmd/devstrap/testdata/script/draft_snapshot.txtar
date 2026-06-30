@@ -1,0 +1,22 @@
+# P5-QUAL-02: `devstrap draft snapshot create` (DRAFT-02) packs a non-git
+# project into an encrypted, content-addressed bundle and emits a snapshot
+# event, exercising the previously-untested draft CLI surface.
+
+env DEVSTRAP_NO_KEYCHAIN=1
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+exec devstrap --home=$WORK/home --root=$WORK/Code init
+
+# A no-remote git repo is adopted as local_git (NOVCS-01), a non-git project for
+# draft purposes.
+exec git init -b main $WORK/Code/work/local
+exec sh -c 'cd $WORK/Code/work/local && echo hi > note.txt && git add note.txt && git commit -m init'
+exec devstrap --home=$WORK/home --root=$WORK/Code scan --adopt
+
+# Pack the draft into an age-encrypted bundle and record the snapshot event.
+exec devstrap --home=$WORK/home --root=$WORK/Code draft snapshot create work/local
+stdout 'Created draft snapshot'
+stdout 'age_blob:'

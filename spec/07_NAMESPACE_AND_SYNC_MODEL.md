@@ -111,7 +111,7 @@ Use for:
 | `draft_project` | no | encrypted bundle* | planned |
 | `plain_folder` | no | none (structure only) | n/a |
 
-*The encrypted working-tree bundle path (`draft.snapshot.created`, see Draft sync model) is specified but not yet implemented. Until then `hydrate`/`open` on a non-`git_repo` type must return an explicit "local-only; not yet syncable" message, not a misleading clone error (`NOVCS-02`).
+*The encrypted draft-bundle path (`draft.snapshot.created`, see Draft sync model) is **shipped** (`P5-DOC-01`): `internal/draftbundle` packs/extracts age-encrypted, content-addressed bundles, `devstrap draft snapshot create` emits the event, and `materialize`/`sync` extract it on receive. `materialize` on a `local_git`/`draft_project` with no synced bundle yet returns an honest "content sync not yet materialized" interim, classified *skipped* (not failed — `P5-QUAL-01`), never a misleading clone error (`NOVCS-02`). What remains deferred is the live network hub (the R2/S3 client) and cross-device recipient enrollment.
 
 ## Device state
 
@@ -507,7 +507,7 @@ On each device:
 
 ## Draft sync model
 
-This encrypted-bundle flow is **Layer C** of the working-state plane: the fallback for `draft_project`/`local_git`/non-git folders and untracked-only content where there is no remote ref to push to. For tracked content in a `git_repo`, the **WIP-ref path (Layer B) is strictly preferred** — git's own integrity-checked transport is safer and cheaper than re-bundling. This flow is specified but **not yet implemented** (no bundle/snapshot code exists today, `NOVCS-02`).
+This encrypted-bundle flow is **Layer C** of the working-state plane: the fallback for `draft_project`/`local_git`/non-git folders and untracked-only content where there is no remote ref to push to. For tracked content in a `git_repo`, the **WIP-ref path (Layer B) is strictly preferred** — git's own integrity-checked transport is safer and cheaper than re-bundling. The bundle/snapshot layer is **shipped** (`P5-DOC-01`): `internal/draftbundle.Pack`/`Extract` produce age-encrypted, content-addressed `age_blob:<sha256>` bundles with a decompression-bomb budget on every entry (`P5-SEC-02`) and directory-fidelity (`P5-QUAL-05`); `devstrap draft snapshot create` emits `draft.snapshot.created`; and `sync`/`materialize` pull and extract it. A revoke rewrap emits a superseding snapshot event before deleting the old hub ciphertext so peers never lose access (`P5-SEC-01`). Deferred: the live network hub (R2/S3 client) and cross-device recipient enrollment (`NOVCS-02`).
 
 Draft project snapshot (`draft.snapshot.created`, workstream `DRAFT-*`):
 

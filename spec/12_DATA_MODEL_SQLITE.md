@@ -181,7 +181,7 @@ CREATE TABLE device_gitstate (
 );
 ```
 
-Status: planned. No `device_gitstate` migration exists yet as of 2026-06-28; add it as `00010_gitstate_mirror.sql` when the Layer A working-state validation plane lands. `sync_cursors` and `event_delivery` are defined; `hub_cursors` (00008) is now wired for cursor-based incremental pull (EAGER-02). `device_sync_state` and `jobs` remain unwired.
+Status: planned. No `device_gitstate` migration exists yet; add it as `00013_gitstate_mirror.sql` when the Layer A working-state validation plane lands (00010–00012 are now taken — see the migration list below). `sync_cursors` and `event_delivery` are defined; `hub_cursors` (00008) is wired for cursor-based incremental pull (EAGER-02); `pending_hub_deletes` (00011) backs the revoke-rewrap cleanup queue (`P5-PROD-02`). `device_sync_state` and `jobs` remain unwired.
 
 ### env_profiles
 
@@ -461,6 +461,9 @@ internal/state/migrations/
   00007_secret_binding_rotation.sql
   00008_sync_hub_cursor.sql
   00009_draft_snapshots.sql
+  00010_repo_forge_kind.sql
+  00011_pending_hub_deletes.sql
+  00012_draft_snapshot_idempotency.sql
 ```
 
 CLI:
@@ -483,9 +486,12 @@ internal/state/migrations/00006_workspace_singleton.sql
 internal/state/migrations/00007_secret_binding_rotation.sql
 internal/state/migrations/00008_sync_hub_cursor.sql
 internal/state/migrations/00009_draft_snapshots.sql
+internal/state/migrations/00010_repo_forge_kind.sql
+internal/state/migrations/00011_pending_hub_deletes.sql
+internal/state/migrations/00012_draft_snapshot_idempotency.sql
 ```
 
-Migrations can be applied by `devstrap init` or explicitly with `devstrap db migrate`.
+The current schema version is **12**. `00010_repo_forge_kind.sql` adds the per-project forge override (`GIT-05`); `00011_pending_hub_deletes.sql` queues blobs orphaned by a local-only revoke for deletion on the next hub-enabled sync (`P5-PROD-02`/`P5-SEC-01`); `00012_draft_snapshot_idempotency.sql` adds a partial `UNIQUE` index on `draft_snapshots(namespace_id, source_event_id)` so idempotency is enforced by the DB, not only the SELECT-then-INSERT guard (`P5-DATA-02`). Migrations can be applied by `devstrap init` or explicitly with `devstrap db migrate`.
 
 ## Backup
 

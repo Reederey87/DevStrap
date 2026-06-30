@@ -53,6 +53,17 @@ func newRunLoopCommand(stdout io.Writer, opts *options) *cobra.Command {
 	return cmd
 }
 
+// runLoopJitterBound returns the upper bound for rand.Int64N when computing the
+// per-tick jitter (P5-QUAL-03). It is clamped to at least 1 so rand.Int64N never
+// panics on sub-10ns intervals (where interval/10 would be 0).
+func runLoopJitterBound(interval time.Duration) int64 {
+	bound := int64(interval) / 10
+	if bound < 1 {
+		bound = 1
+	}
+	return bound
+}
+
 func runLoopTick(ctx context.Context, stdout, stderr io.Writer, opts *options, hubFile string, namespaceOnly bool) error {
 	// P5-CLI-05: the tick header is progress, not a result — route it to stderr.
 	_, _ = fmt.Fprintf(stderr, "[%s] run-loop tick: sync + materialize\n", time.Now().UTC().Format(time.RFC3339))
@@ -93,15 +104,9 @@ func runLoopForever(ctx context.Context, stdout, stderr io.Writer, opts *options
 			return nil
 		case <-ticker.C:
 			// Jittered backoff: add up to 10% jitter so multiple devices do
-			// not stampede the hub on the same schedule. P5-QUAL-03: clamp the
-			// bound to at least 1 so rand.Int64N never panics on sub-10ns
-			// intervals.
-			bound := int64(interval) / 10
-			if bound < 1 {
-				bound = 1
-			}
+			// not stampede the hub on the same schedule.
 			//nolint:gosec // jitter does not need cryptographic randomness.
-			jitter := time.Duration(rand.Int64N(bound))
+			jitter := time.Duration(rand.Int64N(runLoopJitterBound(interval)))
 			if jitter > 0 {
 				select {
 				case <-ctx.Done():

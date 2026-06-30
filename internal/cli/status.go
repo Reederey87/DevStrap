@@ -124,10 +124,10 @@ func deriveDisplayStatus(materialization, dirty string) string {
 	}
 	// materialization == "available" (or any materialized value writers emit):
 	// distinguish a clean checkout ("ready") from a dirty one.
-	switch {
-	case dirty == "dirty" || dirty == "diverged":
+	switch dirty {
+	case "dirty", "diverged":
 		return "dirty"
-	case dirty == "clean":
+	case "clean":
 		return "ready"
 	default:
 		return "available"
