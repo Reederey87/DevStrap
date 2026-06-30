@@ -114,7 +114,7 @@ Materialization is **eager**: after `devstrap sync`, the whole `~/Code` tree is 
 - The **active** hosted hub: production device enrollment, out‑of‑band fingerprint confirmation, and turning the R2 backend on.
 - OS‑enforced agent sandboxing (today's command/file policy is wrapper‑level).
 
-A standing design/implementation audit drives the backlog: the latest is [`AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md`](AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md) (44 grounded findings across security, sync, hub, git, quality, and product).
+A standing design/implementation audit drives the backlog. All passes are archived under [`docs/audits/`](docs/audits/) — see the [index & open backlog](docs/audits/README.md). The latest is the fifth pass, [`AUDIT_RECOMMENDATIONS_2026-06-29_PASS5.md`](docs/audits/AUDIT_RECOMMENDATIONS_2026-06-29_PASS5.md) (36 findings, building on the 44-finding fourth pass).
 
 ## Requirements
 
@@ -238,7 +238,7 @@ Capability layers (see [`spec/14_MVP_ROADMAP_AND_BACKLOG.md`](spec/14_MVP_ROADMA
 4. **Mac daemon** — LaunchAgent, FSEvents watcher, shell/editor integration. ⏳
 5. **Optional StrapFS** — File Provider / FUSE evaluation. ⏳ (deliberately deferred)
 
-The near‑term priorities — harden the hub's zero‑knowledge guarantees and bound sync‑log growth **before** the R2 backend is switched on, then grow the product surface (`devstrap clone`, a graded `doctor --fix`, a `service install` daemon) — are detailed in [`AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md`](AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md).
+The near‑term priorities — harden the hub's zero‑knowledge guarantees and bound sync‑log growth **before** the R2 backend is switched on, then grow the product surface (`devstrap clone`, a graded `doctor --fix`, a `service install` daemon) — are detailed across the [audit archive](docs/audits/) (latest: the fifth pass).
 
 ## Security
 

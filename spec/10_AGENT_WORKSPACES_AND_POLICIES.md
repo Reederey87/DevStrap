@@ -23,7 +23,7 @@ The cloud-sync architecture (eager blobless clone of repo content, age-encrypted
 - repo content reaches the worktree over git's own transport (blobless clone/fetch from the existing remote), not through the DevStrap hub;
 - a stale, dirty, or mid-sync device state has no effect on the SHA an agent worktree is created from.
 
-This keeps agents reproducible and deterministic even while the surrounding `~/Code` tree is being synced across the owner's fleet (audit `AUDIT_RECOMMENDATIONS_2026-06-28.md`, `EAGER-*`/`DRAFT-*`/`HUB-*`).
+This keeps agents reproducible and deterministic even while the surrounding `~/Code` tree is being synced across the owner's fleet (audit `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`, `EAGER-*`/`DRAFT-*`/`HUB-*`).
 
 ## Agent run lifecycle
 

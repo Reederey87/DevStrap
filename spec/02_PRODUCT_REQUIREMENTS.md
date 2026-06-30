@@ -281,7 +281,7 @@ The MVP does not include a team admin UI or hosted SaaS console. If/when DevStra
 
 ## Audit follow-ups (2026-06-27)
 
-From `AUDIT_RECOMMENDATIONS_2026-06-27.md`:
+From `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md`:
 
 - **Readiness model half-implemented (`PROD-01`):** `env_ready`/`tooling_ready` are never written and the derived 9-value display status is never computed; `status` shows only materialization + dirty. Implement a pure `deriveDisplayStatus`, or mark the extra states deferred.
 - **Conflicts are write-only (`PROD-02`):** rows are recorded but no `devstrap conflicts` command or status/doctor surface reads them. Add `conflicts [--json]` + a count in status/doctor.
@@ -291,7 +291,7 @@ From `AUDIT_RECOMMENDATIONS_2026-06-27.md`:
 
 ## Cloud-sync direction (2026-06-28)
 
-From `AUDIT_RECOMMENDATIONS_2026-06-28.md`, extending (not replacing) the 2026-06-27 audit. These decisions sharpen the "Dropbox experience for code" promise into measurable product requirements:
+From `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`, extending (not replacing) the 2026-06-27 audit. These decisions sharpen the "Dropbox experience for code" promise into measurable product requirements:
 
 - **Eager-clone materialization (`EAGER-*`):** the target sync model is eager, not lazy. `devstrap sync` clones every clonable repo up front via blobless/partial clone (`--filter=blob:none`) from its existing remote, so the whole `~/Code` tree is present afterward. There is no FUSE/placeholder/lazy-VFS layer in this design — StrapFS stays explicitly deferred. Repo content rides Git's own transport and never passes through the DevStrap hub. The success metrics above are updated to reflect this.
 - **Dropbox-for-code fleet promise:** the primary persona runs a personal fleet (multiple Macs, an Ubuntu box, a graphics laptop, a NAS); the same `~/Code` namespace must appear automatically on every enrolled device. Content is split by type — repo content via Git, env + non-git/draft folders via age-encrypted content-addressed blobs, the project map via the signed HLC-ordered event log — and `node_modules`/build artifacts are never synced (rebuilt on hydrate). See `07_NAMESPACE_AND_SYNC_MODEL.md` and `09_SECRETS_AND_ENVIRONMENT.md`.

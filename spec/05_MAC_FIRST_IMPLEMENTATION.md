@@ -10,7 +10,7 @@ Build a Mac solution that feels native enough to solve the daily pain, while kee
 
 ## Sequencing note (2026-06-28): cross-platform core first
 
-The 2026-06-28 cloud-sync decisions (see `AUDIT_RECOMMENDATIONS_2026-06-28.md`, workstream `XP-*`) re-order this guide's build sequence: ship the **portable Go core first on both macOS and Ubuntu**, before any native macOS magic. The "Dropbox experience for code" — one identical `~/Code` tree on every device in the fleet (two Mac Minis, an incoming GMKtec Ubuntu box, a graphics laptop, a NAS) — is delivered this cycle by the portable core (eager blobless clone on `devstrap sync`, age-encrypted env/draft blobs, and the signed HLC-ordered namespace map), not by a daemon or virtual filesystem.
+The 2026-06-28 cloud-sync decisions (see `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`, workstream `XP-*`) re-order this guide's build sequence: ship the **portable Go core first on both macOS and Ubuntu**, before any native macOS magic. The "Dropbox experience for code" — one identical `~/Code` tree on every device in the fleet (two Mac Minis, an incoming GMKtec Ubuntu box, a graphics laptop, a NAS) — is delivered this cycle by the portable core (eager blobless clone on `devstrap sync`, age-encrypted env/draft blobs, and the signed HLC-ordered namespace map), not by a daemon or virtual filesystem.
 
 Consequently, treat the daemon, native FSEvents watcher, LaunchAgent, Endpoint Security, File Provider, and FUSE/StrapFS content below as **later layers, not this-cycle work**. The Mac-specific adapter seams in `internal/platform` stay valuable as the eventual home for that behavior and as the proof that Mac specifics stay behind adapters so Ubuntu remains first-class — but they are deferred. Materialization in the cross-platform core is **eager clone-everything on `devstrap sync`** (partial/blobless clone up front); there is no placeholder/lazy-VFS step in this design.
 
@@ -330,7 +330,7 @@ Production distribution should include:
 
 ## Audit follow-ups (2026-06-27)
 
-Platform findings (`PLAT-*`, from `AUDIT_RECOMMENDATIONS_2026-06-27.md`):
+Platform findings (`PLAT-*`, from `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md`):
 
 - **Watcher exclusion diverges from the scanner prune list (`PLAT-01`):** the fsnotify watcher would recursively register watches inside `.venv`/`dist`/`build`/`target`/`__pycache__`. Unify on the single `spec/11` ignore compiler.
 - **No ENOSPC/EMFILE handling (`PLAT-02`):** the watcher treats every Add/Errors failure as fatal with no fallback; add degraded polling + periodic reconciliation.
@@ -340,7 +340,7 @@ Platform findings (`PLAT-*`, from `AUDIT_RECOMMENDATIONS_2026-06-27.md`):
 
 ## Audit follow-ups (2026-06-28)
 
-Cross-platform findings (`XP-*`, from `AUDIT_RECOMMENDATIONS_2026-06-28.md`):
+Cross-platform findings (`XP-*`, from `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`):
 
 - **Ship the portable Go core on macOS + Ubuntu before any native magic (`XP-01`):** the eager-clone materialization (`EAGER-*`), encrypted env/draft sync (`DRAFT-*`), and cloud hub backend (`HUB-*`) must run identically on both platforms via portable Go. No native daemon, FSEvents watcher, LaunchAgent installer, or StrapFS is in scope this cycle.
 - **Keep Mac specifics behind adapters so Ubuntu stays first-class (`XP-02`):** the `internal/platform` watcher/service/keychain/editor seams remain the only place macOS behavior may diverge; the Linux fsnotify/inotify + periodic-reconciliation path must reach feature parity for the eager-sync loop.

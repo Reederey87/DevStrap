@@ -144,7 +144,7 @@ Recommended solution — a git-native, three-layer human-convenience plane, stri
 - **Layer B — WIP recovery (Phase 1):** `git stash create` → push to `refs/devstrap/wip/<device>/<path_key>` over git's integrity-checked transport (forge-agnostic); machine B `wip apply` on demand, never as a branch/base.
 - **Layer C — encrypted bundle (Phase 3):** for non-git/draft folders only, via `draft.snapshot.created` + age encryption.
 
-See `07_NAMESPACE_AND_SYNC_MODEL.md` (working-state plane) and `AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 5.
+See `07_NAMESPACE_AND_SYNC_MODEL.md` (working-state plane) and `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 5.
 
 ## 6c. Non-VCS / remote-less / multi-remote projects
 
@@ -154,13 +154,13 @@ Recommended solution:
 
 - classify a remote-less repo as `local_git` (never a clonable `git_repo`); enforce non-empty `remote_key` for `git_repo` in both `add` and `scan --adopt` (shipped);
 - emit `plain_folder` for structure-only dirs; sync local-only content via the encrypted bundle path (Layer C); add a `promote` command for `plain → draft/local_git → git_repo`;
-- preflight `worktree`/`agent` with a clear "requires a remote" error. See `AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 2 (`NOVCS-*`).
+- preflight `worktree`/`agent` with a clear "requires a remote" error. See `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 2 (`NOVCS-*`).
 
 ## 6d. Non-GitHub forges
 
 Problem: clone/fetch/push are forge-neutral, while PR/MR creation is forge-specific and must not assume GitHub.
 
-Recommended solution: detect the forge from the `origin` host; route PR/MR creation through a `Forge` interface (`gh`/`glab`/`tea`) with a forge-aware token allowlist; fail gracefully (print branch + compare/MR URL) on unknown forges. GitHub/GitLab/Gitea routing, Azure remote-key folding, and graceful unknown-forge fallback are shipped. Remaining work: `doctor` should probe the relevant forge CLI per adopted remote, self-hosted/SSH-alias overrides need a config surface, and native Bitbucket/Azure PR clients remain future. See `AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 3 (`FORGE-*`).
+Recommended solution: detect the forge from the `origin` host; route PR/MR creation through a `Forge` interface (`gh`/`glab`/`tea`) with a forge-aware token allowlist; fail gracefully (print branch + compare/MR URL) on unknown forges. GitHub/GitLab/Gitea routing, Azure remote-key folding, and graceful unknown-forge fallback are shipped. Remaining work: `doctor` should probe the relevant forge CLI per adopted remote, self-hosted/SSH-alias overrides need a config surface, and native Bitbucket/Azure PR clients remain future. See `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 3 (`FORGE-*`).
 
 ## 7. Draft projects not in Git yet
 
@@ -413,7 +413,7 @@ Device revocation (age has no native revocation, so this is not a no-op):
 - on revoke, **re-encrypt affected blobs to the reduced recipient set and flag the affected secrets for rotation** — removing a recipient only protects future blobs, never past ciphertext a held key could already read;
 - event verification must **fail closed** once enrollment exists (today it fails open — audit `SECU-03`).
 
-See `AUDIT_RECOMMENDATIONS_2026-06-28.md` (`HUB-*`), `07_NAMESPACE_AND_SYNC_MODEL.md`, and `15_SECURITY_THREAT_MODEL.md`.
+See `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` (`HUB-*`), `07_NAMESPACE_AND_SYNC_MODEL.md`, and `15_SECURITY_THREAT_MODEL.md`.
 
 ## 21. Security vs convenience
 

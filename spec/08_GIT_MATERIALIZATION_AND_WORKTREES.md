@@ -73,7 +73,7 @@ Current hydrate implementation uses lazy skeleton directories and clones into a 
 
 ### Eager clone-everything on sync (EAGER-*, planned)
 
-The 2026-06-28 cloud-sync direction (`AUDIT_RECOMMENDATIONS_2026-06-28.md`, `EAGER-*`) makes the "Dropbox experience for code" the materialization default: after `devstrap sync` the whole `~/Code` tree is present, not skeletons. This is deliberately **eager clone-everything**, not a FUSE/placeholder/lazy-VFS scheme — StrapFS stays explicitly deferred (Phase 4, see `00_START_HERE.md`).
+The 2026-06-28 cloud-sync direction (`docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`, `EAGER-*`) makes the "Dropbox experience for code" the materialization default: after `devstrap sync` the whole `~/Code` tree is present, not skeletons. This is deliberately **eager clone-everything**, not a FUSE/placeholder/lazy-VFS scheme — StrapFS stays explicitly deferred (Phase 4, see `00_START_HERE.md`).
 
 Decisions:
 

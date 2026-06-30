@@ -27,6 +27,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-06-29 — Consolidate audit files into docs/audits/ + status ledger (P5-PROC-01)
+
+Changed:
+- Moved all five `AUDIT_RECOMMENDATIONS*.md` from the repo root into `docs/audits/` (`git mv`) to declutter the root and end cross-pass finding-ID collisions (fifth-pass finding `P5-PROC-01`).
+- Added `docs/audits/README.md` — the single source-of-truth audit ledger: a pass index, go-forward conventions (pass-scoped unique IDs, archive policy, work-log-rotation note), and a consolidated **open backlog** (Pass 5's 36 findings plus Pass 4's ~25 still-open items, pass-scoped as `P4-*`/`P5-*`; earlier passes superseded).
+- Rewrote every reference to the moved files: `tracks_code:` frontmatter in `spec/00`, `spec/12`, `spec/14`, `spec/17`; prose pointers across `spec/00`–`spec/19` and `spec/adr/*`; the two README audit links (now pointing at the archive index with PASS5 as latest); the `internal/sync/doc.go` comment; and the `.github/ISSUE_TEMPLATE` glob example. Historical `spec/18_WORK_LOG.md` entries were left referencing the old root paths (accurate for when they happened).
+- Generalized the spec-drift gate: `internal/specdrift/specdrift.go` `requiresWorkLog` now treats any change under `docs/` as work-log-requiring (replacing the exact `AUDIT_RECOMMENDATIONS.md` special-case), so the moved audit docs and future docs still gate on the work log.
+
+Validated:
+- `gofmt -l`, `go build ./...`, `DEVSTRAP_NO_KEYCHAIN=1 go test ./... -count=1` (incl. `internal/specdrift`), and `go run ./cmd/spec-drift --base origin/main --head HEAD` (green). A repo-wide sweep confirms no bare root `AUDIT_RECOMMENDATIONS` references remain outside the archive and the historical work-log entries.
+
+Follow-ups:
+- Work-log rotation (archive cycles older than the two most recent passes into a dated file) remains a deferred follow-up to keep this PR reviewable.
+
 ## 2026-06-29 — Fifth-pass design & implementation audit (post-PR-#20)
 
 Changed:

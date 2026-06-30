@@ -8,7 +8,7 @@ tracks_code: [internal/platform/**, .github/**]
 
 Keep the portable Go core identical on macOS and Linux so an incoming GMKtec Ubuntu box becomes a first-class DevStrap node now, not "early" — Ubuntu parity is a present requirement, not a later port.
 
-The 2026-06-28 cloud-sync decisions (recorded in `AUDIT_RECOMMENDATIONS_2026-06-28.md`, extending the 2026-06-27 second-pass audit) make this explicit: **cross-platform core first, OS-specific magic deferred** (workstream `XP-*`). The owner's fleet is mixed by design — two Mac Minis, the GMKtec Ubuntu box, a graphics laptop, and a NAS — so the same `~/Code` tree and the same `devstrap sync` eager-clone behavior must appear identically on macOS and Ubuntu running the one portable binary. No native daemon, FSEvents/inotify-specific watcher, or StrapFS is built this cycle on either platform; those remain deferred. The systemd unit below is a documented target, not shipped code.
+The 2026-06-28 cloud-sync decisions (recorded in `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`, extending the 2026-06-27 second-pass audit) make this explicit: **cross-platform core first, OS-specific magic deferred** (workstream `XP-*`). The owner's fleet is mixed by design — two Mac Minis, the GMKtec Ubuntu box, a graphics laptop, and a NAS — so the same `~/Code` tree and the same `devstrap sync` eager-clone behavior must appear identically on macOS and Ubuntu running the one portable binary. No native daemon, FSEvents/inotify-specific watcher, or StrapFS is built this cycle on either platform; those remain deferred. The systemd unit below is a documented target, not shipped code.
 
 ## Linux target
 
@@ -246,7 +246,7 @@ The platform findings in `05_MAC_FIRST_IMPLEMENTATION.md` (`PLAT-01..05`) apply 
 
 ## Audit follow-ups (2026-06-28)
 
-The 2026-06-28 cloud-sync architecture (`AUDIT_RECOMMENDATIONS_2026-06-28.md`, workstream `XP-*`) sets the ordering this file follows: **cross-platform core first, OS-specific magic deferred.**
+The 2026-06-28 cloud-sync architecture (`docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`, workstream `XP-*`) sets the ordering this file follows: **cross-platform core first, OS-specific magic deferred.**
 
 - Ubuntu is a first-class target now because the owner's fleet already includes an incoming GMKtec Ubuntu box alongside two Mac Minis, a graphics laptop, and a NAS. The same `~/Code` tree must appear on all of them via the one Go binary.
 - The cloud sync hub (`devstraphub`) is platform-neutral by construction: repo content rides git's own blobless clone/fetch transport from each repo's existing remote and never touches the hub, env/draft content moves as age-encrypted content-addressed `age_blob:<sha256>` blobs, and the namespace map is a signed HLC-ordered event log. None of these planes are OS-specific, so Ubuntu and macOS sync identically (`HUB-*`, `DRAFT-*`). Backend is Cloudflare R2 from the start, pluggable behind one Hub interface, with a file-backed local backend kept only for tests — see `07_NAMESPACE_AND_SYNC_MODEL.md` and `13_CLI_DAEMON_API.md`.

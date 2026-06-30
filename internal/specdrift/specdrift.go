@@ -299,7 +299,7 @@ func requiresWorkLog(changed []string) bool {
 			file == "CODEOWNERS",
 			file == "go.mod",
 			file == "go.sum",
-			file == "AUDIT_RECOMMENDATIONS.md":
+			strings.HasPrefix(file, "docs/"):
 			return true
 		}
 	}

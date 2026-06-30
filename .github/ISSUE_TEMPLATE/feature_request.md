@@ -23,4 +23,4 @@ Other approaches you've thought about, and why they fall short.
 ## Additional context
 
 Links to relevant design specs (see [`spec/`](../../spec)), audit items
-(`AUDIT_RECOMMENDATIONS_*.md`), screenshots, or examples.
+(`docs/audits/AUDIT_RECOMMENDATIONS_*.md`), screenshots, or examples.
