@@ -52,7 +52,7 @@ IPC:   Unix domain socket: ~/.devstrap/devstrapd.sock
 
 ## Cloud-sync architecture (2026-06-28 extension)
 
-> Extends the 2026-06-27 second-pass audit (see `00_START_HERE.md` and `AUDIT_RECOMMENDATIONS_2026-06-27.md`); driven by `AUDIT_RECOMMENDATIONS_2026-06-28.md` (workstreams `EAGER-*`, `DRAFT-*`, `HUB-*`, `XP-*`, `SCALE-*`). The product goal is the **Dropbox experience for code**: one identical `~/Code` tree that appears automatically on every device in the owner's fleet (multiple Mac Minis, an incoming Ubuntu box, a graphics laptop, a NAS).
+> Extends the 2026-06-27 second-pass audit (see `00_START_HERE.md` and `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md`); driven by `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` (workstreams `EAGER-*`, `DRAFT-*`, `HUB-*`, `XP-*`, `SCALE-*`). The product goal is the **Dropbox experience for code**: one identical `~/Code` tree that appears automatically on every device in the owner's fleet (multiple Mac Minis, an incoming Ubuntu box, a graphics laptop, a NAS).
 
 ### Sync is split by content type — never blanket file-sync
 

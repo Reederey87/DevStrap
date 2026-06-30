@@ -1,6 +1,6 @@
 ---
 last_reviewed: 2026-06-29
-tracks_code: [internal/state/**, AUDIT_RECOMMENDATIONS_2026-06-28.md]
+tracks_code: [internal/state/**, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md]
 ---
 # SQLite Data Model
 

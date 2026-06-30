@@ -10,7 +10,7 @@ tracks_code: []
 > transport remains `devstrap sync --hub-file <path>` (the file-backed test hub). Every
 > CLI flag, env var, and config key marked *planned* below names the intended surface for
 > the cloud hub; treat names as provisional until `HUB-*` ships. See
-> `AUDIT_RECOMMENDATIONS_2026-06-28.md` (decisions 5 and 6) and `14_MVP_ROADMAP_AND_BACKLOG.md`.
+> `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` (decisions 5 and 6) and `14_MVP_ROADMAP_AND_BACKLOG.md`.
 
 ## Scope
 
@@ -484,6 +484,6 @@ object-store hub, and future per-task runner isolation.
   `--hub-file` test-only backend.
 - `15_SECURITY_THREAT_MODEL.md` — the two-plane zero-knowledge hub trust model and
   confidentiality-by-construction caveat (`HUB-*`, `SCALE-*`).
-- `AUDIT_RECOMMENDATIONS_2026-06-28.md` — the `HUB-*` (cloud zero-knowledge hub on R2) and
+- `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` — the `HUB-*` (cloud zero-knowledge hub on R2) and
   `SCALE-*` (multi-user hosting on Fly.io + R2 + managed Postgres) workstreams that drive
   this guide.

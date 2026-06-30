@@ -1,6 +1,6 @@
 ---
 last_reviewed: 2026-06-28
-tracks_code: [cmd/**, internal/**, .github/**, AUDIT_RECOMMENDATIONS.md, AUDIT_RECOMMENDATIONS_2026-06-27.md, AUDIT_RECOMMENDATIONS_2026-06-28.md]
+tracks_code: [cmd/**, internal/**, .github/**, docs/audits/AUDIT_RECOMMENDATIONS.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md]
 ---
 # MVP Roadmap and Backlog
 
@@ -8,7 +8,7 @@ tracks_code: [cmd/**, internal/**, .github/**, AUDIT_RECOMMENDATIONS.md, AUDIT_R
 
 The MVP is successful when one user can register multiple Macs/Linux machines, keep a consistent `~/Code` structure, materialize repos (on-demand `hydrate` today, moving to eager clone-everything on `sync` — `EAGER-*`), hydrate env safely, and create fresh worktrees for agents.
 
-The "Dropbox experience for code" target — one identical `~/Code` tree that appears automatically across the owner's fleet — is delivered by the 2026-06-28 cloud-sync architecture: content split by type (repo content rides git's own blobless clone/fetch from its existing remote and never transits the hub; env + non-git/draft folders ride age-encrypted content-addressed `age_blob:<sha256>` blobs; the project map rides the signed HLC-ordered event log), eager materialization on `sync`, and a two-plane zero-knowledge hub on Cloudflare R2. See `AUDIT_RECOMMENDATIONS_2026-06-28.md`.
+The "Dropbox experience for code" target — one identical `~/Code` tree that appears automatically across the owner's fleet — is delivered by the 2026-06-28 cloud-sync architecture: content split by type (repo content rides git's own blobless clone/fetch from its existing remote and never transits the hub; env + non-git/draft folders ride age-encrypted content-addressed `age_blob:<sha256>` blobs; the project map rides the signed HLC-ordered event log), eager materialization on `sync`, and a two-plane zero-knowledge hub on Cloudflare R2. See `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`.
 
 ## Recommended build order
 
@@ -29,7 +29,7 @@ Milestone 7: multi-device hub                               [reframed as the clo
 
 ### 2026-06-28 cloud-sync re-sequencing
 
-The next cycle is re-sequenced around the **eager-clone core + cloud backend**, not a native daemon. IDs reference `AUDIT_RECOMMENDATIONS_2026-06-28.md`. This overlay supersedes the priority of the historic M5–M7 above without renumbering them:
+The next cycle is re-sequenced around the **eager-clone core + cloud backend**, not a native daemon. IDs reference `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`. This overlay supersedes the priority of the historic M5–M7 above without renumbering them:
 
 ```text
 Next:      eager-clone materialization (EAGER-*) — clone-everything (blobless) on `devstrap sync`;
@@ -467,7 +467,7 @@ Build these early:
 
 ## Audit follow-ups (second pass, 2026-06-27)
 
-Workstreams added by the second-pass design & implementation audit (`AUDIT_RECOMMENDATIONS_2026-06-27.md`). Ordered by leverage; IDs reference that document.
+Workstreams added by the second-pass design & implementation audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md`). Ordered by leverage; IDs reference that document.
 
 ### P0 — security-relevant rebaseline
 - **Agent wrapper is still not a sandbox** (`AGEN-01`, `AGEN-03`): argv-substring policy is bypassable by any interpreter. Credential env stripping (`AGEN-02`/`SECU-02`) is shipped, but strong enforcement still needs allowlists plus OS sandboxing (Seatbelt / bubblewrap-landlock-seccomp).
@@ -498,7 +498,7 @@ Workstreams added by the second-pass design & implementation audit (`AUDIT_RECOM
 
 ## Audit follow-ups (cloud-sync pass, 2026-06-28)
 
-Workstreams added by the cloud-sync architecture pass (`AUDIT_RECOMMENDATIONS_2026-06-28.md`). These **extend** the 2026-06-27 second-pass audit above — they do not revert it. The product goal is the "Dropbox experience for code": one identical `~/Code` tree that appears automatically across the owner's fleet. The core rule is **file-sync split by content type — never blanket file-sync, never file-sync `.git`** (it corrupts the repo). New planned commands/flags are **future**, not yet shipped.
+Workstreams added by the cloud-sync architecture pass (`docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`). These **extend** the 2026-06-27 second-pass audit above — they do not revert it. The product goal is the "Dropbox experience for code": one identical `~/Code` tree that appears automatically across the owner's fleet. The core rule is **file-sync split by content type — never blanket file-sync, never file-sync `.git`** (it corrupts the repo). New planned commands/flags are **future**, not yet shipped.
 
 ### EAGER-* — eager-clone materialization
 - Make `devstrap sync` perform eager **clone-everything** up front via blobless/partial clone (`git clone --filter=blob:none`) of every namespaced repo from its existing remote; the whole `~/Code` tree is present after sync.

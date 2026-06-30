@@ -16,7 +16,7 @@
 //   - The on-wire hub protocol is NOT defined here. The device_sig and
 //     prev_event_hash chain columns are written and validated locally as a
 //     deliberate, accepted divergence from the original "defer until the hub"
-//     plan (see AUDIT_RECOMMENDATIONS.md ARCH-2 / spec/07); the chain FORMAT
+//     plan (see docs/audits/AUDIT_RECOMMENDATIONS.md ARCH-2 / spec/07); the chain FORMAT
 //     should still be re-reviewed before a production hub freezes it.
 //   - FileHub (hub.go) is a file-backed TEST hub only.
 //

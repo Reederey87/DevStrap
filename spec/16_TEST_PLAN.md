@@ -471,7 +471,7 @@ End-to-end personal scenario:
 
 ## Audit follow-ups (2026-06-27)
 
-Testing gaps (`TEST-*`, from `AUDIT_RECOMMENDATIONS_2026-06-27.md`):
+Testing gaps (`TEST-*`, from `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md`):
 
 - **No fuzz targets** for any untrusted-input parser, incl. the env parser, pathkey, and the secret scrubber (`TEST-01`); add `go test -fuzz`.
 - **e2e harness covers only `init`/`status`** (`TEST-02`); the riskiest flows (scan/hydrate/worktree/agent/env/sync) are tested in-process and bypass the real exit-code/`--json` contract. Extend the `rogpeppe/go-internal` testscript suite.
@@ -483,7 +483,7 @@ Testing gaps (`TEST-*`, from `AUDIT_RECOMMENDATIONS_2026-06-27.md`):
 
 ## Audit follow-ups (2026-06-28)
 
-New test workstreams from `AUDIT_RECOMMENDATIONS_2026-06-28.md` (cloud-sync design; all planned/future until their features ship — they do not satisfy the Phase 0 gate):
+New test workstreams from `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` (cloud-sync design; all planned/future until their features ship — they do not satisfy the Phase 0 gate):
 
 - **Eager-clone two-machine e2e** (`EAGER-*`): the round trip in *Multi-device tests* — Device B reconstructs the whole `~/Code` tree from one `sync`, repos blobless-cloned at the same path, drafts byte-identical, env hydrated, a second sync pulls 0 events, and no `.git` bytes transit the hub.
 - **`.devstrapignore` single-compiler tests** (`DRAFT-*`): all consumers derive from one compiled output; the draft-bundle exclusion set is the compiler output and nothing else, so secrets, `.git`, and `node_modules` can never be age-encrypted into a blob.

@@ -7,7 +7,7 @@ date: 2026-06-27
 
 ## Context
 
-The product promise is "Dropbox for code." The sharpest user need behind it is: *"I forgot to push, I'm now on another machine, and my uncommitted work is stranded."* A natural first instinct is literal file-sync of the working tree (Dropbox/OneDrive/iCloud/Syncthing/Mutagen style). This was researched and pressure-tested (four competing designs, adversarial scoring; see `AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 5).
+The product promise is "Dropbox for code." The sharpest user need behind it is: *"I forgot to push, I'm now on another machine, and my uncommitted work is stranded."* A natural first instinct is literal file-sync of the working tree (Dropbox/OneDrive/iCloud/Syncthing/Mutagen style). This was researched and pressure-tested (four competing designs, adversarial scoring; see `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 5).
 
 The Git project's own FAQ is categorical: no part of a repository may be live-synced by a file-sync engine. The failure class includes torn `.git/index`, conflict-copied refs (`refs/heads/main 2`), `index.lock` contention, and — worst — divergent refs that leave objects unreferenced and **permanently `gc`-pruned (data loss)**. File-sync also has no principled merge for two concurrently-edited dirty worktrees and directly fights DevStrap's fresh-worktree-from-remote invariant.
 

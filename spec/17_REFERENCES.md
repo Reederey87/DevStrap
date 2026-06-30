@@ -1,6 +1,6 @@
 ---
 last_reviewed: 2026-06-28
-tracks_code: [.github/**, go.mod, go.sum, AUDIT_RECOMMENDATIONS.md, AUDIT_RECOMMENDATIONS_2026-06-27.md, AUDIT_RECOMMENDATIONS_2026-06-28.md]
+tracks_code: [.github/**, go.mod, go.sum, docs/audits/AUDIT_RECOMMENDATIONS.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md]
 ---
 # References
 
@@ -134,11 +134,11 @@ Exa MCP review on `2026-06-26` supported agent/watcher hardening behavior:
 - git-town forge drivers: https://www.git-town.com/preferences/forge-type
 - Server-Sent Events: https://html.spec.whatwg.org/multipage/server-sent-events.html
 - Caddy automatic HTTPS: https://caddyserver.com/docs/automatic-https ; Tailscale: https://tailscale.com/
-- Full per-finding sources: `AUDIT_RECOMMENDATIONS_2026-06-27.md`.
+- Full per-finding sources: `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md`.
 
 ## Cloud-sync architecture (2026-06-28) — added references
 
-These sources back the cloud-sync architecture cycle: the "Dropbox experience for code" (one identical `~/Code` tree on every device in the owner's fleet), the content-type-split sync model (git transport for repo content, age blobs for env/draft content, a signed HLC event log for the namespace map), eager clone-everything materialization, and the two-plane zero-knowledge hub. They drive the EAGER-*, DRAFT-*, HUB-*, XP-*, and SCALE-* workstreams in `AUDIT_RECOMMENDATIONS_2026-06-28.md`.
+These sources back the cloud-sync architecture cycle: the "Dropbox experience for code" (one identical `~/Code` tree on every device in the owner's fleet), the content-type-split sync model (git transport for repo content, age blobs for env/draft content, a signed HLC event log for the namespace map), eager clone-everything materialization, and the two-plane zero-knowledge hub. They drive the EAGER-*, DRAFT-*, HUB-*, XP-*, and SCALE-* workstreams in `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`.
 
 ### Never file-sync a git repo
 
@@ -195,4 +195,4 @@ These sources back the cloud-sync architecture cycle: the "Dropbox experience fo
 - Supabase managed Postgres/BaaS alternative: https://supabase.com/pricing ; https://supabase.com/docs/guides/database
 - Render and Railway app-hosting alternatives for simpler trusted deployments: https://render.com/pricing ; https://railway.com/pricing
 - Cloudflare Workers/Durable Objects/D1 + R2 alternative for a future serverless edge control/hub layer if the project accepts a non-Go edge runtime: https://developers.cloudflare.com/workers/platform/pricing/ ; https://developers.cloudflare.com/durable-objects/platform/pricing/ ; https://developers.cloudflare.com/d1/platform/pricing/
-- Full per-finding sources: `AUDIT_RECOMMENDATIONS_2026-06-28.md`.
+- Full per-finding sources: `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`.

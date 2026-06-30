@@ -128,7 +128,7 @@ Responsibilities:
 
 ### `devstraphub`
 
-The **two-plane, zero-knowledge** sync service (`HUB-*`, see `AUDIT_RECOMMENDATIONS_2026-06-28.md`). It is deliberately split by content type so that no single channel ever blanket-syncs files or touches `.git` (which would corrupt repos):
+The **two-plane, zero-knowledge** sync service (`HUB-*`, see `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`). It is deliberately split by content type so that no single channel ever blanket-syncs files or touches `.git` (which would corrupt repos):
 
 **Plane A — the namespace map (event log).** An append-only, Ed25519-signed, HLC-ordered event log. This is the *map of all projects* in the workspace: paths, types, remotes, env/tooling/ignore profiles, draft metadata, and tombstones. Each device replays from its last cursor to reconstruct the identical `~/Code` tree.
 
@@ -153,11 +153,11 @@ Because the hub only ever holds ciphertext blobs plus a signed event map, it can
 
 R2 event-log correctness is part of the DevStrap design, not delegated to object-storage locking. Events are written as immutable, unique, lexicographically sortable objects under a workspace prefix and created with conditional put semantics (`If-None-Match: *` where supported). Pulls page by prefix and cursor; they must never append by overwriting one shared manifest object. The signed event hash chain and local replay rules detect reordering, omission, substitution, and duplicate replay.
 
-Wire protocol — *planned* networked backend (see `07_NAMESPACE_AND_SYNC_MODEL.md`, `AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 6, and `AUDIT_RECOMMENDATIONS_2026-06-28.md`): a thin, **zero-knowledge**, store-and-forward relay over HTTPS — `POST /v1/{ws}/events`, `GET /v1/{ws}/events?after=<hlc>`, SSE `GET /v1/{ws}/stream` (Last-Event-ID=HLC, a live hint only), content-addressed `PUT/GET /v1/{ws}/blobs/{sha256}`, `410 Gone` → full-state snapshot. The hub is **semi-trusted**: it sees only signed, end-to-end-encrypted payloads plus routing metadata, never plaintext code/secrets, and is never trusted to order or authenticate (correctness lives off the wire via HLC + content/prev-hash chain + Ed25519). Device auth via mTLS client certs derived from the device identity, rejecting revoked/lost devices. As a single Go binary it ships in the same module, reusing `internal/state`, `internal/sync`, and `internal/devicekeys`.
+Wire protocol — *planned* networked backend (see `07_NAMESPACE_AND_SYNC_MODEL.md`, `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 6, and `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`): a thin, **zero-knowledge**, store-and-forward relay over HTTPS — `POST /v1/{ws}/events`, `GET /v1/{ws}/events?after=<hlc>`, SSE `GET /v1/{ws}/stream` (Last-Event-ID=HLC, a live hint only), content-addressed `PUT/GET /v1/{ws}/blobs/{sha256}`, `410 Gone` → full-state snapshot. The hub is **semi-trusted**: it sees only signed, end-to-end-encrypted payloads plus routing metadata, never plaintext code/secrets, and is never trusted to order or authenticate (correctness lives off the wire via HLC + content/prev-hash chain + Ed25519). Device auth via mTLS client certs derived from the device identity, rejecting revoked/lost devices. As a single Go binary it ships in the same module, reusing `internal/state`, `internal/sync`, and `internal/devicekeys`.
 
 #### Hosting & scaling (FUTURE direction — documented, not built)
 
-This subsection records the target deployment shape (`SCALE-*`, `AUDIT_RECOMMENDATIONS_2026-06-28.md` decision 6). None of it is implemented this cycle; the cross-platform Go core and the R2/file-backed hub backends come first.
+This subsection records the target deployment shape (`SCALE-*`, `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` decision 6). None of it is implemented this cycle; the cross-platform Go core and the R2/file-backed hub backends come first.
 
 Chosen stack:
 
@@ -193,7 +193,7 @@ Every `devstrap` CLI command works correctly without the daemon. State is materi
 
 ### Project materialized on another machine (eager clone on sync)
 
-Materialization is **eager, not lazy** (`EAGER-*`, `AUDIT_RECOMMENDATIONS_2026-06-28.md`): `devstrap sync` clones everything up front (blobless/partial clone), so after a sync the whole `~/Code` tree is present rather than a skeleton awaiting first open. There is no FUSE / placeholder / lazy-VFS magic in this design — StrapFS stays explicitly deferred.
+Materialization is **eager, not lazy** (`EAGER-*`, `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`): `devstrap sync` clones everything up front (blobless/partial clone), so after a sync the whole `~/Code` tree is present rather than a skeleton awaiting first open. There is no FUSE / placeholder / lazy-VFS magic in this design — StrapFS stays explicitly deferred.
 
 ```text
 1. Machine B runs devstrap sync.
