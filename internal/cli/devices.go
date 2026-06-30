@@ -119,6 +119,9 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 				return err
 			}
 			defer closeStore(store)
+			// P5-CLI-05: progress/warnings go to stderr; stdout stays the result
+			// stream.
+			stderr := cmd.ErrOrStderr()
 			if err := store.SetDeviceTrustState(cmd.Context(), args[0], trustState); err != nil {
 				return err
 			}
@@ -134,33 +137,33 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 					return err
 				}
 				if flagged > 0 {
-					if _, err := fmt.Fprintf(stdout, "warning: %d secret value(s) must be rotated at their source; rewrapping recipients does not revoke %s's historical access\n", flagged, args[0]); err != nil {
-						return err
-					}
+					_, _ = fmt.Fprintf(stderr, "warning: %d secret value(s) must be rotated at their source (run 'devstrap env rotate'); rewrapping recipients does not revoke %s's historical access\n", flagged, args[0])
 				}
-				// SEC-01/HUB-04: re-encrypt affected blobs to the reduced
-				// recipient set and, when a hub is provided, delete the old
-				// ciphertext from the hub so the revoked device can no longer
-				// fetch it. age has no native revocation, so historical access
-				// by the revoked key is irreversible, hence the mandatory
-				// rotation flag above. Without --hub-file, hub-side cleanup is
-				// deferred to the next sync.
+				// P5-SEC-01/SEC-04/HUB-04: re-encrypt affected blobs to the
+				// reduced recipient set. Env blobs are rewrapped locally only;
+				// draft blobs emit a superseding event and (with a hub) delete
+				// the old ciphertext only after the event + new blob are durably
+				// pushed. age has no native revocation, so historical access is
+				// irreversible — hence the mandatory rotation flag above.
 				var hub dssync.Hub
-				if hubFile != "" {
-					hub = dssync.FileHub{Path: hubFile}
+				if hubFile != "" || strings.TrimSpace(opts.v.GetString("hub")) != "" {
+					h, _, herr := hubFromOptions(opts, hubFile)
+					if herr != nil {
+						return appError{code: exitInvalidConfig, err: herr}
+					}
+					hub = h
 				}
 				rewrapped, err := rewrapBlobsOnRevoke(cmd.Context(), store, opts, hub)
 				if err != nil {
-					_, _ = fmt.Fprintf(stdout, "warning: blob re-encryption incomplete: %v\n", err)
+					_, _ = fmt.Fprintf(stderr, "warning: blob re-encryption incomplete: %v\n", err)
 				} else if rewrapped > 0 {
-					if _, err := fmt.Fprintf(stdout, "Re-encrypted %d blob(s) to the reduced recipient set\n", rewrapped); err != nil {
-						return err
-					}
+					_, _ = fmt.Fprintf(stderr, "Re-encrypted %d blob(s) to the reduced recipient set\n", rewrapped)
 				}
-				if hubFile == "" {
-					if _, err := fmt.Fprintf(stdout, "note: --hub-file not set; old ciphertext remains on the hub until the next sync rewraps with --hub-file\n"); err != nil {
-						return err
-					}
+				if hub == nil {
+					// P5-PROD-02: the old draft ciphertext is queued (pending_hub_deletes)
+					// and deleted on the next hub-enabled sync — state that plainly
+					// instead of promising a cleanup that never ran.
+					_, _ = fmt.Fprintf(stderr, "note: no hub configured; old draft ciphertext is queued and removed on the next 'devstrap sync --hub-file'. Rotate the affected secrets at their source regardless.\n")
 				}
 			}
 			return nil

@@ -85,6 +85,14 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 			return err
 		}
 	}
+	// P5-PROD-02: now that local events (including any superseding rewrap event)
+	// and referenced blobs are on the hub, drain blobs queued by a prior
+	// local-only revoke so the old ciphertext is finally removed.
+	if drained, derr := drainPendingHubDeletes(ctx, store, hub); derr != nil {
+		logging.Logger(ctx).Warn("sync: pending hub delete drain failed", "err", derr.Error())
+	} else if drained > 0 {
+		_, _ = fmt.Fprintf(stdout, "Removed %d superseded blob(s) from the hub\n", drained)
+	}
 	// EAGER-02: cursor-based incremental pull.
 	cursor, err := store.HubCursor(ctx, hubID)
 	if err != nil {

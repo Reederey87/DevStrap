@@ -1803,6 +1803,122 @@ WHERE id IN (
 	return int(n), nil
 }
 
+// EnvBlobRefs returns the distinct age_blob refs held by encrypted env bindings
+// (P5-SEC-04). These blobs are local-only and are never pushed to the hub, so
+// the revoke rewrap must not upload or delete them there.
+func (s *Store) EnvBlobRefs(ctx context.Context) ([]string, error) {
+	return s.scanRefs(ctx, `SELECT DISTINCT encrypted_value_ref FROM secret_bindings WHERE encrypted_value_ref LIKE 'age_blob:%';`)
+}
+
+// DraftBlobRefs returns the distinct age_blob refs held by draft snapshots
+// (P5-SEC-04). These are the only blobs synced through the hub.
+func (s *Store) DraftBlobRefs(ctx context.Context) ([]string, error) {
+	return s.scanRefs(ctx, `SELECT DISTINCT blob_ref FROM draft_snapshots WHERE blob_ref LIKE 'age_blob:%';`)
+}
+
+func (s *Store) scanRefs(ctx context.Context, query string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("scan blob refs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var refs []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, fmt.Errorf("scan blob ref: %w", err)
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
+}
+
+// DraftSnapshotRef is the metadata needed to re-emit a superseding
+// draft.snapshot.created event when a draft blob is rewrapped (P5-SEC-01).
+type DraftSnapshotRef struct {
+	Path      string
+	ByteSize  int64
+	FileCount int64
+}
+
+// DraftSnapshotsForBlobRef returns the (path, size, count) of every active
+// draft snapshot referencing ref (P5-SEC-01), so a rewrap can emit a superseding
+// event carrying the new ref before the old hub blob is deleted.
+func (s *Store) DraftSnapshotsForBlobRef(ctx context.Context, ref string) ([]DraftSnapshotRef, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT n.path, ds.byte_size, ds.file_count
+FROM draft_snapshots ds
+JOIN namespace_entries n ON n.id = ds.namespace_id
+WHERE ds.blob_ref = ?;
+`, ref)
+	if err != nil {
+		return nil, fmt.Errorf("read draft snapshots for blob: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []DraftSnapshotRef
+	for rows.Next() {
+		var r DraftSnapshotRef
+		if err := rows.Scan(&r.Path, &r.ByteSize, &r.FileCount); err != nil {
+			return nil, fmt.Errorf("scan draft snapshot ref: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// QueuePendingHubDelete records a blob ref orphaned by a local-only revoke
+// rewrap so the next hub-enabled sync/gc deletes it (P5-PROD-02). Idempotent.
+func (s *Store) QueuePendingHubDelete(ctx context.Context, ref string) error {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO pending_hub_deletes (workspace_id, blob_ref, queued_at)
+VALUES (?, ?, ?)
+ON CONFLICT(workspace_id, blob_ref) DO NOTHING;
+`, workspaceID, ref, timestampNow())
+	if err != nil {
+		return fmt.Errorf("queue pending hub delete: %w", err)
+	}
+	return nil
+}
+
+// PendingHubDeletes returns the queued orphaned blob refs (P5-PROD-02).
+func (s *Store) PendingHubDeletes(ctx context.Context) ([]string, error) {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT blob_ref FROM pending_hub_deletes WHERE workspace_id = ?;`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("list pending hub deletes: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var refs []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, fmt.Errorf("scan pending hub delete: %w", err)
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
+}
+
+// ClearPendingHubDelete removes a drained entry from the queue (P5-PROD-02).
+func (s *Store) ClearPendingHubDelete(ctx context.Context, ref string) error {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `DELETE FROM pending_hub_deletes WHERE workspace_id = ? AND blob_ref = ?;`, workspaceID, ref)
+	if err != nil {
+		return fmt.Errorf("clear pending hub delete: %w", err)
+	}
+	return nil
+}
+
 // UpdateBlobRef repoints every reference from oldRef to newRef across
 // secret_bindings and draft_snapshots (HUB-04 re-encryption).
 func (s *Store) UpdateBlobRef(ctx context.Context, oldRef, newRef string) error {
