@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Reederey87/DevStrap/internal/childenv"
 	dsgit "github.com/Reederey87/DevStrap/internal/git"
@@ -129,15 +130,61 @@ func resolveForgeHost(remoteURL string) string {
 	return host
 }
 
-// resolveSSHHostAlias looks up a host alias in ~/.ssh/config and returns the
-// matching HostName, or "" if not found / unreadable. Matching supports
-// single-segment aliases and `*`/`?` glob patterns as ssh does. Only the first
-// matching Host block is honored (ssh semantics).
+// resolveSSHHostAlias resolves a host alias to its real HostName (GIT-05). It
+// prefers `ssh -G <alias>`, which is authoritative — it honors Include, Match,
+// negation, tokens, and `key=value` syntax that the hand-rolled parser ignores
+// (P5-CLI-04) — and falls back to parsing ~/.ssh/config directly when ssh is
+// unavailable. Returns "" when there is no real HostName override (forge
+// detection then treats the literal alias as the host).
 func resolveSSHHostAlias(alias string) string {
 	alias = strings.ToLower(strings.TrimSpace(alias))
 	if alias == "" || strings.ContainsAny(alias, " /\t") {
 		return ""
 	}
+	// P5-CLI-04: ssh -G echoes the alias as `hostname` when there is no override,
+	// so a result equal to the alias means "no real host" — fall through to the
+	// file parser (which also returns "" in that case but stays the tested path).
+	if host := sshDashGHostName(alias); host != "" && host != alias {
+		return host
+	}
+	return resolveSSHHostAliasFromFile(alias)
+}
+
+// sshDashGHostName runs `ssh -G <alias>` and returns its resolved hostname
+// (lowercased), or "" if ssh is unavailable or errors (P5-CLI-04). It is bounded
+// by a short timeout and a sanitized environment; ssh -G only resolves config
+// and does not connect.
+func sshDashGHostName(alias string) string {
+	sshPath, err := exec.LookPath("ssh")
+	if err != nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	//nolint:gosec // alias is validated (no spaces/slashes) and ssh -G only resolves config.
+	cmd := exec.CommandContext(ctx, sshPath, "-G", alias)
+	if env, eerr := childenv.FromOS(childenv.BasicAllowlist(), nil); eerr == nil {
+		cmd.Env = env
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && strings.ToLower(fields[0]) == "hostname" {
+			return strings.ToLower(fields[1])
+		}
+	}
+	return ""
+}
+
+// resolveSSHHostAliasFromFile looks up a host alias in ~/.ssh/config and returns
+// the matching HostName, or "" if not found / unreadable. Matching supports
+// single-segment aliases and `*`/`?` glob patterns as ssh does. Only the first
+// matching Host block is honored (ssh semantics). Used as the fallback when
+// `ssh -G` is unavailable (P5-CLI-04).
+func resolveSSHHostAliasFromFile(alias string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""

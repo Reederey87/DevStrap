@@ -72,12 +72,26 @@ func newMaterializeCommand(stdout io.Writer, opts *options) *cobra.Command {
 				}
 			}
 			results := materializePass(cmd.Context(), store, opts, projects, partial)
+			// P5-CLI-01: route output through the shared renderer so --json
+			// produces a structured result instead of being silently ignored.
 			// P5-QUAL-01: report succeeded/skipped/failed so the normal interim
 			// "no draft bundle yet" state is visible without polluting the exit
 			// code.
-			_, _ = fmt.Fprintf(stdout, "Materialized %d/%d projects (%d skipped)\n", results.succeeded, results.total, results.skipped)
+			if err := opts.render(stdout, func(w io.Writer) error {
+				_, _ = fmt.Fprintf(w, "Materialized %d/%d projects (%d skipped)\n", results.succeeded, results.total, results.skipped)
+				if results.failed > 0 {
+					_, _ = fmt.Fprintf(w, "%d project(s) failed; run 'devstrap doctor' or 'devstrap status' for details\n", results.failed)
+				}
+				return nil
+			}, struct {
+				Total     int `json:"total"`
+				Succeeded int `json:"succeeded"`
+				Skipped   int `json:"skipped"`
+				Failed    int `json:"failed"`
+			}{results.total, results.succeeded, results.skipped, results.failed}); err != nil {
+				return err
+			}
 			if results.failed > 0 {
-				_, _ = fmt.Fprintf(stdout, "%d project(s) failed; run 'devstrap doctor' or 'devstrap status' for details\n", results.failed)
 				// QUAL-03: exit non-zero ONLY when a project genuinely failed so
 				// automation and CI gating on `devstrap materialize` can detect a
 				// failed clone/hydrate. A draft awaiting its first bundle is

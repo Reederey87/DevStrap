@@ -106,7 +106,39 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newDevicesCommand(stdout, opts))
 	cmd.AddCommand(newConflictsCommand(stdout, opts))
 
+	attachShellCompletions(cmd, opts)
 	return cmd
+}
+
+// attachShellCompletions wires dynamic shell completion onto the command tree
+// (P5-DX-01): namespace-path arguments complete from the local store, and enum
+// flags complete from their fixed value sets.
+func attachShellCompletions(root *cobra.Command, opts *options) {
+	pathCompletion := completePaths(opts)
+	pathCmds := map[string]bool{
+		"devstrap open": true, "devstrap hydrate": true, "devstrap materialize": true,
+		"devstrap worktree new": true, "devstrap env capture": true, "devstrap env hydrate": true,
+		"devstrap env bind": true, "devstrap env rotate": true, "devstrap run": true,
+		"devstrap draft snapshot create": true, "devstrap agent run": true,
+	}
+	walkCommands(root, func(c *cobra.Command) {
+		if pathCmds[c.CommandPath()] {
+			c.ValidArgsFunction = pathCompletion
+		}
+		if c.Flags().Lookup("lfs-policy") != nil {
+			_ = c.RegisterFlagCompletionFunc("lfs-policy", completeEnum("auto", "never", "agent", "always"))
+		}
+		if c.Flags().Lookup("forge") != nil {
+			_ = c.RegisterFlagCompletionFunc("forge", completeEnum("github", "gitlab", "gitea", "bitbucket", "azure"))
+		}
+	})
+}
+
+func walkCommands(c *cobra.Command, fn func(*cobra.Command)) {
+	fn(c)
+	for _, sub := range c.Commands() {
+		walkCommands(sub, fn)
+	}
 }
 
 func initConfig(opts *options) error {
