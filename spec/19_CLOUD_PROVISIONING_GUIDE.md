@@ -1,16 +1,18 @@
 ---
-last_reviewed: 2026-06-28
+last_reviewed: 2026-06-30
 tracks_code: []
 ---
 # Cloud Provisioning & Configuration Guide
 
-> **Status: FUTURE direction (`HUB-*`, `SCALE-*`).** Nothing in this guide is built or
-> wired this cycle. It is the provisioning runbook for when the cloud/SaaS build lands —
-> and it doubles as a single-owner deployment recipe usable today. The only shipped sync
-> transport remains `devstrap sync --hub-file <path>` (the file-backed test hub). Every
-> CLI flag, env var, and config key marked *planned* below names the intended surface for
-> the cloud hub; treat names as provisional until `HUB-*` ships. See
-> `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` (decisions 5 and 6) and `14_MVP_ROADMAP_AND_BACKLOG.md`.
+> **Status: the single-owner R2/S3 recipe is shipped (`P5-HUB-01`); the multi-tenant
+> SaaS direction (`SCALE-*`, Fly.io compute, managed Postgres control plane) remains
+> FUTURE.** This guide is the provisioning runbook for both: it doubles as a single-owner
+> deployment recipe usable today and the SaaS hosting direction for later. The shipped sync
+> transport is `devstrap sync` with `hub: r2://<bucket>` (the `aws-sdk-go-v2` S3 adapter;
+> `--hub-file <path>` stays for tests). Env/config keys below marked *shipped* are live;
+> those marked *planned* name the intended SaaS surface and are provisional until `SCALE-*`
+> ships. See `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` (decisions 5 and 6) and
+> `14_MVP_ROADMAP_AND_BACKLOG.md`.
 
 ## Scope
 
@@ -130,23 +132,22 @@ credentials in `state.db`"):
 Planned client invocation (a developer box running sync):
 
 ```bash
-# planned (HUB-*): the local test hub flag --hub-file stays for tests only
-devstrap sync --hub-s3 devstrap-hub
+# shipped (P5-HUB-01): the bucket is the r2:// URI host; --hub-file stays for tests only
+devstrap sync   # hub: r2://devstrap-hub
 ```
 
-Planned config / env names (provisional until `HUB-*` lands). Non-secret settings:
+Config / env names (shipped, `P5-HUB-01`). The bucket is the `r2://` (or `s3://`) URI host, not a separate env var. Non-secret settings:
 
 ```text
-DEVSTRAP_HUB_S3_BUCKET=devstrap-hub                                  # planned
-DEVSTRAP_HUB_S3_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com  # planned
-DEVSTRAP_HUB_S3_REGION=auto                                          # planned
+DEVSTRAP_HUB_S3_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com  # shipped (or ?endpoint= on the URI)
+DEVSTRAP_HUB_S3_REGION=auto                                          # shipped (default: auto)
 ```
 
 Secret values — supply via the secrets path, **not** as plaintext env in a shell profile:
 
 ```text
-DEVSTRAP_HUB_S3_ACCESS_KEY_ID                                        # planned (id; low sensitivity, still not committed)
-DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY                                    # planned (secret; keychain / age blob / op:// / Fly secret)
+DEVSTRAP_HUB_S3_ACCESS_KEY_ID                                        # shipped (id; low sensitivity, still not committed; AWS_ACCESS_KEY_ID fallback)
+DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY                                    # shipped (secret; keychain / age blob / op:// / Fly secret; AWS_SECRET_ACCESS_KEY fallback)
 ```
 
 Because R2's API is S3-compatible, the underlying client also honors the standard AWS SDK
@@ -480,8 +481,7 @@ object-store hub, and future per-task runner isolation.
   `op://` refs, device recipients, and blob ref-counting / GC.
 - `12_DATA_MODEL_SQLITE.md` — R2 per-workspace key prefixing and the rule that hub
   connection settings are config, not schema, with no plaintext credentials in `state.db`.
-- `13_CLI_DAEMON_API.md` — the planned `devstrap sync --hub-s3 <bucket>` flag and the
-  `--hub-file` test-only backend.
+- `13_CLI_DAEMON_API.md` — the shipped `hub: r2://<bucket>` hub config value (and `--hub-file` test-only backend).
 - `15_SECURITY_THREAT_MODEL.md` — the two-plane zero-knowledge hub trust model and
   confidentiality-by-construction caveat (`HUB-*`, `SCALE-*`).
 - `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` — the `HUB-*` (cloud zero-knowledge hub on R2) and

@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-28
+last_reviewed: 2026-06-30
 tracks_code: [**]
 ---
 # Work Log
@@ -26,6 +26,27 @@ Follow-ups:
 ```
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
+
+## 2026-06-30 — Wire the live R2/S3 hub (P5-HUB-01)
+
+Changed:
+- **Production S3 adapter** (`internal/hub/s3client_awssdk.go`): `S3Adapter` implements the shipped `S3Client` interface over `aws-sdk-go-v2` (`s3.New(s3.Options{...})` with `BaseEndpoint`+`UsePathStyle:true` for R2/MinIO, `aws.NopRetryer{}` so `R2Hub.Retry` is the single retry layer, and an inline `aws.CredentialsProviderFunc` — no `config.LoadDefaultConfig`/SSO/IMDS/STS chain). PutObject (`IfNoneMatch:"*"`), GetObject (deferred Close), ObjectExists (HEAD→404=false), idempotent DeleteObject, ListObjectsV2 (clamped [1,1000], last key as nextStartAfter). `mapS3Error` classifies 412/PreconditionFailed→`ErrPreconditionFailed`, NoSuchKey/NotFound/404→`ErrBlobNotFound`, 429/503/SlowDown/TooManyRequests→`ErrS3Throttle`, 500/502/504/InternalError→`ErrS3Transient`, no-APIError→`ErrS3Transient`, other API→raw terminal.
+- **Tests:** `internal/hub/s3client_awssdk_test.go` (hermetic `mapS3Error` + NewS3Client validation); `internal/hub/r2_test.go` refactored to a shared `assertHubRoundTrip` conformance contract (`TestR2ConformanceMemS3`); `internal/hub/r2_minio_test.go` env-gated `TestR2MinIOConformance` (skips unless `DEVSTRAP_HUB_S3_ENDPOINT`).
+- **Wiring** (`internal/cli/hub.go`): `hubFromOptions(ctx, opts, store, hubFile)` r2:// branch — workspace id via `store.WorkspaceID`, creds from viper `hub_s3_*` + `AWS_` fallbacks, builds `S3Adapter`, returns `R2Hub{}` with hub-id `"r2:"+ws`. Pure `parseHubURI` (rejects credentials-in-URI) + store-free `hubConfigured`. Call sites updated: `sync.go`, `doctor.go`, `devices.go`, `hub gc`, `run_loop.go` preflight (→`hubConfigured`). `internal/cli/hub_test.go` for `parseHubURI`/`hubConfigured`.
+- **Deps:** `go.mod`/`go.sum` — aws-sdk-go-v2 v1.42.0, service/s3 v1.104.1, smithy-go v1.27.3 (+ indirects).
+- **Specs/docs:** flipped R2/S3 hub from planned→shipped across spec/00, 01, 02, 03, 04, 09, 13, 14, 15, 16, 17, 19 + `docs/audits/README.md` (P5-HUB-01 → shipped, 5 open → 4 open); `last_reviewed` bumped to 2026-06-30 on edited specs.
+
+Validated:
+- `gofmt -w`, `go build ./...`, `go vet ./...` clean; `go mod tidy` idempotent.
+- `golangci-lint run` (v2.12.0, bodyclose+gosec) — 0 issues (fixed errcheck on `Body.Close` via named-return defer; 7× errorlint `%v`→`%w`).
+- `go test -race -covermode=atomic ./...` — all green; total coverage 54.8% (≥50% floor), `internal/hub` 67.1% (`mapS3Error` 100%, `parseHubURI` 93.8%, `hubConfigured` 100%).
+- `govulncheck` — 0 vulnerabilities affecting called code.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` — green after spec updates.
+
+Follow-ups:
+- `P5-SYNC-01` (open, latent) — transport-cursor redesign; design in `spec/07`.
+- Optional manual live MinIO round-trip (`docker run minio/minio` + `DEVSTRAP_HUB_S3_* go test -run TestR2MinIOConformance ./internal/hub`); requires Docker, not run in CI.
+- Open PR `fix/p5-hub-01` → `main`, run adversarial review, merge after green CI.
 
 ## 2026-06-30 — Implement the fifth-pass (PASS5) open backlog
 

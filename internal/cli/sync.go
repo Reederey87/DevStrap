@@ -44,7 +44,7 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 	}
 	defer closeStore(store)
 	// P5-HUB-01: resolve the hub through the single selection seam.
-	hub, hubID, err := hubFromOptions(opts, hubFile)
+	hub, hubID, err := hubFromOptions(ctx, opts, store, hubFile)
 	if err != nil {
 		return appError{code: exitInvalidConfig, err: err}
 	}

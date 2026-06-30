@@ -26,9 +26,9 @@ This directory holds DevStrap's chronological design & implementation audits. **
 
 Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely implemented or superseded (see `spec/18_WORK_LOG.md` for the shipped history); the open backlog is concentrated in passes 4 and 5.
 
-> **2026-06-30 — most of Pass 5 shipped.** The PASS5 implementation cycle (`fix/pass5-backlog`, see `spec/18_WORK_LOG.md`) landed **31 of the 36** Pass-5 findings plus `P4-SEC-05` and `P4-QUAL-07` (partial). **Still open:** `P5-SYNC-01` (transport-cursor redesign — deferred with design in `spec/07`, latent), `P5-HUB-01` (the production aws-sdk-go-v2 S3 adapter + integration test; the seam/keying/retry/GC logic shipped), `P5-CLI-01` (the `render` seam landed and is wired into `materialize`; full rollout to every leaf command remains), `P5-ARCH-01` (convergence property tests shipped; the formal pure `Decide` extraction remains), and `P4-QUAL-07`'s `contextcheck` (deferred — needs threading a context through the forge chain). The PASS4 carried-forward XL items (`SEC-07` envelope encryption, `GIT-03` OS sandbox, `SEC-02`/`SEC-04`, `SYNC-02`/`HUB-11` compaction) remain open.
+> **2026-06-30 — most of Pass 5 shipped.** The PASS5 implementation cycle (`fix/pass5-backlog`, see `spec/18_WORK_LOG.md`) landed **32 of the 36** Pass-5 findings (now including `P5-HUB-01`) plus `P4-SEC-05` and `P4-QUAL-07` (partial). **Still open:** `P5-SYNC-01` (transport-cursor redesign — deferred with design in `spec/07`, latent), `P5-CLI-01` (the `render` seam landed and is wired into `materialize`; full rollout to every leaf command remains), `P5-ARCH-01` (convergence property tests shipped; the formal pure `Decide` extraction remains), and `P4-QUAL-07`'s `contextcheck` (deferred — needs threading a context through the forge chain). `P5-HUB-01` shipped today (branch `fix/p5-hub-01`): the `aws-sdk-go-v2` S3 adapter is wired behind `hub: r2://<bucket>` (`hubFromOptions`), with `DEVSTRAP_HUB_S3_*` env/config credentials, `aws.NopRetryer{}` single-retry, and an env-gated MinIO conformance test (`TestR2MinIOConformance`) plus hermetic `mapS3Error`/conformance unit tests. The PASS4 carried-forward XL items (`SEC-07` envelope encryption, `GIT-03` OS sandbox, `SEC-02`/`SEC-04`, `SYNC-02`/`HUB-11` compaction) remain open.
 
-### Pass 5 (2026-06-29) — 31 shipped (2026-06-30), 5 open: `P5-SYNC-01`, `P5-HUB-01`, `P5-CLI-01`, `P5-ARCH-01` (partial), `contextcheck`
+### Pass 5 (2026-06-29) — 32 shipped (2026-06-30), 4 open: `P5-SYNC-01`, `P5-CLI-01`, `P5-ARCH-01` (partial), `contextcheck`
 
 | ID | Sev | Finding | Effort |
 |---|---|---|---|
@@ -38,7 +38,7 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P5-SYNC-04 | P2 | Make `conflicts resolve --keep-*` actually mutate namespace state (or relabel advisory) | M |
 | P5-SYNC-03 | P2 | Write a tombstone at the old path on rename so a stale add/update can't resurrect it | M |
 | P5-SYNC-01 | P2 | Key the pull cursor on hub ingestion order, not logical HLC, so late events aren't stranded | L |
-| P5-HUB-01 | P2 | Wire a real S3 adapter + `hubFromOptions` factory + MinIO/LocalStack integration test | L |
+| P5-HUB-01 | P2 | Wire a real S3 adapter + `hubFromOptions` factory + MinIO/LocalStack integration test — **shipped 2026-06-30** (`fix/p5-hub-01`) | L |
 | P5-HUB-02 | P2 | Hub-side GC + draft-snapshot pruning so superseded blobs are reclaimable | M |
 | P5-SEC-02 | P2 | Bound the decompression budget on *every* tar entry, not just `TypeReg`/`TypeDir` | S |
 | P5-SEC-03 | P2 | Run dependency-rebuild lifecycle scripts through `childenv`, not the raw parent env | S |

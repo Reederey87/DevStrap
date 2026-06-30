@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-28
+last_reviewed: 2026-06-30
 tracks_code: [cmd/**, internal/**]
 ---
 # Challenge Matrix and Viable Approaches
@@ -129,7 +129,7 @@ Recommended solution:
 
 - DevStrap never syncs hydrated Git working tree bytes or `.git` internals across devices;
 - Git remote is the source of truth;
-- DevStrap syncs only namespace metadata and (planned) encrypted draft/working-state bundles;
+- DevStrap syncs only namespace metadata and encrypted draft bundles (shipped, `DRAFT-*`); cross-machine working-state (WIP) bundles remain future;
 - worktree state is device-local unless committed/pushed.
 
 **Decision: continuous working-tree file-sync (Mutagen/Syncthing-style) is rejected** — it reintroduces this entire corruption class and violates the fresh-worktree-from-remote invariant. Do not relitigate.

@@ -92,7 +92,7 @@ func checkHubHealth(ctx context.Context, opts *options, hubFile string) []checkR
 		return []checkResult{{Name: "hub", Status: checkError, Detail: err.Error()}}
 	}
 	defer closeStore(store)
-	hub, hubID, err := hubFromOptions(opts, hubFile)
+	hub, hubID, err := hubFromOptions(ctx, opts, store, hubFile)
 	if err != nil {
 		return []checkResult{{Name: "hub", Status: checkError, Detail: err.Error(), Remedy: "pass --hub-file or set 'hub' in config"}}
 	}

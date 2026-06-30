@@ -147,7 +147,7 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 				// irreversible — hence the mandatory rotation flag above.
 				var hub dssync.Hub
 				if hubFile != "" || strings.TrimSpace(opts.v.GetString("hub")) != "" {
-					h, _, herr := hubFromOptions(opts, hubFile)
+					h, _, herr := hubFromOptions(cmd.Context(), opts, store, hubFile)
 					if herr != nil {
 						return appError{code: exitInvalidConfig, err: herr}
 					}

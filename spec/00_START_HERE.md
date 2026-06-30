@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-29
+last_reviewed: 2026-06-30
 tracks_code: [cmd/**, internal/**, .github/**, AGENTS.md, README.md, go.mod, go.sum, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md]
 ---
 # DevStrap — Start Here
@@ -157,7 +157,7 @@ Implemented in this repository:
 
 Not implemented yet (genuinely unbuilt — features that are partly shipped are listed under "now built" below, never here):
 
-- the **live network hub**: the real AWS SDK v2 S3 client wiring behind the shipped `hubFromOptions` seam, full-state snapshot exchange, and the bespoke HTTP/SSE relay (the `Hub` interface, R2 keying/retry/conditional-put logic, blob GC, retention floor, and content-hash verification are all shipped and unit-tested);
+- the bespoke **HTTP/SSE relay** and full-state snapshot exchange (the live R2/S3 backend is shipped: the `aws-sdk-go-v2` S3 adapter is wired behind the `hubFromOptions` `r2://` seam, with the `Hub` interface, R2 keying/retry/conditional-put logic, blob GC, retention floor, and content-hash verification all shipped and unit-tested, and the same conformance contract proven against MinIO via an env-gated integration test);
 - production **remote device registration** and out-of-band fingerprint confirmation (the local trust plane and device-revoke rewrap are shipped); synced encrypted **env-bundle** exchange (draft-bundle exchange is shipped);
 - daemon, local socket API, FSEvents-specific Mac watcher, LaunchAgent/systemd installers;
 - OS-enforced agent sandboxing, project-env allowlists, and non-generic engine adapters;
@@ -168,7 +168,7 @@ Cloud-sync workstreams from the 2026-06-28 audit (`docs/audits/AUDIT_RECOMMENDAT
 
 - eager-clone materialization (`EAGER-*`) — `devstrap sync` reconstructs the whole `~/Code` tree by blobless/partial-cloning every repo from its existing remote up front with bounded concurrency and per-project failure isolation; env profiles hydrate; `node_modules`/build artifacts are rebuilt on hydrate (opt-in), never synced;
 - non-git/draft content sync (`DRAFT-*`) — a `.devstrapignore` compiler (`internal/ignore`) and age-encrypted, content-addressed `age_blob:<sha256>` bundles for non-git/draft folders pushed/pulled through the blob plane (`draft snapshot create`, `draft.snapshot.created` event);
-- cloud hub backend (`HUB-*`) — the two-plane zero-knowledge `Hub` interface (event log + content-addressed encrypted blob store) with the Cloudflare R2/S3 backend (`internal/hub`) and the file-backed backend retained for tests;
+- cloud hub backend (`HUB-*`) — the two-plane zero-knowledge `Hub` interface (event log + content-addressed encrypted blob store) with the Cloudflare R2/S3 backend (`internal/hub`, the `aws-sdk-go-v2` S3 adapter wired behind `hub: r2://<bucket>`) and the file-backed backend retained for tests;
 - cross-platform hardening (`XP-*`) — portable `devstrap run-loop` (scan → sync → materialize, no daemon); e2e testscript proving two-device materialization; headless key custody test; NFC/case-fold path invariant test;
 - multi-user future (`SCALE-*`) — documented-not-built hosting/scaling direction (Fly.io compute + R2 hub + managed Postgres control plane; control/data-plane split and cell-based tenancy);
 - fail-closed event verification on enrollment (`HUB-03`) — once any approved device exists, all non-local events require valid signatures from approved devices; device revoke re-encrypts affected blobs to the reduced recipient set, deletes superseded hub ciphertext when `--hub-file` is given, and flags secrets for rotation (`HUB-04`/`SEC-01`).

@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-28
+last_reviewed: 2026-06-30
 tracks_code: [.github/**, go.mod, go.sum, docs/audits/AUDIT_RECOMMENDATIONS.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md]
 ---
 # References
@@ -174,6 +174,8 @@ These sources back the cloud-sync architecture cycle: the "Dropbox experience fo
 - Backblaze B2 (S3-compatible): https://www.backblaze.com/docs/cloud-storage-s3-compatible-api
 - Amazon S3 API reference: https://docs.aws.amazon.com/AmazonS3/latest/API/Welcome.html
 - MinIO (self-hostable, S3-compatible; useful for a non-cloud Hub backend): https://min.io/docs/minio/linux/index.html
+- aws-sdk-go-v2 (shipped S3 adapter, `P5-HUB-01`) — `service/s3` client via `s3.New(s3.Options{...})` with `BaseEndpoint` + `UsePathStyle:true` for R2/MinIO, `aws.NopRetryer{}` so `R2Hub.Retry` is the single retry layer, and `aws.CredentialsProviderFunc` for an inline static-credentials closure (no `config.LoadDefaultConfig`/SSO/IMDS/STS chain): https://pkg.go.dev/github.com/aws/aws-sdk-go-v2 ; https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/service/s3 ; https://pkg.go.dev/github.com/aws/smithy-go
+- aws-sdk-go-v2 error handling — `smithy.APIError` (code/message) is the stable interface for mapped errors; `awshttp.ResponseError` carries the HTTP status for unmapped responses. The shipped `mapS3Error` classifies `NoSuchKey`/`NotFound`/404 to `ErrBlobNotFound`, `PreconditionFailed`/412 to `ErrPreconditionFailed`, 429/503/`SlowDown`/`TooManyRequests` to `ErrS3Throttle`, 500/502/504/`InternalError` to `ErrS3Transient`, and other API errors as terminal: https://pkg.go.dev/github.com/aws/smithy-go#APIError ; https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/aws/transport/http
 
 ### Agent-runner sandboxes (microVM isolation for the future control plane)
 
