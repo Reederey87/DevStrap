@@ -36,6 +36,11 @@ func newEnvCommand(stdout io.Writer, opts *options) *cobra.Command {
 // an age-encrypted blob, returning the number of bindings and the blob ref. It
 // is shared by `env capture` and `env rotate` (P5-PROD-03).
 func captureEnvProfile(ctx context.Context, store *state.Store, opts *options, project state.ProjectStatus, envFile, profileName string, literal bool) (nBindings int, ref string, nRecipients int, err error) {
+	// P5 review: enforce the git_repo guard in the shared helper so both
+	// `env capture` and `env rotate` reject non-git projects consistently.
+	if project.Type != "git_repo" {
+		return 0, "", 0, appError{code: exitInvalidConfig, err: fmt.Errorf("%s is %s, not git_repo", project.Path, project.Type)}
+	}
 	localPath := project.LocalPath
 	if localPath == "" {
 		localPath = filepath.Join(opts.paths().Root, filepath.FromSlash(project.Path))

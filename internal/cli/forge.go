@@ -138,45 +138,55 @@ func resolveForgeHost(remoteURL string) string {
 // detection then treats the literal alias as the host).
 func resolveSSHHostAlias(alias string) string {
 	alias = strings.ToLower(strings.TrimSpace(alias))
-	if alias == "" || strings.ContainsAny(alias, " /\t") {
+	// Reject empty, whitespace/path-bearing, and leading-dash aliases. The
+	// leading-dash check (P5 review) prevents an attacker-influenced remote host
+	// (a host string from a synced namespace event) from being parsed as an
+	// `ssh -G` option (e.g. `-Fsomefile`); ssh does not honor `--` as an
+	// end-of-options guard, so rejection is the robust fix.
+	if alias == "" || strings.ContainsAny(alias, " /\t") || strings.HasPrefix(alias, "-") {
 		return ""
 	}
-	// P5-CLI-04: ssh -G echoes the alias as `hostname` when there is no override,
-	// so a result equal to the alias means "no real host" — fall through to the
-	// file parser (which also returns "" in that case but stays the tested path).
-	if host := sshDashGHostName(alias); host != "" && host != alias {
+	// P5-CLI-04: prefer `ssh -G`, which is authoritative when it finds a real
+	// override (it honors Include/Match/key=value/tokens the file parser ignores).
+	// `ssh -G` echoes the alias as `hostname` when there is no override, so a
+	// result equal to the alias means "no override found" — fall back to the file
+	// parser (which honors negation, P5 review) rather than guessing.
+	if host, ok := sshDashGHostName(alias); ok && host != alias {
 		return host
 	}
 	return resolveSSHHostAliasFromFile(alias)
 }
 
-// sshDashGHostName runs `ssh -G <alias>` and returns its resolved hostname
-// (lowercased), or "" if ssh is unavailable or errors (P5-CLI-04). It is bounded
-// by a short timeout and a sanitized environment; ssh -G only resolves config
-// and does not connect.
-func sshDashGHostName(alias string) string {
+// sshDashGHostName runs `ssh -G <alias>` and returns (resolvedHostname, ok).
+// ok is true only when ssh ran successfully; the hostname is lowercased and
+// equals the alias when there is no HostName override. ok is false when ssh is
+// unavailable or errors, signalling the caller to fall back to the file parser
+// (P5-CLI-04). It is bounded by a short timeout and a sanitized environment;
+// `ssh -G` only resolves config and does not connect.
+func sshDashGHostName(alias string) (string, bool) {
 	sshPath, err := exec.LookPath("ssh")
 	if err != nil {
-		return ""
+		return "", false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	//nolint:gosec // alias is validated (no spaces/slashes) and ssh -G only resolves config.
+	//nolint:gosec // alias is validated (no spaces/slashes/leading-dash) and ssh -G only resolves config.
 	cmd := exec.CommandContext(ctx, sshPath, "-G", alias)
 	if env, eerr := childenv.FromOS(childenv.BasicAllowlist(), nil); eerr == nil {
 		cmd.Env = env
 	}
 	out, err := cmd.Output()
 	if err != nil {
-		return ""
+		return "", false
 	}
 	for _, line := range strings.Split(string(out), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) >= 2 && strings.ToLower(fields[0]) == "hostname" {
-			return strings.ToLower(fields[1])
+			return strings.ToLower(fields[1]), true
 		}
 	}
-	return ""
+	// ssh ran but printed no hostname line (unexpected); treat as no override.
+	return alias, true
 }
 
 // resolveSSHHostAliasFromFile looks up a host alias in ~/.ssh/config and returns
@@ -217,10 +227,22 @@ func resolveSSHHostAliasFromFile(alias string) string {
 			}
 			inMatch = false
 			hostName = ""
+			// P5 review: honor OpenSSH negation. A `!pattern` that matches the
+			// alias vetoes the whole Host block even if a positive pattern also
+			// matches, so the file parser does not return a host ssh would
+			// exclude.
+			matched, negated := false, false
 			for _, pat := range fields[1:] {
-				if sshHostMatch(pat, alias) {
-					inMatch = true
+				if strings.HasPrefix(pat, "!") {
+					if sshHostMatch(pat[1:], alias) {
+						negated = true
+					}
+				} else if sshHostMatch(pat, alias) {
+					matched = true
 				}
+			}
+			if matched && !negated {
+				inMatch = true
 			}
 		case "hostname":
 			if inMatch && hostName == "" {

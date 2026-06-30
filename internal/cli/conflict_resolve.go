@@ -70,15 +70,15 @@ func enactSamePathResolution(ctx context.Context, store *state.Store, opts *opti
 		if err != nil {
 			return "", err
 		}
-		// Switching the remote at a path is a delete-then-add so the re-keyed
-		// remote does not re-trigger the same-path reconcile on peers (it would
-		// otherwise re-open a fresh conflict). Re-clone is required, so reset the
-		// materialization state by passing the local path + skeleton.
-		if err := deleteResolvedProject(ctx, store, info.Path); err != nil {
-			return "", err
-		}
+		// Switch the remote at the path with a SINGLE dominating project.updated
+		// event (P5 review): a delete-then-add would tombstone the project on
+		// every device and, if the add step failed, leave it deleted with no
+		// re-add (data loss). One event is atomic. On peers this may transiently
+		// re-open a same-path conflict that the same dominating event then wins
+		// (the LWW model) — cosmetic, not data loss. Re-clone is required, so the
+		// local path is passed to reset materialization to skeleton.
 		localPath := filepath.Join(opts.paths().Root, filepath.FromSlash(info.Path))
-		if err := upsertResolvedProject(ctx, store, opts, dssync.EventProjectAdded, chosen, localPath); err != nil {
+		if err := upsertResolvedProject(ctx, store, opts, dssync.EventProjectUpdated, chosen, localPath); err != nil {
 			return "", err
 		}
 		return fmt.Sprintf("%s switched to %s (re-materialize to clone it)", info.Path, chosen.RemoteKey), nil

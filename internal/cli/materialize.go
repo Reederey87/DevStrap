@@ -360,12 +360,15 @@ func runRebuildCommand(ctx context.Context, dir, command string, args []string) 
 	cmd.Stdin = nil
 	cmd.Stdout = nil
 	cmd.Stderr = nil
-	// P5-SEC-03: dependency rebuild runs package-manager lifecycle scripts
-	// (npm/pnpm postinstall, etc.) which are arbitrary code. Every other
-	// subprocess in the tree is launched through childenv; do the same here so
-	// ambient OP_*/cloud/CI credentials and dangerous LD_*/DYLD_*/NODE_OPTIONS
-	// names are stripped instead of being handed to untrusted lifecycle scripts.
-	env, err := childenv.FromOS(childenv.BasicAllowlist(), nil)
+	// P5-SEC-03 (+ P5 review): dependency rebuild runs package-manager lifecycle
+	// scripts (npm/pnpm postinstall, etc.) which are arbitrary code driven by an
+	// attacker-influenceable lockfile/package.json from a cloned repo. Mirror the
+	// agent runner's threat model (SECU-02): use AgentAllowlist — which omits
+	// SSH_AUTH_SOCK and HOME — and repoint HOME to the project dir, so a malicious
+	// postinstall cannot authenticate via the user's live ssh-agent or read the
+	// real ~/.ssh, ~/.aws, ~/.npmrc, or ~/.config/gh. Dangerous
+	// LD_*/DYLD_*/NODE_OPTIONS names are stripped too.
+	env, err := childenv.FromOS(childenv.AgentAllowlist(), map[string]string{"HOME": dir})
 	if err != nil {
 		return fmt.Errorf("build rebuild environment: %w", err)
 	}

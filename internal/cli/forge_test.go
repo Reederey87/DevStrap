@@ -76,6 +76,33 @@ func TestSSHHostMatch(t *testing.T) {
 	}
 }
 
+// P5 review: the file parser must honor OpenSSH negation so it never returns a
+// host that ssh would exclude.
+func TestSSHHostAliasFromFileHonorsNegation(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := "Host *gitlab* !work-gitlab\n  HostName real.gitlab.com\n"
+	if err := os.WriteFile(filepath.Join(sshDir, "config"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// work-gitlab is negated → no override.
+	if got := resolveSSHHostAliasFromFile("work-gitlab"); got != "" {
+		t.Errorf("resolveSSHHostAliasFromFile(work-gitlab) = %q, want empty (negated by !work-gitlab)", got)
+	}
+	// A non-negated sibling still matches the glob.
+	if got := resolveSSHHostAliasFromFile("dev-gitlab"); got != "real.gitlab.com" {
+		t.Errorf("resolveSSHHostAliasFromFile(dev-gitlab) = %q, want real.gitlab.com", got)
+	}
+	// P5 review: a leading-dash alias is rejected (ssh-option injection guard).
+	if got := resolveSSHHostAlias("-Fmalicious"); got != "" {
+		t.Errorf("resolveSSHHostAlias(-Fmalicious) = %q, want empty (leading-dash rejected)", got)
+	}
+}
+
 func TestResolveSSHHostAlias(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

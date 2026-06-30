@@ -1676,7 +1676,7 @@ SELECT id, namespace_id, blob_ref, byte_size, file_count,
        COALESCE(source_event_hlc, 0), COALESCE(source_event_device_id, ''), COALESCE(source_event_id, '')
 FROM draft_snapshots
 WHERE namespace_id = ?
-ORDER BY created_at DESC, id DESC
+ORDER BY COALESCE(source_event_hlc, 0) DESC, created_at DESC, id DESC
 LIMIT 1;
 `, namespaceID).Scan(&snap.ID, &snap.NamespaceID, &snap.BlobRef, &snap.ByteSize, &snap.FileCount,
 		&snap.SourceEventHLC, &snap.SourceEventDeviceID, &snap.SourceEventID)
@@ -1952,6 +1952,42 @@ func (s *Store) ClearPendingHubDelete(ctx context.Context, ref string) error {
 		return fmt.Errorf("clear pending hub delete: %w", err)
 	}
 	return nil
+}
+
+// RetainedBlobRefs returns the blob refs that remain referenced AFTER pruning
+// draft snapshots to the latest `keep` per project (P5 review): env binding refs
+// plus the top-`keep` draft snapshot refs per namespace. `hub gc --dry-run` uses
+// this so its preview matches what a real run (prune + delete) would leave
+// referenced, instead of counting soon-to-be-pruned superseded snapshots as live.
+func (s *Store) RetainedBlobRefs(ctx context.Context, keep int) ([]string, error) {
+	if keep < 1 {
+		keep = 1
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT DISTINCT encrypted_value_ref FROM secret_bindings WHERE encrypted_value_ref LIKE 'age_blob:%'
+UNION
+SELECT blob_ref FROM (
+  SELECT blob_ref, ROW_NUMBER() OVER (
+    PARTITION BY namespace_id
+    ORDER BY COALESCE(source_event_hlc, 0) DESC, created_at DESC, id DESC
+  ) AS rn
+  FROM draft_snapshots
+  WHERE blob_ref LIKE 'age_blob:%'
+) WHERE rn <= ?;
+`, keep)
+	if err != nil {
+		return nil, fmt.Errorf("list retained blob refs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var refs []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, fmt.Errorf("scan retained blob ref: %w", err)
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
 }
 
 // UpdateBlobRef repoints every reference from oldRef to newRef across

@@ -44,7 +44,7 @@ Validated:
 - `golangci-lint run` (v2.12.0) — 0 issues (with the new `bodyclose`/`sqlclosecheck` enabled).
 - `GOCACHE=… DEVSTRAP_NO_KEYCHAIN=1 go test -race ./...` — all packages green.
 - `go run ./cmd/spec-drift --base origin/main --head HEAD` after this work-log + spec updates.
-- Adversarial multi-agent review of the diff (5 dimension reviewers + per-finding verification).
+- Adversarial multi-agent review of the diff (5 dimension reviewers + per-finding verification) surfaced 7 confirmed defects (3 P2, 4 P3), all fixed before handoff: dependency-rebuild now uses `AgentAllowlist`+`HOME=projectdir` (was leaking ssh-agent/real HOME to lifecycle scripts); `conflicts resolve` enacts BEFORE emitting the `conflict.resolved` event (a failed/inapplicable resolution no longer diverges peers) and `--keep-remote` is a single atomic `project.updated` (no delete-then-add tombstone-without-re-add window); `LatestDraftSnapshot` ordering aligned with `PruneDraftSnapshots` (HLC-first) so prune can't delete the materialized snapshot; `hub gc --dry-run` uses `RetainedBlobRefs` for an accurate preview; SSH alias resolution rejects leading-dash aliases (option-injection guard) and the file parser honors OpenSSH negation; `env rotate`/`env capture` share the `git_repo` guard.
 
 Follow-ups (deliberately deferred, documented with design):
 - `P5-SYNC-01` (open, P2, latent) — decouple the transport cursor from logical HLC via a hub-assigned ingestion position; a core-engine change best landed as its own PR with multi-device tests, paired with `SYNC-02`/`HUB-11` snapshot/compaction (design recorded in `spec/07`).

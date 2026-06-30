@@ -131,13 +131,21 @@ func newConflictsResolveCommand(stdout io.Writer, opts *options) *cobra.Command 
 			if err != nil {
 				return err
 			}
-			// PROD-06: emit the sync event BEFORE marking the row resolved so a
-			// failure between the two operations is recoverable. If the event
-			// emits but the resolve fails, the row stays open and the user can
-			// retry `resolve` (re-emitting a duplicate event, which the apply
-			// handler treats idempotently). If the resolve succeeded first and
-			// the event then failed, the "already resolved" guard would block
-			// retry and cross-device convergence would be lost.
+			// P5-SYNC-04 (+ P5 review): ENACT the choice on namespace state FIRST.
+			// If enaction fails or is inapplicable for this conflict type (e.g.
+			// --keep-both on a delete conflict, or a same_path conflict with no
+			// recoverable alternate variant), return BEFORE emitting the
+			// conflict.resolved event — otherwise peers would converge their
+			// open-conflict count to "resolved" for a resolution this device never
+			// applied, diverging the very count PROD-06/P5-SYNC-04 converge.
+			note, err := enactConflictResolution(cmd.Context(), store, opts, c, action)
+			if err != nil {
+				return appError{code: exitConflict, err: fmt.Errorf("apply resolution: %w", err)}
+			}
+			// Then emit the conflict.resolved event so the resolved state syncs,
+			// then mark the local row resolved. The event before ResolveConflict
+			// keeps a mid-failure recoverable: the row stays open and `resolve`
+			// can be retried (the apply handler treats the event idempotently).
 			if _, err := dssync.CreateConflictResolvedEvent(cmd.Context(), store, dssync.ConflictResolvedPayload{
 				ConflictID:  c.ID,
 				NamespaceID: c.NamespaceID,
@@ -146,13 +154,6 @@ func newConflictsResolveCommand(stdout io.Writer, opts *options) *cobra.Command 
 				Action:      action,
 			}); err != nil {
 				return fmt.Errorf("record conflict.resolved event: %w", err)
-			}
-			// P5-SYNC-04: enact the choice on namespace state (emit a dominating
-			// project.* event + mutate locally) so --keep-* is authoritative and
-			// converges, instead of only being recorded.
-			note, err := enactConflictResolution(cmd.Context(), store, opts, c, action)
-			if err != nil {
-				return fmt.Errorf("apply resolution: %w", err)
 			}
 			if err := store.ResolveConflict(cmd.Context(), c.ID, string(raw)); err != nil {
 				return err

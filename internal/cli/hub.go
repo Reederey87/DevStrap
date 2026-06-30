@@ -90,10 +90,11 @@ func newHubGCCommand(stdout io.Writer, opts *options) *cobra.Command {
 
 // hubGC reclaims superseded blobs (P5-HUB-02). It first prunes superseded draft
 // snapshot rows (keeping the latest `keep` per project) so their blobs become
-// unreferenced, then lists every blob on the hub and deletes those no current
+// unreferenced, then lists every blob on the hub and deletes those no retained
 // secret binding or draft snapshot references. It is the hub-side counterpart to
 // gcUnreferencedBlobs (which only reclaims the LOCAL cache). A dry run prunes
-// nothing and only reports what would be deleted.
+// nothing but uses RetainedBlobRefs so the preview reflects post-prune state and
+// matches what a real run would delete (P5 review).
 func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync.Hub, keep int, dryRun bool) (pruned, removed int, err error) {
 	if !dryRun {
 		pruned, err = store.PruneDraftSnapshots(ctx, keep)
@@ -105,7 +106,11 @@ func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync
 	if err != nil {
 		return pruned, 0, fmt.Errorf("list hub blobs: %w", err)
 	}
-	refs, err := store.AllBlobRefs(ctx)
+	// RetainedBlobRefs is the post-prune referenced set: env binding refs + the
+	// kept (top-`keep`) draft snapshot refs. Using it for both dry-run and real
+	// run makes the dry-run preview accurate (a real run prunes first, after
+	// which AllBlobRefs == RetainedBlobRefs).
+	refs, err := store.RetainedBlobRefs(ctx, keep)
 	if err != nil {
 		return pruned, 0, err
 	}
