@@ -74,6 +74,14 @@ jobs:
         run: go build ./...
       - name: Test
         run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+      - name: Coverage floor
+        # P5-QUAL-04: consume the coverage profile instead of writing and
+        # discarding it. Gate at a conservative floor so under-tested new code
+        # (run-loop, draft, materialize variants) can't silently drop coverage.
+        run: |
+          total=$(go tool cover -func=coverage.out | tail -1 | awk '{print $3}' | tr -d '%')
+          echo "total coverage: ${total}%"
+          awk -v t="$total" 'BEGIN { if (t+0 < 50.0) { printf("coverage %.1f%% is below the 50%% floor\n", t); exit 1 } }'
       - name: Module hygiene
         run: |
           go mod tidy

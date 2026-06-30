@@ -25,9 +25,6 @@ func newSyncCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Use:   "sync",
 		Short: "Push and pull namespace events and materialize the tree",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if hubFile == "" {
-				return appError{code: exitInvalidConfig, err: fmt.Errorf("--hub-file is required until the production hub exists")}
-			}
 			return runSyncCycle(cmd.Context(), stdout, opts, hubFile, namespaceOnly, dryRun)
 		},
 	}
@@ -46,8 +43,11 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 		return err
 	}
 	defer closeStore(store)
-	hub := dssync.FileHub{Path: hubFile}
-	hubID := "file:" + hubFile
+	// P5-HUB-01: resolve the hub through the single selection seam.
+	hub, hubID, err := hubFromOptions(opts, hubFile)
+	if err != nil {
+		return appError{code: exitInvalidConfig, err: err}
+	}
 	// SYNC-04: push cursor bounds the push side so a sync cycle re-uploads
 	// only new local-origin events (HLC > push cursor), not the entire event
 	// log including remote-origin events the hub already holds from their
@@ -84,6 +84,14 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 		if err := store.AdvanceHubCursor(ctx, "push:"+hubID, maxPushHLC); err != nil {
 			return err
 		}
+	}
+	// P5-PROD-02: now that local events (including any superseding rewrap event)
+	// and referenced blobs are on the hub, drain blobs queued by a prior
+	// local-only revoke so the old ciphertext is finally removed.
+	if drained, derr := drainPendingHubDeletes(ctx, store, hub); derr != nil {
+		logging.Logger(ctx).Warn("sync: pending hub delete drain failed", "err", derr.Error())
+	} else if drained > 0 {
+		_, _ = fmt.Fprintf(stdout, "Removed %d superseded blob(s) from the hub\n", drained)
 	}
 	// EAGER-02: cursor-based incremental pull.
 	cursor, err := store.HubCursor(ctx, hubID)
@@ -127,13 +135,14 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 	if err != nil {
 		return err
 	}
-	results := materializePass(ctx, store, opts, projects)
+	// sync always materializes with a blobless/partial clone (EAGER-01).
+	results := materializePass(ctx, store, opts, projects, true)
 	// HUB-05: reclaim locally-cached blobs no longer referenced.
 	if removed, gcErr := gcUnreferencedBlobs(ctx, store, opts.paths()); gcErr == nil && removed > 0 {
 		_, _ = fmt.Fprintf(stdout, "GC'd %d unreferenced blob(s)\n", removed)
 	}
-	_, err = fmt.Fprintf(stdout, "Synced events: pushed %d, pulled %d; materialized %d/%d projects\n",
-		len(localEvents), len(remoteEvents), results.succeeded, results.total)
+	_, err = fmt.Fprintf(stdout, "Synced events: pushed %d, pulled %d; materialized %d/%d projects (%d skipped)\n",
+		len(localEvents), len(remoteEvents), results.succeeded, results.total, results.skipped)
 	return err
 }
 

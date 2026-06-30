@@ -28,6 +28,116 @@ func newEnvCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.AddCommand(newEnvCaptureCommand(stdout, opts))
 	cmd.AddCommand(newEnvHydrateCommand(stdout, opts))
 	cmd.AddCommand(newEnvBindCommand(stdout, opts))
+	cmd.AddCommand(newEnvRotateCommand(stdout, opts))
+	return cmd
+}
+
+// captureEnvProfile reads, parses, encrypts, and stores a project's env file as
+// an age-encrypted blob, returning the number of bindings and the blob ref. It
+// is shared by `env capture` and `env rotate` (P5-PROD-03).
+func captureEnvProfile(ctx context.Context, store *state.Store, opts *options, project state.ProjectStatus, envFile, profileName string, literal bool) (nBindings int, ref string, nRecipients int, err error) {
+	// P5 review: enforce the git_repo guard in the shared helper so both
+	// `env capture` and `env rotate` reject non-git projects consistently.
+	if project.Type != "git_repo" {
+		return 0, "", 0, appError{code: exitInvalidConfig, err: fmt.Errorf("%s is %s, not git_repo", project.Path, project.Type)}
+	}
+	localPath := project.LocalPath
+	if localPath == "" {
+		localPath = filepath.Join(opts.paths().Root, filepath.FromSlash(project.Path))
+	}
+	envPath := envFile
+	if !filepath.IsAbs(envPath) {
+		envPath = filepath.Join(localPath, envPath)
+	}
+	raw, err := readEnvFile(envPath)
+	if err != nil {
+		return 0, "", 0, err
+	}
+	bindings, err := envfile.ParseBytes(raw, envfile.Options{Literal: literal})
+	if err != nil {
+		return 0, "", 0, appError{code: exitInvalidConfig, err: err}
+	}
+	device, err := store.CurrentDevice(ctx)
+	if err != nil {
+		return 0, "", 0, err
+	}
+	recipients, err := envRecipients(ctx, store, device)
+	if err != nil {
+		return 0, "", 0, err
+	}
+	ciphertext, ref, err := envbundle.Encrypt(bindings, recipients)
+	if err != nil {
+		return 0, "", 0, err
+	}
+	if err := writeEnvBlob(opts.paths(), ref, ciphertext); err != nil {
+		return 0, "", 0, err
+	}
+	varNames := make([]string, 0, len(bindings))
+	for _, binding := range bindings {
+		varNames = append(varNames, binding.Name)
+	}
+	if _, err := store.SaveCapturedEnvProfile(ctx, project.ID, profileName, varNames, ref); err != nil {
+		return 0, "", 0, err
+	}
+	if err := ensureIgnored(localPath, envPath); err != nil {
+		return 0, "", 0, err
+	}
+	return len(bindings), ref, len(recipients), nil
+}
+
+func newEnvRotateCommand(stdout io.Writer, opts *options) *cobra.Command {
+	var literal bool
+	var profileName string
+	var all bool
+	cmd := &cobra.Command{
+		Use:   "rotate [path] [env-file]",
+		Short: "Re-capture a rotated secret to the current recipients and clear its needs-rotation flag (P5-PROD-03)",
+		Args:  cobra.MaximumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := opts.openState(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer closeStore(store)
+			if all {
+				if len(args) != 0 {
+					return appError{code: exitUsage, err: fmt.Errorf("--all takes no path argument")}
+				}
+				cleared, err := store.ClearAllBindingRotation(cmd.Context())
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprintf(stdout, "Cleared the needs-rotation flag on %d binding(s). Rotate the secrets at their source first.\n", cleared)
+				return err
+			}
+			if len(args) == 0 {
+				return appError{code: exitUsage, err: fmt.Errorf("pass a <path> (and optionally an env-file to re-capture) or --all")}
+			}
+			project, err := store.ProjectByPath(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			if len(args) == 2 {
+				// Re-capture the rotated value to the current recipient set.
+				n, ref, nRecipients, err := captureEnvProfile(cmd.Context(), store, opts, project, args[1], profileName, literal)
+				if err != nil {
+					return err
+				}
+				if _, err := fmt.Fprintf(stdout, "Re-captured %d env variable(s) for %s into %s for %d recipient device(s)\n", n, project.Path, ref, nRecipients); err != nil {
+					return err
+				}
+			}
+			cleared, err := store.ClearRotationForProject(cmd.Context(), project.ID)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(stdout, "Cleared the needs-rotation flag on %d binding(s) for %s\n", cleared, project.Path)
+			return err
+		},
+	}
+	cmd.Flags().BoolVar(&literal, "literal", false, "capture interpolation-looking values as literal text")
+	cmd.Flags().StringVar(&profileName, "profile", "default", "env profile name")
+	cmd.Flags().BoolVar(&all, "all", false, "clear the needs-rotation flag on all bindings (after rotating at source)")
 	return cmd
 }
 
@@ -51,48 +161,11 @@ func newEnvCaptureCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if project.Type != "git_repo" {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("%s is %s, not git_repo", project.Path, project.Type)}
 			}
-			localPath := project.LocalPath
-			if localPath == "" {
-				localPath = filepath.Join(opts.paths().Root, filepath.FromSlash(project.Path))
-			}
-			envPath := args[1]
-			if !filepath.IsAbs(envPath) {
-				envPath = filepath.Join(localPath, envPath)
-			}
-			raw, err := readEnvFile(envPath)
+			n, ref, nRecipients, err := captureEnvProfile(cmd.Context(), store, opts, project, args[1], profileName, literal)
 			if err != nil {
 				return err
 			}
-			bindings, err := envfile.ParseBytes(raw, envfile.Options{Literal: literal})
-			if err != nil {
-				return appError{code: exitInvalidConfig, err: err}
-			}
-			device, err := store.CurrentDevice(cmd.Context())
-			if err != nil {
-				return err
-			}
-			recipients, err := envRecipients(cmd.Context(), store, device)
-			if err != nil {
-				return err
-			}
-			ciphertext, ref, err := envbundle.Encrypt(bindings, recipients)
-			if err != nil {
-				return err
-			}
-			if err := writeEnvBlob(opts.paths(), ref, ciphertext); err != nil {
-				return err
-			}
-			varNames := make([]string, 0, len(bindings))
-			for _, binding := range bindings {
-				varNames = append(varNames, binding.Name)
-			}
-			if _, err := store.SaveCapturedEnvProfile(cmd.Context(), project.ID, profileName, varNames, ref); err != nil {
-				return err
-			}
-			if err := ensureIgnored(localPath, envPath); err != nil {
-				return err
-			}
-			_, err = fmt.Fprintf(stdout, "Captured %d env variables for %s into %s for %d recipient device(s)\n", len(bindings), project.Path, ref, len(recipients))
+			_, err = fmt.Fprintf(stdout, "Captured %d env variables for %s into %s for %d recipient device(s)\n", n, project.Path, ref, nRecipients)
 			return err
 		},
 	}

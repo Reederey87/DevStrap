@@ -27,6 +27,32 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-06-30 — Implement the fifth-pass (PASS5) open backlog
+
+Changed (grouped by batch; IDs reference `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-29_PASS5.md` and PASS4 Appendix A):
+
+- **Security (P1 + P2/P3):** `P5-SEC-01` (P1) — revoke rewrap emits a superseding `draft.snapshot.created` event and pushes event+blob to the hub before deleting the old ciphertext (`rewrapHubCleanup` ordering), so peers never replay a deleted ref. `P5-SEC-04` — env (local-only) vs draft (hub-synced) blob refs partitioned (`EnvBlobRefs`/`DraftBlobRefs`); env blobs never uploaded/deleted on the hub. `P5-SEC-02` — `draftbundle.ExtractWithLimits` charges the decompression budget on every tar entry and rejects unknown types. `P5-SEC-03` — `rebuildDependencies` runs through `childenv`. `P5-SEC-05` — `redact.Writer` caps its line buffer at 1 MiB (`emitLine` helper).
+- **Sync convergence:** `P5-SYNC-02` — `ResolveConflictByFingerprint` drops the device-local `namespace_id` from its match. `P5-SYNC-03` — `RenameProject` leaves a tombstone at the old path. `P5-SYNC-04` — `conflicts resolve --keep-*` is authoritative (emits dominating `project.*` events via `internal/cli/conflict_resolve.go`; keep-remote delete-then-adds the alternate; keep-both adds a sibling). `P5-QUAL-01` — `materialize` classifies "no draft bundle yet" as skipped, not failed.
+- **Hub:** `P5-HUB-01` — `hubFromOptions` selection seam routes sync/run-loop/hub-gc; r2:// returns a not-yet-wired error. `P5-HUB-02` — `devstrap hub gc` + `Hub.ListBlobs` + `PruneDraftSnapshots`. `P5-HUB-03` — `R2Hub.RetentionHLC` floor + `ErrSnapshotRequired`. `P5-HUB-04` — bounded-concurrency `R2Hub.Pull`.
+- **Product:** `P5-PROD-01` reachable "ready" status; `P5-PROD-02` `pending_hub_deletes` queue (migration 00011) drained on sync; `P5-PROD-03` `devstrap env rotate`; `P5-PROD-04` README documents `clone`; `P5-PROD-05` `doctor --remote` + `status --watch`.
+- **CLI/DX:** `P5-CLI-02` thread `--partial`; `P5-CLI-03` `MarkFlagsMutuallyExclusive` on clone; `P5-CLI-04` `ssh -G` host-alias resolution; `P5-CLI-05` run-loop/devices stderr + consecutive-failure exit; `P5-DX-01` dynamic shell completion (paths + enum flags); `P5-CLI-01` `options.render` seam wired into `materialize` (broader rollout deferred).
+- **Data/docs/CI:** `P5-DATA-01` spec/12 migration inventory; `P5-DATA-02` migration 00012 (partial UNIQUE index + `INSERT OR IGNORE`); `P5-DOC-01` spec/07 draft/hub truth; `P5-DOC-02` spec/00 de-contradicted + command inventory; `P5-DX-02` `TestMigrationsDocumented` + AGENTS.md note; `P5-QUAL-02` run-loop/draft testscripts + jitter unit test; `P5-QUAL-03` clamped jitter bound; `P5-QUAL-04` CI coverage floor (50%); `P4-QUAL-07` `bodyclose`+`sqlclosecheck` linters; `P4-SEC-05` SHA-pin `goreleaser-action`.
+- Schema version 10 -> 12 (migrations 00011, 00012).
+
+Validated:
+- `gofmt -l cmd internal` (clean), `go vet ./...`, `go build ./...`, `go mod tidy` (no diff).
+- `golangci-lint run` (v2.12.0) — 0 issues (with the new `bodyclose`/`sqlclosecheck` enabled).
+- `GOCACHE=… DEVSTRAP_NO_KEYCHAIN=1 go test -race ./...` — all packages green.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` after this work-log + spec updates.
+- Adversarial multi-agent review of the diff (5 dimension reviewers + per-finding verification) surfaced 7 confirmed defects (3 P2, 4 P3), all fixed before handoff: dependency-rebuild now uses `AgentAllowlist`+`HOME=projectdir` (was leaking ssh-agent/real HOME to lifecycle scripts); `conflicts resolve` enacts BEFORE emitting the `conflict.resolved` event (a failed/inapplicable resolution no longer diverges peers) and `--keep-remote` is a single atomic `project.updated` (no delete-then-add tombstone-without-re-add window); `LatestDraftSnapshot` ordering aligned with `PruneDraftSnapshots` (HLC-first) so prune can't delete the materialized snapshot; `hub gc --dry-run` uses `RetainedBlobRefs` for an accurate preview; SSH alias resolution rejects leading-dash aliases (option-injection guard) and the file parser honors OpenSSH negation; `env rotate`/`env capture` share the `git_repo` guard.
+
+Follow-ups (deliberately deferred, documented with design):
+- `P5-SYNC-01` (open, P2, latent) — decouple the transport cursor from logical HLC via a hub-assigned ingestion position; a core-engine change best landed as its own PR with multi-device tests, paired with `SYNC-02`/`HUB-11` snapshot/compaction (design recorded in `spec/07`).
+- `P5-HUB-01` remaining step — the production `aws-sdk-go-v2` S3 client adapter + MinIO/LocalStack integration test (the seam, keying, retry, conditional-put, and GC logic are shipped and unit-tested).
+- `P5-CLI-01` — extend the `render` seam to all leaf commands (or reject `--json` where unsupported).
+- `P5-ARCH-01` — convergence is covered by new property-style apply tests; the formal pure `Decide(state,event)` extraction remains.
+- PASS4 carried XL items: `SEC-07` envelope encryption (the structural fix for the revoke/rewrap model), `GIT-03` OS-enforced agent sandbox, `SEC-02`/`SEC-04` at-rest map encryption + fail-closed enrollment, `SYNC-02`/`HUB-11` compaction.
+
 ## 2026-06-29 — Consolidate audit files into docs/audits/ + status ledger (P5-PROC-01)
 
 Changed:

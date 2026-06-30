@@ -1055,6 +1055,16 @@ WHERE id = ?;
 	if err != nil {
 		return 0, fmt.Errorf("apply rename: %w", err)
 	}
+	// P5-SYNC-03: leave a tombstone at the old path stamped with the rename
+	// HLC. The source row was re-keyed in place, so without this the old
+	// path_key vanishes with no tombstone and a stale or cross-batch add/update
+	// targeting the old path (even one with a lower HLC) would find no active
+	// row and no tombstone, then resurrect a ghost project. The tombstone makes
+	// renamed-away paths HLC-gated by the same TombstoneHLC guard as deletes; a
+	// legitimately newer add/update at the old path still re-creates it.
+	if err := tx.TombstoneProject(ctx, oldPK.Display, event.HLC); err != nil {
+		return 0, fmt.Errorf("tombstone renamed-away path: %w", err)
+	}
 	return RenameApplied, nil
 }
 
@@ -1126,7 +1136,7 @@ SELECT id FROM draft_snapshots WHERE namespace_id = ? AND source_event_id = ?;
 		return err
 	}
 	if _, err := tx.tx.ExecContext(ctx, `
-INSERT INTO draft_snapshots (id, namespace_id, blob_ref, byte_size, file_count, source_event_hlc, source_event_device_id, source_event_id, created_at)
+INSERT OR IGNORE INTO draft_snapshots (id, namespace_id, blob_ref, byte_size, file_count, source_event_hlc, source_event_device_id, source_event_id, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
 `, snapID, namespaceID, blobRef, byteSize, fileCount, event.HLC, event.DeviceID, event.ID, now); err != nil {
 		return fmt.Errorf("insert draft snapshot: %w", err)
@@ -1597,6 +1607,41 @@ WHERE encrypted_value_ref IS NOT NULL AND needs_rotation = 0;
 	return int(n), nil
 }
 
+// ClearRotationForProject clears the needs_rotation flag on a project's env
+// bindings (P5-PROD-03), used after `devstrap env rotate` re-captures the value
+// at its rotated source. Returns the number of bindings cleared.
+func (s *Store) ClearRotationForProject(ctx context.Context, namespaceID string) (int, error) {
+	res, err := s.db.ExecContext(ctx, `
+UPDATE secret_bindings
+SET needs_rotation = 0, updated_at = ?
+WHERE needs_rotation = 1
+  AND env_profile_id IN (SELECT id FROM env_profiles WHERE namespace_id = ?);
+`, timestampNow(), namespaceID)
+	if err != nil {
+		return 0, fmt.Errorf("clear rotation for project: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("clear rotation rows: %w", err)
+	}
+	return int(n), nil
+}
+
+// ClearAllBindingRotation clears the needs_rotation flag on every binding
+// (P5-PROD-03 `--all`), used when the operator asserts all flagged secrets have
+// been rotated at their source. Returns the number of bindings cleared.
+func (s *Store) ClearAllBindingRotation(ctx context.Context) (int, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE secret_bindings SET needs_rotation = 0, updated_at = ? WHERE needs_rotation = 1;`, timestampNow())
+	if err != nil {
+		return 0, fmt.Errorf("clear all rotation flags: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("clear all rotation rows: %w", err)
+	}
+	return int(n), nil
+}
+
 // CountSecretBindingsNeedingRotation reports how many secret values are flagged
 // for rotation (e.g. after a device revocation).
 func (s *Store) CountSecretBindingsNeedingRotation(ctx context.Context) (int, error) {
@@ -1631,7 +1676,7 @@ SELECT id, namespace_id, blob_ref, byte_size, file_count,
        COALESCE(source_event_hlc, 0), COALESCE(source_event_device_id, ''), COALESCE(source_event_id, '')
 FROM draft_snapshots
 WHERE namespace_id = ?
-ORDER BY created_at DESC, id DESC
+ORDER BY COALESCE(source_event_hlc, 0) DESC, created_at DESC, id DESC
 LIMIT 1;
 `, namespaceID).Scan(&snap.ID, &snap.NamespaceID, &snap.BlobRef, &snap.ByteSize, &snap.FileCount,
 		&snap.SourceEventHLC, &snap.SourceEventDeviceID, &snap.SourceEventID)
@@ -1665,7 +1710,7 @@ SELECT id FROM draft_snapshots WHERE namespace_id = ? AND source_event_id = ?;
 			return nil // idempotent: this event's snapshot is already recorded
 		}
 		if _, err := tx.tx.ExecContext(ctx, `
-INSERT INTO draft_snapshots (id, namespace_id, blob_ref, byte_size, file_count, source_event_hlc, source_event_device_id, source_event_id, created_at)
+INSERT OR IGNORE INTO draft_snapshots (id, namespace_id, blob_ref, byte_size, file_count, source_event_hlc, source_event_device_id, source_event_id, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
 `, snapID, namespaceID, blobRef, byteSize, fileCount, event.HLC, event.DeviceID, event.ID, now); err != nil {
 			return fmt.Errorf("insert draft snapshot: %w", err)
@@ -1755,6 +1800,190 @@ SELECT DISTINCT blob_ref FROM draft_snapshots WHERE blob_ref LIKE 'age_blob:%';
 		var ref string
 		if err := rows.Scan(&ref); err != nil {
 			return nil, fmt.Errorf("scan blob ref: %w", err)
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
+}
+
+// PruneDraftSnapshots deletes superseded draft snapshot rows, keeping the most
+// recent `keep` per project (P5-HUB-02). RecordDraftSnapshot only ever INSERTs,
+// so without pruning every superseded snapshot keeps its blob "referenced"
+// forever and neither local nor hub GC can reclaim a stale draft blob. keep is
+// clamped to >= 1 so the current snapshot (highest HLC) is always retained.
+// Returns the number of rows pruned.
+func (s *Store) PruneDraftSnapshots(ctx context.Context, keep int) (int, error) {
+	if keep < 1 {
+		keep = 1
+	}
+	res, err := s.db.ExecContext(ctx, `
+DELETE FROM draft_snapshots
+WHERE id IN (
+  SELECT id FROM (
+    SELECT id, ROW_NUMBER() OVER (
+      PARTITION BY namespace_id
+      ORDER BY COALESCE(source_event_hlc, 0) DESC, created_at DESC, id DESC
+    ) AS rn
+    FROM draft_snapshots
+  ) WHERE rn > ?
+);
+`, keep)
+	if err != nil {
+		return 0, fmt.Errorf("prune draft snapshots: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("prune draft snapshots rows: %w", err)
+	}
+	return int(n), nil
+}
+
+// EnvBlobRefs returns the distinct age_blob refs held by encrypted env bindings
+// (P5-SEC-04). These blobs are local-only and are never pushed to the hub, so
+// the revoke rewrap must not upload or delete them there.
+func (s *Store) EnvBlobRefs(ctx context.Context) ([]string, error) {
+	return s.scanRefs(ctx, `SELECT DISTINCT encrypted_value_ref FROM secret_bindings WHERE encrypted_value_ref LIKE 'age_blob:%';`)
+}
+
+// DraftBlobRefs returns the distinct age_blob refs held by draft snapshots
+// (P5-SEC-04). These are the only blobs synced through the hub.
+func (s *Store) DraftBlobRefs(ctx context.Context) ([]string, error) {
+	return s.scanRefs(ctx, `SELECT DISTINCT blob_ref FROM draft_snapshots WHERE blob_ref LIKE 'age_blob:%';`)
+}
+
+func (s *Store) scanRefs(ctx context.Context, query string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("scan blob refs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var refs []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, fmt.Errorf("scan blob ref: %w", err)
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
+}
+
+// DraftSnapshotRef is the metadata needed to re-emit a superseding
+// draft.snapshot.created event when a draft blob is rewrapped (P5-SEC-01).
+type DraftSnapshotRef struct {
+	Path      string
+	ByteSize  int64
+	FileCount int64
+}
+
+// DraftSnapshotsForBlobRef returns the (path, size, count) of every active
+// draft snapshot referencing ref (P5-SEC-01), so a rewrap can emit a superseding
+// event carrying the new ref before the old hub blob is deleted.
+func (s *Store) DraftSnapshotsForBlobRef(ctx context.Context, ref string) ([]DraftSnapshotRef, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT n.path, ds.byte_size, ds.file_count
+FROM draft_snapshots ds
+JOIN namespace_entries n ON n.id = ds.namespace_id
+WHERE ds.blob_ref = ?;
+`, ref)
+	if err != nil {
+		return nil, fmt.Errorf("read draft snapshots for blob: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []DraftSnapshotRef
+	for rows.Next() {
+		var r DraftSnapshotRef
+		if err := rows.Scan(&r.Path, &r.ByteSize, &r.FileCount); err != nil {
+			return nil, fmt.Errorf("scan draft snapshot ref: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// QueuePendingHubDelete records a blob ref orphaned by a local-only revoke
+// rewrap so the next hub-enabled sync/gc deletes it (P5-PROD-02). Idempotent.
+func (s *Store) QueuePendingHubDelete(ctx context.Context, ref string) error {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO pending_hub_deletes (workspace_id, blob_ref, queued_at)
+VALUES (?, ?, ?)
+ON CONFLICT(workspace_id, blob_ref) DO NOTHING;
+`, workspaceID, ref, timestampNow())
+	if err != nil {
+		return fmt.Errorf("queue pending hub delete: %w", err)
+	}
+	return nil
+}
+
+// PendingHubDeletes returns the queued orphaned blob refs (P5-PROD-02).
+func (s *Store) PendingHubDeletes(ctx context.Context) ([]string, error) {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT blob_ref FROM pending_hub_deletes WHERE workspace_id = ?;`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("list pending hub deletes: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var refs []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, fmt.Errorf("scan pending hub delete: %w", err)
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
+}
+
+// ClearPendingHubDelete removes a drained entry from the queue (P5-PROD-02).
+func (s *Store) ClearPendingHubDelete(ctx context.Context, ref string) error {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `DELETE FROM pending_hub_deletes WHERE workspace_id = ? AND blob_ref = ?;`, workspaceID, ref)
+	if err != nil {
+		return fmt.Errorf("clear pending hub delete: %w", err)
+	}
+	return nil
+}
+
+// RetainedBlobRefs returns the blob refs that remain referenced AFTER pruning
+// draft snapshots to the latest `keep` per project (P5 review): env binding refs
+// plus the top-`keep` draft snapshot refs per namespace. `hub gc --dry-run` uses
+// this so its preview matches what a real run (prune + delete) would leave
+// referenced, instead of counting soon-to-be-pruned superseded snapshots as live.
+func (s *Store) RetainedBlobRefs(ctx context.Context, keep int) ([]string, error) {
+	if keep < 1 {
+		keep = 1
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT DISTINCT encrypted_value_ref FROM secret_bindings WHERE encrypted_value_ref LIKE 'age_blob:%'
+UNION
+SELECT blob_ref FROM (
+  SELECT blob_ref, ROW_NUMBER() OVER (
+    PARTITION BY namespace_id
+    ORDER BY COALESCE(source_event_hlc, 0) DESC, created_at DESC, id DESC
+  ) AS rn
+  FROM draft_snapshots
+  WHERE blob_ref LIKE 'age_blob:%'
+) WHERE rn <= ?;
+`, keep)
+	if err != nil {
+		return nil, fmt.Errorf("list retained blob refs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var refs []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, fmt.Errorf("scan retained blob ref: %w", err)
 		}
 		refs = append(refs, ref)
 	}
@@ -1900,16 +2129,20 @@ UPDATE conflicts SET status = 'resolved', resolution_json = ?, updated_at = ? WH
 }
 
 // ResolveConflictByFingerprint marks the open conflict matching the stable
-// (namespace_id, type, details_json) fingerprint resolved (PROD-06). Used by
+// (workspace_id, type, details_json) fingerprint resolved (PROD-06). Used by
 // the conflict.resolved event apply handler so cross-device convergence does
-// not depend on per-device conflict IDs. It is idempotent: a duplicate event
-// for an already-resolved (or absent) row affects zero rows and returns nil.
-func (tx *Tx) ResolveConflictByFingerprint(ctx context.Context, namespaceID, typ, detailsJSON, resolutionJSON string) error {
+// not depend on per-device conflict IDs. P5-SYNC-02: namespace_id is a
+// locally-minted prj_<uuid> that differs per device, so it must NOT be part of
+// the match — details_json already embeds the stable path and event-coordinate
+// winner/loser, making (type, details_json) globally unique. It is idempotent:
+// a duplicate event for an already-resolved (or absent) row affects zero rows
+// and returns nil.
+func (tx *Tx) ResolveConflictByFingerprint(ctx context.Context, typ, detailsJSON, resolutionJSON string) error {
 	now := timestampNow()
 	_, err := tx.tx.ExecContext(ctx, `
 UPDATE conflicts SET status = 'resolved', resolution_json = ?, updated_at = ?
-WHERE workspace_id = ? AND COALESCE(namespace_id, '') = COALESCE(?, '') AND type = ? AND details_json = ? AND status = 'open';
-`, nullEmpty(resolutionJSON), now, tx.workspaceID, nullEmpty(namespaceID), typ, detailsJSON)
+WHERE workspace_id = ? AND type = ? AND details_json = ? AND status = 'open';
+`, nullEmpty(resolutionJSON), now, tx.workspaceID, typ, detailsJSON)
 	if err != nil {
 		return fmt.Errorf("resolve conflict by fingerprint: %w", err)
 	}
@@ -2447,6 +2680,24 @@ ORDER BY hlc ASC, id ASC;
 		events = append(events, e)
 	}
 	return events, rows.Err()
+}
+
+// EventByID returns a single event by id. Used by conflict resolution
+// (P5-SYNC-04) to recover the full payload of a losing variant so a chosen
+// remote can be re-asserted with a fresh dominating event.
+func (s *Store) EventByID(ctx context.Context, id string) (Event, error) {
+	var e Event
+	err := s.db.QueryRowContext(ctx, `
+SELECT id, workspace_id, device_id, COALESCE(seq, 0), hlc, type, payload_json, content_hash, COALESCE(device_sig, ''), COALESCE(prev_event_hash, ''), created_at
+FROM events WHERE id = ?;
+`, id).Scan(&e.ID, &e.WorkspaceID, &e.DeviceID, &e.Seq, &e.HLC, &e.Type, &e.PayloadJSON, &e.ContentHash, &e.DeviceSig, &e.PrevEventHash, &e.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Event{}, fmt.Errorf("unknown event %q", id)
+	}
+	if err != nil {
+		return Event{}, fmt.Errorf("read event: %w", err)
+	}
+	return e, nil
 }
 
 // HubCursor returns the last HLC applied from the given hub source (EAGER-02).

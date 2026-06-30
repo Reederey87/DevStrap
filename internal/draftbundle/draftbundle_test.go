@@ -48,8 +48,11 @@ func TestPackExtractRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Pack: %v", err)
 	}
-	if snap.FileCount != 3 {
-		t.Errorf("file count = %d, want 3", snap.FileCount)
+	// P5-QUAL-05: FileCount counts entries (files + directories). Here: 3 files
+	// (README.md, src/main.go, data/config.json) + 2 directory headers
+	// (src/, data/) = 5, so empty directories survive the round-trip.
+	if snap.FileCount != 5 {
+		t.Errorf("entry count = %d, want 5 (3 files + 2 dirs)", snap.FileCount)
 	}
 	if !strings.HasPrefix(snap.BlobRef, "age_blob:") {
 		t.Errorf("blob ref = %s, want age_blob: prefix", snap.BlobRef)

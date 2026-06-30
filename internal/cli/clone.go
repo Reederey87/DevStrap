@@ -58,16 +58,13 @@ func newCloneCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			// Eager materialization: blobless clone + env hydrate (EAGER-01/03).
-			if err := materializeOne(cmd.Context(), store, opts, status); err != nil {
+			if err := materializeOne(cmd.Context(), store, opts, status, true); err != nil {
 				return appError{code: exitGit, err: fmt.Errorf("clone %s: %w", project.Path, err)}
 			}
 			if _, err := fmt.Fprintf(stdout, "cloned %s\n", project.Path); err != nil {
 				return err
 			}
 			if openCursor || openVSCode {
-				if openCursor && openVSCode {
-					return appError{code: exitInvalidConfig, err: fmt.Errorf("choose --open or --vscode, not both")}
-				}
 				editor := "cursor"
 				if openVSCode {
 					editor = "code"
@@ -97,6 +94,9 @@ func newCloneCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().BoolVar(&openVSCode, "vscode", false, "open the cloned repo in VS Code after materialization")
 	cmd.Flags().StringVar(&defaultBranch, "default-branch", "", "default branch fallback")
 	cmd.Flags().StringVar(&lfsPolicy, "lfs-policy", "auto", "Git LFS policy: auto, never, agent, or always")
+	// P5-CLI-03: reject --open + --vscode during flag parsing, before the add +
+	// network clone runs, instead of after the expensive side-effecting work.
+	cmd.MarkFlagsMutuallyExclusive("open", "vscode")
 	return cmd
 }
 

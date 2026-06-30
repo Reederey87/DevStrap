@@ -26,6 +26,14 @@ const (
 	EventDraftSnapshotCreated = "draft.snapshot.created" // DRAFT-02
 )
 
+// Conflict type identifiers, exported so the CLI resolver can branch on them
+// (P5-SYNC-04) without duplicating string literals.
+const (
+	ConflictSamePathDifferentRemote = "same_path_different_remote"
+	ConflictPendingDelete           = "pending_delete_conflict"
+	ConflictRenameTargetExists      = "rename_target_exists"
+)
+
 // defaultReceiveMaxSkew bounds how far ahead of local physical time a remote
 // event's HLC may be before it is quarantined instead of applied.
 const defaultReceiveMaxSkew = 5 * time.Minute
@@ -55,10 +63,10 @@ type RenamePayload struct {
 
 // ConflictResolvedPayload carries a conflict.resolved event (PROD-06): the
 // user's local resolution decision is audited and synced so every device sees
-// the same outcome and the open-conflict count converges. ConflictID is the
-// origin device's local row id (per-device, NOT stable across devices); the
-// apply handler matches on the stable (namespace_id, type, details_json)
-// fingerprint instead.
+// the same outcome and the open-conflict count converges. ConflictID and
+// NamespaceID are the origin device's local row ids (per-device, NOT stable
+// across devices), retained only for display/audit; the apply handler matches
+// on the stable (type, details_json) fingerprint instead (P5-SYNC-02).
 type ConflictResolvedPayload struct {
 	ConflictID  string `json:"conflict_id"`
 	NamespaceID string `json:"namespace_id,omitempty"`
@@ -360,7 +368,7 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 					return err
 				}
 			}
-			return tx.InsertConflict(ctx, existing.ID, "same_path_different_remote", details)
+			return tx.InsertConflict(ctx, existing.ID, ConflictSamePathDifferentRemote, details)
 		}
 		// SYNC-01: same-remote add/update must be HLC last-writer-wins. Only
 		// mutate when the incoming event coordinates strictly dominate the
@@ -392,7 +400,7 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 			if err != nil {
 				return err
 			}
-			return tx.InsertConflict(ctx, existing.ID, "pending_delete_conflict", string(raw))
+			return tx.InsertConflict(ctx, existing.ID, ConflictPendingDelete, string(raw))
 		}
 		return tx.TombstoneProject(ctx, payload.Path, event.HLC)
 	case EventProjectRenamed:
@@ -414,7 +422,7 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 			if err != nil {
 				return err
 			}
-			return tx.InsertConflict(ctx, "", "rename_target_exists", string(raw))
+			return tx.InsertConflict(ctx, "", ConflictRenameTargetExists, string(raw))
 		}
 		return nil
 	case EventConflictCreated:
@@ -434,7 +442,9 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 			"resolved_by":  event.DeviceID,
 			"resolved_hlc": fmt.Sprintf("%d", event.HLC),
 		})
-		return tx.ResolveConflictByFingerprint(ctx, payload.NamespaceID, payload.Type, payload.DetailsJSON, string(resolution))
+		// P5-SYNC-02: match on (type, details_json) only — namespace_id is
+		// per-device and would never match on the receiving device.
+		return tx.ResolveConflictByFingerprint(ctx, payload.Type, payload.DetailsJSON, string(resolution))
 	case EventDraftSnapshotCreated:
 		var payload DraftSnapshotPayload
 		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
@@ -520,6 +530,53 @@ func reconcileSamePath(existing state.ProjectStatus, incoming ProjectPayload, ev
 		return ProjectPayload{}, false, "", err
 	}
 	return winner.payload, incomingWins, string(raw), nil
+}
+
+// SamePathConflictInfo is the exported, parsed view of a
+// same_path_different_remote conflict's details (P5-SYNC-04), so the CLI
+// resolver can recover the competing variants and their origin events.
+type SamePathConflictInfo struct {
+	Path          string
+	WinnerKey     string
+	WinnerEventID string
+	LoserKey      string
+	LoserEventID  string
+}
+
+// ParseSamePathConflictDetails decodes a same_path_different_remote conflict's
+// details_json (P5-SYNC-04).
+func ParseSamePathConflictDetails(detailsJSON string) (SamePathConflictInfo, error) {
+	var d samePathConflictDetails
+	if err := json.Unmarshal([]byte(detailsJSON), &d); err != nil {
+		return SamePathConflictInfo{}, fmt.Errorf("decode same-path conflict details: %w", err)
+	}
+	return SamePathConflictInfo{
+		Path:          d.Path,
+		WinnerKey:     d.WinnerKey,
+		WinnerEventID: d.WinnerEventID,
+		LoserKey:      d.LoserKey,
+		LoserEventID:  d.LoserEventID,
+	}, nil
+}
+
+// ParsePendingDeleteConflictPath decodes a pending_delete_conflict's path
+// (P5-SYNC-04).
+func ParsePendingDeleteConflictPath(detailsJSON string) (string, error) {
+	var d pendingDeleteConflictDetails
+	if err := json.Unmarshal([]byte(detailsJSON), &d); err != nil {
+		return "", fmt.Errorf("decode pending-delete conflict details: %w", err)
+	}
+	return d.Path, nil
+}
+
+// ProjectPayloadFromEvent decodes a project event's payload (P5-SYNC-04), used
+// to recover a losing variant's full remote.
+func ProjectPayloadFromEvent(payloadJSON string) (ProjectPayload, error) {
+	var p ProjectPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &p); err != nil {
+		return ProjectPayload{}, fmt.Errorf("decode project payload: %w", err)
+	}
+	return p, nil
 }
 
 func samePathLess(a, b samePathCandidate) bool {

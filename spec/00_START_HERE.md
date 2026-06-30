@@ -122,13 +122,13 @@ Why Go: one portable binary, good process management, solid cross-platform files
 
 ## Current repository state
 
-Last validated: `2026-06-28`.
+Last validated: `2026-06-30`.
 
 Implemented in this repository:
 
 - Go module: `github.com/Reederey87/DevStrap`.
 - CLI entrypoint: `cmd/devstrap`.
-- Commands: `version`, `init`, `scan`, `add`, `hydrate`, `open`, `sync --hub-file`, `worktree new/status/finalize/list/remove/cleanup`, `env capture/hydrate/bind`, `run`, `agent run/list/show/pr`, `devices list/approve/revoke/lost/rename`, `status`, `doctor`, and `db migrate/status/backup/down`.
+- Commands: `version`, `init`, `scan`, `add`, `clone`, `hydrate`, `open`, `sync --hub-file`, `hub gc`, `materialize`, `draft snapshot create`, `run-loop`, `worktree new/status/finalize/list/remove/cleanup/unlock`, `env capture/hydrate/bind/rotate`, `run`, `agent run/list/show/pr`, `devices enroll/list/approve/revoke/lost/rename`, `conflicts list/show/resolve`, `status` (`--watch`), `doctor` (`--remote`), and `db migrate/status/backup/down`.
 - Structured `slog` setup with CLI/env log-level control, secret-key/value redaction helpers, and no whole-context log attributes.
 - Local state package with embedded Goose SQLite migrations.
 - SQLite open path with per-connection pragmas, WAL, busy timeout, asserted foreign-key enforcement, startup `foreign_key_check`, `0600` database mode, and single-writer pool.
@@ -155,16 +155,14 @@ Implemented in this repository:
 - Spec frontmatter and a Go-based `cmd/spec-drift` CI gate that maps changed code/config paths to tracked spec files and requires the work log on code/spec/doc changes, plus a command-doc drift test that keeps the spec command list in sync with the binary, and a product-naming ADR at `spec/adr/0001-product-naming.md`.
 - README, MIT license, `.gitignore`, GitHub Actions CI with separate spec-drift, test, and golangci-lint jobs, `CONTRIBUTING.md`, `SECURITY.md`, `CODEOWNERS`, Dependabot, issue/PR templates, and concise `AGENTS.md`.
 
-Not implemented yet:
+Not implemented yet (genuinely unbuilt — features that are partly shipped are listed under "now built" below, never here):
 
-- synced encrypted env/draft bundle exchange, production remote device registration, and out-of-band fingerprint confirmation;
+- the **live network hub**: the real AWS SDK v2 S3 client wiring behind the shipped `hubFromOptions` seam, full-state snapshot exchange, and the bespoke HTTP/SSE relay (the `Hub` interface, R2 keying/retry/conditional-put logic, blob GC, retention floor, and content-hash verification are all shipped and unit-tested);
+- production **remote device registration** and out-of-band fingerprint confirmation (the local trust plane and device-revoke rewrap are shipped); synced encrypted **env-bundle** exchange (draft-bundle exchange is shipped);
 - daemon, local socket API, FSEvents-specific Mac watcher, LaunchAgent/systemd installers;
-- production sync hub, remote device registration/fingerprint UX, encrypted blob exchange, and real cross-root skeleton reconciliation;
 - OS-enforced agent sandboxing, project-env allowlists, and non-generic engine adapters;
-- cross-machine working-state sync — git-state validation plane (`repo.gitstate.observed`), WIP refs (`refs/devstrap/wip/*`), and encrypted working-tree bundles (audit Section 5);
-- non-VCS / remote-less / multi-remote content sync — scanner classification, `.devstrapignore` compiler, encrypted draft bundles, and type-dispatch materialization are now shipped (`DRAFT-*`); the post-hydrate dependency rebuild is opt-in (`DEVSTRAP_REBUILD_DEPS`);
-- forge hardening beyond the shipped PR/MR routing — `agent pr` now detects GitHub/GitLab/Gitea/Bitbucket/Azure and routes through `gh`/`glab`/`tea` or graceful compare-URL fallback, but `doctor` still needs forge-specific CLI probes, explicit self-hosted overrides, and broader hermetic test coverage (`FORGE-04/05`);
-- zero-knowledge sync hub — the logical `Hub` interface (`HUB-01`), Cloudflare R2/S3 backend with immutable keying (`HUB-02/06`), fail-closed enrollment verification (`HUB-03`), device-revoke blob re-encryption with hub-side ciphertext delete (`HUB-04`/`SEC-01`), blob ref-count/GC (`HUB-05`), the `DeleteBlob` reclamation primitive (`HUB-12`), R2 retry/backoff with error classification (`HUB-10`), and blob content-hash verification on fetch (`SEC-03`) are shipped; the real AWS SDK v2 S3 client wiring, full-state snapshot exchange, and the bespoke HTTP/SSE relay remain deferred.
+- cross-machine working-state sync — git-state validation plane (`repo.gitstate.observed`) and WIP refs (`refs/devstrap/wip/*`); the encrypted draft-bundle layer (Layer C) is shipped;
+- forge hardening beyond the shipped PR/MR routing — `agent pr` detects GitHub/GitLab/Gitea/Bitbucket/Azure and routes through `gh`/`glab`/`tea` (or a compare-URL fallback) and resolves SSH host aliases via `ssh -G` (`P5-CLI-04`); `doctor` still needs forge-specific CLI probes and broader hermetic test coverage (`FORGE-04/05`).
 
 Cloud-sync workstreams from the 2026-06-28 audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`), now built:
 

@@ -64,6 +64,10 @@ type Hub interface {
 	PutBlob(ctx context.Context, sha256Hex string, r io.Reader) error
 	GetBlob(ctx context.Context, sha256Hex string) (io.ReadCloser, error)
 	DeleteBlob(ctx context.Context, sha256Hex string) error
+	// ListBlobs returns the sha256 hex keys of every blob currently on the hub
+	// (P5-HUB-02). It is the enumeration primitive for mark-and-sweep hub GC:
+	// list everything, delete what no current binding/snapshot references.
+	ListBlobs(ctx context.Context) ([]string, error)
 }
 
 // FileHub is a file-backed test Hub (HUB-01). The event log is a single JSON
@@ -188,6 +192,33 @@ func (h FileHub) DeleteBlob(_ context.Context, sha256Hex string) error {
 		return fmt.Errorf("delete blob: %w", err)
 	}
 	return nil
+}
+
+// ListBlobs returns the sha256 hex keys of every blob in the hub's blob
+// directory (P5-HUB-02).
+func (h FileHub) ListBlobs(_ context.Context) ([]string, error) {
+	entries, err := os.ReadDir(h.blobDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("list hub blobs: %w", err)
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, ".blob") {
+			continue
+		}
+		key := strings.TrimSuffix(name, ".blob")
+		if validateBlobKey(key) == nil {
+			out = append(out, key)
+		}
+	}
+	return out, nil
 }
 
 func (h FileHub) blobDir() string {

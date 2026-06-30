@@ -27,6 +27,14 @@ import (
 // Placeholder is the text substituted for any redacted value.
 const Placeholder = "[REDACTED]"
 
+// maxLineBytes bounds how much a Writer buffers while waiting for a newline
+// (P5-SEC-05). A newline-free stream (a very long single line or a binary blob)
+// would otherwise grow the line buffer without limit. When the buffer reaches
+// this size without a newline, the partial buffer is scrubbed and flushed so
+// memory stays bounded. Confidentiality is preserved — buffered bytes are never
+// forwarded until scrubbed.
+const maxLineBytes = 1 << 20 // 1 MiB
+
 // Secret wraps a sensitive string so it cannot be accidentally logged,
 // printed, or serialized in cleartext. Every standard rendering path returns
 // Placeholder; the plaintext is reachable only via Reveal.
@@ -248,6 +256,8 @@ func (w *Writer) scrub(s string) string {
 // destination. It always reports len(p) consumed.
 // SECU-04: multi-line PEM private key blocks are suppressed across line
 // boundaries so base64 body lines never reach the destination.
+// P5-SEC-05: a newline-free run longer than maxLineBytes is scrubbed and
+// flushed as a partial line so the buffer cannot grow without bound.
 func (w *Writer) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -256,28 +266,43 @@ func (w *Writer) Write(p []byte) (int, error) {
 		data := w.buf.Bytes()
 		idx := bytes.IndexByte(data, '\n')
 		if idx < 0 {
+			// P5-SEC-05: no complete line yet. If the buffer has grown past the
+			// cap, flush the oversized partial (scrubbed) so memory stays
+			// bounded; otherwise wait for more input.
+			if w.buf.Len() > maxLineBytes {
+				partial := w.buf.String()
+				w.buf.Reset()
+				if err := w.emitLine(partial); err != nil {
+					return len(p), err
+				}
+			}
 			break
 		}
 		line := string(data[:idx+1])
 		w.buf.Next(idx + 1)
-		if w.inPEM {
-			if pemEnd.MatchString(line) {
-				w.inPEM = false
-			}
-			continue // drop body lines inside a PEM block
-		}
-		if pemBegin.MatchString(line) {
-			w.inPEM = true
-			if _, err := io.WriteString(w.dst, "[REDACTED PRIVATE KEY]\n"); err != nil {
-				return len(p), err
-			}
-			continue
-		}
-		if _, err := io.WriteString(w.dst, w.scrub(line)); err != nil {
+		if err := w.emitLine(line); err != nil {
 			return len(p), err
 		}
 	}
 	return len(p), nil
+}
+
+// emitLine writes one (possibly newline-terminated) line to the destination,
+// honoring the multi-line PEM suppression state. The caller holds w.mu.
+func (w *Writer) emitLine(line string) error {
+	if w.inPEM {
+		if pemEnd.MatchString(line) {
+			w.inPEM = false
+		}
+		return nil // drop body lines inside a PEM block
+	}
+	if pemBegin.MatchString(line) {
+		w.inPEM = true
+		_, err := io.WriteString(w.dst, "[REDACTED PRIVATE KEY]\n")
+		return err
+	}
+	_, err := io.WriteString(w.dst, w.scrub(line))
+	return err
 }
 
 // Close flushes any buffered trailing partial line (scrubbed) to the
@@ -290,8 +315,7 @@ func (w *Writer) Close() error {
 	}
 	line := w.buf.String()
 	w.buf.Reset()
-	_, err := io.WriteString(w.dst, w.scrub(line))
-	return err
+	return w.emitLine(line)
 }
 
 func buildReplacer(values []string) *strings.Replacer {

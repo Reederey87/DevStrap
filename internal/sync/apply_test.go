@@ -256,6 +256,147 @@ func hasConflictType(conflicts []state.Conflict, typ string) bool {
 	return false
 }
 
+// projEvent builds a project.added/updated event at the given (unshifted) HLC.
+func projEvent(t *testing.T, dev, typ string, hlc int64, nsPath, key string) state.Event {
+	t.Helper()
+	p := ProjectPayload{Path: nsPath, Type: "git_repo"}
+	if key != "" {
+		p.RemoteKey = key
+		p.RemoteURL = "https://example.com/" + key
+	}
+	ev, err := NewProjectEvent(dev, typ, hlc<<hlcLogicalBits, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ev
+}
+
+// projectionOf returns path -> remote_key for the active namespace projection.
+func projectionOf(t *testing.T, st *state.Store) map[string]string {
+	t.Helper()
+	projects, err := st.ListProjects(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := make(map[string]string, len(projects))
+	for _, p := range projects {
+		m[p.Path] = p.RemoteKey
+	}
+	return m
+}
+
+// P5-SYNC-03: a rename leaves a tombstone at the old path. A stale or
+// cross-batch add/update at the old path (lower HLC than the rename) must NOT
+// resurrect the renamed-away project, while a legitimately newer event re-creates
+// it.
+func TestApplyEventsRenameLeavesTombstone(t *testing.T) {
+	ctx := context.Background()
+	st, device := newSyncStore(t)
+	dev := device.ID // a known local device, so the rename signature gate passes
+
+	// Batch 1: add work/x @10, then rename work/x -> work/y @20.
+	if _, err := ApplyEvents(ctx, st, []state.Event{
+		projEvent(t, dev, EventProjectAdded, 10, "work/x", "github.com/acme/x"),
+		renameEvent(t, dev, 20<<hlcLogicalBits, "work/x", "work/y"),
+	}); err != nil {
+		t.Fatalf("apply batch 1: %v", err)
+	}
+
+	// Batch 2: a stale update at the OLD path (15 < rename 20) must be a no-op.
+	if _, err := ApplyEvents(ctx, st, []state.Event{
+		projEvent(t, dev, EventProjectUpdated, 15, "work/x", "github.com/acme/x"),
+	}); err != nil {
+		t.Fatalf("apply stale update: %v", err)
+	}
+	proj := projectionOf(t, st)
+	if _, ok := proj["work/x"]; ok {
+		t.Fatalf("stale update resurrected work/x: %+v", proj)
+	}
+	if _, ok := proj["work/y"]; !ok {
+		t.Fatalf("renamed work/y missing: %+v", proj)
+	}
+
+	// Batch 3: a legitimately newer add at the old path (30 > rename 20)
+	// re-creates work/x.
+	if _, err := ApplyEvents(ctx, st, []state.Event{
+		projEvent(t, dev, EventProjectAdded, 30, "work/x", "github.com/acme/x2"),
+	}); err != nil {
+		t.Fatalf("apply newer add: %v", err)
+	}
+	if got := projectionOf(t, st)["work/x"]; got != "github.com/acme/x2" {
+		t.Fatalf("newer add failed to re-create work/x: got %q", got)
+	}
+}
+
+// P5-SYNC-02: conflict.resolved matches on (type, details_json) only. Here the
+// local conflict row carries a REAL, non-empty namespace_id (a per-device
+// prj_<uuid>) while the remote resolution event carries a DIFFERENT namespace_id;
+// the local row must still resolve so the open-conflict count converges.
+func TestApplyConflictResolvedConvergesWithMismatchedNamespaceID(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newSyncStore(t)
+
+	// Create a project so we have a real namespace_id to attach the conflict to.
+	if _, err := ApplyEvents(ctx, st, []state.Event{
+		projEvent(t, "device-a", EventProjectAdded, 10, "work/acme/api", "github.com/acme/api"),
+	}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	proj, err := st.ProjectByPath(ctx, "work/acme/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	localNamespaceID := proj.ID
+	if localNamespaceID == "" {
+		t.Fatal("expected a non-empty local namespace id")
+	}
+
+	const (
+		cType   = ConflictSamePathDifferentRemote
+		details = `{"path":"work/acme/api","winner_key":"github.com/acme/api"}`
+	)
+	if err := st.InsertConflict(ctx, localNamespaceID, cType, details); err != nil {
+		t.Fatal(err)
+	}
+	open, err := st.OpenConflicts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("open conflicts = %d, want 1", len(open))
+	}
+
+	// Remote device resolves with a DIFFERENT namespace_id (its own prj_ id).
+	payload, err := json.Marshal(ConflictResolvedPayload{
+		ConflictID:  "cnf_remote",
+		NamespaceID: "prj_some_other_device_id",
+		Type:        cType,
+		DetailsJSON: details,
+		Action:      "keep-local",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eid, err := id.New("evt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved := state.Event{
+		ID:          eid,
+		DeviceID:    "device-b",
+		HLC:         20 << hlcLogicalBits,
+		Type:        EventConflictResolved,
+		PayloadJSON: string(payload),
+		ContentHash: state.ContentHash(string(payload)),
+	}
+	if _, err := ApplyEvents(ctx, st, []state.Event{resolved}); err != nil {
+		t.Fatalf("apply conflict.resolved: %v", err)
+	}
+	if remaining, _ := st.OpenConflicts(ctx); len(remaining) != 0 {
+		t.Fatalf("open conflicts after resolve = %d, want 0 (mismatched namespace_id must not block convergence)", len(remaining))
+	}
+}
+
 // SYNC-01: the sync cursor is a low-water mark. A transiently-skipped event
 // (here a hash-chain break) with a LOWER HLC than a valid event from another
 // device must hold the returned safe cursor below it, so it is re-delivered
