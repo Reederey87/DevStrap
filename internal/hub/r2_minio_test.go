@@ -76,5 +76,5 @@ func TestR2MinIOConformance(t *testing.T) {
 
 	// The production adapter must satisfy the SAME conformance contract as the
 	// in-memory double (TestR2ConformanceMemS3).
-	assertHubRoundTrip(t, h)
+	assertHubRoundTrip(t, ctx, h)
 }

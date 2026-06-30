@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/spf13/viper"
@@ -34,6 +35,20 @@ func TestParseHubURI(t *testing.T) {
 		case got != c.wantSpec:
 			t.Errorf("parseHubURI(%q) = %+v, want %+v", c.uri, got, c.wantSpec)
 		}
+	}
+}
+
+// TestParseHubURINoCredentialLeak locks in the security fix (P5-HUB-01 review):
+// a URI carrying credentials must be rejected AND the secret must not appear in
+// the error diagnostic (parseHubURI uses url.URL.Redacted()).
+func TestParseHubURINoCredentialLeak(t *testing.T) {
+	const secret = "supersecrettoken"
+	_, err := parseHubURI("r2://AKIAEXAMPLE:" + secret + "@my-bucket")
+	if err == nil {
+		t.Fatal("parseHubURI: expected error for credentials-in-URI, got nil")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Errorf("parseHubURI error leaks the secret: %q", err.Error())
 	}
 }
 

@@ -111,13 +111,13 @@ func parseHubURI(uri string) (hubSpec, error) {
 	}
 	scheme := strings.ToLower(u.Scheme)
 	if scheme != "r2" && scheme != "s3" {
-		return hubSpec{}, fmt.Errorf("unrecognized hub %q (want r2://<bucket> or s3://<bucket>)", uri)
+		return hubSpec{}, fmt.Errorf("unrecognized hub %q (want r2://<bucket> or s3://<bucket>)", u.Redacted())
 	}
 	if u.Host == "" {
-		return hubSpec{}, fmt.Errorf("hub uri %q has no bucket", uri)
+		return hubSpec{}, fmt.Errorf("hub uri %q has no bucket", u.Redacted())
 	}
 	if u.User != nil {
-		return hubSpec{}, fmt.Errorf("hub uri %q must not contain credentials", uri)
+		return hubSpec{}, fmt.Errorf("hub uri %q must not contain credentials", u.Redacted())
 	}
 	spec := hubSpec{scheme: scheme, bucket: u.Host}
 	if e := u.Query().Get("endpoint"); e != "" {

@@ -38,9 +38,8 @@ func TestR2EventKeyImmutable(t *testing.T) {
 // the production aws-sdk-go-v2 adapter is proven against the SAME contract as
 // the conformance double. Retention-floor, skip-HEAD, pagination, and retry
 // behaviors are memS3/fault-injection-specific and stay in their own tests below.
-func assertHubRoundTrip(t *testing.T, h R2Hub) {
+func assertHubRoundTrip(t *testing.T, ctx context.Context, h R2Hub) {
 	t.Helper()
-	ctx := context.Background()
 
 	// Event-log plane: push/pull round trip + deterministic (hlc, device, id) order.
 	events := []state.Event{
@@ -159,7 +158,7 @@ func assertHubRoundTrip(t *testing.T, h R2Hub) {
 // MinIO/R2 bucket in r2_minio_test.go, proving the production adapter matches
 // the conformance double.
 func TestR2ConformanceMemS3(t *testing.T) {
-	assertHubRoundTrip(t, newTestR2Hub(t))
+	assertHubRoundTrip(t, context.Background(), newTestR2Hub(t))
 }
 
 // P5-HUB-03: a Pull whose cursor is below the retention horizon must return
