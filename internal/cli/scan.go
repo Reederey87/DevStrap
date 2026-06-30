@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -42,40 +43,8 @@ func newScanCommand(stdout io.Writer, opts *options) *cobra.Command {
 					return err
 				}
 				defer closeStore(store)
-				for _, finding := range result.Findings {
-					localPath := filepath.Join(rootAbs, filepath.FromSlash(finding.Path))
-					materialization := "available"
-					dirty := "unknown"
-					if finding.Type == scan.TypeGitRepo {
-						dirty = "clean"
-					}
-					payload := dssync.ProjectPayload{
-						Path:          finding.Path,
-						Type:          string(finding.Type),
-						RemoteURL:     finding.RemoteURL,
-						RemoteKey:     finding.RemoteKey,
-						DefaultBranch: finding.DefaultBranch,
-					}
-					event, err := dssync.CreateProjectEvent(cmd.Context(), store, dssync.EventProjectAdded, payload)
-					if err != nil {
-						return err
-					}
-					if _, err := store.UpsertProject(cmd.Context(), state.UpsertProjectParams{
-						Path:                  finding.Path,
-						Type:                  string(finding.Type),
-						RemoteURL:             finding.RemoteURL,
-						RemoteKey:             finding.RemoteKey,
-						DefaultBranch:         finding.DefaultBranch,
-						MaterializationPolicy: "lazy",
-						LocalPath:             localPath,
-						MaterializationState:  materialization,
-						DirtyState:            dirty,
-						SourceEventHLC:        event.HLC,
-						SourceEventDeviceID:   event.DeviceID,
-						SourceEventID:         event.ID,
-					}); err != nil {
-						return err
-					}
+				if _, err := adoptFindings(cmd.Context(), store, rootAbs, result); err != nil {
+					return err
 				}
 				for _, warning := range result.Warnings {
 					if isConflictWarning(warning) {
@@ -131,6 +100,51 @@ func newScanCommand(stdout io.Writer, opts *options) *cobra.Command {
 
 func isConflictWarning(warning string) bool {
 	return strings.Contains(warning, "symlink escape") || strings.Contains(warning, "case-only path conflict")
+}
+
+// adoptFindings writes discovered scan findings to local state as project.added
+// events + namespace entries, returning the number adopted (PROD-03). Shared by
+// `devstrap scan --adopt` and `devstrap init --scan` so the first-run epiphany
+// (the user's existing tree appearing) is one command.
+func adoptFindings(ctx context.Context, store *state.Store, rootAbs string, result scan.Result) (int, error) {
+	adopted := 0
+	for _, finding := range result.Findings {
+		localPath := filepath.Join(rootAbs, filepath.FromSlash(finding.Path))
+		materialization := "available"
+		dirty := "unknown"
+		if finding.Type == scan.TypeGitRepo {
+			dirty = "clean"
+		}
+		payload := dssync.ProjectPayload{
+			Path:          finding.Path,
+			Type:          string(finding.Type),
+			RemoteURL:     finding.RemoteURL,
+			RemoteKey:     finding.RemoteKey,
+			DefaultBranch: finding.DefaultBranch,
+		}
+		event, err := dssync.CreateProjectEvent(ctx, store, dssync.EventProjectAdded, payload)
+		if err != nil {
+			return adopted, err
+		}
+		if _, err := store.UpsertProject(ctx, state.UpsertProjectParams{
+			Path:                  finding.Path,
+			Type:                  string(finding.Type),
+			RemoteURL:             finding.RemoteURL,
+			RemoteKey:             finding.RemoteKey,
+			DefaultBranch:         finding.DefaultBranch,
+			MaterializationPolicy: "lazy",
+			LocalPath:             localPath,
+			MaterializationState:  materialization,
+			DirtyState:            dirty,
+			SourceEventHLC:        event.HLC,
+			SourceEventDeviceID:   event.DeviceID,
+			SourceEventID:         event.ID,
+		}); err != nil {
+			return adopted, err
+		}
+		adopted++
+	}
+	return adopted, nil
 }
 
 type quarantinedFile struct {

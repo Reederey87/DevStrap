@@ -84,6 +84,7 @@ type GitRepo struct {
 	DefaultBranch string `json:"default_branch"`
 	CloneFilter   string `json:"clone_filter,omitempty"`
 	LFSPolicy     string `json:"lfs_policy"`
+	ForgeKind     string `json:"forge_kind,omitempty"`
 }
 
 type EnvProfile struct {
@@ -110,6 +111,7 @@ type ProjectStatus struct {
 	RemoteKey            string `json:"remote_key,omitempty"`
 	DefaultBranch        string `json:"default_branch,omitempty"`
 	LFSPolicy            string `json:"lfs_policy,omitempty"`
+	ForgeKind            string `json:"forge_kind,omitempty"`
 	LocalPath            string `json:"local_path,omitempty"`
 	MaterializationState string `json:"materialization_state,omitempty"`
 	DirtyState           string `json:"dirty_state,omitempty"`
@@ -137,6 +139,7 @@ type UpsertProjectParams struct {
 	SourceEventHLC        int64
 	SourceEventDeviceID   string
 	SourceEventID         string
+	ForgeKind             string
 }
 
 type Conflict struct {
@@ -789,15 +792,16 @@ func (s *Store) UpsertProject(ctx context.Context, params UpsertProjectParams) (
 	switch params.Type {
 	case "git_repo":
 		_, err = tx.ExecContext(ctx, `
-INSERT INTO git_repos (namespace_id, remote_url, remote_key, default_branch, clone_filter, lfs_policy, created_at, updated_at)
-VALUES (?, ?, ?, ?, 'blob:none', COALESCE(NULLIF(?, ''), 'auto'), ?, ?)
+INSERT INTO git_repos (namespace_id, remote_url, remote_key, default_branch, clone_filter, lfs_policy, forge_kind, created_at, updated_at)
+VALUES (?, ?, ?, ?, 'blob:none', COALESCE(NULLIF(?, ''), 'auto'), ?, ?, ?)
 ON CONFLICT(namespace_id) DO UPDATE SET
   remote_url = excluded.remote_url,
   remote_key = excluded.remote_key,
   default_branch = excluded.default_branch,
   lfs_policy = CASE WHEN ? != '' THEN excluded.lfs_policy ELSE git_repos.lfs_policy END,
+  forge_kind = CASE WHEN excluded.forge_kind != '' THEN excluded.forge_kind ELSE git_repos.forge_kind END,
   updated_at = excluded.updated_at;
-`, ns.ID, params.RemoteURL, params.RemoteKey, params.DefaultBranch, params.LFSPolicy, now, now, params.LFSPolicy)
+`, ns.ID, params.RemoteURL, params.RemoteKey, params.DefaultBranch, params.LFSPolicy, params.ForgeKind, now, now, params.LFSPolicy)
 		if err != nil {
 			return NamespaceEntry{}, fmt.Errorf("upsert git repo: %w", err)
 		}
@@ -854,15 +858,16 @@ func (tx *Tx) UpsertProject(ctx context.Context, params UpsertProjectParams) (Na
 	switch params.Type {
 	case "git_repo":
 		_, err = tx.tx.ExecContext(ctx, `
-INSERT INTO git_repos (namespace_id, remote_url, remote_key, default_branch, clone_filter, lfs_policy, created_at, updated_at)
-VALUES (?, ?, ?, ?, 'blob:none', COALESCE(NULLIF(?, ''), 'auto'), ?, ?)
+INSERT INTO git_repos (namespace_id, remote_url, remote_key, default_branch, clone_filter, lfs_policy, forge_kind, created_at, updated_at)
+VALUES (?, ?, ?, ?, 'blob:none', COALESCE(NULLIF(?, ''), 'auto'), ?, ?, ?)
 ON CONFLICT(namespace_id) DO UPDATE SET
   remote_url = excluded.remote_url,
   remote_key = excluded.remote_key,
   default_branch = excluded.default_branch,
   lfs_policy = CASE WHEN ? != '' THEN excluded.lfs_policy ELSE git_repos.lfs_policy END,
+  forge_kind = CASE WHEN excluded.forge_kind != '' THEN excluded.forge_kind ELSE git_repos.forge_kind END,
   updated_at = excluded.updated_at;
-`, ns.ID, params.RemoteURL, params.RemoteKey, params.DefaultBranch, params.LFSPolicy, now, now, params.LFSPolicy)
+`, ns.ID, params.RemoteURL, params.RemoteKey, params.DefaultBranch, params.LFSPolicy, params.ForgeKind, now, now, params.LFSPolicy)
 		if err != nil {
 			return NamespaceEntry{}, fmt.Errorf("upsert git repo: %w", err)
 		}
@@ -1222,7 +1227,7 @@ func projectByPath(ctx context.Context, queryer sqlExecutor, workspaceID string,
 	row := queryer.QueryRowContext(ctx, `
 SELECT n.id, n.path, n.path_key, n.type, COALESCE(n.display_name, ''), n.materialization_policy, n.status,
        COALESCE(n.source_event_hlc, 0), COALESCE(n.source_event_device_id, ''), COALESCE(n.source_event_id, ''),
-       COALESCE(g.remote_url, ''), COALESCE(g.remote_key, ''), COALESCE(g.default_branch, ''), COALESCE(g.lfs_policy, ''),
+       COALESCE(g.remote_url, ''), COALESCE(g.remote_key, ''), COALESCE(g.default_branch, ''), COALESCE(g.lfs_policy, ''), COALESCE(g.forge_kind, ''),
        COALESCE(dps.local_path, ''), COALESCE(dps.materialization_state, ''), COALESCE(dps.dirty_state, '')
 FROM namespace_entries n
 LEFT JOIN git_repos g ON g.namespace_id = n.id
@@ -1233,7 +1238,7 @@ WHERE n.workspace_id = ? AND n.path_key = ? AND n.status = 'active';
 	var p ProjectStatus
 	err := row.Scan(&p.ID, &p.Path, &p.PathKey, &p.Type, &p.DisplayName, &p.MaterializationPolicy, &p.Status,
 		&p.SourceEventHLC, &p.SourceEventDeviceID, &p.SourceEventID,
-		&p.RemoteURL, &p.RemoteKey, &p.DefaultBranch, &p.LFSPolicy, &p.LocalPath, &p.MaterializationState, &p.DirtyState)
+		&p.RemoteURL, &p.RemoteKey, &p.DefaultBranch, &p.LFSPolicy, &p.ForgeKind, &p.LocalPath, &p.MaterializationState, &p.DirtyState)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ProjectStatus{}, fmt.Errorf("unknown namespace path %q", pk.Display)
@@ -1247,7 +1252,7 @@ func projectByID(ctx context.Context, queryer sqlExecutor, workspaceID, id strin
 	row := queryer.QueryRowContext(ctx, `
 SELECT n.id, n.path, n.path_key, n.type, COALESCE(n.display_name, ''), n.materialization_policy, n.status,
        COALESCE(n.source_event_hlc, 0), COALESCE(n.source_event_device_id, ''), COALESCE(n.source_event_id, ''),
-       COALESCE(g.remote_url, ''), COALESCE(g.remote_key, ''), COALESCE(g.default_branch, ''), COALESCE(g.lfs_policy, ''),
+       COALESCE(g.remote_url, ''), COALESCE(g.remote_key, ''), COALESCE(g.default_branch, ''), COALESCE(g.lfs_policy, ''), COALESCE(g.forge_kind, ''),
        COALESCE(dps.local_path, ''), COALESCE(dps.materialization_state, ''), COALESCE(dps.dirty_state, '')
 FROM namespace_entries n
 LEFT JOIN git_repos g ON g.namespace_id = n.id
@@ -1258,7 +1263,7 @@ WHERE n.workspace_id = ? AND n.id = ? AND n.status = 'active';
 	var p ProjectStatus
 	err := row.Scan(&p.ID, &p.Path, &p.PathKey, &p.Type, &p.DisplayName, &p.MaterializationPolicy, &p.Status,
 		&p.SourceEventHLC, &p.SourceEventDeviceID, &p.SourceEventID,
-		&p.RemoteURL, &p.RemoteKey, &p.DefaultBranch, &p.LFSPolicy, &p.LocalPath, &p.MaterializationState, &p.DirtyState)
+		&p.RemoteURL, &p.RemoteKey, &p.DefaultBranch, &p.LFSPolicy, &p.ForgeKind, &p.LocalPath, &p.MaterializationState, &p.DirtyState)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ProjectStatus{}, fmt.Errorf("unknown namespace id %q", id)
@@ -1276,7 +1281,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]ProjectStatus, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT n.id, n.path, n.path_key, n.type, COALESCE(n.display_name, ''), n.materialization_policy, n.status,
        COALESCE(n.source_event_hlc, 0), COALESCE(n.source_event_device_id, ''), COALESCE(n.source_event_id, ''),
-       COALESCE(g.remote_url, ''), COALESCE(g.remote_key, ''), COALESCE(g.default_branch, ''), COALESCE(g.lfs_policy, ''),
+       COALESCE(g.remote_url, ''), COALESCE(g.remote_key, ''), COALESCE(g.default_branch, ''), COALESCE(g.lfs_policy, ''), COALESCE(g.forge_kind, ''),
        COALESCE(dps.local_path, ''), COALESCE(dps.materialization_state, ''), COALESCE(dps.dirty_state, '')
 FROM namespace_entries n
 LEFT JOIN git_repos g ON g.namespace_id = n.id
@@ -1297,7 +1302,7 @@ ORDER BY n.path_key;
 		var p ProjectStatus
 		if err := rows.Scan(&p.ID, &p.Path, &p.PathKey, &p.Type, &p.DisplayName, &p.MaterializationPolicy, &p.Status,
 			&p.SourceEventHLC, &p.SourceEventDeviceID, &p.SourceEventID,
-			&p.RemoteURL, &p.RemoteKey, &p.DefaultBranch, &p.LFSPolicy, &p.LocalPath, &p.MaterializationState, &p.DirtyState); err != nil {
+			&p.RemoteURL, &p.RemoteKey, &p.DefaultBranch, &p.LFSPolicy, &p.ForgeKind, &p.LocalPath, &p.MaterializationState, &p.DirtyState); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
 		projects = append(projects, p)
@@ -1332,6 +1337,19 @@ func (s *Store) UpdateGitDefaultBranch(ctx context.Context, namespaceID, branch 
 UPDATE git_repos SET default_branch = ?, updated_at = ? WHERE namespace_id = ?;
 `, branch, now, namespaceID); err != nil {
 		return fmt.Errorf("update git default branch: %w", err)
+	}
+	return nil
+}
+
+// SetProjectForgeKind persists a per-project forge override (GIT-05) so a
+// self-hosted GitLab/Gitea instance routes to glab/tea instead of degrading to
+// a compare URL. An empty kind clears the override (fall back to detection).
+func (s *Store) SetProjectForgeKind(ctx context.Context, namespaceID, kind string) error {
+	now := timestampNow()
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE git_repos SET forge_kind = ?, updated_at = ? WHERE namespace_id = ?;
+`, kind, now, namespaceID); err != nil {
+		return fmt.Errorf("update git forge kind: %w", err)
 	}
 	return nil
 }
@@ -1834,6 +1852,70 @@ func (tx *Tx) InsertConflict(ctx context.Context, namespaceID, typ, detailsJSON 
 	return insertConflict(ctx, tx.tx, tx.workspaceID, namespaceID, typ, detailsJSON)
 }
 
+// ConflictByID returns a single conflict by id (any status), used by
+// `conflicts show`/`resolve` (PROD-06).
+func (s *Store) ConflictByID(ctx context.Context, id string) (Conflict, error) {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return Conflict{}, err
+	}
+	var c Conflict
+	err = s.db.QueryRowContext(ctx, `
+SELECT id, COALESCE(namespace_id, ''), type, status, details_json
+FROM conflicts
+WHERE workspace_id = ? AND id = ?;
+`, workspaceID, id).Scan(&c.ID, &c.NamespaceID, &c.Type, &c.Status, &c.DetailsJSON)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Conflict{}, fmt.Errorf("unknown conflict %q", id)
+		}
+		return Conflict{}, fmt.Errorf("read conflict: %w", err)
+	}
+	return c, nil
+}
+
+// ResolveConflict marks a conflict resolved and records the chosen resolution
+// (PROD-06). The resolution_json captures the user's keep-local/keep-remote/
+// keep-both decision for audit and cross-device sync.
+func (s *Store) ResolveConflict(ctx context.Context, id, resolutionJSON string) error {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return err
+	}
+	now := timestampNow()
+	res, err := s.db.ExecContext(ctx, `
+UPDATE conflicts SET status = 'resolved', resolution_json = ?, updated_at = ? WHERE id = ? AND workspace_id = ? AND status = 'open';
+`, nullEmpty(resolutionJSON), now, id, workspaceID)
+	if err != nil {
+		return fmt.Errorf("resolve conflict: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("resolve conflict rows: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("conflict %q not found or already resolved", id)
+	}
+	return nil
+}
+
+// ResolveConflictByFingerprint marks the open conflict matching the stable
+// (namespace_id, type, details_json) fingerprint resolved (PROD-06). Used by
+// the conflict.resolved event apply handler so cross-device convergence does
+// not depend on per-device conflict IDs. It is idempotent: a duplicate event
+// for an already-resolved (or absent) row affects zero rows and returns nil.
+func (tx *Tx) ResolveConflictByFingerprint(ctx context.Context, namespaceID, typ, detailsJSON, resolutionJSON string) error {
+	now := timestampNow()
+	_, err := tx.tx.ExecContext(ctx, `
+UPDATE conflicts SET status = 'resolved', resolution_json = ?, updated_at = ?
+WHERE workspace_id = ? AND COALESCE(namespace_id, '') = COALESCE(?, '') AND type = ? AND details_json = ? AND status = 'open';
+`, nullEmpty(resolutionJSON), now, tx.workspaceID, nullEmpty(namespaceID), typ, detailsJSON)
+	if err != nil {
+		return fmt.Errorf("resolve conflict by fingerprint: %w", err)
+	}
+	return nil
+}
+
 func insertConflict(ctx context.Context, exec sqlExecutor, workspaceID, namespaceID, typ, detailsJSON string) error {
 	var existingID string
 	err := exec.QueryRowContext(ctx, `
@@ -2322,6 +2404,38 @@ ORDER BY hlc ASC, device_id ASC, id ASC;
 `)
 	if err != nil {
 		return nil, fmt.Errorf("list pending events: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var events []Event
+	for rows.Next() {
+		var e Event
+		if err := rows.Scan(&e.ID, &e.WorkspaceID, &e.DeviceID, &e.Seq, &e.HLC, &e.Type, &e.PayloadJSON, &e.ContentHash, &e.DeviceSig, &e.PrevEventHash, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan event: %w", err)
+		}
+		events = append(events, e)
+	}
+	return events, rows.Err()
+}
+
+// LocalPendingEvents returns events originated by the local device with HLC
+// strictly greater than afterHLC (SYNC-04). It bounds the push side of sync so
+// a cycle re-uploads only new local-origin events, not the entire event log
+// (including remote-origin events the hub already holds from their origin
+// device). The push cursor is stored per hub as a "push:<hubID>" row in
+// hub_cursors.
+func (s *Store) LocalPendingEvents(ctx context.Context, afterHLC int64) ([]Event, error) {
+	device, err := s.CurrentDevice(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read current device for local pending events: %w", err)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, workspace_id, device_id, COALESCE(seq, 0), hlc, type, payload_json, content_hash, COALESCE(device_sig, ''), COALESCE(prev_event_hash, ''), created_at
+FROM events
+WHERE device_id = ? AND hlc > ?
+ORDER BY hlc ASC, id ASC;
+`, device.ID, afterHLC)
+	if err != nil {
+		return nil, fmt.Errorf("list local pending events: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	var events []Event

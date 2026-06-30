@@ -205,8 +205,8 @@ func TestMigrateEnsureSummaryAndVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 9 {
-		t.Fatalf("schema version = %d, want 9", version)
+	if version != 10 {
+		t.Fatalf("schema version = %d, want 10", version)
 	}
 
 	var tableCount int
@@ -346,8 +346,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 8 {
-		t.Fatalf("schema version after down = %d, want 8", version)
+	if version != 9 {
+		t.Fatalf("schema version after down = %d, want 9", version)
 	}
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
@@ -356,8 +356,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 9 {
-		t.Fatalf("schema version after re-migrate = %d, want 9", version)
+	if version != 10 {
+		t.Fatalf("schema version after re-migrate = %d, want 10", version)
 	}
 }
 

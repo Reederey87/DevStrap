@@ -35,6 +35,8 @@ exec sh -c 'test -d $WORK/CodeB/work/proj/.git'
 exec sh -c 'cat $WORK/CodeB/work/proj/README.md'
 stdout 'hello'
 
-# A second sync with no new events pulls zero (EAGER-02 cursor).
+# A second sync with no new events pulls only the inclusive-boundary overlap
+# (HUB-13): the event at the cursor HLC is re-delivered and deduped by
+# ApplyEvents (idempotent on event ID), so nothing new materializes.
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
-stdout 'pulled 0'
+stdout 'pulled 1'

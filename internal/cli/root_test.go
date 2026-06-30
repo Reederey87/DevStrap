@@ -140,7 +140,7 @@ func TestInitStatusAndDBCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stdout = %q stderr = %q err = %v", stdout, stderr, err)
 	}
-	if !strings.Contains(stdout, "schema version: 9") || !strings.Contains(stdout, "sqlite quick_check: ok") || !strings.Contains(stdout, "sqlite foreign_key_check: ok") {
+	if !strings.Contains(stdout, "schema version: 10") || !strings.Contains(stdout, "sqlite quick_check: ok") || !strings.Contains(stdout, "sqlite foreign_key_check: ok") {
 		t.Fatalf("stdout = %q, want db status", stdout)
 	}
 	stdout, stderr, err = executeForTest("--home", home, "sync", "--hub-file", filepath.Join(t.TempDir(), "hub.json"), "--dry-run")
@@ -213,8 +213,13 @@ func TestInitStatusAndDBCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("doctor stdout = %q stderr = %q err = %v", stdout, stderr, err)
 	}
-	if !strings.Contains(stdout, "sqlite foreign_key_check: ok") || !strings.Contains(stdout, "device key: ok") || !strings.Contains(stdout, "device signing key: ok") {
-		t.Fatalf("doctor stdout = %q, want device key checks ok", stdout)
+	// PROD-02: doctor is now a graded report. A healthy workspace has the
+	// device-key and DB-integrity checks present and zero errors.
+	if !strings.Contains(stdout, "foreign_key_check") || !strings.Contains(stdout, "device key") || !strings.Contains(stdout, "device signing key") {
+		t.Fatalf("doctor stdout = %q, want device key + db checks present", stdout)
+	}
+	if !strings.Contains(stdout, "0 error(s)") {
+		t.Fatalf("doctor stdout = %q, want 0 errors on a healthy workspace", stdout)
 	}
 }
 
@@ -972,6 +977,30 @@ func TestAgentRunRecordsLogsDiffAndPRStaleGate(t *testing.T) {
 	// Note: gh args verification is skipped for file:// remotes because the
 	// forge-agnostic path does not call gh. A separate test with a
 	// GitHub-like remote URL would verify gh pr create argv.
+
+	// GIT-05: --forge override routes a self-hosted-looking (file://) remote
+	// to glab even though DetectForge cannot infer it, and the fake glab is
+	// invoked with the mr-create argv.
+	glabArgsPath := filepath.Join(t.TempDir(), "glab-args.txt")
+	fakeGlab := filepath.Join(fakeBin, "glab")
+	glabScript := "#!/bin/sh\n{\n  pwd\n  printf '%s\\n' \"$@\"\n} > " + glabArgsPath + "\nprintf 'https://gitlab.acme.com/acme/repo/-/merge_requests/7\\n'\n"
+	if err := os.WriteFile(fakeGlab, []byte(glabScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, err = executeForTest("--home", home, "agent", "pr", runs[0].ID, "--allow-stale-base", "--forge", "gitlab", "--title", "Self-hosted MR", "--body", "Body")
+	if err != nil {
+		t.Fatalf("agent pr --forge gitlab stdout = %q stderr = %q err = %v", stdout, stderr, err)
+	}
+	if !strings.Contains(stdout, "merge_requests/7") {
+		t.Fatalf("agent pr --forge gitlab stdout = %q, want glab MR URL", stdout)
+	}
+	glabArgs, err := os.ReadFile(glabArgsPath)
+	if err != nil {
+		t.Fatalf("glab not invoked: %v", err)
+	}
+	if !strings.Contains(string(glabArgs), "mr") || !strings.Contains(string(glabArgs), "create") {
+		t.Fatalf("glab argv = %q, want mr create", glabArgs)
+	}
 }
 
 func runGit(t *testing.T, dir string, args ...string) {

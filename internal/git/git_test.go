@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -224,6 +226,57 @@ exit 128
 	}
 }
 
+// TestCloneRetryCleansPartialDestination (GIT-02): a transient mid-clone
+// network failure leaves the destination partially populated. git does not
+// remove a directory it did not create (dest is a pre-existing MkdirTemp dir),
+// so a naive retry of the same argv would fail with "destination path already
+// exists and is not empty". Clone must reset dest to a clean, empty directory
+// before retrying so the second attempt succeeds.
+func TestCloneRetryCleansPartialDestination(t *testing.T) {
+	countPath := filepath.Join(t.TempDir(), "count")
+	dest := filepath.Join(t.TempDir(), "repo")
+	// Pre-create dest as hydrate does (os.MkdirTemp), so git treats it as
+	// pre-existing and would NOT clean it on failure.
+	if err := os.MkdirAll(dest, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	script := writeFakeGit(t, fmt.Sprintf(`#!/bin/sh
+count=0
+if [ -f %[1]q ]; then count=$(cat %[1]q); fi
+count=$((count + 1))
+echo "$count" > %[1]q
+dest=""
+for a in "$@"; do dest="$a"; done
+if [ "$count" -lt 2 ]; then
+  # Simulate a mid-clone network failure: leave dest partially populated.
+  mkdir -p "$dest"
+  echo "partial" > "$dest/partial-file"
+  echo "fatal: the remote end hung up unexpectedly" >&2
+  exit 128
+fi
+# Second attempt succeeds into a clean dest.
+mkdir -p "$dest/.git"
+exit 0
+`, countPath))
+	r := Runner{Bin: script, Timeout: 5 * time.Second, RetryAttempts: 2, RetryBackoff: time.Millisecond}
+	if err := r.Clone(context.Background(), "https://example.test/org/repo.git", dest, true); err != nil {
+		t.Fatalf("Clone err = %v, want retry success into clean dest", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "partial-file")); err == nil {
+		t.Fatalf("partial file from failed attempt remains in dest; retry did not clean it (GIT-02)")
+	}
+	if _, err := os.Stat(filepath.Join(dest, ".git")); err != nil {
+		t.Fatalf("successful retry did not populate dest: %v", err)
+	}
+	raw, err := os.ReadFile(countPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(raw)) != "2" {
+		t.Fatalf("retry count = %q, want 2", raw)
+	}
+}
+
 func TestUsesLFSDetectsGitAttributes(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, ".gitattributes"), []byte("# no-op\n*.bin filter=lfs diff=lfs merge=lfs -text\n"), 0o644); err != nil {
@@ -383,4 +436,124 @@ func writeFakeGit(t *testing.T, script string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// QUAL-06: jitterDelay produces full-jitter capped-exponential backoff. Delays
+// must stay within [1, min(cap, base*2^(attempt-1))] and the cap must clamp
+// exponential growth.
+func TestJitterDelayFullJitterBounded(t *testing.T) {
+	base := 200 * time.Millisecond
+	cap := 5 * time.Second
+	rng := rand.New(rand.NewSource(42)) // deterministic
+	randFn := rng.Int63n
+
+	for attempt := 1; attempt <= 6; attempt++ {
+		d := jitterDelay(base, cap, attempt, randFn)
+		upper := int64(cap)
+		if exp := int64(base) * (int64(1) << uint(attempt-1)); exp < upper {
+			upper = exp
+		}
+		if d < 1 || d > time.Duration(upper) {
+			t.Fatalf("attempt %d: delay %s outside [1, %s]", attempt, d, time.Duration(upper))
+		}
+	}
+	// Once base*2^n exceeds cap, the delay is clamped to [1, cap].
+	big := jitterDelay(base, cap, 30, randFn)
+	if big > cap {
+		t.Fatalf("delay %s exceeds cap %s", big, cap)
+	}
+	// Zero/negative base short-circuits (no delay).
+	if d := jitterDelay(0, cap, 1, randFn); d != 0 {
+		t.Fatalf("zero base delay = %s, want 0", d)
+	}
+}
+
+func TestCloneArgsSubmodules(t *testing.T) {
+	cases := []struct {
+		name string
+		opts CloneOptions
+		want []string
+	}{
+		{name: "plain", opts: CloneOptions{}, want: []string{"clone", "--", "r", "d"}},
+		{name: "partial", opts: CloneOptions{Partial: true}, want: []string{"clone", "--filter=blob:none", "--", "r", "d"}},
+		{name: "submodules", opts: CloneOptions{Submodules: true}, want: []string{"clone", "--recurse-submodules", "--", "r", "d"}},
+		{name: "partial+submodules", opts: CloneOptions{Partial: true, Submodules: true, AlsoFilterSubmodules: true}, want: []string{"clone", "--filter=blob:none", "--also-filter-submodules", "--recurse-submodules", "--", "r", "d"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := cloneArgs("r", "d", c.opts)
+			if !slices.Equal(got, c.want) {
+				t.Fatalf("cloneArgs = %#v, want %#v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestCloneWithOptionsInitializesSubmodules (GIT-06) clones a superproject
+// that has a submodule with --recurse-submodules and verifies the submodule
+// working tree is present on disk. Uses the real git binary against local
+// file-path remotes.
+func TestCloneWithOptionsInitializesSubmodules(t *testing.T) {
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	tmp := t.TempDir()
+	gitEnv := []string{
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com",
+		"GIT_CONFIG_NOSYSTEM=true",
+		"HOME=" + tmp,
+		"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=protocol.file.allow", "GIT_CONFIG_VALUE_0=always",
+	}
+	run := func(dir string, args ...string) error {
+		c := exec.Command(gitBin, args...)
+		c.Dir = dir
+		c.Env = append(os.Environ(), gitEnv...)
+		out, err := c.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("git %v: %w\n%s", args, err, out)
+		}
+		return nil
+	}
+	// Submodule remote.
+	sub := filepath.Join(tmp, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(sub, "init"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "README.md"), []byte("sub\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(sub, "add", "README.md"); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(sub, "commit", "-m", "sub init"); err != nil {
+		t.Fatal(err)
+	}
+	// Superproject remote.
+	main := filepath.Join(tmp, "main")
+	if err := os.MkdirAll(main, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(main, "init"); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(main, "submodule", "add", sub, "vendor/sub"); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(main, "commit", "-m", "add submodule"); err != nil {
+		t.Fatal(err)
+	}
+	// Clone with submodules.
+	dest := filepath.Join(tmp, "dest")
+	r := Runner{Bin: gitBin, Timeout: 30 * time.Second}
+	if err := r.CloneWithOptions(context.Background(), main, dest, CloneOptions{Submodules: true}); err != nil {
+		t.Fatalf("CloneWithOptions: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "vendor", "sub", "README.md")); err != nil {
+		t.Fatalf("submodule not materialized: %v", err)
+	}
 }

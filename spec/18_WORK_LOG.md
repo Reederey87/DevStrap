@@ -27,6 +27,89 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-06-29 — PASS4 audit Phase A/D quick wins (part 4)
+
+Changed:
+- Continued PASS4 quick wins: GIT-05 (P2), PROD-06 (P2), GIT-06 (P2).
+- **GIT-05**: forge detection now supports self-hosted GitLab/Gitea/Forgejo. New `ResolveForge` with documented precedence — `--forge` flag > per-project `git_repos.forge_kind` column > `[forge] host = kind` config map > `DetectForge` heuristic. Added migration `00010_repo_forge_kind.sql` (new `forge_kind` column, schema version 10), `Store.SetProjectForgeKind`, and threaded `ForgeKind` through `UpsertProjectParams`/`ProjectStatus`/`GitRepo` + the UPSERTs and SELECTs. SSH host aliases (`~/.ssh/config` `Host`->`HostName`) are resolved before detection so `git@work-gitlab:org/repo` maps to the real host. `agent pr` gained a `--forge` flag; `doctor` now iterates adopted git-repo remotes, resolves the forge, and warns when the matching CLI (`gh`/`glab`/`tea`) is missing or the forge is unknown.
+- **PROD-06**: `conflicts` is now a command group (`list`/`show`/`resolve`) instead of a list-only leaf. `resolve <id>` accepts exactly one of `--keep-local`/`--keep-remote`/`--keep-both`, marks the row `resolved` (so the `status` open-conflict count converges), records the decision in `resolution_json`, and emits a signed `conflict.resolved` HLC event (`CreateConflictResolvedEvent`) so every device sees the same outcome. `devstrap conflicts` with no subcommand still lists.
+- **GIT-06**: the materialize/hydrate clone path now initializes submodules (`--recurse-submodules` + `--also-filter-submodules` for blobless submodules) under a `materialization.submodules` policy (`auto` default / `never`). Added `git.CloneOptions` + `CloneWithOptions` (keeping `Clone` as a thin wrapper) and a `Runner.MaintenanceRun` helper; an opt-in `materialization.maintenance` config runs a one-time `git maintenance run --auto` after clone so blobless clones do not trigger per-object lazy-fetch storms. `doctor` surfaces the blobless-clone offline caveat (historical blobs need the promisor online).
+- Tests: `TestParseForgeKind`/`TestResolveForgePrecedence`/`TestSSHHostMatch`/`TestResolveSSHHostAlias`/`TestDetectForgeResolvesSSHAlias` + a `--forge gitlab` fake-CLI override test (GIT-05); `TestResolveActionValidation`/`TestConflictsListShowResolve` (PROD-06); `TestCloneArgsSubmodules`/`TestCloneWithOptionsInitializesSubmodules` (real-git submodule clone) (GIT-06); updated `TestInitStatusAndDBCommands`/`TestMigrateEnsureSummaryAndVersion`/`TestMigrationDownAndUp` for schema version 10.
+
+Validated:
+- `gofmt -w cmd internal`, `go vet`, `DEVSTRAP_NO_KEYCHAIN=1 go test ./... -count=1` (all green), `spec-drift` passes (20 specs, 52 changed files).
+- golangci-lint not installed in this environment.
+
+Follow-ups:
+- GIT-05: per-project forge override has no `set` CLI yet (the column is writable via `SetProjectForgeKind`); native Bitbucket/Azure PR clients; broader FORGE-05 hermetic fake-CLI tests.
+- PROD-06: `--keep-both` records the dual-copy intent and clears the row; it does not auto-clone the remote variant under a sibling path (no network/ambiguity risk). Honoring a prior resolution to suppress re-conflict on re-sync is a sync-engine follow-up.
+- GIT-06: per-project `materialization.submodules` column (currently config-level only); `git maintenance start` (scheduled) vs the one-time `run --auto`; submodule hydrate-state recording.
+- Remaining: SEC-02 (encrypt namespace map, L), SEC-04 (bootstrap pinning, deferred), SEC-05 (release signing), SYNC-02/HUB-11 (compaction, L), SYNC-06 (tombstone GC), SYNC-03 (needs HLC test refactor), SYNC-05 (folded hash + signed head), QUAL-02 (property tests), SEC-07/08, HUB-14/15/16, GIT-04 (worktree GC), GIT-03 (XL sandbox), PROD-04/05, and Phase E.
+
+## 2026-06-29 — PASS4 audit Phase A/D quick wins (part 3)
+
+Changed:
+- Continued PASS4 quick wins: PROD-01 (P1), PROD-02 (P1), SYNC-04 (P2), QUAL-01 (P1).
+- **PROD-01**: added `devstrap clone <url> [path]` — a one-shot quick path that derives a namespace path from the remote (`work/<org>/<repo>`, overridable), runs the existing add + eager materialize (blobless clone + env hydrate) + optional `--open`/`--vscode`. Extracted a shared `addProject` helper from `add` so clone is a thin orchestrator over existing internals. Registered in `root.go`; documented in `spec/13` (command-doc drift gate satisfied).
+- **PROD-02**: `doctor` is now a severity-graded health report. Each check returns `{name, status: ok|warning|error, detail, remedy}`; rendered as a graded table + summary line, with a non-zero exit on any error (CI-gateable). `--json` emits the check array; `--fix` applies safe remediations (create missing state home, run pending migrations, clear stale repo locks via `clearRepoLock`) and re-runs checks; `--no-network` flag added. Checks cover git (required)/gh/go (optional), state home, schema version, SQLite quick_check/foreign_key_check, secrets needing rotation, device age + Ed25519 key health, and held repo locks (stale = warning).
+- **SYNC-04**: the push side is now cursor-bounded. `runSyncCycle` reads a per-hub `push:<hubID>` watermark, fetches only local-origin events with `HLC > pushCursor` via the new `Store.LocalPendingEvents(ctx, afterHLC)`, pushes them, and advances the watermark. Remote-origin events are no longer re-uploaded every cycle (the hub already holds them from their origin device), so a no-op sync pushes zero instead of the whole log.
+- **QUAL-01**: `draftbundle.Extract` now enforces an aggregate decompression budget (max total uncompressed bytes + max file count) via the new `ExtractWithLimits`, aborting a gzip/tar decompression bomb authored by a compromised-but-trusted device with `ErrBundleTooLarge` (the per-file `LimitReader` alone did not bound total size/count). `Extract` delegates with the Pack-side defaults (100 MiB / 5000 files). Added Go native fuzz targets `FuzzParseBytes` (envfile) and `FuzzCompile` (ignore) with seed corpora from existing table tests; they run as ordinary tests on `go test` and fuzz under `-fuzz`.
+- Tests: `TestDeriveClonePath` + `clone.txtar` (PROD-01), `doctor.txtar` + updated `TestInitStatusAndDBCommands`/`init_status.txtar` for the graded format (PROD-02), `sync_push_cursor.txtar` (SYNC-04), `TestExtractRejectsTooManyFiles`/`TestExtractRejectsOversizedBundle` (QUAL-01), `FuzzParseBytes`/`FuzzCompile` seed corpus (QUAL-01).
+
+Validated:
+- `gofmt -w cmd internal`, `go vet`, `DEVSTRAP_NO_KEYCHAIN=1 go test ./... -count=1` (all green), `go test -race` on touched packages, `spec-drift` passes.
+- golangci-lint not installed in this environment.
+
+Follow-ups:
+- QUAL-01 CI fuzz step (`go test -fuzz=... -fuzztime=30s`) and `FuzzCanonicalRemoteKey`/`FuzzExtract` not yet wired (the fuzz targets exist and pass seed corpora; the CI step + the git/draftbundle fuzz targets remain).
+- Remaining: SEC-02 (encrypt namespace map, L), SEC-04 (bootstrap pinning, deferred), SEC-05 (release signing), SYNC-02/HUB-11 (compaction, L), SYNC-06 (tombstone GC), SYNC-03 (needs HLC test refactor), QUAL-02 (property tests), GIT-04/05/06, HUB-14/15/16, PROD-04/05/06, and Phase E.
+
+## 2026-06-29 — PASS4 audit Phase A quick wins (part 2)
+
+Changed:
+- Continued the PASS4 audit quick wins: SYNC-01 (P1, low-water-mark cursor), QUAL-06 (P2, jitter + aggregate retry budget), PROD-03 (P2, guided init).
+- **SYNC-01**: `ApplyEvents` now returns a low-water-mark safe cursor instead of `maxAppliedHLC`. It tracks `lowestUnappliedHLC` over every transiently-skipped event (skew-ahead quarantine and hash-chain breaks) and returns `min(maxAppliedHLC, lowestUnappliedHLC-1)`, so a skipped event with a lower HLC than a higher-HLC applied event is never permanently stranded — the hub pull cursor never advances past it, so it is re-delivered next cycle. Permanently-invalid events (HLC<=0 / below epoch floor) are recorded as conflicts but do NOT hold the cursor (they will never re-apply, and holding at a non-positive cursor would strand every higher event). `runSyncCycle` advances the cursor to the returned safe value. The misleading "will be re-delivered next pull" comment was corrected.
+- **QUAL-06**: git network retry backoff switched from deterministic linear (`base*attempt`) to full-jitter capped exponential (`jitterDelay`: uniform in `[1, min(cap, base*2^(attempt-1))]`), the AWS-recommended scheme, so parallel materialize workers no longer retry in lockstep (thundering herd) against a struggling forge. `Runner` gained `RetryCap` (default 5s) and `MaxElapsed` (optional aggregate wall-clock budget per operation; when set, the retry loop stops once elapsed). `sleepBackoff` takes the cap; `jitterDelay` is a pure function taking a `randFn` for deterministic seeded-RNG testing.
+- **PROD-03**: `devstrap init` gained a `--scan` flag that runs the existing scan/adopt path inline after workspace creation, so a user with a populated `~/Code` sees their tree adopted on the very first command (the "epiphany" moment). The adopt logic was extracted into a shared `adoptFindings` helper used by both `scan --adopt` and `init --scan`. `init` always prints a short next-steps hint (`devstrap status • devstrap scan --adopt • devstrap sync --hub-file <path>`) per clig.dev guidance.
+- **HUB-13**: `FileHub.Pull` and `R2Hub.Pull` now filter with an inclusive `>= afterHLC` boundary instead of strict `>`, so a same-HLC event from another device that arrives after the cursor was advanced to that HLC is still delivered on the next pull (HLC is not globally unique across devices). Re-delivering the boundary is safe because `ApplyEvents`/`InsertEvent` dedups by event ID. The Hub doc comment was updated to document the inclusive boundary. The composite-`(HLC,device,id)` cursor (zero re-delivery) is deferred as a future optimization; the inclusive overlap is the audit's recommended cheap fix.
+- Tests: `TestApplyEventsLowWaterMarkCursorHoldsBelowSkippedEvent` / `TestApplyEventsPermanentInvalidDoesNotHoldCursor` (SYNC-01), `TestJitterDelayFullJitterBounded` (QUAL-06), `init_scan.txtar` (PROD-03), `TestFileHubPullInclusiveBoundaryDeliversSameHLC` (HUB-13); updated `TestR2PullCursorIncremental` and `sync_materialize.txtar` for the inclusive boundary.
+
+Validated:
+- `gofmt -w cmd internal`, `go vet ./internal/git/ ./internal/cli/ ./internal/sync/`
+- `GOCACHE=/tmp/devstrap-gocache DEVSTRAP_NO_KEYCHAIN=1 go test ./... -count=1` (all green)
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- Subagent code review (PR #20) found one MAJOR: `rewrapBlobsOnRevoke` deleted old hub ciphertext even when the rewrapped-blob push failed (hub data loss). Fixed by gating the delete on a successful push (extracted `rewrapHubCleanup` with early-return gating) + added `TestRewrapHubCleanupKeepsOldBlobOnPushFailure`/`TestRewrapHubCleanupDeletesOldBlobOnSuccess`; also clamped `R2Retry.sleep` exp to `[1,cap]` for overflow robustness. Re-validated full suite + spec-drift green.
+
+Follow-ups:
+- Remaining Phase A: SEC-04 (fail-closed bootstrap — the fail-closed-once-enrolled logic is already implemented; the pre-enrollment bootstrap-window closure requires an out-of-band pinning ceremony + authenticated snapshot and changes the core sync-without-enroll demo flow, so it is deferred as L-effort), SEC-02 (encrypt namespace map, L), SEC-05 (sign releases, infra). Then Phases B–E.
+- SYNC-03 (P2/S) deferred: raising `epochFloorMS` + adding the past-direction staleness bound requires updating all deterministic sync tests to use realistic HLC physical components (they currently use `physical=0`), a coordinated refactor.
+- QUAL-06 materialize-pass aggregate context deadline not yet wired (the per-operation `MaxElapsed` field is in place for callers to opt into); deferred to avoid breaking slow CI clones.
+
+## 2026-06-29 — PASS4 audit Phase A quick wins (part 1)
+
+Changed:
+- Implemented the first batch of `AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md` Phase A "make the hub backend safe to turn on" quick wins.
+- **GIT-02**: `git.Clone` now uses a clone-specific retry that `os.RemoveAll`+`os.MkdirAll` the destination before every retry, so a transient mid-clone network failure (which leaves the pre-existing `MkdirTemp` dest partially populated) is recoverable instead of fatal "destination path already exists and is not empty". Extracted a shared `sleepBackoff` helper used by both `Clone` and `runWithNetworkRetry`.
+- **QUAL-03**: `devstrap materialize` now returns non-zero (`ErrPartialMaterialize`) when any project fails, while still completing the batch (EAGER-04 isolation), so CI/cron gates and `&&` chains can detect partial failure.
+- **HUB-09**: `R2Hub.Push`/`PutBlob` dropped the redundant `ObjectExists` (HEAD) pre-check; the conditional put (`If-None-Match: *`) is the atomic guard. Added a typed `ErrPreconditionFailed` (R2 412/10031) returned by the `memS3` double and classified as an idempotent dedup hit, halving Class B request volume and closing the TOCTOU race.
+- **SEC-03**: `pullReferencedBlobs` now recomputes sha256 of fetched ciphertext and rejects on mismatch against the signed `age_blob:<sha256>` ref (`verifyBlobContentHash`), so a malicious/buggy hub cannot substitute bytes under a valid content-addressed key. Mismatched blobs are not cached and surface as missing/tampered.
+- **GIT-01**: `hydrateProjectUnlocked` verifies a resolvable HEAD after promote; if HEAD is unresolvable it self-heals (re-resolve remote default branch + checkout) and records an honest `materialized-empty` state (surfaced in `status` as "empty checkout") when commits exist but HEAD is broken. A legitimately empty repo (no commits) is still recorded as `available` so hydrating a fresh remote succeeds.
+- **HUB-10**: `R2Hub` now wraps every S3 call (`Push`/`Pull`/`PutBlob`/`GetBlob`) in an `R2Retry` seam with throttle/transient/terminal error classification and capped exponential backoff + full jitter; the context is honored between attempts. `ErrS3Throttle`/`ErrS3Transient` sentinels; terminal errors (incl. 412, not-found, auth) fail fast. A zero-value `R2Retry` uses a default policy; tests inject a deterministic jitter + tiny delays. The real aws-sdk-go-v2 standard retryer will slot behind this seam when the SDK is wired.
+- **SEC-06**: `redact.tokenPatterns` extended with GitLab (`glpat-`), Stripe (`sk_live_`/`rk_live_`), generic `Bearer <token>`, and a JSON-secret-field redactor (`jsonSecretField`) that masks the value of any field named like a secret (secret/token/password/private_key/api_key/authorization) while preserving the key — catching GCP service-account `private_key` (base64 on one JSON line) and Snowflake config passwords the bare token-prefix patterns miss.
+- **SEC-01**: added `DeleteBlob` to the `Hub` interface (+ `FileHub`, `R2Hub`) and `DeleteObject` to `S3Client` (+ `memS3`), the reclamation primitive that makes blob/event GC possible (also serves HUB-12). `rewrapBlobsOnRevoke` is now hub-aware: when a hub is provided it pulls non-cached blobs from the hub (with SEC-03 hash verification) before rewrapping, `PutBlob`s the rewrapped blob, and `DeleteBlob`s the old ciphertext (guarded by `blobRefStillReferenced` so a still-referenced blob is never deleted). `devstrap devices revoke|lost` gained an optional `--hub-file` to trigger hub-side cleanup at revoke time; without it, rewrap is local-only and hub cleanup is deferred to the next sync. `needs_rotation` remains belt-and-suspenders since already-downloaded ciphertext is irrecoverably exposed.
+- Tests: `TestCloneRetryCleansPartialDestination` (GIT-02), `TestR2WritePathSkipsObjectExists` (HUB-09), `TestR2PushRetriesThrottling`/`TestR2PushRetriesTransient`/`TestR2PushDoesNotRetryTerminal`/`TestR2RetryRespectsContextCancellation` (HUB-10), `TestVerifyBlobContentHash` (SEC-03), `TestScrubExtendedTokenShapes`/`TestScrubJSONSecretFields` (SEC-06), `TestR2HubDeleteBlob`/`TestFileHubBlobPutGetDelete`/`TestFileHubDeleteBlobLeavesEventLogUntouched` (SEC-01/HUB-12), `materialize_nonzero_on_failure.txtar` (QUAL-03).
+- Note: the PASS4 audit reuses `GIT-01`/`GIT-02` IDs (empty-checkout / clone-retry) that collide with the second-pass audit's same-named findings; spec prose will reference the PASS4 audit file to disambiguate. Specs are reconciled in the end-of-session review (AGENTS.md).
+
+Validated:
+- `gofmt -w cmd internal`, `go vet ./internal/hub/... ./internal/git/... ./internal/cli/... ./internal/redact/...`
+- `GOCACHE=/tmp/devstrap-gocache DEVSTRAP_NO_KEYCHAIN=1 go test ./...` (all green)
+- New tests green: GIT-02, HUB-09, HUB-10, SEC-03, SEC-06, QUAL-03 testscript.
+
+Follow-ups:
+- Remaining Phase A: SEC-04 (fail-closed bootstrap), SEC-02 (encrypt namespace map, L), SEC-05 (sign releases). Then Phases B–E.
+- SEC-01 signed `env.bundle.reencrypted` audit event (audit step 4) not yet emitted; the core revoke-delete + rewrap is done, the audit-trail event is deferred.
+- SEC-03 sender-authentication (Ed25519 producer signature over bundles) is a larger sub-item; hash-verification (the headline "verify blob hashes on fetch") is done, producer-signature deferred.
+
 ## 2026-06-28 — README rebuild with brand banner + app icon
 
 Changed:

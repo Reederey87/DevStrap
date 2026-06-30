@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -21,6 +22,7 @@ const (
 	EventProjectDeleted       = "project.deleted"
 	EventProjectRenamed       = "project.renamed"
 	EventConflictCreated      = "conflict.created"
+	EventConflictResolved     = "conflict.resolved"      // PROD-06
 	EventDraftSnapshotCreated = "draft.snapshot.created" // DRAFT-02
 )
 
@@ -49,6 +51,20 @@ type ProjectPayload struct {
 type RenamePayload struct {
 	OldPath string `json:"old_path"`
 	NewPath string `json:"new_path"`
+}
+
+// ConflictResolvedPayload carries a conflict.resolved event (PROD-06): the
+// user's local resolution decision is audited and synced so every device sees
+// the same outcome and the open-conflict count converges. ConflictID is the
+// origin device's local row id (per-device, NOT stable across devices); the
+// apply handler matches on the stable (namespace_id, type, details_json)
+// fingerprint instead.
+type ConflictResolvedPayload struct {
+	ConflictID  string `json:"conflict_id"`
+	NamespaceID string `json:"namespace_id,omitempty"`
+	Type        string `json:"type"`
+	DetailsJSON string `json:"details_json"`
+	Action      string `json:"action"` // keep-local | keep-remote | keep-both
 }
 
 // DraftSnapshotPayload carries a draft.snapshot.created event's content-addressed
@@ -154,6 +170,37 @@ func NewDraftSnapshotEvent(typ, payloadJSON string) state.Event {
 	}
 }
 
+// CreateConflictResolvedEvent builds and inserts a conflict.resolved event
+// (PROD-06) recording the user's resolution decision so it syncs to every
+// device and the open-conflict count converges.
+func CreateConflictResolvedEvent(ctx context.Context, st *state.Store, payload ConflictResolvedPayload) (state.Event, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return state.Event{}, err
+	}
+	return st.InsertLocalEvent(ctx, state.Event{
+		Type:        EventConflictResolved,
+		PayloadJSON: string(raw),
+		ContentHash: state.ContentHash(string(raw)),
+	})
+}
+
+// ApplyEvents sorts and applies a batch of remote events. It returns
+// safeAdvanceHLC: the highest HLC value that is safe to advance the hub pull
+// cursor to (SYNC-01 low-water mark). The cursor must never advance past an
+// event that was skipped (quarantined or hash-chain-broken) within this batch,
+// otherwise that event is never re-delivered and the gap is permanent.
+//
+// safeAdvanceHLC = min(maxAppliedHLC, lowestUnappliedHLC-1). When no event was
+// skipped, lowestUnappliedHLC is +Inf and safeAdvanceHLC equals maxAppliedHLC.
+//
+// Only TRANSIENTLY-skipped events hold back the cursor: skew-ahead quarantine
+// (a remote clock a few minutes ahead; it becomes valid once local time
+// catches up) and hash-chain breaks (a re-delivery may eventually carry the
+// correct prev_event_hash). Permanently-invalid events (HLC <= 0 or below the
+// epoch floor) are recorded as conflicts and do NOT hold the cursor, since they
+// will never be re-applied and holding at a non-positive cursor would strand
+// every higher event.
 func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) (int64, error) {
 	sort.Slice(events, func(i, j int) bool {
 		if events[i].HLC == events[j].HLC {
@@ -167,10 +214,12 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) (in
 	now := time.Now().UnixMilli()
 	maxSkewMS := defaultReceiveMaxSkew.Milliseconds()
 	var maxAppliedHLC int64
+	lowestUnapplied := int64(math.MaxInt64)
 	for _, event := range events {
 		// SYNC-03: quarantine remote events with implausible HLC values
 		// (non-positive or below the epoch floor) so they cannot win every
-		// same-path conflict from the "past" direction.
+		// same-path conflict from the "past" direction. These are permanently
+		// invalid and do NOT hold back the cursor (SYNC-01).
 		physical := event.HLC >> hlcLogicalBits
 		if event.HLC <= 0 || physical < epochFloorMS {
 			if err := quarantineSkewedEvent(ctx, st, event, physical-now); err != nil {
@@ -180,10 +229,15 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) (in
 		}
 		// SYNC-3: quarantine remote events whose physical timestamp is beyond
 		// the trusted skew so one bad/malicious peer cannot poison ordering.
-		// Skipping (not aborting) keeps the rest of the batch converging.
+		// Skipping (not aborting) keeps the rest of the batch converging. This
+		// is TRANSIENT (bounded by maxSkew) so it holds back the cursor
+		// (SYNC-01) until local time catches up and the event is re-delivered.
 		if offset := physical - now; offset > maxSkewMS {
 			if err := quarantineSkewedEvent(ctx, st, event, offset); err != nil {
 				return 0, err
+			}
+			if event.HLC < lowestUnapplied {
+				lowestUnapplied = event.HLC
 			}
 			continue
 		}
@@ -222,9 +276,13 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) (in
 				// SYNC-05/CODE-01: record the conflict and continue so the
 				// rest of the batch (and other devices' events) still apply,
 				// mirroring the skew-quarantine path. The broken event is
-				// never inserted, so it will be re-delivered on the next pull;
-				// insertConflict dedups on stable details so no unbounded
-				// growth results.
+				// never inserted. SYNC-01: hold the cursor below it so it is
+				// re-delivered next pull (a re-delivery may carry the correct
+				// prev_event_hash); insertConflict dedups on stable details so
+				// no unbounded growth results.
+				if event.HLC < lowestUnapplied {
+					lowestUnapplied = event.HLC
+				}
 				continue
 			}
 			return 0, err
@@ -233,7 +291,18 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) (in
 			maxAppliedHLC = event.HLC
 		}
 	}
-	return maxAppliedHLC, nil
+	// SYNC-01: advance the cursor only to the low-water mark — never past a
+	// transiently-skipped event — so skipped events are re-delivered next pull
+	// instead of being permanently stranded.
+	safe := maxAppliedHLC
+	if lowestUnapplied != math.MaxInt64 && lowestUnapplied-1 < safe {
+		safe = lowestUnapplied - 1
+	}
+	if lowestUnapplied != math.MaxInt64 {
+		logging.Logger(ctx).Warn("sync cursor held back by unapplied event",
+			"lowest_unapplied_hlc", lowestUnapplied, "safe_advance_hlc", safe, "max_applied_hlc", maxAppliedHLC)
+	}
+	return safe, nil
 }
 
 func quarantineSkewedEvent(ctx context.Context, st *state.Store, event state.Event, offsetMS int64) error {
@@ -350,6 +419,22 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 		return nil
 	case EventConflictCreated:
 		return tx.InsertConflict(ctx, "", "remote_conflict", event.PayloadJSON)
+	case EventConflictResolved:
+		// PROD-06: mark the matching open conflict resolved on the receiving
+		// device so the open-conflict count converges. Conflict IDs are
+		// per-device, so match on the stable (namespace_id, type, details_json)
+		// fingerprint. The UPDATE is idempotent (WHERE status='open'): a
+		// duplicate event for an already-resolved row is a no-op.
+		var payload ConflictResolvedPayload
+		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+			return fmt.Errorf("decode event %s: %w", event.ID, err)
+		}
+		resolution, _ := json.Marshal(map[string]string{
+			"action":       payload.Action,
+			"resolved_by":  event.DeviceID,
+			"resolved_hlc": fmt.Sprintf("%d", event.HLC),
+		})
+		return tx.ResolveConflictByFingerprint(ctx, payload.NamespaceID, payload.Type, payload.DetailsJSON, string(resolution))
 	case EventDraftSnapshotCreated:
 		var payload DraftSnapshotPayload
 		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {

@@ -1,0 +1,26 @@
+# PROD-03: init --scan adopts existing repos on the very first command and
+# always prints a next-steps hint.
+
+env DEVSTRAP_NO_KEYCHAIN=1
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+# An existing repo lives in the root before init.
+exec git init -b main $WORK/Code/myproj
+exec sh -c 'cd $WORK/Code/myproj && echo hi > README.md && git add README.md && git commit -m init'
+
+# init --scan adopts the repo and prints guidance.
+exec devstrap --home=$WORK/home --root=$WORK/Code init --scan
+stdout 'Initialized DevStrap workspace'
+stdout 'Adopted 1 existing project'
+stdout 'Next: devstrap status'
+
+# The adopted project is in state.
+exec devstrap --home=$WORK/home --root=$WORK/Code status
+stdout 'myproj'
+
+# A plain init (no --scan) still prints the next-steps hint but adopts nothing.
+exec devstrap --home=$WORK/home2 --root=$WORK/Code2 init
+stdout 'Next: devstrap status'

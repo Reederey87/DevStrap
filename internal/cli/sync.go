@@ -3,12 +3,15 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 
 	"github.com/Reederey87/DevStrap/internal/config"
+	"github.com/Reederey87/DevStrap/internal/logging"
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
 	"github.com/spf13/cobra"
@@ -43,7 +46,18 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 		return err
 	}
 	defer closeStore(store)
-	localEvents, err := store.PendingEvents(ctx)
+	hub := dssync.FileHub{Path: hubFile}
+	hubID := "file:" + hubFile
+	// SYNC-04: push cursor bounds the push side so a sync cycle re-uploads
+	// only new local-origin events (HLC > push cursor), not the entire event
+	// log including remote-origin events the hub already holds from their
+	// origin device. The push cursor is a per-hub "push:<hubID>" row in
+	// hub_cursors.
+	pushCursor, err := store.HubCursor(ctx, "push:"+hubID)
+	if err != nil {
+		return err
+	}
+	localEvents, err := store.LocalPendingEvents(ctx, pushCursor)
 	if err != nil {
 		return err
 	}
@@ -51,14 +65,25 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 		_, err = fmt.Fprintf(stdout, "Would push %d local events to %s and pull namespace events\n", len(localEvents), hubFile)
 		return err
 	}
-	hub := dssync.FileHub{Path: hubFile}
-	hubID := "file:" + hubFile
 	// DRAFT-02: push local blobs referenced by pending events to the hub.
 	if err := pushReferencedBlobs(ctx, hub, localEvents, opts.paths()); err != nil {
 		return appError{code: exitNetwork, err: fmt.Errorf("push blobs: %w", err)}
 	}
 	if err := hub.Push(ctx, localEvents); err != nil {
 		return appError{code: exitNetwork, err: err}
+	}
+	// SYNC-04: advance the push cursor to the highest pushed local HLC so the
+	// next cycle only pushes newly-originated events.
+	if len(localEvents) > 0 {
+		var maxPushHLC int64
+		for _, e := range localEvents {
+			if e.HLC > maxPushHLC {
+				maxPushHLC = e.HLC
+			}
+		}
+		if err := store.AdvanceHubCursor(ctx, "push:"+hubID, maxPushHLC); err != nil {
+			return err
+		}
 	}
 	// EAGER-02: cursor-based incremental pull.
 	cursor, err := store.HubCursor(ctx, hubID)
@@ -72,12 +97,16 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 		}
 		return err
 	}
-	appliedMaxHLC, err := dssync.ApplyEvents(ctx, store, remoteEvents)
+	// SYNC-01: ApplyEvents returns a low-water-mark safe cursor — the highest
+	// HLC safe to advance to, never past a transiently-skipped (quarantined or
+	// hash-chain-broken) event in this batch. Advancing past such an event
+	// would permanently strand it, since Pull only returns HLC > cursor.
+	safeCursor, err := dssync.ApplyEvents(ctx, store, remoteEvents)
 	if err != nil {
 		return err
 	}
-	if appliedMaxHLC > cursor {
-		if err := store.AdvanceHubCursor(ctx, hubID, appliedMaxHLC); err != nil {
+	if safeCursor > cursor {
+		if err := store.AdvanceHubCursor(ctx, hubID, safeCursor); err != nil {
 			return err
 		}
 	}
@@ -149,11 +178,39 @@ func pullReferencedBlobs(ctx context.Context, hub dssync.Hub, events []state.Eve
 		if err != nil {
 			return missing, fmt.Errorf("read blob %s: %w", ref, err)
 		}
+		// SEC-03: the blob_ref comes from a signed namespace event, so the hub
+		// is an untrusted bit-bucket. Recompute sha256 of the fetched
+		// ciphertext and reject on mismatch so a malicious or buggy hub cannot
+		// substitute arbitrary bytes under a valid content-addressed key. Do
+		// not cache a mismatched blob; surface it as a missing/tampered blob.
+		if err := verifyBlobContentHash(ref, ciphertext); err != nil {
+			logging.Logger(ctx).Warn("blob content-address verification failed; not caching",
+				"ref", ref, "err", err.Error())
+			missing++
+			continue
+		}
 		if err := writeEnvBlob(paths, ref, ciphertext); err != nil {
 			return missing, fmt.Errorf("cache blob %s: %w", ref, err)
 		}
 	}
 	return missing, nil
+}
+
+// verifyBlobContentHash asserts that ciphertext hashes to the sha256 embedded
+// in the age_blob:<sha256> ref (SEC-03). The ref is sourced from a signed
+// namespace event, so this turns content-addressing into a client-side
+// integrity check the hub cannot bypass: a hub that returns wrong bytes under
+// a valid key is detected as tampering.
+func verifyBlobContentHash(ref string, ciphertext []byte) error {
+	want := blobHashHex(ref)
+	if want == "" {
+		return fmt.Errorf("blob ref %s has no content hash", ref)
+	}
+	sum := sha256.Sum256(ciphertext)
+	if got := hex.EncodeToString(sum[:]); got != want {
+		return fmt.Errorf("blob %s failed content-address verification: got %s (hub tampering?)", ref, got)
+	}
+	return nil
 }
 
 // blobRefFromEvent extracts an age_blob:<sha256> reference from an event

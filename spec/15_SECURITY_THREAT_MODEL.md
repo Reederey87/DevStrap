@@ -1,6 +1,6 @@
 ---
-last_reviewed: 2026-06-28
-tracks_code: [internal/childenv/**, internal/cli/**, internal/devicekeys/**, internal/envbundle/**, internal/git/**, internal/logging/**]
+last_reviewed: 2026-06-29
+tracks_code: [internal/childenv/**, internal/cli/**, internal/devicekeys/**, internal/envbundle/**, internal/git/**, internal/hub/**, internal/redact/**, internal/sync/**, internal/logging/**]
 ---
 # Security Threat Model
 
@@ -133,7 +133,7 @@ Hub-backend trust model (`HUB-*`): the hub is a **two-plane zero-knowledge store
 
 Residual risk: a malicious approved device can decrypt bundles it is authorized to receive until revoked, and **age has no native revocation**. Bound this by per-profile recipient scoping, re-encrypting every affected bundle to the reduced recipient set after revocation, and requiring provider/service-side value rotation for secrets that may already have been exposed.
 
-Reality (`SECU-03`, `SECU-05`): event signature verification currently **fails open** — events from a device whose signing key is unknown (or that has no signing key) are accepted unverified, so the "event signatures from day one" and "out-of-band fingerprint confirmation" bullets above are not yet enforced; a malicious hub could inject a rogue device. The hub must be treated as **zero-knowledge / semi-trusted** (ciphertext + routing metadata only); clients must **fail closed** on events from unverified devices once enrollment exists, and mTLS device certs should enforce revocation at the transport layer. Destructive event types (`project.deleted`, `project.renamed`) already verify fail-closed (`SECU-03`); the remaining work is to extend fail-closed to all event types once device enrollment is the default.
+Reality (`SECU-03`/`SECU-05`/`HUB-03`): event signature verification **fails closed once any approved device is enrolled** — `verifyEventSignature` requires a valid signature from a known, approved, non-local device for **all** event types once `hasEnrolledDevices` is true; unknown devices, devices with no signing key, and non-approved devices are rejected (not applied). The local device is exempt from the signing-key requirement (pre-enrollment grace). Destructive event types (`project.deleted`, `project.renamed`) require verification unconditionally. The remaining gap is the **pre-enrollment bootstrap window** (`SEC-04`): before any peer is approved, non-destructive events from unknown devices are accepted so a fresh device can sync its first tree; closing this requires an out-of-band peer-signing-key pinning ceremony plus an authenticated full-state snapshot, which changes the core sync-without-enroll flow and is deferred. The hub must be treated as **zero-knowledge / semi-trusted** (ciphertext + routing metadata only); mTLS device certs should enforce revocation at the transport layer.
 
 Multi-tenant isolation (future SaaS direction, `SCALE-*`): when the hub serves more than one owner, **confidentiality** is by construction — every blob and event is client-side age-encrypted before upload and namespaced by `workspace_id`, so a zero-knowledge hub cannot decrypt across tenants even if its access controls fail. Integrity and availability are not automatic: a leaked bucket-wide key can still delete, overwrite, withhold, or reorder ciphertext. Hosted mode therefore requires prefix-scoped temporary credentials, signed hash chains, fail-closed verification, snapshots/backups, retention discipline, rate limits, and cell/tenant scoping.
 
@@ -257,7 +257,7 @@ Event signatures cover `(id, hlc, type, payload_json, content_hash, prev_event_h
 
 Current implementation creates a local Ed25519 signing identity during `devstrap init`, stores only the public key in `devices.signing_public_key`, stores private signing material through the platform keychain adapter with `0600` file fallback, signs local events, and verifies signed inserts when the source device's signing public key is known. Manual remote-device enrollment/approval is available for local env capture recipients. Key fingerprint confirmation, automatic enrollment, and signed hub ingestion remain future work.
 
-Key-custody status (`SECR-04`/`SECU-01`): the file fallback is now gated on true keychain unavailability and a present-but-failing keychain fails closed; the fallback warns when engaged. Remaining coverage risk is Linux Secret Service/headless integration (`XP-03`). Verification fail-open (`SECU-03`) must become fail-closed for all remote event types once enrollment lands.
+Key-custody status (`SECR-04`/`SECU-01`): the file fallback is now gated on true keychain unavailability and a present-but-failing keychain fails closed; the fallback warns when engaged. Remaining coverage risk is Linux Secret Service/headless integration (`XP-03`). Event-verification fail-closed-once-enrolled is implemented (`HUB-03`); the pre-enrollment bootstrap window remains open (`SEC-04`, deferred).
 
 ## Security profiles
 
@@ -293,6 +293,6 @@ Key-custody status (`SECR-04`/`SECU-01`): the file fallback is now gated on true
 
 - **SECU-01**: Key custody fallback now gated on `IsKeychainUnavailable(err)`; present-but-failing keychain fails closed.
 - **SECU-02**: `SSH_AUTH_SOCK` excluded from agent subprocess environment via `AgentAllowlist`; HOME repointed to worktree path so `~/.ssh`, `~/.aws`, `~/.config/gh` are not reachable.
-- **SECU-03**: `verifyEventSignature` requires valid signatures from known approved devices for destructive event types (`project.deleted`, `project.renamed`).
+- **SECU-03**: `verifyEventSignature` requires valid signatures from known approved devices for destructive event types (`project.deleted`, `project.renamed`) unconditionally, and for **all** non-local event types once any approved device is enrolled (`HUB-03` fail-closed-once-enrolled). The pre-enrollment bootstrap window for non-destructive events remains (`SEC-04`).
 - **SECU-04**: `redact.Writer` suppresses multi-line PEM private key blocks across line boundaries. Fixed `pemBegin` pattern indexing bug (was pointing to age-key pattern instead of PEM header). Added test coverage.
 - **SECU-05**: `devices enroll --approve` now requires `--signing-public-key`.

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Reederey87/DevStrap/internal/state"
+	dssync "github.com/Reederey87/DevStrap/internal/sync"
 	"github.com/spf13/cobra"
 )
 
@@ -107,7 +108,8 @@ func newDevicesListCommand(stdout io.Writer, opts *options) *cobra.Command {
 }
 
 func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState string) *cobra.Command {
-	return &cobra.Command{
+	var hubFile string
+	cmd := &cobra.Command{
 		Use:   use + " <device-id>",
 		Short: "Mark a device as " + trustState,
 		Args:  cobra.ExactArgs(1),
@@ -136,20 +138,41 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 						return err
 					}
 				}
-				// HUB-04: re-encrypt affected blobs to the reduced recipient
-				// set (age has no native revocation). Limits future exposure;
-				// historical access by the revoked key is irreversible, hence
-				// the mandatory rotation flag above.
-				rewrapped, err := rewrapBlobsOnRevoke(cmd.Context(), store, opts)
+				// SEC-01/HUB-04: re-encrypt affected blobs to the reduced
+				// recipient set and, when a hub is provided, delete the old
+				// ciphertext from the hub so the revoked device can no longer
+				// fetch it. age has no native revocation, so historical access
+				// by the revoked key is irreversible, hence the mandatory
+				// rotation flag above. Without --hub-file, hub-side cleanup is
+				// deferred to the next sync.
+				var hub dssync.Hub
+				if hubFile != "" {
+					hub = dssync.FileHub{Path: hubFile}
+				}
+				rewrapped, err := rewrapBlobsOnRevoke(cmd.Context(), store, opts, hub)
 				if err != nil {
 					_, _ = fmt.Fprintf(stdout, "warning: blob re-encryption incomplete: %v\n", err)
 				} else if rewrapped > 0 {
-					_, _ = fmt.Fprintf(stdout, "Re-encrypted %d blob(s) to the reduced recipient set\n", rewrapped)
+					if _, err := fmt.Fprintf(stdout, "Re-encrypted %d blob(s) to the reduced recipient set\n", rewrapped); err != nil {
+						return err
+					}
+				}
+				if hubFile == "" {
+					if _, err := fmt.Fprintf(stdout, "note: --hub-file not set; old ciphertext remains on the hub until the next sync rewraps with --hub-file\n"); err != nil {
+						return err
+					}
 				}
 			}
 			return nil
 		},
 	}
+	// SEC-01: an optional hub path lets revoke/lost delete superseded
+	// ciphertext from the hub immediately. Optional so revoke stays usable
+	// without a hub configured.
+	if trustState == "revoked" || trustState == "lost" {
+		cmd.Flags().StringVar(&hubFile, "hub-file", "", "file-backed test hub path; when set, old ciphertext is deleted from the hub on rewrap")
+	}
+	return cmd
 }
 
 func newDeviceRenameCommand(stdout io.Writer, opts *options) *cobra.Command {

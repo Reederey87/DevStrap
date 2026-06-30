@@ -26,6 +26,10 @@ git clone --filter=blob:none git@github.com:org/repo.git ~/Code/work/org/repo
 
 Use for larger repos. Missing blobs are fetched on demand by Git when needed.
 
+### Submodules and maintenance (GIT-06)
+
+The materialize/hydrate clone path initializes submodules so the working tree is structurally complete: `git clone --filter=blob:none --also-filter-submodules --recurse-submodules` (submodules stay blobless too) unless `materialization.submodules` is set to `never`. The policy is `auto` by default (recurse if present, a no-op when the repo has no submodules). An opt-in `materialization.maintenance` config runs a one-time `git maintenance run --auto` (commit-graph + prefetch) after clone so `git blame`/`log -p` on a blobless clone do not trigger per-object lazy-fetch storms on first use. `doctor` surfaces the offline caveat: historical blobs on a blobless clone need the promisor remote online for the first lazy fetch.
+
 ### No checkout clone
 
 ```bash
@@ -367,7 +371,7 @@ MVP:
 - detect the forge from the `origin` host (`DetectForge`); for PR/MR creation shell out to the matching CLI — `gh` (GitHub), `glab` (GitLab), `tea` (Gitea/Forgejo);
 - on an unknown/unsupported forge, **fail gracefully**: the branch is already pushed, so print the branch + a constructed compare/MR URL and exit cleanly — never run `gh` unconditionally (`FORGE-01`).
 
-Status: `agent pr` is forge-aware as of the 2026-06-28 implementation pass: it detects GitHub/GitLab/Gitea/Forgejo/Bitbucket/Azure remotes, routes through `gh`/`glab`/`tea` when supported, allows forge-specific token env names, and gracefully prints a compare/MR URL for unsupported forges instead of running `gh` unconditionally (`FORGE-01/02`). Azure DevOps SSH-vs-HTTPS remote-key folding is also implemented (`FORGE-03`). Remaining work: add a `--forge` / `git_repos.forge_kind` override for self-hosted instances and SSH host aliases, make `doctor` probe the relevant forge CLI per adopted remote (`FORGE-04`), add native Bitbucket/Azure clients where useful, and broaden hermetic fake-CLI tests (`FORGE-05`).
+Status: `agent pr` is forge-aware as of the 2026-06-28 implementation pass: it detects GitHub/GitLab/Gitea/Forgejo/Bitbucket/Azure remotes, routes through `gh`/`glab`/`tea` when supported, allows forge-specific token env names, and gracefully prints a compare/MR URL for unsupported forges instead of running `gh` unconditionally (`FORGE-01/02`). Azure DevOps SSH-vs-HTTPS remote-key folding is also implemented (`FORGE-03`). `FORGE-04` is now implemented (GIT-05): a `--forge` flag, a per-project `git_repos.forge_kind` column, and a `[forge] host = kind` config map resolve self-hosted GitLab/Gitea/Forgejo instances with precedence flag > project column > host map > `DetectForge` heuristic; SSH host aliases (`~/.ssh/config` `Host`->`HostName`) are resolved before detection so `git@work-gitlab:org/repo` maps to the real host; `doctor` probes the matching forge CLI per adopted remote and warns on a missing `glab`/`tea` or unknown forge. Remaining work: native Bitbucket/Azure clients where useful, and broader hermetic fake-CLI tests (`FORGE-05`; a `--forge gitlab` override test exists).
 
 Later:
 

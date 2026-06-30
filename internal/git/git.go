@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net/url"
 	"os"
 	"os/exec"
@@ -22,10 +23,25 @@ type Runner struct {
 	Timeout       time.Duration
 	RetryAttempts int
 	RetryBackoff  time.Duration
+	// RetryCap bounds the per-sleep backoff so exponential growth cannot exceed
+	// a sane ceiling (QUAL-06).
+	RetryCap time.Duration
+	// MaxElapsed bounds the total wall-clock time of a single operation's
+	// retry loop (across all attempts). Zero means no aggregate budget (bounded
+	// only by RetryAttempts and the per-command Timeout). Set by callers that
+	// need a hung operation to fail fast instead of wedging a worker slot
+	// (QUAL-06).
+	MaxElapsed time.Duration
 }
 
 func NewRunner() Runner {
-	return Runner{Bin: "git", Timeout: 2 * time.Minute, RetryAttempts: 3, RetryBackoff: 200 * time.Millisecond}
+	return Runner{
+		Bin:           "git",
+		Timeout:       2 * time.Minute,
+		RetryAttempts: 3,
+		RetryBackoff:  200 * time.Millisecond,
+		RetryCap:      5 * time.Second,
+	}
 }
 
 var (
@@ -104,17 +120,88 @@ func (r Runner) Run(ctx context.Context, dir string, args ...string) (string, er
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+// CloneOptions controls git clone behavior (GIT-06).
+type CloneOptions struct {
+	Partial              bool // --filter=blob:none (blobless clone)
+	Submodules           bool // --recurse-submodules so the tree is fully present
+	AlsoFilterSubmodules bool // --also-filter-submodules (keep submodules blobless too; only meaningful with Partial)
+}
+
 func (r Runner) Clone(ctx context.Context, remote, dest string, partial bool) error {
+	return r.CloneWithOptions(ctx, remote, dest, CloneOptions{Partial: partial})
+}
+
+// CloneWithOptions runs a git clone with the given options and the GIT-02
+// clean-destination retry. When Submodules is set the clone initializes
+// submodules so the working tree is structurally complete (GIT-06); with
+// Partial + AlsoFilterSubmodules the submodules are blobless too.
+func (r Runner) CloneWithOptions(ctx context.Context, remote, dest string, opts CloneOptions) error {
 	if err := ValidateRemote(remote); err != nil {
 		return err
 	}
+	args := cloneArgs(remote, dest, opts)
+	attempts := r.RetryAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	backoff := r.RetryBackoff
+	cap := r.RetryCap
+	if cap <= 0 {
+		cap = 5 * time.Second
+	}
+	start := time.Now()
+	var lastErr error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		// GIT-02: a mid-clone network failure (early EOF / RPC failed /
+		// connection reset, all classified ErrNetwork) leaves dest partially
+		// populated. git does not remove a directory it did not create (dest
+		// is a pre-existing os.MkdirTemp dir), so a naive retry of the same
+		// argv fails with "destination path already exists and is not empty"
+		// and turns a recoverable transient failure into a fatal one. Reset
+		// dest to a clean, empty directory before every retry so the clone is
+		// idempotent and a transient mid-clone failure is recoverable.
+		if attempt > 1 {
+			if err := os.RemoveAll(dest); err != nil {
+				return fmt.Errorf("clean clone destination for retry: %w", err)
+			}
+			if err := os.MkdirAll(dest, 0o750); err != nil {
+				return fmt.Errorf("recreate clone destination for retry: %w", err)
+			}
+		}
+		_, err := r.Run(ctx, "", args...)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !errors.Is(err, ErrNetwork) || attempt == attempts {
+			return err
+		}
+		// QUAL-06: stop retrying once the aggregate operation budget is spent.
+		if r.MaxElapsed > 0 && time.Since(start) >= r.MaxElapsed {
+			return err
+		}
+		if err := sleepBackoff(ctx, backoff, cap, attempt); err != nil {
+			return err
+		}
+	}
+	return lastErr
+}
+
+// cloneArgs builds the argv for a git clone with optional blobless partial
+// clone (GIT-02) and submodule materialization (GIT-06).
+func cloneArgs(remote, dest string, opts CloneOptions) []string {
 	args := []string{"clone"}
-	if partial {
+	if opts.Partial {
 		args = append(args, "--filter=blob:none")
+		if opts.AlsoFilterSubmodules {
+			args = append(args, "--also-filter-submodules")
+		}
+	}
+	if opts.Submodules {
+		args = append(args, "--recurse-submodules")
 	}
 	args = append(args, "--", remote, dest)
-	err := r.runWithNetworkRetry(ctx, "", args...)
-	return err
+	return args
 }
 
 func (r Runner) Fetch(ctx context.Context, dir, remote, branch string) error {
@@ -132,6 +219,16 @@ func (r Runner) Fetch(ctx context.Context, dir, remote, branch string) error {
 	return r.runWithNetworkRetry(ctx, dir, args...)
 }
 
+// MaintenanceRun runs a one-time `git maintenance run --auto` (commit-graph +
+// prefetch) so common history ops (blame, log -p) do not trigger per-object
+// lazy fetches on a blobless clone (GIT-06). It is best-effort: older git or a
+// missing promisor makes this a no-op or error, and the caller should not fail
+// materialization on it.
+func (r Runner) MaintenanceRun(ctx context.Context, dir string) error {
+	_, err := r.Run(ctx, dir, "maintenance", "run", "--auto")
+	return err
+}
+
 func (r Runner) RemoteURL(ctx context.Context, dir string) (string, error) {
 	out, err := r.Run(ctx, dir, "remote", "get-url", "origin")
 	if errors.Is(err, ErrRemoteMissing) {
@@ -146,6 +243,11 @@ func (r Runner) runWithNetworkRetry(ctx context.Context, dir string, args ...str
 		attempts = 1
 	}
 	backoff := r.RetryBackoff
+	cap := r.RetryCap
+	if cap <= 0 {
+		cap = 5 * time.Second
+	}
+	start := time.Now()
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt++ {
 		_, err := r.Run(ctx, dir, args...)
@@ -156,18 +258,52 @@ func (r Runner) runWithNetworkRetry(ctx context.Context, dir string, args ...str
 		if !errors.Is(err, ErrNetwork) || attempt == attempts {
 			return err
 		}
-		if backoff <= 0 {
-			continue
+		// QUAL-06: stop retrying once the aggregate operation budget is spent.
+		if r.MaxElapsed > 0 && time.Since(start) >= r.MaxElapsed {
+			return err
 		}
-		timer := time.NewTimer(backoff * time.Duration(attempt))
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
+		if err := sleepBackoff(ctx, backoff, cap, attempt); err != nil {
+			return err
 		}
 	}
 	return lastErr
+}
+
+// sleepBackoff waits for a full-jitter capped-exponential backoff delay or
+// until ctx is cancelled (QUAL-06). A non-positive base returns immediately so
+// the next attempt runs without delay. Without jitter, parallel materialize
+// workers retry in lockstep at identical boundaries (a synchronized thundering
+// herd that amplifies load on a struggling forge); full jitter spreads retries
+// uniformly across [1, min(cap, base*2^(attempt-1))], the AWS-recommended scheme.
+func sleepBackoff(ctx context.Context, base, cap time.Duration, attempt int) error {
+	if base <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(jitterDelay(base, cap, attempt, rand.Int63n))
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// jitterDelay computes a full-jitter capped-exponential backoff delay for the
+// given attempt. The result is uniform in [1, min(cap, base*2^(attempt-1))].
+// It takes a randFn so it is deterministic under a seeded RNG in tests.
+func jitterDelay(base, cap time.Duration, attempt int, randFn func(n int64) int64) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	maxN := int64(cap)
+	if exp := int64(base) * (int64(1) << uint(attempt-1)); exp < maxN {
+		maxN = exp
+	}
+	if maxN < 1 {
+		maxN = 1
+	}
+	return time.Duration(randFn(maxN) + 1)
 }
 
 // DefaultBranchSource records how ResolveDefaultBranch determined the branch,

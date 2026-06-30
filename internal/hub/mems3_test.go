@@ -28,7 +28,10 @@ func (m *memS3) PutObject(_ context.Context, key string, body []byte, ifNoneMatc
 	defer m.mu.Unlock()
 	if ifNoneMatch {
 		if _, ok := m.objects[key]; ok {
-			return fmt.Errorf("condition failed: object already exists")
+			// HUB-09: surface a typed precondition error so R2Hub can classify
+			// a duplicate conditional put as an idempotent no-op instead of a
+			// hard failure.
+			return ErrPreconditionFailed
 		}
 	}
 	m.objects[key] = body
@@ -52,6 +55,15 @@ func (m *memS3) ObjectExists(_ context.Context, key string) (bool, error) {
 	defer m.mu.Unlock()
 	_, ok := m.objects[key]
 	return ok, nil
+}
+
+// DeleteObject removes an object. A missing object is not an error (idempotent
+// delete), matching the S3Client contract for HUB-12/SEC-01.
+func (m *memS3) DeleteObject(_ context.Context, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.objects, key)
+	return nil
 }
 
 func (m *memS3) ListObjectsV2(_ context.Context, prefix, startAfter string, maxKeys int) ([]string, string, error) {

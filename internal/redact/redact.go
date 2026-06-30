@@ -59,12 +59,31 @@ func (s Secret) Reveal() string { return s.v }
 // IsZero reports whether the Secret holds an empty value.
 func (s Secret) IsZero() bool { return s.v == "" }
 
+// jsonSecretField matches a JSON object field whose name looks like a secret
+// (secret/token/password/private_key/api_key/authorization, case-insensitive)
+// and captures the key name so Scrub can mask the value while preserving the
+// key (SEC-06). This catches GCP service-account JSON ("private_key":
+// "-----BEGIN PRIVATE KEY-----\n...") where the key body is base64 on one line,
+// generic Authorization/secret fields a child process may echo, and Snowflake
+// config passwords — shapes the bare token-prefix patterns cannot see.
+var jsonSecretField = regexp.MustCompile(`(?i)"([A-Za-z0-9_-]*(?:secret|token|password|private[_-]?key|api[_-]?key|authorization)[A-Za-z0-9_-]*)"\s*:\s*"[^"]*"`)
+
+// jsonSecretReplacement preserves the captured key name while masking its
+// value (SEC-06), e.g. "private_key":"-----BEGIN..." -> "private_key":"[REDACTED]".
+const jsonSecretReplacement = `"$1":"` + Placeholder + `"`
+
 // tokenPatterns matches the shapes of common credentials so that values not
 // registered with a Redactor are still scrubbed on a best-effort basis. Order
-// does not matter; all patterns are applied.
+// matters: the URL-userinfo and JSON-secret-field patterns are special-cased in
+// Scrub (they preserve surrounding structure), and jsonSecretField runs before
+// the PEM-header pattern so a one-line JSON private_key is fully masked instead
+// of leaving its base64 body exposed.
 var tokenPatterns = []*regexp.Regexp{
-	// URL userinfo: scheme://user:pass@host or scheme://token@host
+	// URL userinfo: *********************** or scheme://token@host
 	regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^/@\s:]+(?::[^/@\s]*)?@`),
+	// SEC-06: JSON secret fields (secret/token/password/private_key/api_key/
+	// authorization). Special-cased in Scrub to preserve the key name.
+	jsonSecretField,
 	// GitHub tokens (PAT, OAuth, app, refresh, server-to-server).
 	regexp.MustCompile(`gh[pousr]_[A-Za-z0-9]{20,255}`),
 	regexp.MustCompile(`github_pat_[A-Za-z0-9_]{20,255}`),
@@ -72,8 +91,15 @@ var tokenPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`xox[baprs]-[A-Za-z0-9-]{10,}`),
 	// AWS access key id.
 	regexp.MustCompile(`A(?:KIA|SIA|GPA|IDA|ROA|NPA|NVA|3T)[0-9A-Z]{16}`),
-	// OpenAI / generic sk- secret keys.
+	// OpenAI / generic sk- secret keys (requires a hyphen, so sk_live_ is covered
+	// by the dedicated Stripe pattern below).
 	regexp.MustCompile(`sk-[A-Za-z0-9_-]{20,}`),
+	// SEC-06: Stripe live secret/restricted keys (sk_live_/rk_live_).
+	regexp.MustCompile(`(?:sk|rk)_live_[0-9A-Za-z]{20,}`),
+	// SEC-06: GitLab personal/project/group access tokens (glpat-).
+	regexp.MustCompile(`glpat-[0-9A-Za-z_-]{20,}`),
+	// SEC-06: generic Authorization: Bearer <token>.
+	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._-]{20,}`),
 	// Google API key.
 	regexp.MustCompile(`AIza[0-9A-Za-z_-]{35}`),
 	// age secret key.
@@ -130,11 +156,15 @@ var pemBegin = regexp.MustCompile(`-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PR
 // instance-specific secret values are known.
 func Scrub(s string) string {
 	for _, p := range tokenPatterns {
-		if p == urlUserinfo {
+		switch p {
+		case urlUserinfo:
 			s = p.ReplaceAllString(s, "${1}"+Placeholder+"@")
-			continue
+		case jsonSecretField:
+			// SEC-06: preserve the JSON key name, mask the value.
+			s = p.ReplaceAllString(s, jsonSecretReplacement)
+		default:
+			s = p.ReplaceAllString(s, Placeholder)
 		}
-		s = p.ReplaceAllString(s, Placeholder)
 	}
 	return s
 }

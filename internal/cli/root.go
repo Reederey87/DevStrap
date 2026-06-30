@@ -91,6 +91,7 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newDBCommand(stdout, opts))
 	cmd.AddCommand(newScanCommand(stdout, opts))
 	cmd.AddCommand(newAddCommand(stdout, opts))
+	cmd.AddCommand(newCloneCommand(stdout, opts))
 	cmd.AddCommand(newHydrateCommand(stdout, opts))
 	cmd.AddCommand(newOpenCommand(stdout, opts))
 	cmd.AddCommand(newWorktreeCommand(stdout, opts))

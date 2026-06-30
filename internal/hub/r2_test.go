@@ -3,9 +3,12 @@ package hub
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/Reederey87/DevStrap/internal/state"
 )
@@ -59,21 +62,32 @@ func TestR2PullCursorIncremental(t *testing.T) {
 	if err := h.Push(ctx, events); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
-	// EAGER-02: cursor-based pull returns only events after the cursor.
+	// EAGER-02 cursor-based pull + HUB-13 inclusive boundary: Pull(afterHLC)
+	// returns events with HLC >= afterHLC, so a same-HLC late arrival is not
+	// dropped. Pull(100) includes the boundary evt_001 (HLC=100) plus evt_002.
 	pulled, err := h.Pull(ctx, 100)
 	if err != nil {
 		t.Fatalf("Pull(100): %v", err)
 	}
-	if len(pulled) != 1 || pulled[0].ID != "evt_002" {
-		t.Errorf("Pull(100) = %v, want only evt_002", pulled)
+	if len(pulled) != 2 {
+		t.Errorf("Pull(100) = %d events, want 2 (inclusive boundary + newer)", len(pulled))
 	}
-	// Pull past everything returns nothing.
+	// Pull at the max HLC re-delivers the boundary event (deduped by
+	// ApplyEvents); it is not empty because the boundary is inclusive.
 	pulled, err = h.Pull(ctx, 200)
 	if err != nil {
 		t.Fatalf("Pull(200): %v", err)
 	}
+	if len(pulled) != 1 || pulled[0].ID != "evt_002" {
+		t.Errorf("Pull(200) = %v, want the boundary evt_002 (inclusive)", pulled)
+	}
+	// Pull past everything returns nothing.
+	pulled, err = h.Pull(ctx, 201)
+	if err != nil {
+		t.Fatalf("Pull(201): %v", err)
+	}
 	if len(pulled) != 0 {
-		t.Errorf("Pull(200) = %d events, want 0", len(pulled))
+		t.Errorf("Pull(201) = %d events, want 0", len(pulled))
 	}
 }
 
@@ -125,11 +139,83 @@ func TestR2BlobNotFound(t *testing.T) {
 	}
 }
 
+// TestR2HubDeleteBlob (SEC-01/HUB-12): DeleteBlob removes a content-addressed
+// blob and is idempotent on a missing blob so revoke/GC can call it
+// unconditionally for superseded ciphertext.
+func TestR2HubDeleteBlob(t *testing.T) {
+	ctx := context.Background()
+	h := newTestR2Hub(t)
+	hash := strings.Repeat("a", 64)
+	if err := h.PutBlob(ctx, hash, bytes.NewReader([]byte("encrypted-blob"))); err != nil {
+		t.Fatalf("PutBlob: %v", err)
+	}
+	if err := h.DeleteBlob(ctx, hash); err != nil {
+		t.Fatalf("DeleteBlob: %v", err)
+	}
+	if _, err := h.GetBlob(ctx, hash); err == nil {
+		t.Fatal("expected error after delete")
+	}
+	// Idempotent: deleting a missing blob is not an error.
+	if err := h.DeleteBlob(ctx, strings.Repeat("c", 64)); err != nil {
+		t.Fatalf("idempotent delete of missing blob: %v", err)
+	}
+}
+
 func TestR2InvalidBlobKey(t *testing.T) {
 	ctx := context.Background()
 	h := newTestR2Hub(t)
 	if err := h.PutBlob(ctx, "short", bytes.NewReader([]byte("x"))); err == nil {
 		t.Error("expected error for invalid blob key")
+	}
+}
+
+// countS3 wraps an S3Client and counts ObjectExists (HEAD) and PutObject calls
+// so tests can assert HUB-09: the write path must not issue a redundant
+// ObjectExists before the conditional put.
+type countS3 struct {
+	S3Client
+	heads int
+	puts  int
+}
+
+func (c *countS3) PutObject(ctx context.Context, key string, body []byte, ifNoneMatch bool) error {
+	c.puts++
+	return c.S3Client.PutObject(ctx, key, body, ifNoneMatch)
+}
+
+func (c *countS3) ObjectExists(ctx context.Context, key string) (bool, error) {
+	c.heads++
+	return c.S3Client.ObjectExists(ctx, key)
+}
+
+// TestR2WritePathSkipsObjectExists (HUB-09): Push and PutBlob rely solely on
+// the conditional put and never issue a redundant ObjectExists/HEAD, even when
+// re-pushing a duplicate event or blob. A 412 PreconditionFailed is classified
+// as an idempotent dedup hit.
+func TestR2WritePathSkipsObjectExists(t *testing.T) {
+	ctx := context.Background()
+	c := &countS3{S3Client: newMemS3()}
+	h := R2Hub{S3: c, WorkspaceID: "ws_test"}
+	e := makeEvent("evt_001", "dev_a", 100, 1, "project.added", `{"path":"a"}`)
+	if err := h.Push(ctx, []state.Event{e}); err != nil {
+		t.Fatalf("Push 1: %v", err)
+	}
+	// Re-pushing the same event is an idempotent no-op via 412, no HEAD.
+	if err := h.Push(ctx, []state.Event{e}); err != nil {
+		t.Fatalf("Push 2 (dup): %v", err)
+	}
+	if c.heads != 0 {
+		t.Errorf("Push issued %d ObjectExists calls, want 0 (HUB-09)", c.heads)
+	}
+	blob := []byte("encrypted-blob-content")
+	if err := h.PutBlob(ctx, strings.Repeat("a", 64), bytes.NewReader(blob)); err != nil {
+		t.Fatalf("PutBlob 1: %v", err)
+	}
+	if err := h.PutBlob(ctx, strings.Repeat("a", 64), bytes.NewReader(blob)); err != nil {
+		t.Fatalf("PutBlob 2 (dup): %v", err)
+	}
+	if c.heads != 0 {
+		t.Errorf("PutBlob issued %d ObjectExists calls, want 0 (HUB-09)", c.heads)
 	}
 }
 
@@ -158,5 +244,100 @@ func TestR2Pagination(t *testing.T) {
 	}
 	if len(keys) != 3 {
 		t.Errorf("page size = %d, want 3", len(keys))
+	}
+}
+
+// faultS3 wraps an S3Client and injects a configured error on the first failN
+// PutObject calls, then delegates. Used to exercise HUB-10 retry/recovery.
+type faultS3 struct {
+	S3Client
+	mu     sync.Mutex
+	calls  int
+	failN  int
+	inject error
+}
+
+func (f *faultS3) PutObject(ctx context.Context, key string, body []byte, ifNoneMatch bool) error {
+	f.mu.Lock()
+	f.calls++
+	n := f.calls
+	failN := f.failN
+	inject := f.inject
+	f.mu.Unlock()
+	if n <= failN {
+		return inject
+	}
+	return f.S3Client.PutObject(ctx, key, body, ifNoneMatch)
+}
+
+func (f *faultS3) CallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+func fastRetry() R2Retry {
+	return R2Retry{
+		MaxAttempts:   3,
+		BaseDelay:     time.Millisecond,
+		ThrottleDelay: time.Millisecond,
+		Cap:           10 * time.Millisecond,
+		Jitter:        func(int64) int64 { return 0 },
+	}
+}
+
+// TestR2PushRetriesThrottling (HUB-10): a throttling error on the first two
+// PutObject attempts is retried with backoff and the third attempt succeeds.
+func TestR2PushRetriesThrottling(t *testing.T) {
+	ctx := context.Background()
+	f := &faultS3{S3Client: newMemS3(), failN: 2, inject: ErrS3Throttle}
+	h := R2Hub{S3: f, WorkspaceID: "ws_test", Retry: fastRetry()}
+	e := makeEvent("evt_001", "dev_a", 100, 1, "project.added", `{"path":"a"}`)
+	if err := h.Push(ctx, []state.Event{e}); err != nil {
+		t.Fatalf("Push: %v, want retry recovery", err)
+	}
+	if f.CallCount() < 3 {
+		t.Fatalf("PutObject calls = %d, want >=3 (retried)", f.CallCount())
+	}
+}
+
+// TestR2PushRetriesTransient (HUB-10): a transient error is retried and recovers.
+func TestR2PushRetriesTransient(t *testing.T) {
+	ctx := context.Background()
+	f := &faultS3{S3Client: newMemS3(), failN: 1, inject: ErrS3Transient}
+	h := R2Hub{S3: f, WorkspaceID: "ws_test", Retry: fastRetry()}
+	e := makeEvent("evt_001", "dev_a", 100, 1, "project.added", `{"path":"a"}`)
+	if err := h.Push(ctx, []state.Event{e}); err != nil {
+		t.Fatalf("Push: %v, want retry recovery", err)
+	}
+	if f.CallCount() < 2 {
+		t.Fatalf("PutObject calls = %d, want >=2 (retried)", f.CallCount())
+	}
+}
+
+// TestR2PushDoesNotRetryTerminal (HUB-10): an unclassified/terminal error (e.g.
+// auth) is not retried; Push fails fast on the first attempt.
+func TestR2PushDoesNotRetryTerminal(t *testing.T) {
+	ctx := context.Background()
+	f := &faultS3{S3Client: newMemS3(), failN: 5, inject: errors.New("s3 auth error")}
+	h := R2Hub{S3: f, WorkspaceID: "ws_test", Retry: fastRetry()}
+	err := h.Push(ctx, []state.Event{makeEvent("evt_001", "dev_a", 100, 1, "project.added", `{"path":"a"}`)})
+	if err == nil {
+		t.Fatal("Push: want terminal error, got nil")
+	}
+	if f.CallCount() != 1 {
+		t.Fatalf("PutObject calls = %d, want 1 (no retry on terminal)", f.CallCount())
+	}
+}
+
+// TestR2RetryRespectsContextCancellation (HUB-10): a cancelled context aborts
+// the retry loop rather than sleeping through the backoff.
+func TestR2RetryRespectsContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := R2Retry{MaxAttempts: 3, BaseDelay: time.Minute, ThrottleDelay: time.Minute, Jitter: func(int64) int64 { return 0 }}
+	err := r.do(ctx, func() error { return ErrS3Throttle })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("do with cancelled ctx = %v, want context.Canceled", err)
 	}
 }

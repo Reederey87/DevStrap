@@ -116,6 +116,67 @@ func TestScrubTokenShapes(t *testing.T) {
 	}
 }
 
+// TestScrubExtendedTokenShapes (SEC-06): GitLab, Stripe, and Bearer secret
+// shapes that the original tokenPatterns omitted are now redacted.
+func TestScrubExtendedTokenShapes(t *testing.T) {
+	bearerBody := secretLike("dGhpcyBpcyBhIHRva2VuIGZvciB0ZXN0aW5n", "")
+	secrets := []string{
+		secretLike("glpat-", "abcdefghijklmnopqrstuvwxyz0123456789"),
+		secretLike("sk_live_", "abcdefghijklmnopqrstuvwxyz0123456789"),
+		secretLike("rk_live_", "abcdefghijklmnopqrstuvwxyz0123456789"),
+		"Bearer " + bearerBody,
+	}
+	for _, secret := range secrets {
+		text := "context before " + secret + " context after"
+		got := Scrub(text)
+		if strings.Contains(got, secret) {
+			t.Fatalf("Scrub failed to redact %q: %q", secret, got)
+		}
+		if !strings.Contains(got, "context before") || !strings.Contains(got, "context after") {
+			t.Fatalf("Scrub mangled surrounding text: %q", got)
+		}
+	}
+}
+
+// TestScrubJSONSecretFields (SEC-06): a JSON field whose name looks like a
+// secret has its value masked while the key name is preserved. This catches the
+// GCP service-account private_key (base64 on one JSON line) that the bare
+// PEM-header pattern would leave exposed, plus generic api_key/Authorization/
+// password/client_secret fields (incl. Snowflake config passwords).
+func TestScrubJSONSecretFields(t *testing.T) {
+	gcpSA := `{"type":"service_account","private_key":"-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ\n-----END PRIVATE KEY-----\n","client_email":"svc@test.iam.gserviceaccount.com"}`
+	got := Scrub(gcpSA)
+	if strings.Contains(got, "MIIEvQ") {
+		t.Fatalf("GCP SA private_key body leaked: %q", got)
+	}
+	if !strings.Contains(got, `"private_key":"`+Placeholder+`"`) {
+		t.Fatalf("GCP SA private_key value not masked (key name should be preserved): %q", got)
+	}
+	if !strings.Contains(got, `"client_email":"svc@test.iam.gserviceaccount.com"`) {
+		t.Fatalf("non-secret field client_email mangled: %q", got)
+	}
+
+	cases := []struct {
+		name, in, leak string
+	}{
+		{"api_key", `{"api_key":"` + secretLike("ak_live_", "abcdefghijklmnopqrstuvwxyz0123456789") + `"}`, "abcdefghijklmnopqrstuvwxyz0123456789"},
+		{"authorization bearer", `{"Authorization":"Bearer ` + secretLike("eyJhbGciOi", "JIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig") + `"}`, "JIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig"},
+		{"db_password", `{"db_password":"` + secretLike("pw_", "supersecretpassword1234567890ABCDEF") + `"}`, "supersecretpassword1234567890ABCDEF"},
+		{"client_secret", `{"client_secret":"` + secretLike("cs_", "abcdefghijklmnopqrstuvwxyz0123456789AB") + `"}`, "abcdefghijklmnopqrstuvwxyz0123456789AB"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := Scrub(c.in)
+			if strings.Contains(got, c.leak) {
+				t.Fatalf("JSON secret value leaked for %q: %q", c.in, got)
+			}
+			if !strings.Contains(got, Placeholder) {
+				t.Fatalf("JSON secret value not replaced with placeholder: %q", got)
+			}
+		})
+	}
+}
+
 func TestStripURLUserinfo(t *testing.T) {
 	httpsToken := secretLike("ghp_", "tokenabcdef1234567890")
 	cases := []struct {

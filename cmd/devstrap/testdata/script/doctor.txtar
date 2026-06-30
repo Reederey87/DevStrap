@@ -1,0 +1,17 @@
+# PROD-02: doctor is a severity-graded health report with --json and --fix.
+
+env DEVSTRAP_NO_KEYCHAIN=1
+
+exec devstrap --home=$WORK/home --root=$WORK/Code init
+
+# Graded report on a healthy workspace: zero errors.
+exec devstrap --home=$WORK/home --root=$WORK/Code doctor
+stdout '0 error\(s\)'
+
+# --json emits a JSON array of graded checks.
+exec devstrap --home=$WORK/home --root=$WORK/Code doctor --json
+stdout '"status"'
+
+# --fix is idempotent and safe on a healthy workspace.
+exec devstrap --home=$WORK/home --root=$WORK/Code doctor --fix
+stdout '0 error\(s\)'

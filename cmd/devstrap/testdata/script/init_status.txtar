@@ -21,6 +21,8 @@ stdout '"device_id"'
 exec devstrap version
 stdout 'devstrap'
 
-# doctor reports prerequisites and no held locks after a clean init.
+# doctor reports prerequisites and no held locks after a clean init (PROD-02:
+# graded report — "repo locks" check is ok with "none held").
 exec devstrap doctor
-stdout 'repo locks: none held'
+stdout 'repo locks'
+stdout 'none held'
