@@ -21,7 +21,10 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: GoReleaser
-        uses: goreleaser/goreleaser-action@v7 # Dependabot keeps this current; pin to a SHA on the next bump
+        # P4-SEC-05: SHA-pin the one remaining unpinned action in this
+        # contents:write release job. The trailing version comment lets
+        # Dependabot bump the SHA on new releases.
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
           version: "~> v2"

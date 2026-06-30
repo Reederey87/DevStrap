@@ -127,13 +127,14 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 	if err != nil {
 		return err
 	}
-	results := materializePass(ctx, store, opts, projects)
+	// sync always materializes with a blobless/partial clone (EAGER-01).
+	results := materializePass(ctx, store, opts, projects, true)
 	// HUB-05: reclaim locally-cached blobs no longer referenced.
 	if removed, gcErr := gcUnreferencedBlobs(ctx, store, opts.paths()); gcErr == nil && removed > 0 {
 		_, _ = fmt.Fprintf(stdout, "GC'd %d unreferenced blob(s)\n", removed)
 	}
-	_, err = fmt.Fprintf(stdout, "Synced events: pushed %d, pulled %d; materialized %d/%d projects\n",
-		len(localEvents), len(remoteEvents), results.succeeded, results.total)
+	_, err = fmt.Fprintf(stdout, "Synced events: pushed %d, pulled %d; materialized %d/%d projects (%d skipped)\n",
+		len(localEvents), len(remoteEvents), results.succeeded, results.total, results.skipped)
 	return err
 }
 

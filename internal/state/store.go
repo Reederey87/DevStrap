@@ -1055,6 +1055,16 @@ WHERE id = ?;
 	if err != nil {
 		return 0, fmt.Errorf("apply rename: %w", err)
 	}
+	// P5-SYNC-03: leave a tombstone at the old path stamped with the rename
+	// HLC. The source row was re-keyed in place, so without this the old
+	// path_key vanishes with no tombstone and a stale or cross-batch add/update
+	// targeting the old path (even one with a lower HLC) would find no active
+	// row and no tombstone, then resurrect a ghost project. The tombstone makes
+	// renamed-away paths HLC-gated by the same TombstoneHLC guard as deletes; a
+	// legitimately newer add/update at the old path still re-creates it.
+	if err := tx.TombstoneProject(ctx, oldPK.Display, event.HLC); err != nil {
+		return 0, fmt.Errorf("tombstone renamed-away path: %w", err)
+	}
 	return RenameApplied, nil
 }
 
@@ -1900,16 +1910,20 @@ UPDATE conflicts SET status = 'resolved', resolution_json = ?, updated_at = ? WH
 }
 
 // ResolveConflictByFingerprint marks the open conflict matching the stable
-// (namespace_id, type, details_json) fingerprint resolved (PROD-06). Used by
+// (workspace_id, type, details_json) fingerprint resolved (PROD-06). Used by
 // the conflict.resolved event apply handler so cross-device convergence does
-// not depend on per-device conflict IDs. It is idempotent: a duplicate event
-// for an already-resolved (or absent) row affects zero rows and returns nil.
-func (tx *Tx) ResolveConflictByFingerprint(ctx context.Context, namespaceID, typ, detailsJSON, resolutionJSON string) error {
+// not depend on per-device conflict IDs. P5-SYNC-02: namespace_id is a
+// locally-minted prj_<uuid> that differs per device, so it must NOT be part of
+// the match — details_json already embeds the stable path and event-coordinate
+// winner/loser, making (type, details_json) globally unique. It is idempotent:
+// a duplicate event for an already-resolved (or absent) row affects zero rows
+// and returns nil.
+func (tx *Tx) ResolveConflictByFingerprint(ctx context.Context, typ, detailsJSON, resolutionJSON string) error {
 	now := timestampNow()
 	_, err := tx.tx.ExecContext(ctx, `
 UPDATE conflicts SET status = 'resolved', resolution_json = ?, updated_at = ?
-WHERE workspace_id = ? AND COALESCE(namespace_id, '') = COALESCE(?, '') AND type = ? AND details_json = ? AND status = 'open';
-`, nullEmpty(resolutionJSON), now, tx.workspaceID, nullEmpty(namespaceID), typ, detailsJSON)
+WHERE workspace_id = ? AND type = ? AND details_json = ? AND status = 'open';
+`, nullEmpty(resolutionJSON), now, tx.workspaceID, typ, detailsJSON)
 	if err != nil {
 		return fmt.Errorf("resolve conflict by fingerprint: %w", err)
 	}

@@ -54,8 +54,12 @@ type Limits struct {
 
 // Snapshot records the metadata of a packed draft bundle.
 type Snapshot struct {
-	BlobRef    string // age_blob:<sha256>
-	ByteSize   int64
+	BlobRef  string // age_blob:<sha256>
+	ByteSize int64
+	// FileCount is the number of tar entries (regular files + directory
+	// headers) in the bundle (P5-QUAL-05). Counting directory entries keeps the
+	// extract-side decompression-bomb budget (P5-SEC-02) and the materialize
+	// floor symmetric with what Pack produced.
 	FileCount  int64
 	Manifest   []string // relative paths included, for diagnostics
 	Ciphertext []byte   // the encrypted blob (caller stores it)
@@ -112,6 +116,27 @@ func Pack(dir string, matcher *ignore.Matcher, limits Limits, recipients []strin
 			// Skip the .devstrap metadata dir inside drafts.
 			if relSlash == ".devstrap" {
 				return filepath.SkipDir
+			}
+			// P5-QUAL-05: emit an explicit directory header so empty
+			// directories (placeholder logs/, tmp/, scaffold dirs) survive the
+			// cross-device round-trip. Count it against MaxFiles so the
+			// decompression-bomb guard (P5-SEC-02) stays sound.
+			info, err := d.Info()
+			if err != nil {
+				return fmt.Errorf("stat dir %s: %w", relSlash, err)
+			}
+			dhdr := &tar.Header{
+				Name:     relSlash + "/",
+				Mode:     0o750,
+				ModTime:  info.ModTime(),
+				Typeflag: tar.TypeDir,
+			}
+			if err := tw.WriteHeader(dhdr); err != nil {
+				return fmt.Errorf("write tar dir header %s: %w", relSlash, err)
+			}
+			fileCount++
+			if fileCount > limits.MaxFiles {
+				return fmt.Errorf("draft bundle exceeds max_files %d; raise draft_projects.max_files or add content to .devstrapignore", limits.MaxFiles)
 			}
 			return nil
 		}
@@ -250,28 +275,35 @@ func ExtractWithLimits(ciphertext []byte, identity, dest string, limits Limits) 
 		if !pathWithin(cleanDest, target) {
 			return fmt.Errorf("refusing tar path outside extract root: %s", hdr.Name)
 		}
+		// P5-SEC-02: reject any entry type Pack never produces. Pack emits only
+		// regular files (TypeReg) and directories (TypeDir); anything else
+		// (symlink, device, fifo, GNU/PAX extension records that can carry data)
+		// is attacker-introduced and must not slip past the budget guard.
+		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeDir {
+			return fmt.Errorf("unsupported tar entry %q (type %d)", hdr.Name, hdr.Typeflag)
+		}
+		// P5-SEC-02 / QUAL-01: charge the aggregate decompression budget for
+		// EVERY entry, before the type switch, so a crafted header with a large
+		// declared Size cannot walk past the guard regardless of its type. A
+		// zero-size entry passes even when the budget is exactly exhausted
+		// (0 > 0 is false), matching Pack's strict-`>` accounting.
+		fileCount++
+		if fileCount > limits.MaxFiles {
+			return fmt.Errorf("%w: %d files exceeds limit %d", ErrBundleTooLarge, fileCount, limits.MaxFiles)
+		}
+		if hdr.Size > 0 {
+			remaining := limits.MaxBytes - totalBytes
+			if hdr.Size > remaining {
+				return fmt.Errorf("%w: entry %s (%d bytes) exceeds remaining budget %d", ErrBundleTooLarge, hdr.Name, hdr.Size, remaining)
+			}
+			totalBytes += hdr.Size
+		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(target, 0o750); err != nil {
 				return fmt.Errorf("create dir %s: %w", hdr.Name, err)
 			}
 		case tar.TypeReg:
-			// QUAL-01: aggregate decompression-budget guard. Count every
-			// regular entry and bound the running total so a bomb cannot
-			// exhaust disk via many small files or one huge file.
-			fileCount++
-			if fileCount > limits.MaxFiles {
-				return fmt.Errorf("%w: %d files exceeds limit %d", ErrBundleTooLarge, fileCount, limits.MaxFiles)
-			}
-			remaining := limits.MaxBytes - totalBytes
-			// QUAL-01: abort (do not truncate) when this entry alone would
-			// exceed the remaining budget, so a single huge file is caught as
-			// a bomb rather than silently shortened. A zero-size entry (e.g. a
-			// trailing .gitkeep) passes even when the budget is exactly
-			// exhausted (0 > 0 is false), matching Pack's strict-`>` accounting.
-			if hdr.Size > remaining {
-				return fmt.Errorf("%w: entry %s (%d bytes) exceeds remaining budget %d", ErrBundleTooLarge, hdr.Name, hdr.Size, remaining)
-			}
 			copyLimit := hdr.Size
 			if copyLimit < 0 {
 				copyLimit = 0
@@ -279,47 +311,23 @@ func ExtractWithLimits(ciphertext []byte, identity, dest string, limits Limits) 
 			if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 				return fmt.Errorf("create parent %s: %w", hdr.Name, err)
 			}
+			dst := target
 			if _, err := os.Stat(target); err == nil {
 				// Dual-copy: preserve both versions on conflict (DRAFT-01).
-				conflict := target + ".devstrap-conflict"
-				//nolint:gosec // Path validated within cleanDest; size bounded by the aggregate budget.
-				cf, err := os.OpenFile(conflict, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-				if err != nil {
-					return fmt.Errorf("create conflict %s: %w", hdr.Name, err)
-				}
-				n, err := io.Copy(cf, io.LimitReader(tr, copyLimit))
-				if err != nil {
-					_ = cf.Close()
-					return fmt.Errorf("write conflict %s: %w", hdr.Name, err)
-				}
-				if err := cf.Close(); err != nil {
-					return fmt.Errorf("close conflict %s: %w", hdr.Name, err)
-				}
-				totalBytes += n
-				if totalBytes > limits.MaxBytes {
-					return fmt.Errorf("%w: %d bytes exceeds limit %d", ErrBundleTooLarge, totalBytes, limits.MaxBytes)
-				}
-				continue
+				dst = target + ".devstrap-conflict"
 			}
-			//nolint:gosec // Path validated within cleanDest; size bounded by the aggregate budget.
-			out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+			//nolint:gosec // Path validated within cleanDest; size bounded by the aggregate budget charged above.
+			out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 			if err != nil {
 				return fmt.Errorf("create %s: %w", hdr.Name, err)
 			}
-			n, err := io.Copy(out, io.LimitReader(tr, copyLimit))
-			if err != nil {
+			if _, err := io.Copy(out, io.LimitReader(tr, copyLimit)); err != nil {
 				_ = out.Close()
 				return fmt.Errorf("write %s: %w", hdr.Name, err)
 			}
 			if err := out.Close(); err != nil {
 				return fmt.Errorf("close %s: %w", hdr.Name, err)
 			}
-			totalBytes += n
-			if totalBytes > limits.MaxBytes {
-				return fmt.Errorf("%w: %d bytes exceeds limit %d", ErrBundleTooLarge, totalBytes, limits.MaxBytes)
-			}
-		default:
-			// Skip symlinks, devices, and other special types for safety.
 		}
 	}
 	return nil

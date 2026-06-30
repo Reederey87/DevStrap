@@ -55,10 +55,10 @@ type RenamePayload struct {
 
 // ConflictResolvedPayload carries a conflict.resolved event (PROD-06): the
 // user's local resolution decision is audited and synced so every device sees
-// the same outcome and the open-conflict count converges. ConflictID is the
-// origin device's local row id (per-device, NOT stable across devices); the
-// apply handler matches on the stable (namespace_id, type, details_json)
-// fingerprint instead.
+// the same outcome and the open-conflict count converges. ConflictID and
+// NamespaceID are the origin device's local row ids (per-device, NOT stable
+// across devices), retained only for display/audit; the apply handler matches
+// on the stable (type, details_json) fingerprint instead (P5-SYNC-02).
 type ConflictResolvedPayload struct {
 	ConflictID  string `json:"conflict_id"`
 	NamespaceID string `json:"namespace_id,omitempty"`
@@ -434,7 +434,9 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 			"resolved_by":  event.DeviceID,
 			"resolved_hlc": fmt.Sprintf("%d", event.HLC),
 		})
-		return tx.ResolveConflictByFingerprint(ctx, payload.NamespaceID, payload.Type, payload.DetailsJSON, string(resolution))
+		// P5-SYNC-02: match on (type, details_json) only — namespace_id is
+		// per-device and would never match on the receiving device.
+		return tx.ResolveConflictByFingerprint(ctx, payload.Type, payload.DetailsJSON, string(resolution))
 	case EventDraftSnapshotCreated:
 		var payload DraftSnapshotPayload
 		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
