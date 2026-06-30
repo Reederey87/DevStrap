@@ -27,7 +27,7 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
-## 2026-06-30 — Consolidate audit files into docs/audits/ + status ledger (P5-PROC-01)
+## 2026-06-29 — Consolidate audit files into docs/audits/ + status ledger (P5-PROC-01)
 
 Changed:
 - Moved all five `AUDIT_RECOMMENDATIONS*.md` from the repo root into `docs/audits/` (`git mv`) to declutter the root and end cross-pass finding-ID collisions (fifth-pass finding `P5-PROC-01`).

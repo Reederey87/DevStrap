@@ -2,7 +2,7 @@
 
 This directory holds DevStrap's chronological design & implementation audits. **This file is the single source of truth** for the audit program: the index of passes, the conventions for keeping them sane, and the **consolidated open backlog** (what's still actionable). Per-finding detail and `file:line` evidence live in each pass's own file.
 
-> Moved here from the repo root on 2026-06-30 to declutter the root and end the cross-pass finding-ID collisions (fifth-pass finding `P5-PROC-01`).
+> Moved here from the repo root on 2026-06-29 to declutter the root and end the cross-pass finding-ID collisions (fifth-pass finding `P5-PROC-01`).
 
 ## Index of passes
 
