@@ -161,10 +161,9 @@ devstrap init ~/Code --workspace-name personal
 devstrap scan ~/Code --adopt
 devstrap status
 
-# 3. Add a new repo to the namespace and materialize it
-devstrap add git@github.com:acme/api.git --path work/acme/api --lfs-policy auto
-devstrap hydrate work/acme/api
-devstrap open work/acme/api --cursor
+# 3. Add a new repo and materialize it in one command
+devstrap clone git@github.com:acme/api.git work/acme/api --open
+# (or the explicit two-step form: devstrap add … then devstrap hydrate …)
 
 # 4. Capture and re-hydrate its environment (encrypted at rest)
 devstrap env capture work/acme/api .env
@@ -189,6 +188,7 @@ Prefer not to install? Every command also works via `go run ./cmd/devstrap <cmd>
 | `devstrap status` | Show local workspace status (`--json` supported) |
 | `devstrap doctor` | Check local prerequisites |
 | `devstrap scan` | Scan a workspace root for projects (`--adopt`, `--quarantine`) |
+| `devstrap clone` | Clone a repo into the namespace and materialize it in one command (`--open`/`--vscode`) |
 | `devstrap add` | Add a Git repository to the namespace |
 | `devstrap hydrate` | Clone a skeleton Git repository |
 | `devstrap open` | Hydrate and open a namespace path in an editor (`--cursor`/`--code`) |
@@ -197,9 +197,10 @@ Prefer not to install? Every command also works via `go run ./cmd/devstrap <cmd>
 | `devstrap run-loop` | Run scan + sync + materialize on an interval (portable, no daemon) |
 | `devstrap worktree` | Manage isolated worktrees (`new`/`status`/`finalize`/`list`/`remove`/`cleanup`/`unlock`) |
 | `devstrap agent` | Run agents in isolated fresh worktrees (`run`/`list`/`show`/`pr`) |
-| `devstrap env` | Manage project environment profiles (`capture`/`hydrate`/`bind`) |
+| `devstrap env` | Manage project environment profiles (`capture`/`hydrate`/`bind`/`rotate`) |
 | `devstrap run` | Run a command with the project env profile injected |
 | `devstrap draft` | Manage non‑git draft project content sync (`snapshot`) |
+| `devstrap hub` | Operate on the sync hub (`gc` reclaims unreferenced blobs) |
 | `devstrap devices` | Manage device trust state (`list`/`approve`/`revoke`/`lost`/`rename`) |
 | `devstrap conflicts` | List open namespace conflicts |
 | `devstrap db` | Manage the local state database (`migrate`/`status`/`backup`/`down`) |
@@ -238,7 +239,7 @@ Capability layers (see [`spec/14_MVP_ROADMAP_AND_BACKLOG.md`](spec/14_MVP_ROADMA
 4. **Mac daemon** — LaunchAgent, FSEvents watcher, shell/editor integration. ⏳
 5. **Optional StrapFS** — File Provider / FUSE evaluation. ⏳ (deliberately deferred)
 
-The near‑term priorities — harden the hub's zero‑knowledge guarantees and bound sync‑log growth **before** the R2 backend is switched on, then grow the product surface (`devstrap clone`, a graded `doctor --fix`, a `service install` daemon) — are detailed across the [audit archive](docs/audits/) (latest: the fifth pass).
+The near‑term priorities — wire the R2/S3 hub backend behind the shipped `hubFromOptions` seam, harden the hub's zero‑knowledge guarantees, and bound sync‑log growth **before** the R2 backend is switched on, then grow the product surface (`doctor --remote`, a `service install` daemon) — are detailed across the [audit archive](docs/audits/) (latest: the fifth pass).
 
 ## Security
 

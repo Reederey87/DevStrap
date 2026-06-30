@@ -1607,6 +1607,41 @@ WHERE encrypted_value_ref IS NOT NULL AND needs_rotation = 0;
 	return int(n), nil
 }
 
+// ClearRotationForProject clears the needs_rotation flag on a project's env
+// bindings (P5-PROD-03), used after `devstrap env rotate` re-captures the value
+// at its rotated source. Returns the number of bindings cleared.
+func (s *Store) ClearRotationForProject(ctx context.Context, namespaceID string) (int, error) {
+	res, err := s.db.ExecContext(ctx, `
+UPDATE secret_bindings
+SET needs_rotation = 0, updated_at = ?
+WHERE needs_rotation = 1
+  AND env_profile_id IN (SELECT id FROM env_profiles WHERE namespace_id = ?);
+`, timestampNow(), namespaceID)
+	if err != nil {
+		return 0, fmt.Errorf("clear rotation for project: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("clear rotation rows: %w", err)
+	}
+	return int(n), nil
+}
+
+// ClearAllBindingRotation clears the needs_rotation flag on every binding
+// (P5-PROD-03 `--all`), used when the operator asserts all flagged secrets have
+// been rotated at their source. Returns the number of bindings cleared.
+func (s *Store) ClearAllBindingRotation(ctx context.Context) (int, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE secret_bindings SET needs_rotation = 0, updated_at = ? WHERE needs_rotation = 1;`, timestampNow())
+	if err != nil {
+		return 0, fmt.Errorf("clear all rotation flags: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("clear all rotation rows: %w", err)
+	}
+	return int(n), nil
+}
+
 // CountSecretBindingsNeedingRotation reports how many secret values are flagged
 // for rotation (e.g. after a device revocation).
 func (s *Store) CountSecretBindingsNeedingRotation(ctx context.Context) (int, error) {

@@ -37,6 +37,8 @@ type checkResult struct {
 
 func newDoctorCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var fixFlag bool
+	var remoteFlag bool
+	var hubFile string
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check local prerequisites and workspace health",
@@ -44,6 +46,12 @@ func newDoctorCommand(stdout io.Writer, opts *options) *cobra.Command {
 			results := runDoctorChecks(cmd.Context(), opts)
 			if fixFlag {
 				results = applyDoctorFixes(cmd.Context(), opts, results)
+			}
+			// P5-PROD-05: --remote probes the sync hub (reachability, pending
+			// push backlog, queued hub deletes, device trust) so a fleet's
+			// convergence health is visible, not just local prerequisites.
+			if remoteFlag {
+				results = append(results, checkHubHealth(cmd.Context(), opts, hubFile)...)
 			}
 			if opts.v.GetBool("json") {
 				enc := json.NewEncoder(stdout)
@@ -67,7 +75,59 @@ func newDoctorCommand(stdout io.Writer, opts *options) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&fixFlag, "fix", false, "apply safe remediations (create state home, run migrations, clear stale locks)")
+	cmd.Flags().BoolVar(&remoteFlag, "remote", false, "also probe the sync hub (reachability, pending push, queued deletes, device trust)")
+	cmd.Flags().StringVar(&hubFile, "hub-file", "", "file-backed test hub path for --remote")
 	return cmd
+}
+
+// checkHubHealth probes the sync hub for --remote (P5-PROD-05): reachability,
+// pending-push backlog, queued hub-deletes, and a device-trust summary. It is a
+// thin observability layer over the existing event log + cursors.
+func checkHubHealth(ctx context.Context, opts *options, hubFile string) []checkResult {
+	if _, err := os.Stat(opts.paths().StateDB()); err != nil {
+		return []checkResult{{Name: "hub", Status: checkWarn, Detail: "no state database; run `devstrap init`"}}
+	}
+	store, err := opts.openState(ctx)
+	if err != nil {
+		return []checkResult{{Name: "hub", Status: checkError, Detail: err.Error()}}
+	}
+	defer closeStore(store)
+	hub, hubID, err := hubFromOptions(opts, hubFile)
+	if err != nil {
+		return []checkResult{{Name: "hub", Status: checkError, Detail: err.Error(), Remedy: "pass --hub-file or set 'hub' in config"}}
+	}
+	var out []checkResult
+	if _, err := hub.ListBlobs(ctx); err != nil {
+		return append(out, checkResult{Name: "hub reachable", Status: checkError, Detail: err.Error()})
+	}
+	out = append(out, checkResult{Name: "hub reachable", Status: checkOK, Detail: hubID})
+
+	pushCursor, _ := store.HubCursor(ctx, "push:"+hubID)
+	if pending, perr := store.LocalPendingEvents(ctx, pushCursor); perr == nil {
+		if len(pending) > 0 {
+			out = append(out, checkResult{Name: "pending push", Status: checkWarn, Detail: fmt.Sprintf("%d local event(s) not yet pushed", len(pending)), Remedy: "run `devstrap sync`"})
+		} else {
+			out = append(out, checkResult{Name: "pending push", Status: checkOK, Detail: "0"})
+		}
+	}
+	if queued, qerr := store.PendingHubDeletes(ctx); qerr == nil && len(queued) > 0 {
+		out = append(out, checkResult{Name: "queued hub deletes", Status: checkWarn, Detail: fmt.Sprintf("%d superseded blob(s) awaiting deletion", len(queued)), Remedy: "run `devstrap sync`"})
+	}
+	if devices, derr := store.ListDevices(ctx); derr == nil {
+		approved, revoked, other := 0, 0, 0
+		for _, d := range devices {
+			switch d.TrustState {
+			case "approved":
+				approved++
+			case "revoked", "lost":
+				revoked++
+			default:
+				other++
+			}
+		}
+		out = append(out, checkResult{Name: "device trust", Status: checkOK, Detail: fmt.Sprintf("%d approved, %d revoked/lost, %d pending", approved, revoked, other)})
+	}
+	return out
 }
 
 // runDoctorChecks collects all health checks into a graded result list (PROD-02).
@@ -163,7 +223,7 @@ func checkSecretsRotation(ctx context.Context, store *state.Store) []checkResult
 		return nil
 	}
 	if rotate > 0 {
-		return []checkResult{{Name: "secrets needing rotation", Status: checkWarn, Detail: fmt.Sprintf("%d (rotate at source after a device revoke)", rotate), Remedy: "rotate the flagged secrets at their source"}}
+		return []checkResult{{Name: "secrets needing rotation", Status: checkWarn, Detail: fmt.Sprintf("%d (rotate at source after a device revoke)", rotate), Remedy: "rotate at the provider, then 'devstrap env rotate <path> <env-file>' to re-capture and clear the flag (or 'devstrap env rotate --all')"}}
 	}
 	return []checkResult{{Name: "secrets needing rotation", Status: checkOK, Detail: "0"}}
 }
