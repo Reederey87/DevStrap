@@ -25,9 +25,6 @@ func newSyncCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Use:   "sync",
 		Short: "Push and pull namespace events and materialize the tree",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if hubFile == "" {
-				return appError{code: exitInvalidConfig, err: fmt.Errorf("--hub-file is required until the production hub exists")}
-			}
 			return runSyncCycle(cmd.Context(), stdout, opts, hubFile, namespaceOnly, dryRun)
 		},
 	}
@@ -46,8 +43,11 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 		return err
 	}
 	defer closeStore(store)
-	hub := dssync.FileHub{Path: hubFile}
-	hubID := "file:" + hubFile
+	// P5-HUB-01: resolve the hub through the single selection seam.
+	hub, hubID, err := hubFromOptions(opts, hubFile)
+	if err != nil {
+		return appError{code: exitInvalidConfig, err: err}
+	}
 	// SYNC-04: push cursor bounds the push side so a sync cycle re-uploads
 	// only new local-origin events (HLC > push cursor), not the entire event
 	// log including remote-origin events the hub already holds from their

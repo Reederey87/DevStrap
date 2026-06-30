@@ -1771,6 +1771,38 @@ SELECT DISTINCT blob_ref FROM draft_snapshots WHERE blob_ref LIKE 'age_blob:%';
 	return refs, rows.Err()
 }
 
+// PruneDraftSnapshots deletes superseded draft snapshot rows, keeping the most
+// recent `keep` per project (P5-HUB-02). RecordDraftSnapshot only ever INSERTs,
+// so without pruning every superseded snapshot keeps its blob "referenced"
+// forever and neither local nor hub GC can reclaim a stale draft blob. keep is
+// clamped to >= 1 so the current snapshot (highest HLC) is always retained.
+// Returns the number of rows pruned.
+func (s *Store) PruneDraftSnapshots(ctx context.Context, keep int) (int, error) {
+	if keep < 1 {
+		keep = 1
+	}
+	res, err := s.db.ExecContext(ctx, `
+DELETE FROM draft_snapshots
+WHERE id IN (
+  SELECT id FROM (
+    SELECT id, ROW_NUMBER() OVER (
+      PARTITION BY namespace_id
+      ORDER BY COALESCE(source_event_hlc, 0) DESC, created_at DESC, id DESC
+    ) AS rn
+    FROM draft_snapshots
+  ) WHERE rn > ?
+);
+`, keep)
+	if err != nil {
+		return 0, fmt.Errorf("prune draft snapshots: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("prune draft snapshots rows: %w", err)
+	}
+	return int(n), nil
+}
+
 // UpdateBlobRef repoints every reference from oldRef to newRef across
 // secret_bindings and draft_snapshots (HUB-04 re-encryption).
 func (s *Store) UpdateBlobRef(ctx context.Context, oldRef, newRef string) error {

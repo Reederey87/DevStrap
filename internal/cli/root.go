@@ -96,6 +96,7 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newOpenCommand(stdout, opts))
 	cmd.AddCommand(newWorktreeCommand(stdout, opts))
 	cmd.AddCommand(newSyncCommand(stdout, opts))
+	cmd.AddCommand(newHubCommand(stdout, opts))
 	cmd.AddCommand(newMaterializeCommand(stdout, opts))
 	cmd.AddCommand(newDraftCommand(stdout, opts))
 	cmd.AddCommand(newEnvCommand(stdout, opts))

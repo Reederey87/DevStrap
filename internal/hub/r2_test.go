@@ -5,12 +5,14 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/Reederey87/DevStrap/internal/state"
+	dssync "github.com/Reederey87/DevStrap/internal/sync"
 )
 
 func newTestR2Hub(t *testing.T) R2Hub {
@@ -136,6 +138,50 @@ func TestR2BlobNotFound(t *testing.T) {
 	_, err := h.GetBlob(ctx, strings.Repeat("b", 64))
 	if err == nil {
 		t.Fatal("expected error for missing blob")
+	}
+}
+
+// P5-HUB-03: a Pull whose cursor is below the retention horizon must return
+// ErrSnapshotRequired instead of a silently-incomplete (post-compaction) set.
+func TestR2HubPullRetentionFloor(t *testing.T) {
+	ctx := context.Background()
+	h := newTestR2Hub(t)
+	h.RetentionHLC = 100
+	if err := h.Push(ctx, []state.Event{makeEvent("evt_1", "dev_a", 150, 1, "project.added", `{"path":"a"}`)}); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	// Below the floor → snapshot required.
+	if _, err := h.Pull(ctx, 50); !errors.Is(err, dssync.ErrSnapshotRequired) {
+		t.Fatalf("Pull(50) = %v, want ErrSnapshotRequired", err)
+	}
+	// At/above the floor → normal incremental pull.
+	pulled, err := h.Pull(ctx, 100)
+	if err != nil {
+		t.Fatalf("Pull(100): %v", err)
+	}
+	if len(pulled) != 1 {
+		t.Fatalf("Pull(100) = %d events, want 1", len(pulled))
+	}
+}
+
+// P5-HUB-02: ListBlobs enumerates the workspace's blobs by sha256 hex key.
+func TestR2HubListBlobs(t *testing.T) {
+	ctx := context.Background()
+	h := newTestR2Hub(t)
+	keyA := strings.Repeat("a", 64)
+	keyB := strings.Repeat("b", 64)
+	for _, k := range []string{keyA, keyB} {
+		if err := h.PutBlob(ctx, k, bytes.NewReader([]byte("x"))); err != nil {
+			t.Fatalf("PutBlob %s: %v", k, err)
+		}
+	}
+	got, err := h.ListBlobs(ctx)
+	if err != nil {
+		t.Fatalf("ListBlobs: %v", err)
+	}
+	sort.Strings(got)
+	if len(got) != 2 || got[0] != keyA || got[1] != keyB {
+		t.Fatalf("ListBlobs = %v, want [%s %s]", got, keyA, keyB)
 	}
 }
 

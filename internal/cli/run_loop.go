@@ -34,8 +34,9 @@ func newRunLoopCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// P5-CLI-05: progress/diagnostics go to stderr so a scheduler or log
 			// consumer can keep stdout (the sync result stream) clean.
 			stderr := cmd.ErrOrStderr()
-			if hubFile == "" {
-				return appError{code: exitInvalidConfig, err: fmt.Errorf("--hub-file is required until the production hub exists")}
+			// P5-HUB-01: fail fast if no hub is resolvable before starting the loop.
+			if _, _, err := hubFromOptions(opts, hubFile); err != nil {
+				return appError{code: exitInvalidConfig, err: err}
 			}
 			if once {
 				return runLoopTick(cmd.Context(), stdout, stderr, opts, hubFile, namespaceOnly)

@@ -30,7 +30,14 @@ import (
 
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
+	"golang.org/x/sync/errgroup"
 )
+
+// r2PullConcurrency bounds how many event objects R2Hub.Pull fetches in
+// parallel (P5-HUB-04). It mirrors the materialize pass's bounded fan-out so a
+// cold-start pull of thousands of events is not O(events) serial round-trips,
+// without exhausting connections.
+const r2PullConcurrency = 8
 
 // S3Client is the minimal S3-compatible operation set the R2 backend needs
 // S3Client is the minimal S3-compatible operation set the R2 backend needs
@@ -62,6 +69,12 @@ type S3Client interface {
 type R2Hub struct {
 	S3          S3Client
 	WorkspaceID string
+	// RetentionHLC is the hub's retention horizon (P5-HUB-03): the minimum HLC
+	// still retained on the hub. A Pull whose cursor falls below it returns
+	// dssync.ErrSnapshotRequired so the caller performs a full-state snapshot
+	// exchange instead of silently receiving a partial (post-compaction) event
+	// set and diverging. Zero means "no compaction yet" (R2 retains everything).
+	RetentionHLC int64
 	// Retry configures R2Hub-level retry, backoff, and error classification for
 	// S3 operations (HUB-10). A zero value uses a default policy: throttling
 	// (429/503 SlowDown) and transient (500/connection-reset) errors are retried
@@ -131,46 +144,68 @@ func (h R2Hub) Push(ctx context.Context, events []state.Event) error {
 }
 
 func (h R2Hub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, error) {
+	// P5-HUB-03: honor the retention horizon. If the cursor has fallen below the
+	// hub's compaction floor, the post-cursor log is incomplete; force a
+	// full-state snapshot exchange rather than silently returning a partial set.
+	if h.RetentionHLC > 0 && afterHLC < h.RetentionHLC {
+		return nil, dssync.ErrSnapshotRequired
+	}
 	// HUB-06: pull with bounded ListObjectsV2 pages, start-after the
 	// afterHLC-padded key so only newer events are listed. The cursor is the
 	// HLC value; we encode it as the zero-padded prefix to start after.
 	startAfter := fmt.Sprintf("%s%020d", h.eventsPrefix(), afterHLC)
-	var out []state.Event
+	var keys []string
 	for {
-		// HUB-10: retry list/get on throttling/transient S3 errors with backoff.
-		var keys []string
+		// HUB-10: retry list on throttling/transient S3 errors with backoff.
+		var page []string
 		var next string
 		if err := h.retry().do(ctx, func() error {
 			var lerr error
-			keys, next, lerr = h.S3.ListObjectsV2(ctx, h.eventsPrefix(), startAfter, 1000)
+			page, next, lerr = h.S3.ListObjectsV2(ctx, h.eventsPrefix(), startAfter, 1000)
 			return lerr
 		}); err != nil {
 			return nil, fmt.Errorf("list events: %w", err)
 		}
-		for _, key := range keys {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			var raw []byte
-			if err := h.retry().do(ctx, func() error {
-				var gerr error
-				raw, gerr = h.S3.GetObject(ctx, key)
-				return gerr
-			}); err != nil {
-				return nil, fmt.Errorf("get event object %s: %w", key, err)
-			}
-			var event state.Event
-			if err := json.Unmarshal(raw, &event); err != nil {
-				return nil, fmt.Errorf("decode event object %s: %w", key, err)
-			}
-			if event.HLC >= afterHLC {
-				out = append(out, event)
-			}
-		}
+		keys = append(keys, page...)
 		if next == "" {
 			break
 		}
 		startAfter = next
+	}
+	// P5-HUB-04: fetch the post-cursor objects with bounded concurrency instead
+	// of one serial GetObject at a time, so a cold-start pull is not O(events)
+	// serial round-trips. Results are placed by index so ordering is independent
+	// of completion order; the final sort restores apply order.
+	fetched := make([]state.Event, len(keys))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(r2PullConcurrency)
+	for i, key := range keys {
+		i, key := i, key
+		g.Go(func() error {
+			var raw []byte
+			if err := h.retry().do(gctx, func() error {
+				var gerr error
+				raw, gerr = h.S3.GetObject(gctx, key)
+				return gerr
+			}); err != nil {
+				return fmt.Errorf("get event object %s: %w", key, err)
+			}
+			var event state.Event
+			if err := json.Unmarshal(raw, &event); err != nil {
+				return fmt.Errorf("decode event object %s: %w", key, err)
+			}
+			fetched[i] = event
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	var out []state.Event
+	for _, event := range fetched {
+		if event.HLC >= afterHLC {
+			out = append(out, event)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].HLC == out[j].HLC {
@@ -181,6 +216,33 @@ func (h R2Hub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, error) 
 		}
 		return out[i].HLC < out[j].HLC
 	})
+	return out, nil
+}
+
+// ListBlobs returns the sha256 hex keys of every blob in this workspace's blob
+// prefix (P5-HUB-02), the enumeration primitive for mark-and-sweep hub GC.
+func (h R2Hub) ListBlobs(ctx context.Context) ([]string, error) {
+	prefix := fmt.Sprintf("workspaces/%s/blobs/", h.WorkspaceID)
+	var out []string
+	startAfter := ""
+	for {
+		var keys []string
+		var next string
+		if err := h.retry().do(ctx, func() error {
+			var lerr error
+			keys, next, lerr = h.S3.ListObjectsV2(ctx, prefix, startAfter, 1000)
+			return lerr
+		}); err != nil {
+			return nil, fmt.Errorf("list blobs: %w", err)
+		}
+		for _, k := range keys {
+			out = append(out, strings.TrimPrefix(k, prefix))
+		}
+		if next == "" {
+			break
+		}
+		startAfter = next
+	}
 	return out, nil
 }
 

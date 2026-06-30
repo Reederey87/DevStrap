@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Reederey87/DevStrap/internal/state"
@@ -89,3 +90,47 @@ func TestRewrapHubCleanupDeletesOldBlobOnSuccess(t *testing.T) {
 
 const hex64a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 const hex64b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+// P5-HUB-02: hubGC deletes hub blobs not referenced by any binding/snapshot,
+// and leaves referenced ones alone.
+func TestHubGCDeletesUnreferencedBlobs(t *testing.T) {
+	ctx := context.Background()
+	st := newRewrapTestStore(t)
+	hub := dssync.FileHub{Path: filepath.Join(t.TempDir(), "hub.json")}
+
+	// Two blobs on the hub; only hex64a is referenced by a draft snapshot.
+	for _, k := range []string{hex64a, hex64b} {
+		if err := hub.PutBlob(ctx, k, strings.NewReader("ciphertext-"+k)); err != nil {
+			t.Fatalf("PutBlob %s: %v", k, err)
+		}
+	}
+	// Create a project + a draft snapshot referencing hex64a.
+	if _, err := st.UpsertProject(ctx, state.UpsertProjectParams{Path: "work/draft", Type: "draft_project"}); err != nil {
+		t.Fatalf("UpsertProject: %v", err)
+	}
+	proj, err := st.ProjectByPath(ctx, "work/draft")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordDraftSnapshot(ctx, proj.ID, "age_blob:"+hex64a, 1, 1, state.Event{ID: "evt_d1", HLC: 10}); err != nil {
+		t.Fatalf("RecordDraftSnapshot: %v", err)
+	}
+
+	pruned, removed, err := hubGC(ctx, io.Discard, st, hub, 1, false)
+	if err != nil {
+		t.Fatalf("hubGC: %v", err)
+	}
+	if pruned != 0 {
+		t.Fatalf("pruned = %d, want 0 (only one snapshot)", pruned)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1 (only the unreferenced blob)", removed)
+	}
+	// hex64a (referenced) survives; hex64b (unreferenced) is gone.
+	if _, err := hub.GetBlob(ctx, hex64a); err != nil {
+		t.Fatalf("referenced blob hex64a was deleted: %v", err)
+	}
+	if _, err := hub.GetBlob(ctx, hex64b); err == nil {
+		t.Fatal("unreferenced blob hex64b should have been deleted")
+	}
+}
