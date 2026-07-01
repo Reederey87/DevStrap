@@ -84,6 +84,18 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := ensureLocalDeviceIdentity(cmd.Context(), paths, store, device); err != nil {
 				return err
 			}
+			// P4-SEC-02/SEC-07: bootstrap the WCK epoch keyring so the event
+			// log is envelope-encrypted from the first sync. EnsureBootstrap
+			// mints epoch 1 and stores the WCK in the local keychain. No
+			// self-grant is emitted: a self-grant would collide with an
+			// inbound grant from another device at the same epoch on a joining
+			// device's first pull (overwriting the correct WCK). The WCK
+			// propagates to other devices via `devices approve` (GrantAllEpochs),
+			// and the local device already holds it in its keychain.
+			kr := buildKeyring(opts, store)
+			if _, err := kr.EnsureBootstrap(cmd.Context()); err != nil {
+				return fmt.Errorf("bootstrap workspace key: %w", err)
+			}
 
 			// PROD-03: an optional --scan adopts existing repos in the root on
 			// the very first command, delivering the "my tree just appeared"

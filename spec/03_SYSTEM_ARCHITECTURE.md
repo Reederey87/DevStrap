@@ -333,7 +333,7 @@ type EditorAdapter interface {
 // Hub is the pluggable two-plane backend boundary (HUB-*).
 // Intended package: internal/hub. Implementations: file-backed (tests only),
 // Cloudflare R2/S3 (production), HTTP/SSE hub service (later networked backend).
-// All implementations handle signed events + age-encrypted blobs only.
+// All implementations handle signed events (envelope-encrypted payloads under a per-epoch WCK, P4-SEC-02/SEC-07) + age-encrypted blobs only.
 type Hub interface {
     Name() string
 

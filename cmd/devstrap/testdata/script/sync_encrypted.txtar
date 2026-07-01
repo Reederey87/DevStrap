@@ -1,0 +1,55 @@
+# P4-SEC-02/SEC-07: end-to-end envelope encryption of the namespace-map event
+# log. The hub file must store only ciphertext (enc.v1 carriers) — no project
+# paths, remote URLs, or payload content in plaintext. A second device, after
+# being enrolled and approved (which grants the WCK), decrypts the full history
+# and materializes. Revoking a device rotates the WCK for go-forward forward
+# secrecy.
+
+env DEVSTRAP_NO_KEYCHAIN=1
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+# Set up a bare git remote with one commit.
+exec git init --bare -b main $WORK/remote.git
+exec git clone $WORK/remote.git $WORK/src
+exec sh -c 'echo hello > $WORK/src/README.md'
+exec sh -c 'cd $WORK/src && git add README.md && git commit -m init && git branch -M main && git push origin main'
+
+# Device A: init, add a project with a distinctive path, sync to the hub.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA init
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/secret-proj $WORK/remote.git
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+stdout 'pushed 1'
+
+# The hub file must contain the enc.v1 sentinel (envelope encryption is active).
+grep 'enc.v1' $WORK/hub.json
+
+# The hub file must NOT leak the project path or remote URL in plaintext.
+! grep 'secret-proj' $WORK/hub.json
+! grep 'remote.git' $WORK/hub.json
+
+# Device B: init, then enroll+approve on A so A grants its WCK epochs to B.
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB init
+exec sh -c 'REC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); SIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll dev_b --name b --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve'
+stdout 'enrolled as approved'
+
+# A syncs to publish the grant events.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+
+# B syncs: ingests grants, decrypts A's encrypted history, materializes the repo.
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
+stdout 'materialized'
+exec sh -c 'test -d $WORK/CodeB/work/secret-proj/.git'
+
+# P4-SEC-07: revoking B rotates the WCK to a new epoch (go-forward forward
+# secrecy). The revoke command emits new-epoch grants to remaining devices.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA devices revoke dev_b
+stdout 'marked revoked'
+stderr 'Rotated workspace key'
+
+# A syncs to publish the rotated-epoch grants. The hub still stores only
+# ciphertext — no plaintext leaked by the rotation.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+! grep 'secret-proj' $WORK/hub.json

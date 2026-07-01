@@ -24,6 +24,7 @@ const (
 	EventConflictCreated      = "conflict.created"
 	EventConflictResolved     = "conflict.resolved"      // PROD-06
 	EventDraftSnapshotCreated = "draft.snapshot.created" // DRAFT-02
+	EventDeviceKeyGranted     = "device.key.granted"     // P4-SEC-07: age-wrapped WCK epoch grant
 )
 
 // Conflict type identifiers, exported so the CLI resolver can branch on them
@@ -82,6 +83,19 @@ type DraftSnapshotPayload struct {
 	BlobRef   string `json:"blob_ref"`
 	ByteSize  int64  `json:"byte_size"`
 	FileCount int64  `json:"file_count"`
+}
+
+// DeviceKeyGrant carries a device.key.granted event (P4-SEC-07): a Workspace
+// Content Key for an epoch, age-wrapped to a single approved device's X25519
+// recipient. Grant events ride the hub event log as PLAINTEXT (the decorator
+// passes them through unencrypted) because their payload is already
+// asymmetrically wrapped — the hub cannot decrypt the WCK without the recipient's
+// private key. A newly-approved device ingests grants for every held epoch on
+// its first pull so it can decrypt the entire namespace-map history.
+type DeviceKeyGrant struct {
+	Epoch      int64  `json:"epoch"`
+	Recipient  string `json:"recipient"`   // age X25519 recipient the WCK is wrapped to
+	WrappedKey string `json:"wrapped_key"` // base64(age.Encrypt(wck, recipient))
 }
 
 type skewConflictDetails struct {
@@ -171,6 +185,19 @@ func CreateProjectEvent(ctx context.Context, st *state.Store, typ string, payloa
 // pre-marshaled payload (DRAFT-02). The store stamps HLC, seq, device id, and
 // the device signature on InsertLocalEvent.
 func NewDraftSnapshotEvent(typ, payloadJSON string) state.Event {
+	return state.Event{
+		Type:        typ,
+		PayloadJSON: payloadJSON,
+		ContentHash: state.ContentHash(payloadJSON),
+	}
+}
+
+// NewDeviceKeyGrantEvent builds an unsigned device.key.granted event from a
+// pre-marshaled DeviceKeyGrant payload (P4-SEC-07). The store stamps HLC, seq,
+// device id, and the device signature on InsertLocalEvent. Grant events are NOT
+// envelope-encrypted (the payload is itself age-wrapped), so the EncryptedHub
+// decorator passes them through unchanged on both Push and Pull.
+func NewDeviceKeyGrantEvent(typ, payloadJSON string) state.Event {
 	return state.Event{
 		Type:        typ,
 		PayloadJSON: payloadJSON,
@@ -462,6 +489,20 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 			return fmt.Errorf("draft snapshot for unknown project %q: %w", payload.Path, err)
 		}
 		return tx.RecordDraftSnapshotTx(ctx, project.ID, payload.BlobRef, payload.ByteSize, payload.FileCount, event)
+	case EventDeviceKeyGranted:
+		// P4-SEC-07: record the grant audit row transactionally with the event
+		// insert. The secret WCK is ingested into the keychain by the
+		// EncryptedHub decorator during Pull (on the recipient device only);
+		// this case only records the non-secret membership audit on every
+		// device that applies the grant. Grant events are intentionally NOT in
+		// mustVerifyEvent so a newly-approved device can ingest its first WCK
+		// during the pre-enrollment bootstrap window (SEC-04); they inherit
+		// SEC-04 fail-closed trust once that lands.
+		var payload DeviceKeyGrant
+		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+			return fmt.Errorf("decode event %s: %w", event.ID, err)
+		}
+		return tx.RecordKeyGrantTx(ctx, payload.Epoch, payload.Recipient, event)
 	default:
 		return nil
 	}

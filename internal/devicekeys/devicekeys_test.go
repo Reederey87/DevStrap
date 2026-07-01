@@ -187,3 +187,80 @@ func TestHybridStoreFallsBackToFileStore(t *testing.T) {
 		t.Fatalf("second fallback ensure = %+v created=%v, want existing %+v", again, created, identity)
 	}
 }
+
+func TestHybridStoreWCKRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	backend := &memorySecretBackend{}
+	store := NewHybridStore(dir, backend)
+	wck := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
+	const epoch = int64(1)
+
+	if err := store.StoreWCK(t.Context(), "ws_test", epoch, wck); err != nil {
+		t.Fatalf("StoreWCK: %v", err)
+	}
+	got, err := store.LoadWCK(t.Context(), "ws_test", epoch)
+	if err != nil {
+		t.Fatalf("LoadWCK: %v", err)
+	}
+	if string(got) != string(wck) {
+		t.Fatalf("LoadWCK = %x, want %x", got, wck)
+	}
+}
+
+func TestHybridStoreLoadWCKMissing(t *testing.T) {
+	store := NewHybridStore(t.TempDir(), &memorySecretBackend{})
+	if _, err := store.LoadWCK(t.Context(), "ws_test", 9); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("LoadWCK missing: got %v, want os.ErrNotExist", err)
+	}
+}
+
+func TestFileStoreWCKRoundTripAndPerms(t *testing.T) {
+	// Exercise the file fallback store directly.
+	store := NewFileStore(t.TempDir())
+	wck := make([]byte, 32)
+	for i := range wck {
+		wck[i] = byte(i)
+	}
+	if err := store.WriteWCK("ws_test", 2, wck); err != nil {
+		t.Fatalf("WriteWCK: %v", err)
+	}
+	got, err := store.ReadWCK("ws_test", 2)
+	if err != nil {
+		t.Fatalf("ReadWCK: %v", err)
+	}
+	if string(got) != string(wck) {
+		t.Fatalf("ReadWCK = %x, want %x", got, wck)
+	}
+	info, err := os.Stat(store.wckPath("ws_test", 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("wck file permissions = %s, want 0600", got)
+	}
+}
+
+func TestHybridStoreWCKFallsBackToFile(t *testing.T) {
+	// A keychain backend that reports "unsupported" triggers the file fallback
+	// (mirrors DEVSTRAP_NO_KEYCHAIN=1 -> platform.UnsupportedKeychain).
+	backend := &memorySecretBackend{err: errors.New("keyring: unsupported platform")}
+	store := NewHybridStore(t.TempDir(), backend)
+	wck := []byte("0123456789abcdef0123456789abcdef")
+	if err := store.StoreWCK(t.Context(), "ws_test", 3, wck); err != nil {
+		t.Fatalf("StoreWCK file fallback: %v", err)
+	}
+	got, err := store.LoadWCK(t.Context(), "ws_test", 3)
+	if err != nil {
+		t.Fatalf("LoadWCK file fallback: %v", err)
+	}
+	if string(got) != string(wck) {
+		t.Fatalf("LoadWCK = %x, want %x", got, wck)
+	}
+}
+
+func TestStoreWCKRejectsInvalidWorkspaceID(t *testing.T) {
+	store := NewHybridStore(t.TempDir(), &memorySecretBackend{})
+	if err := store.StoreWCK(t.Context(), "ws/../escape", 1, make([]byte, 32)); err == nil {
+		t.Fatal("StoreWCK with path-traversal workspace id unexpectedly succeeded")
+	}
+}

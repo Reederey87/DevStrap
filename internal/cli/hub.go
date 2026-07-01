@@ -9,9 +9,12 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/hub"
+	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
+	"github.com/Reederey87/DevStrap/internal/workspacekeys"
 	"github.com/spf13/cobra"
 )
 
@@ -22,6 +25,12 @@ import (
 // site. It returns the Hub plus a stable hub id used to key per-hub sync
 // cursors.
 //
+// P4-SEC-02/SEC-07: the returned Hub is an EncryptedHub decorator wrapping the
+// backend (FileHub or R2Hub) so the hub stores only ciphertext for the event
+// log. The keyring is built lazily — EncryptedHub only touches it on Push/Pull
+// of events, so blob-only paths (hub gc, doctor reachability) never need a
+// bootstrapped epoch.
+//
 // Resolution order: the --hub-file flag, then a "hub" config value
 // (file:<path>, r2://<bucket>, or s3://<bucket>). The R2/S3 backend
 // keying/retry/conditional-put/GC logic lives in internal/hub; this seam builds
@@ -29,6 +38,24 @@ import (
 // key on "r2:"+workspace_id, anticipated by migration 00008), and returns an
 // R2Hub with the default retry policy.
 func hubFromOptions(ctx context.Context, opts *options, store *state.Store, hubFile string) (dssync.Hub, string, error) {
+	backend, hubID, err := selectBackendHub(ctx, opts, store, hubFile)
+	if err != nil {
+		return nil, "", err
+	}
+	return dssync.EncryptedHub{Hub: backend, Keyring: buildKeyring(opts, store)}, hubID, nil
+}
+
+// buildKeyring constructs the WCK epoch keyring (P4-SEC-07) from the state store
+// and the local device key custody store. It is cheap (stores refs only); the
+// keychain is read lazily on first Prime/IngestGrant/GrantAllEpochs.
+func buildKeyring(opts *options, store *state.Store) *workspacekeys.Keyring {
+	keyStore := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain)
+	return workspacekeys.New(store, keyStore)
+}
+
+// selectBackendHub resolves the raw backend Hub (FileHub or R2Hub) without the
+// encryption decorator. hubFromOptions wraps its result in EncryptedHub.
+func selectBackendHub(ctx context.Context, opts *options, store *state.Store, hubFile string) (dssync.Hub, string, error) {
 	if hubFile == "" {
 		hubFile = strings.TrimSpace(opts.v.GetString("hub-file"))
 	}

@@ -361,6 +361,7 @@ Deliverables:
 - cursor-based event push/pull with snapshot-required recovery — **shipped**;
 - Cloudflare R2/S3 direct backend with immutable event objects, conditional puts, paged cursor pulls, and content-addressed encrypted blob upload/download — **shipped** (`P5-HUB-01`: the `aws-sdk-go-v2` `S3Adapter` behind `hub: r2://<bucket>`);
 - event payload validation before apply, fail-closed verification after enrollment, and device heartbeat/trust metadata.
+- envelope encryption of the event log at the hub boundary (`EncryptedHub`, XChaCha20-Poly1305 under a per-epoch WCK, `P4-SEC-02`/`SEC-07` foundation) — **shipped** (`fix/p4-sec-02-envelope-encryption`): `init` bootstraps epoch 1, `devices approve` grants all epochs, `devices revoke`/`lost` rotates, `Pull` ingests grants in HLC order then decrypts; the hub stores only `enc.v1` ciphertext carriers.
 
 Tasks:
 

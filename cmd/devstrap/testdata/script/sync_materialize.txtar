@@ -1,6 +1,11 @@
 # XP-01: end-to-end sync + eager materialization loop through the real binary.
 # Simulates two devices (A and B) sharing a file-backed hub, proving device B
 # gets a real blobless clone after sync — the "same tree everywhere" promise.
+#
+# P4-SEC-02/SEC-07: the event log is envelope-encrypted, so device B must be
+# enrolled and approved on device A (which grants its WCK epochs to B) before B
+# can decrypt A's namespace events. This models the real multi-device flow:
+# init → enroll+approve → sync.
 
 # Force the file-backed key store for headless CI (XP-03).
 env DEVSTRAP_NO_KEYCHAIN=1
@@ -25,8 +30,18 @@ exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/proj $WORK/r
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
 stdout 'pushed 1'
 
-# Device B: init, sync from the same hub file, verify the repo materialized.
+# Device B: init (creates B's device identity + workspace key bootstrap).
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB init
+
+# P4-SEC-07: enroll B on A and approve, so A grants its WCK epochs to B.
+# Extract B's age recipient + signing public key via the read-only helper.
+exec sh -c 'REC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); SIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll dev_b --name b --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve'
+stdout 'enrolled as approved'
+
+# A syncs to publish the device.key.granted events for B.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+
+# Device B: sync from the same hub file — ingest grants, decrypt, materialize.
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
 stdout 'materialized'
 

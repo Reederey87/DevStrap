@@ -1,11 +1,17 @@
-// Package sync is a Phase-0 experimental SPIKE, not the production hub protocol.
+// Package sync implements the local-first event-log hub protocol, HLC
+// ordering, event apply/dedup, and the EncryptedHub envelope-encryption
+// decorator (P4-SEC-02/SEC-07).
 //
 // It proves the local-first spine the rest of the product will build on:
 //   - Hybrid Logical Clock ordering with a device-id tiebreaker (hlc.go),
 //   - an append-only, content-hashed, idempotent event log (events.go),
 //   - deterministic replay and order-independent same-path/different-remote
 //     conflict DETECTION across two local roots,
-//   - HLC-gated tombstones, rename, and a clock-skew quarantine guard.
+//   - HLC-gated tombstones, rename, and a clock-skew quarantine guard,
+//   - envelope encryption of the event log at the hub boundary
+//     (encryptedhub.go/eventcrypt.go): XChaCha20-Poly1305 under a per-epoch
+//     Workspace Content Key, wrapped with age to approved device recipients,
+//     so the hub stores only ciphertext carriers (P4-SEC-02/SEC-07).
 //
 // Scope and assumptions:
 //   - Namespace state is treated as single-writer-per-path most of the time;

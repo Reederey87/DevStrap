@@ -1149,6 +1149,24 @@ UPDATE draft_projects SET current_snapshot_id = ?, updated_at = ? WHERE namespac
 	return nil
 }
 
+// RecordKeyGrantTx records a workspace key grant audit row transactionally with
+// the event insert that carried it (P4-SEC-07). Idempotent on
+// (workspace_id, epoch, recipient) so a re-delivered grant is a no-op. This is
+// the membership audit trail only; the age-wrapped WCK rides the event payload
+// and the secret WCK lives in the keychain (ingested by the decorator on the
+// recipient device). Runs on every device that applies the grant event.
+func (tx *Tx) RecordKeyGrantTx(ctx context.Context, epoch int64, recipient string, event Event) error {
+	now := timestampNow()
+	if _, err := tx.tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO workspace_key_grants
+  (workspace_id, epoch, recipient, source_event_id, source_event_hlc, source_event_device_id, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+`, tx.workspaceID, epoch, recipient, event.ID, nullZero(event.HLC), nullEmpty(event.DeviceID), now); err != nil {
+		return fmt.Errorf("record key grant: %w", err)
+	}
+	return nil
+}
+
 // GCTombstones permanently removes deleted namespace entries whose tombstone
 // HLC is strictly below beforeHLC. Callers must pass the minimum HLC that every
 // approved sync cursor has already passed, so no peer can still resurrect the
@@ -2740,6 +2758,90 @@ WHERE excluded.last_hlc_applied > hub_cursors.last_hlc_applied;
 `, workspaceID, hubID, hlc, now)
 	if err != nil {
 		return fmt.Errorf("advance hub cursor: %w", err)
+	}
+	return nil
+}
+
+// CurrentKeyEpoch returns the highest WCK epoch this device holds a key for
+// (P4-SEC-07), or 0 if none has been bootstrapped. The active epoch is the one
+// under which new outgoing namespace events are envelope-encrypted; revoke
+// rotates it to epoch+1 for forward secrecy.
+func (s *Store) CurrentKeyEpoch(ctx context.Context) (int64, error) {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return 0, err
+	}
+	var epoch int64
+	err = s.db.QueryRowContext(ctx, `
+SELECT COALESCE(MAX(epoch), 0) FROM workspace_keys WHERE workspace_id = ?;
+`, workspaceID).Scan(&epoch)
+	if err != nil {
+		return 0, fmt.Errorf("read current key epoch: %w", err)
+	}
+	return epoch, nil
+}
+
+// RecordKeyEpoch records that this device holds the WCK for epoch (idempotent)
+// (P4-SEC-07). The secret key itself is stored in the keychain via
+// devicekeys.HybridStore.StoreWCK; this row is the non-secret local metadata.
+func (s *Store) RecordKeyEpoch(ctx context.Context, epoch int64) error {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return err
+	}
+	now := timestampNow()
+	_, err = s.db.ExecContext(ctx, `
+INSERT OR IGNORE INTO workspace_keys (workspace_id, epoch, created_at) VALUES (?, ?, ?);
+`, workspaceID, epoch, now)
+	if err != nil {
+		return fmt.Errorf("record key epoch: %w", err)
+	}
+	return nil
+}
+
+// HeldKeyEpochs returns every epoch this device holds a WCK for, ascending
+// (P4-SEC-07). Used by devices approve to wrap every held epoch's WCK to a
+// newly-approved device so it can decrypt the entire history.
+func (s *Store) HeldKeyEpochs(ctx context.Context) ([]int64, error) {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT epoch FROM workspace_keys WHERE workspace_id = ? ORDER BY epoch ASC;
+`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("list held key epochs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var epochs []int64
+	for rows.Next() {
+		var epoch int64
+		if err := rows.Scan(&epoch); err != nil {
+			return nil, fmt.Errorf("scan key epoch: %w", err)
+		}
+		epochs = append(epochs, epoch)
+	}
+	return epochs, rows.Err()
+}
+
+// RecordKeyGrant records a workspace key grant: a WCK epoch was age-wrapped to
+// recipient by a device.key.granted event (P4-SEC-07). Idempotent on
+// (workspace_id, epoch, recipient) so a re-delivered grant is a no-op. This is
+// a membership audit trail only; the wrapped key rides the event log.
+func (s *Store) RecordKeyGrant(ctx context.Context, epoch int64, recipient, sourceEventID string, sourceEventHLC int64, sourceEventDeviceID string) error {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return err
+	}
+	now := timestampNow()
+	_, err = s.db.ExecContext(ctx, `
+INSERT OR IGNORE INTO workspace_key_grants
+  (workspace_id, epoch, recipient, source_event_id, source_event_hlc, source_event_device_id, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+`, workspaceID, epoch, recipient, sourceEventID, nullZero(sourceEventHLC), nullEmpty(sourceEventDeviceID), now)
+	if err != nil {
+		return fmt.Errorf("record key grant: %w", err)
 	}
 	return nil
 }

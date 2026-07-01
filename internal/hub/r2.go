@@ -1,7 +1,9 @@
 // R2 is S3-compatible with zero egress, strong consistency for object
-// writes/listing, and conditional puts. All payloads and blobs are
-// age-encrypted and Ed25519-signed before upload, so R2 stores only ciphertext
-// plus a signed map — it can decrypt nothing and holds no private key.
+// writes/listing, and conditional puts. Event-log payloads are
+// envelope-encrypted (XChaCha20-Poly1305 under a per-epoch Workspace Content
+// Key, P4-SEC-02/SEC-07) and Ed25519-signed before upload; blobs are
+// age-encrypted. R2 stores only ciphertext plus a signed carrier map — it can
+// decrypt nothing and holds no private key.
 //
 // The event log is NOT one overwritten manifest object. Every event is an
 // immutable, unique, lexicographically sortable object (HUB-06):

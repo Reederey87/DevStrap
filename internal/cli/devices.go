@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,6 +23,7 @@ func newDevicesCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.AddCommand(newDeviceTrustCommand(stdout, opts, "revoke", "revoked"))
 	cmd.AddCommand(newDeviceTrustCommand(stdout, opts, "lost", "lost"))
 	cmd.AddCommand(newDeviceRenameCommand(stdout, opts))
+	cmd.AddCommand(newDeviceRecipientCommand(stdout, opts))
 	return cmd
 }
 
@@ -66,6 +68,12 @@ func newDeviceEnrollCommand(stdout io.Writer, opts *options) *cobra.Command {
 			}
 			if err := store.UpsertDevice(cmd.Context(), device); err != nil {
 				return err
+			}
+			// P4-SEC-07: when --approve is set, grant every held WCK epoch to
+			// the newly-approved device so it can decrypt the namespace-map
+			// history on its first pull.
+			if approve {
+				grantWorkspaceKeyToApprovedDevice(cmd.Context(), cmd.ErrOrStderr(), opts, store, args[0])
 			}
 			_, err = fmt.Fprintf(stdout, "Device %s enrolled as %s\n", args[0], trustState)
 			return err
@@ -128,10 +136,24 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 			if _, err := fmt.Fprintf(stdout, "Device %s marked %s\n", args[0], trustState); err != nil {
 				return err
 			}
+			// P4-SEC-07: approving a device grants every held WCK epoch to it
+			// so it can decrypt the full namespace-map history on its first
+			// pull. The grant events are local-origin; the next `devstrap sync`
+			// publishes them to the hub.
+			if trustState == "approved" {
+				grantWorkspaceKeyToApprovedDevice(cmd.Context(), stderr, opts, store, args[0])
+			}
 			// Revoking or losing a device means it could decrypt any env bundle
 			// it received; flag those values for source rotation (rewrapping
 			// recipients does not revoke historical access).
 			if trustState == "revoked" || trustState == "lost" {
+				// P4-SEC-07: rotate the WCK epoch so go-forward events encrypt
+				// under a key the revoked device does not hold. The revoked
+				// device is already excluded from ApprovedRecipients (its
+				// trust_state was just changed), so Rotate grants the new epoch
+				// only to remaining approved devices. Skip silently if no epoch
+				// was ever bootstrapped (pre-envelope workspace).
+				rotateWorkspaceKeyOnRevoke(cmd.Context(), stderr, opts, store)
 				flagged, err := store.MarkEncryptedBindingsNeedingRotation(cmd.Context())
 				if err != nil {
 					return err
@@ -195,5 +217,113 @@ func newDeviceRenameCommand(stdout io.Writer, opts *options) *cobra.Command {
 			_, err = fmt.Fprintf(stdout, "Device %s renamed to %s\n", args[0], args[1])
 			return err
 		},
+	}
+}
+
+// devicePublicKey looks up a device's age recipient by ID (P4-SEC-07).
+func devicePublicKey(ctx context.Context, store *state.Store, deviceID string) (string, error) {
+	devices, err := store.ListDevices(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, d := range devices {
+		if d.ID == deviceID {
+			return d.PublicKey, nil
+		}
+	}
+	return "", fmt.Errorf("device %s not found", deviceID)
+}
+
+// newDeviceRecipientCommand implements `devstrap devices recipient`, a
+// read-only helper that prints the local device's age recipient (or Ed25519
+// signing public key with --signing) so it can be shared for out-of-band
+// enrollment on another device (P4-SEC-07).
+func newDeviceRecipientCommand(stdout io.Writer, opts *options) *cobra.Command {
+	var signing bool
+	cmd := &cobra.Command{
+		Use:   "recipient",
+		Short: "Print the local device's age recipient (or signing public key with --signing)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := opts.openState(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer closeStore(store)
+			dev, err := store.CurrentDevice(cmd.Context())
+			if err != nil {
+				return err
+			}
+			if signing {
+				if dev.SigningPublicKey == "" {
+					return appError{code: exitInvalidConfig, err: fmt.Errorf("local device has no signing public key; run devstrap init")}
+				}
+				_, err = fmt.Fprintln(stdout, dev.SigningPublicKey)
+				return err
+			}
+			if dev.PublicKey == "" {
+				return appError{code: exitInvalidConfig, err: fmt.Errorf("local device has no age recipient; run devstrap init")}
+			}
+			_, err = fmt.Fprintln(stdout, dev.PublicKey)
+			return err
+		},
+	}
+	cmd.Flags().BoolVar(&signing, "signing", false, "print the Ed25519 signing public key instead of the age recipient")
+	return cmd
+}
+
+// grantWorkspaceKeyToApprovedDevice grants every held WCK epoch to the
+// newly-approved device so it can decrypt the full namespace-map history on its
+// first pull (P4-SEC-07). It bootstraps epoch 1 if none exists (defensive for
+// pre-envelope workspaces) and emits one device.key.granted event per epoch;
+// the next sync publishes them. Warnings go to stderr; failures do not abort
+// the trust-state change, which already succeeded.
+func grantWorkspaceKeyToApprovedDevice(ctx context.Context, stderr io.Writer, opts *options, store *state.Store, deviceID string) {
+	recipient, err := devicePublicKey(ctx, store, deviceID)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "warning: could not read device %s for workspace key grant: %v\n", deviceID, err)
+		return
+	}
+	if recipient == "" {
+		_, _ = fmt.Fprintf(stderr, "warning: device %s has no age recipient; cannot grant workspace key\n", deviceID)
+		return
+	}
+	kr := buildKeyring(opts, store)
+	if epoch, _ := kr.CurrentEpoch(ctx); epoch == 0 {
+		if _, berr := kr.EnsureBootstrap(ctx); berr != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: workspace key bootstrap failed: %v\n", berr)
+			return
+		}
+	}
+	grants, gerr := kr.GrantAllEpochs(ctx, recipient)
+	if gerr != nil {
+		_, _ = fmt.Fprintf(stderr, "warning: workspace key grant to %s failed: %v\n", deviceID, gerr)
+		return
+	}
+	if len(grants) > 0 {
+		_, _ = fmt.Fprintf(stderr, "Granted %d workspace key epoch(s) to device %s; run 'devstrap sync' to publish\n", len(grants), deviceID)
+	}
+}
+
+// rotateWorkspaceKeyOnRevoke mints a fresh WCK at epoch+1 and grants it to the
+// remaining approved devices for go-forward forward secrecy (P4-SEC-07). The
+// revoked device is excluded because its trust_state was just changed. Skipped
+// silently if no epoch was ever bootstrapped. Warnings go to stderr.
+func rotateWorkspaceKeyOnRevoke(ctx context.Context, stderr io.Writer, opts *options, store *state.Store) {
+	kr := buildKeyring(opts, store)
+	epoch, err := kr.CurrentEpoch(ctx)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "warning: workspace key rotation skipped: %v\n", err)
+		return
+	}
+	if epoch == 0 {
+		return // pre-envelope workspace; nothing to rotate
+	}
+	newEpoch, grants, rerr := kr.Rotate(ctx)
+	if rerr != nil {
+		_, _ = fmt.Fprintf(stderr, "warning: workspace key rotation failed: %v\n", rerr)
+		return
+	}
+	if len(grants) > 0 {
+		_, _ = fmt.Fprintf(stderr, "Rotated workspace key to epoch %d; granted to %d remaining device(s); run 'devstrap sync' to publish\n", newEpoch, len(grants))
 	}
 }

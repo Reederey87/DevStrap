@@ -194,7 +194,7 @@ device signing private identity → local protected secret storage
 
 Env bundles are encrypted for approved device public keys.
 
-Current implementation generates age X25519 and Ed25519 identities during `devstrap init`, stores only public keys in SQLite, and stores private identities through the platform keychain adapter. Darwin uses macOS Keychain through the Go keyring backend; Linux uses Secret Service/keyring through the same backend. If the system keyring is unavailable, DevStrap falls back to `~/.devstrap/keys` with mode `0600` so headless/CI systems remain usable. Manual `devices enroll --approve` records an approved device age recipient so future captures include that recipient. Production synced env blobs still require automatic remote enrollment and fingerprint confirmation.
+Current implementation generates age X25519 and Ed25519 identities during `devstrap init`, stores only public keys in SQLite, and stores private identities through the platform keychain adapter. Darwin uses macOS Keychain through the Go keyring backend; Linux uses Secret Service/keyring through the same backend. If the system keyring is unavailable, DevStrap falls back to `~/.devstrap/keys` with mode `0600` so headless/CI systems remain usable. The same `HybridStore` also custodies per-epoch Workspace Content Keys (WCK) for event-log envelope encryption (`P4-SEC-07`, keyed `wck.<workspace_id>.<epoch>`). Manual `devices enroll --approve` records an approved device age recipient so future captures include that recipient, and grants every held WCK epoch to the newly-approved device. Production synced env blobs still require automatic remote enrollment and fingerprint confirmation.
 
 Device states:
 
