@@ -263,8 +263,8 @@ sync_cursors(workspace_id, peer_id, last_hlc_applied, last_seq_applied)   # plan
 Sync loop:
 
 ```text
-1. push local queued events to the hub (only local-origin events past the push:<hubID> watermark)
-2. cursor-based incremental pull: GET events after hub_cursors.last_hlc_applied — never a full replay from HLC 0
+1. push local queued events to the hub (only local-origin events with HLC > the push:<hubID> watermark — the push cursor is exclusive)
+2. cursor-based incremental pull: GET events with HLC >= hub_cursors.last_hlc_applied — never a full replay from HLC 0 (the pull cursor is inclusive, `HUB-13`, so a same-HLC late arrival from another device is not dropped)
 3. verify signatures / decrypt blob refs where needed
 4. apply events to local SQLite in (hlc, device_id) order
 5. materialize the local filesystem to match the applied namespace (eager clone-everything; see below)
