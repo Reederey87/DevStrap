@@ -11,7 +11,7 @@ This directory holds DevStrap's chronological design & implementation audits. **
 | 1 | (initial) | [`AUDIT_RECOMMENDATIONS.md`](AUDIT_RECOMMENDATIONS.md) | First-pass design & implementation review | — | Largely implemented / superseded by later passes |
 | 2 | 2026-06-27 | [`AUDIT_RECOMMENDATIONS_2026-06-27.md`](AUDIT_RECOMMENDATIONS_2026-06-27.md) | Second pass: CI (`CI-*`), non-VCS/remote-less (`NOVCS-*`), forges (`FORGE-*`), working-state sync, zero-knowledge hub | 65 | Largely implemented / superseded |
 | 3 | 2026-06-28 | [`AUDIT_RECOMMENDATIONS_2026-06-28.md`](AUDIT_RECOMMENDATIONS_2026-06-28.md) | Cloud-sync architecture: `EAGER-*`, `DRAFT-*`, `HUB-01..08`, `XP-*`, `SCALE-*` | workstreams | `EAGER-*`/`DRAFT-*`/`HUB-01..08`/`XP-*` shipped (PR #16); `SCALE-*` documented-not-built |
-| 4 | 2026-06-28 | [`AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md`](AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md) | Fourth pass: audit of the now-shipped cloud-sync system | 44 (P1=17, P2=23, P3=4) | ~19 shipped (PR #20), ~25 open — see below |
+| 4 | 2026-06-28 | [`AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md`](AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md) | Fourth pass: audit of the now-shipped cloud-sync system | 44 (P1=17, P2=23, P3=4) | ~22 shipped/partial across PRs #20/#23/#25 (incl. P4-SEC-02, P4-SEC-07 foundation, P4-SEC-05 partial); remainder open — see below |
 | 5 | 2026-06-29 | [`AUDIT_RECOMMENDATIONS_2026-06-29_PASS5.md`](AUDIT_RECOMMENDATIONS_2026-06-29_PASS5.md) | Fifth pass: adversarial review of the PASS4 batch + under-examined dimensions + new features | 36 (P1=1, P2=12, P3=23) | 32 shipped (PR #23); 4 open — see below |
 | 6 | 2026-07-01 | [`AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`](AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md) | Sixth pass: adversarial audit of the PR #24/#25 batch (live R2 hub + envelope-encryption foundation) + under-examined dimensions | 43 (P1=5, P2=25, P3=13) | Open — see below |
 
@@ -38,7 +38,9 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P4-SEC-02 | P1 | PR #25 (`8c739b8`) | Namespace-map event log is envelope-encrypted at rest on the hub (`internal/sync/eventcrypt.go`, `encryptedhub.go`). Fully shipped — no longer open. |
 | P4-SEC-07 | P2 | PR #25 (`8c739b8`), foundation | WCK epoch keyring (`internal/workspacekeys`) + age-wrapped grants + `Rotate` on revoke. Foundation only; **open remainder** tracked below. |
 
-### Pass 6 (2026-07-01) — all 43 open (audit just landed)
+### Pass 6 (2026-07-01) — 40 open; the 3 pure-doc fixes (`P6-DOC-01`/`03`/`04`) were applied in the audit PR
+
+> The `P6-DOC-*` findings are documentation/gate accuracy fixes; their doc portions were applied in the same PR that landed this audit (spec/00, spec/13, spec/07/09/15 `tracks_code`, and this ledger). The remaining 40 findings are open backlog for future implementation PRs.
 
 | ID | Sev | Effort | Finding |
 |---|---|---|---|
@@ -52,7 +54,7 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P6-DATA-02 | P2 | S | Fix `ClearRotationForProject` to join through `namespace_entries` (`env rotate` always fails today) |
 | P6-DATA-03 | P2 | M | Emit event + state mutation in one transaction at every emission site |
 | P6-DATA-04 | P2 | M | Ship `db backup --full` (blobs + keys) and a restore path/runbook |
-| P6-DOC-01 | P2 | S | Fix spec/13's stale status block; document `env rotate`; path-anchor the command gate |
+| P6-DOC-01 | P2 | S | Fix spec/13's stale status block; document `env rotate`; path-anchor the command gate _(doc portion applied this PR; command-gate test hardening open)_ |
 | P6-DOC-02 | P2 | S | Reconcile the audit ledger's P4-SEC-05 contradiction + convention-#3 violation _(applied this PR)_ |
 | P6-GIT-02 | P2 | S | Diff `agent` runs against the recorded base SHA, not just the working tree |
 | P6-GIT-03 | P2 | S | Run dependency rebuild before `.env` hydrate; capture a 0600 log |
@@ -77,8 +79,8 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P6-CLI-05 | P3 | S | Document the shipped `r2://` hub path; stop steering users to the file hub |
 | P6-DATA-05 | P3 | S | Add `idx_events_device_hlc` to serve the hot push/doctor query |
 | P6-DATA-06 | P3 | S | Add a single-`local`-device partial unique index + race-tolerant `EnsureDevice` |
-| P6-DOC-03 | P3 | S | Fix spec/00's re-drift (planned-sync comment, command/test inventories) |
-| P6-DOC-04 | P3 | S | Add `internal/workspacekeys/**` to the spec/07/09/15 `tracks_code` frontmatter |
+| P6-DOC-03 | P3 | S | Fix spec/00's re-drift (planned-sync comment, command/test inventories) _(applied this PR)_ |
+| P6-DOC-04 | P3 | S | Add `internal/workspacekeys/**` to the spec/07/09/15 `tracks_code` frontmatter _(applied this PR; new-package mapping gate test open)_ |
 | P6-GIT-06 | P3 | S | Gate `agent pr` on run status; reconcile crash-stuck `running` rows |
 | P6-HUB-03 | P3 | S | Fan-out `R2Hub.Push` in HLC-ordered waves |
 | P6-HUB-04 | P3 | M | Give the retention floor a signed hub-side marker object |
