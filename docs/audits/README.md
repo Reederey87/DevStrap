@@ -26,7 +26,7 @@ This directory holds DevStrap's chronological design & implementation audits. **
 
 Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely implemented or superseded (see `spec/18_WORK_LOG.md` for the shipped history); the open backlog is concentrated in passes 4 and 5.
 
-> **2026-06-30 — most of Pass 5 shipped.** The PASS5 implementation cycle (`fix/pass5-backlog`, see `spec/18_WORK_LOG.md`) landed **32 of the 36** Pass-5 findings (now including `P5-HUB-01`) plus `P4-SEC-05` and `P4-QUAL-07` (partial). **Still open:** `P5-SYNC-01` (transport-cursor redesign — deferred with design in `spec/07`, latent), `P5-CLI-01` (the `render` seam landed and is wired into `materialize`; full rollout to every leaf command remains), `P5-ARCH-01` (convergence property tests shipped; the formal pure `Decide` extraction remains), and `P4-QUAL-07`'s `contextcheck` (deferred — needs threading a context through the forge chain). `P5-HUB-01` shipped today (branch `fix/p5-hub-01`): the `aws-sdk-go-v2` S3 adapter is wired behind `hub: r2://<bucket>` (`hubFromOptions`), with `DEVSTRAP_HUB_S3_*` env/config credentials, `aws.NopRetryer{}` single-retry, and an env-gated MinIO conformance test (`TestR2MinIOConformance`) plus hermetic `mapS3Error`/conformance unit tests. The PASS4 carried-forward XL items (`SEC-07` envelope encryption, `GIT-03` OS sandbox, `SEC-02`/`SEC-04`, `SYNC-02`/`HUB-11` compaction) remain open.
+> **2026-06-30 — most of Pass 5 shipped.** The PASS5 implementation cycle (`fix/pass5-backlog`, see `spec/18_WORK_LOG.md`) landed **32 of the 36** Pass-5 findings (now including `P5-HUB-01`) plus `P4-SEC-05` and `P4-QUAL-07` (partial). **Still open:** `P5-SYNC-01` (transport-cursor redesign — deferred with design in `spec/07`, latent), `P5-CLI-01` (the `render` seam landed and is wired into `materialize`; full rollout to every leaf command remains), `P5-ARCH-01` (convergence property tests shipped; the formal pure `Decide` extraction remains), and `P4-QUAL-07`'s `contextcheck` (deferred — needs threading a context through the forge chain). `P5-HUB-01` shipped today (branch `fix/p5-hub-01`): the `aws-sdk-go-v2` S3 adapter is wired behind `hub: r2://<bucket>` (`hubFromOptions`), with `DEVSTRAP_HUB_S3_*` env/config credentials, `aws.NopRetryer{}` single-retry, and an env-gated MinIO conformance test (`TestR2MinIOConformance`) plus hermetic `mapS3Error`/conformance unit tests. The PASS4 carried-forward XL items (`SEC-07` envelope encryption **foundation shipped** 2026-06-30, `GIT-03` OS sandbox, `SEC-02` **shipped** 2026-06-30, `SEC-04`, `SYNC-02`/`HUB-11` compaction) — `SEC-07` full workspace-ID pairing and `SEC-08` remain open.
 
 ### Pass 5 (2026-06-29) — 32 shipped (2026-06-30), 4 open: `P5-SYNC-01`, `P5-CLI-01`, `P5-ARCH-01` (partial), `contextcheck`
 
@@ -73,10 +73,10 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 
 | ID | Sev | Finding |
 |---|---|---|
-| P4-SEC-02 | P1 | Encrypt namespace-map events at rest on R2 (stop leaking paths/remotes/device timelines) |
+| P4-SEC-02 | P1 | Encrypt namespace-map events at rest on R2 (stop leaking paths/remotes/device timelines) — **shipped 2026-06-30** (`fix/p4-sec-02-envelope-encryption`) |
 | P4-SEC-04 | P1 | Close the bootstrap window: fail-closed enrollment verification |
 | P4-SEC-05 | P1 | Sign release binaries (cosign/SLSA/SBOM); pin `goreleaser-action` to a commit SHA |
-| P4-SEC-07 | P2 | Envelope encryption (KEK/DEK) + key rotation + forward secrecy — **promote** (fixes P5-SEC-01/04, P5-PROD-02) |
+| P4-SEC-07 | P2 | Envelope encryption (KEK/DEK) + key rotation + forward secrecy — **foundation shipped 2026-06-30** (`fix/p4-sec-02-envelope-encryption`: WCK epoch keyring + age-wrapped grants + Rotate on revoke; full workspace-ID pairing across devices remains) |
 | P4-SEC-08 | P2 | Hosted-mode prefix-scoped/temporary credentials + object immutability |
 | P4-SYNC-02 | P1 | Event-log compaction + snapshot exchange (events table grows forever) |
 | P4-SYNC-03 | P2 | Raise `epochFloorMS` above 0; past-direction quarantine |

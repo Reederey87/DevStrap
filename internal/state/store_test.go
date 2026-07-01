@@ -205,8 +205,8 @@ func TestMigrateEnsureSummaryAndVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 12 {
-		t.Fatalf("schema version = %d, want 12", version)
+	if version != 13 {
+		t.Fatalf("schema version = %d, want 13", version)
 	}
 
 	var tableCount int
@@ -217,12 +217,12 @@ WHERE type = 'table' AND name IN (
   'workspaces', 'devices', 'namespace_entries', 'git_repos', 'draft_projects',
   'device_project_state', 'env_profiles', 'secret_bindings', 'worktrees',
   'agent_runs', 'events', 'jobs', 'conflicts', 'sync_cursors', 'event_delivery',
-  'hub_cursors', 'draft_snapshots'
+  'hub_cursors', 'draft_snapshots', 'workspace_keys', 'workspace_key_grants'
 )`).Scan(&tableCount); err != nil {
 		t.Fatal(err)
 	}
-	if tableCount != 17 {
-		t.Fatalf("table count = %d, want 17", tableCount)
+	if tableCount != 19 {
+		t.Fatalf("table count = %d, want 19", tableCount)
 	}
 
 	ctx := context.Background()
@@ -346,8 +346,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 11 {
-		t.Fatalf("schema version after down = %d, want 11", version)
+	if version != 12 {
+		t.Fatalf("schema version after down = %d, want 12", version)
 	}
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
@@ -356,8 +356,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 12 {
-		t.Fatalf("schema version after re-migrate = %d, want 12", version)
+	if version != 13 {
+		t.Fatalf("schema version after re-migrate = %d, want 13", version)
 	}
 }
 

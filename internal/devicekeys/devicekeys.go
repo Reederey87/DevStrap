@@ -242,6 +242,85 @@ func (s HybridStore) ReadSigning(ctx context.Context, deviceID string) (SigningI
 	return s.File.ReadSigning(deviceID)
 }
 
+// wckAccount is the keychain account name for a Workspace Content Key
+// (P4-SEC-07): wck.<workspace_id>.<epoch>. The secret 32-byte WCK never enters
+// SQLite; it lives in the OS keychain when available and a 0600 file otherwise.
+func wckAccount(workspaceID string, epoch int64) string {
+	return fmt.Sprintf("wck.%s.%d", workspaceID, epoch)
+}
+
+func (s FileStore) wckPath(workspaceID string, epoch int64) string {
+	//nolint:gosec // workspaceID is an internally-generated ws_<uuidv7> and is
+	// validated against path separators; epoch is an int. No user-controlled
+	// path component reaches this filename.
+	return filepath.Join(s.Dir, fmt.Sprintf("wck-%s-%d.key", workspaceID, epoch))
+}
+
+// WriteWCK persists a WCK to the file fallback store as base64 with mode 0600.
+func (s FileStore) WriteWCK(workspaceID string, epoch int64, wck []byte) error {
+	if err := validateWorkspaceID(workspaceID); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		return fmt.Errorf("create device key directory: %w", err)
+	}
+	if err := os.WriteFile(s.wckPath(workspaceID, epoch), []byte(base64.StdEncoding.EncodeToString(wck)+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write workspace key: %w", err)
+	}
+	return nil
+}
+
+// ReadWCK loads a WCK from the file fallback store.
+func (s FileStore) ReadWCK(workspaceID string, epoch int64) ([]byte, error) {
+	if err := validateWorkspaceID(workspaceID); err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(s.wckPath(workspaceID, epoch))
+	if err != nil {
+		return nil, err
+	}
+	return base64.StdEncoding.DecodeString(strings.TrimSpace(string(raw)))
+}
+
+// StoreWCK persists a 32-byte Workspace Content Key for the given workspace and
+// epoch (P4-SEC-07), reusing the keychain/file custody path used for device
+// identities. The keychain is preferred; a 0600 file fallback is used only when
+// the keychain is genuinely unavailable (DEVSTRAP_NO_KEYCHAIN or a missing
+// Secret Service), so headless/CI runs remain usable. A present-but-failing
+// keychain fails closed (SECR-04/SECU-01).
+func (s HybridStore) StoreWCK(ctx context.Context, workspaceID string, epoch int64, wck []byte) error {
+	if err := validateWorkspaceID(workspaceID); err != nil {
+		return err
+	}
+	enc := base64.StdEncoding.EncodeToString(wck)
+	if err := s.storeSecret(ctx, wckAccount(workspaceID, epoch), enc); err == nil {
+		return nil
+	} else if !IsKeychainUnavailable(err) {
+		return fmt.Errorf("store workspace key in keychain: %w", err)
+	}
+	slog.Warn("keychain unavailable; writing workspace key to file fallback", "workspace_id", workspaceID, "epoch", epoch)
+	return s.File.WriteWCK(workspaceID, epoch, wck)
+}
+
+// LoadWCK loads the WCK for a workspace+epoch, or an error wrapping
+// os.ErrNotExist if this device does not hold it. The decorator calls this
+// during Pull to obtain the key for an enc.v1 event's epoch.
+func (s HybridStore) LoadWCK(ctx context.Context, workspaceID string, epoch int64) ([]byte, error) {
+	if err := validateWorkspaceID(workspaceID); err != nil {
+		return nil, err
+	}
+	if s.Secret != nil {
+		raw, err := s.loadSecret(ctx, wckAccount(workspaceID, epoch))
+		if err == nil {
+			return base64.StdEncoding.DecodeString(raw)
+		}
+		if !errors.Is(err, os.ErrNotExist) && fileMissing(s.File.wckPath(workspaceID, epoch)) {
+			return nil, err
+		}
+	}
+	return s.File.ReadWCK(workspaceID, epoch)
+}
+
 func Sign(privateKey, domain string, message []byte) (string, error) {
 	key, err := parsePrivateSigningKey(privateKey)
 	if err != nil {
@@ -370,6 +449,17 @@ func (s FileStore) signingPath(deviceID string) string {
 func validateDeviceID(deviceID string) error {
 	if deviceID == "" || strings.ContainsAny(deviceID, `/\`) {
 		return fmt.Errorf("invalid device id %q", deviceID)
+	}
+	return nil
+}
+
+// validateWorkspaceID guards WCK file/keychain account names against path
+// traversal. workspaceID is an internally-generated ws_<uuidv7>, but defending
+// here keeps the file fallback safe even if a future caller passes an
+// unvalidated value.
+func validateWorkspaceID(workspaceID string) error {
+	if workspaceID == "" || strings.ContainsAny(workspaceID, `/\`) {
+		return fmt.Errorf("invalid workspace id %q", workspaceID)
 	}
 	return nil
 }

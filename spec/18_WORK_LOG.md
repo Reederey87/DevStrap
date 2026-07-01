@@ -27,6 +27,39 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-06-30 — Envelope-encrypt the namespace-map event log (P4-SEC-02 + P4-SEC-07 foundation)
+
+Changed:
+- **Envelope crypto** (`internal/sync/eventcrypt.go`): `EncryptEvent`/`DecryptEvent` seal the content tuple (Type/PayloadJSON/ContentHash/PrevEventHash) under XChaCha20-Poly1305 (`chacha20poly1305.NewX`, 24-byte random nonce) with AAD = event.ID||uint64(epoch); the carrier (ID/DeviceID/Seq/HLC/DeviceSig) stays plaintext so hub ordering/dedup/signature verification are unchanged. `enc.v1` sentinel + `encryptedEnvelope{Version,Epoch,CT}`. `NewWCK` mints a 32-byte key. Typed errors: `ErrMissingWorkspaceKey`/`ErrUnknownEnvelopeVersion`/`ErrPlaintextEventFromHub`.
+- **Migration** (`internal/state/migrations/00013_workspace_keys.sql`): `workspace_keys(workspace_id,epoch,created_at)` + `workspace_key_grants(workspace_id,epoch,recipient,source_event_id,source_event_hlc,source_event_device_id,created_at)` — epoch metadata + grant audit (the wrapped WCK rides the event payload, never SQLite). Schema version 12→13.
+- **Store accessors** (`internal/state/store.go`): `CurrentKeyEpoch`/`RecordKeyEpoch`/`HeldKeyEpochs`/`RecordKeyGrant`/`RecordKeyGrantTx`.
+- **WCK custody** (`internal/devicekeys/devicekeys.go`): `HybridStore.StoreWCK`/`LoadWCK` (keychain-preferred, 0600 file fallback) keyed `wck.<workspace_id>.<epoch>`; `FileStore.WriteWCK`/`ReadWCK` (base64, 0600).
+- **Keyring** (`internal/workspacekeys/keyring.go`): concrete `Keyring` implementing `dssync.WorkspaceKeyring` — `EnsureBootstrap` (mints epoch 1), `GrantAllEpochs` (wraps every held epoch's WCK to a recipient, emits `device.key.granted` events), `Rotate` (mints epoch+1, wraps to remaining `ApprovedRecipients`), `IngestGrant` (age-unwrap, store WCK, record epoch), `Prime`/`WCK`/`CurrentEpoch`. age wrap/unwrap via `filippo.io/age` X25519.
+- **Grant event** (`internal/sync/events.go`): `EventDeviceKeyGranted="device.key.granted"` const + `DeviceKeyGrant{Epoch,Recipient,WrappedKey}` struct + `NewDeviceKeyGrantEvent` + `applyEventTx` case (records grant audit; NOT in `mustVerifyEvent` so the bootstrap chicken-and-egg works).
+- **Decorator** (`internal/sync/encryptedhub.go`): `EncryptedHub{Hub,Keyring}` — Push encrypts non-grants under the current epoch (grants passthrough), Pull primes/ingests grants in HLC order then decrypts enc.v1, degrading (not aborting) on non-conforming events — missing-epoch truncates, undecryptable/malformed/plaintext-downgrade events are skipped-with-warning (see the "Review fix" note below) — blob ops passthrough. `WorkspaceKeyring` interface defined here so internal/sync has no keychain/platform deps.
+- **Wiring** (`internal/cli/hub.go`): `hubFromOptions` wraps both FileHub and R2Hub in `EncryptedHub` via `buildKeyring` (lazy — blob-only paths like `hub gc`/`doctor` never need an epoch). `init.go`: `EnsureBootstrap` at init (no self-grant — avoids epoch collision when a second device joins). `devices.go`: `enroll --approve` and `approve` call `GrantAllEpochs`; `revoke`/`lost` call `Rotate` before blob rewrap; new `devices recipient` read-only helper (prints local age recipient / `--signing` Ed25519 public key for out-of-band enrollment).
+- **Tests:** `eventcrypt_test.go` (9), `encryptedhub_test.go` (8, recordingHub+fakeKeyring), `keyring_test.go` (6, incl. `TestNewDeviceReadsHistoryAcrossEpochBump`), devicekeys WCK custody (5), store schema bump. E2E txtar `sync_encrypted.txtar` (ciphertext-only hub `grep enc.v1` + `! grep` plaintext + two-device decrypt + revoke rotate) + `sync_materialize.txtar` updated for enrollment flow.
+- **Deps:** `golang.org/x/crypto v0.50.0` promoted indirect→direct.
+- **Specs/docs:** spec/07 (envelope format + grant event lifecycle), spec/12 (00013 tables + schema 13 + gitstate bumped to 00014), spec/13 (devices recipient + encryption), spec/15 (metadata-leakage), spec/16 (test plan), spec/18 (this entry); `internal/hub/r2.go`+`internal/sync/hub.go`+`internal/sync/doc.go` doc fixes (event log is envelope-encrypted, not age-encrypted); `docs/audits/README.md` (P4-SEC-02 → shipped, P4-SEC-07 foundation landed).
+
+Validated:
+- `go test -race ./...` green (all packages).
+- `go build ./...` green.
+- E2E: `sync_encrypted.txtar` proves hub stores only `enc.v1` carriers (no plaintext path/remote), B decrypts after enroll+approve, revoke rotates to epoch 2.
+- `TestMigrationsDocumented` green (00013 in spec/12).
+
+Follow-ups:
+- P4-SEC-07 full: workspace-ID pairing across devices (spec/07 §211 anticipates provisioning the same logical `ws_...` id; currently each `init` mints a separate workspace id, and the joining device's bootstrap WCK is overwritten by the origin device's grant on first pull — functional but not the intended shared-workspace model).
+- P4-SEC-08 (hub-side grant verification / anti-replay) remains open.
+- Hub-based WCK recovery for a solo device that loses its keychain (self-grant removed to avoid epoch collision; a re-grant from another device is the recovery path in a multi-device workspace).
+- `golangci-lint run` + `gofmt -w cmd internal` to be run before PR.
+
+Review fix (subagent review of PR #25) — make `EncryptedHub.Pull` non-wedging:
+- The original `Pull` returned an error on the *first* enc.v1 event it could not decrypt or whose epoch it did not hold, and the caller (`internal/cli/sync.go`) does `return err`, so the whole batch aborted and the pull cursor never advanced. Since `Pull(afterHLC)` only returns events with HLC past the cursor, a single un-decryptable object (wrong-key cross-device epoch collision, corruption, forgery, or an unexpected plaintext/downgrade event) permanently wedged that device's sync and never reached `ApplyEvents`' quarantine + safe-cursor machinery. This is the exact self-DoS the zero-knowledge/untrusted-hub model must resist.
+- `Pull` now degrades instead of aborting: a **missing epoch key** (grant not yet propagated) **truncates** the batch — the decryptable prefix is returned so it applies and the cursor advances up to but not past that event, and the next sync retries once the grant arrives; a **held-epoch decrypt failure**, a **malformed/unknown envelope**, and a **non-grant plaintext event** (anti-downgrade) are each **skipped with a loud `logging.Logger(ctx).Warn`** and Pull continues. Bad events are still never applied (the security property holds — no unauthenticated data enters the log), but one bad object can no longer brick a device. This also de-fangs the acknowledged P4-SEC-07 epoch-collision case (it now logs + skips on the affected device rather than wedging) and removes the anti-downgrade brick for a stale/pre-envelope hub.
+- Tests: rewrote `TestEncryptedHubAntiDowngrade`/`TestEncryptedHubMissingEpoch`/`TestEncryptedHubUnknownVersion` to assert the skip/truncate contract, and added `TestEncryptedHubPoisonEventDoesNotWedge` (good events on either side of a wrong-key epoch-1 poison event still deliver). The typed sentinels remain in use (`ErrMissingWorkspaceKey` still guards `Push`; `ErrUnknownEnvelopeVersion`/`ErrPlaintextEventFromHub` from `ParseEncryptedEnvelope`).
+- Validated: `gofmt -w cmd internal`; `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` — 0 issues; `go run ./cmd/spec-drift --base origin/main --head HEAD` — passed; `go test -race ./...` — green (incl. `cmd/devstrap` e2e and `internal/cli`).
+
 ## 2026-06-30 — Wire the live R2/S3 hub (P5-HUB-01)
 
 Changed:

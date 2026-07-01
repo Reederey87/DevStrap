@@ -51,7 +51,7 @@ devstrap wip
 Current repository status as of `2026-06-28`:
 
 ```text
-Implemented: devstrap init, version, scan, add, clone, hydrate, open, sync --hub-file, materialize, draft snapshot create, run-loop, status, doctor, conflicts list/show/resolve, db migrate/status/backup/down, env capture/hydrate/bind, run, worktree new/status/finalize/list/remove/cleanup/unlock, agent run/list/show/pr, devices enroll/list/approve/revoke/lost/rename
+Implemented: devstrap init, version, scan, add, clone, hydrate, open, sync --hub-file, materialize, draft snapshot create, run-loop, status, doctor, conflicts list/show/resolve, db migrate/status/backup/down, env capture/hydrate/bind, run, worktree new/status/finalize/list/remove/cleanup/unlock, agent run/list/show/pr, devices enroll/list/approve/revoke/lost/rename/recipient
 Planned: production R2/S3 SDK wiring, env check, OS-enforced agent sandboxing, automatic remote device enrollment/fingerprint confirmation, daemon/socket API, export, promote, gitstate, wip
 ```
 
@@ -313,9 +313,11 @@ devstrap devices approve dev_01jz...
 devstrap devices revoke dev_01jz...
 devstrap devices lost dev_01jz...
 devstrap devices rename dev_01jz... gmk-ubuntu
+devstrap devices recipient              # print local device's age recipient (for out-of-band enrollment)
+devstrap devices recipient --signing    # print local device's Ed25519 signing public key
 ```
 
-Current implementation manually enrolls remote device records with age recipients, lists and renames device records, and updates non-local device trust state to `approved`, `revoked`, or `lost`. Env capture encrypts local bundles to the local recipient plus approved remote recipients. It refuses to change the current local device trust state so a user cannot revoke the only active local root by accident. Automatic remote enrollment, out-of-band fingerprint confirmation UX, and bundle re-encryption hooks remain future work.
+Current implementation manually enrolls remote device records with age recipients, lists and renames device records, and updates non-local device trust state to `approved`, `revoked`, or `lost`. `devices recipient` is a read-only helper that prints the local device's age recipient (or Ed25519 signing public key with `--signing`) so it can be shared out-of-band for enrollment on another device. Env capture encrypts local bundles to the local recipient plus approved remote recipients. `devices approve` and `enroll --approve` grant every held WCK epoch to the newly-approved device (`P4-SEC-07`); `devices revoke`/`lost` rotate the WCK to a new epoch (go-forward forward secrecy) before the existing blob re-encryption pass. It refuses to change the current local device trust state so a user cannot revoke the only active local root by accident. Automatic remote enrollment, out-of-band fingerprint confirmation UX, and bundle re-encryption hooks remain future work.
 
 ## Doctor command
 

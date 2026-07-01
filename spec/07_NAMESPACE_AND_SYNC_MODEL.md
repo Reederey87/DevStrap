@@ -227,6 +227,7 @@ env.profile.bound
 tooling.profile.bound
 agent.policy.bound
 draft.snapshot.created        # encrypted working-tree bundle (non-git / draft fallback — Layer C)
+device.key.granted            # age-wrapped Workspace Content Key for a recipient+epoch (P4-SEC-07)
 repo.gitstate.observed        # signed read-only git-state snapshot (working-state validation plane — Layer A)
 repo.wip.pushed               # a WIP commit pushed to refs/devstrap/wip/<device>/<path_key> (recovery — Layer B)
 conflict.created
@@ -332,7 +333,7 @@ On dangerous conflicts, write a `conflicts` row and never auto-overwrite local f
 
 ## Hub storage
 
-The hub is **two planes**, both zero-knowledge: (a) the append-only, signed, HLC-ordered event log — the namespace map; and (b) a content-addressed encrypted blob store (`age_blob:<sha256>`) for env and non-git/draft content. The hub sees only ciphertext plus a signed map — it cannot read code, secrets, or drafts. Repo content rides git's own transport and never enters the hub. Confidentiality comes from client-side encryption; integrity and availability come from signed event/hash chains, scoped credentials, snapshots, and backups.
+The hub is **two planes**, both zero-knowledge: (a) the append-only, signed, HLC-ordered event log — the namespace map — whose payloads are **envelope-encrypted** (`enc.v1`, XChaCha20-Poly1305 under a per-epoch Workspace Content Key, `P4-SEC-02`/`SEC-07`) so the hub stores only ciphertext carriers plus the signed carrier fields (ID/DeviceID/Seq/HLC/DeviceSig); and (b) a content-addressed encrypted blob store (`age_blob:<sha256>`) for env and non-git/draft content. The hub sees only ciphertext plus a signed carrier map — it cannot read code, secrets, drafts, or event payloads. Repo content rides git's own transport and never enters the hub. Confidentiality comes from client-side encryption; integrity and availability come from signed event/hash chains, scoped credentials, snapshots, and backups.
 
 Hub stores:
 
@@ -557,6 +558,18 @@ Devices are enrolled and approved per-device (`devstrap devices`, `15_SECURITY_T
 Re-encryption shrinks the recipient set for new pulls; **rotation is what actually invalidates already-exposed secret values**, so both steps are required. Status: the `needs_rotation` flag on revoke/lost is shipped; the blob re-encryption pass is shipped (`P5-SEC-01`/`HUB-04`: revoke/lost rewraps affected blobs to the reduced recipient set and deletes superseded hub ciphertext).
 
 **Fail-closed verification (`HUB-03`):** once any approved device enrollment exists, signed-event verification fails CLOSED — an event whose signing key is unknown or not approved is rejected, not applied. Before enrollment (the bootstrap window), only destructive event types (`project.deleted`, `project.renamed`) require verification. The local device is always exempt from the signing-key requirement (pre-enrollment grace). See `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`.
+
+### Workspace Content Key (WCK) envelope encryption (`P4-SEC-02`/`SEC-07`)
+
+Status: shipped (foundation). The event-log payloads are envelope-encrypted at the hub boundary by an `EncryptedHub` decorator (`internal/sync/encryptedhub.go`) wrapping the backend Hub (FileHub or R2Hub). The symmetric layer is XChaCha20-Poly1305 (`chacha20poly1305.NewX`, 24-byte random nonce) under a 32-byte per-epoch Workspace Content Key (WCK); AAD = `event.ID || uint64(epoch)`. The WCK is age-wrapped (X25519) to each approved device recipient and published as a plaintext `device.key.granted` event (the hub cannot decrypt the wrapped WCK without the recipient's private key). The carrier (ID/DeviceID/Seq/HLC/DeviceSig) stays plaintext so hub ordering, dedup, and Ed25519 verification are unchanged; decryption restores Type/PayloadJSON/ContentHash/PrevEventHash before `ApplyEvents` re-derives ContentHash and verifies the signature.
+
+Lifecycle:
+- **Init** (`devstrap init`): `EnsureBootstrap` mints epoch 1 WCK, stored in the OS keychain / 0600 file fallback (`devicekeys.HybridStore`, keyed `wck.<workspace_id>.<epoch>`). No self-grant is emitted (avoids epoch collision when a second device joins and its bootstrap WCK is overwritten by the origin's grant on first pull).
+- **Approve** (`devices approve` / `enroll --approve`): `GrantAllEpochs(recipient)` wraps every held epoch's WCK to the newly-approved device and emits one `device.key.granted` event per epoch. The new device ingests them on its first pull and decrypts the entire history.
+- **Revoke / lost** (`devices revoke` / `lost`): `Rotate` mints a fresh WCK at epoch+1 and wraps it to the remaining `ApprovedRecipients` (the revoked device is already excluded), emitting grant events. Go-forward events encrypt under the new epoch, giving forward secrecy without re-encrypting past events (a revoked device keeps its already-downloaded history — the residual risk age's no-native-revocation model accepts, bounded by secret rotation). The existing blob re-encryption pass runs after the rotate.
+- **Pull**: `EncryptedHub.Pull` primes the keyring, ingests in-batch grants in HLC order (so a new device obtains its WCKs before decrypting history), then decrypts `enc.v1` envelopes. Because the hub is untrusted, a single non-conforming object must never wedge sync, so Pull degrades instead of aborting the whole batch: an event whose **epoch key has not yet been granted** *truncates* the batch (the decryptable prefix is returned and applies; the cursor advances up to but not past it; the next sync retries once the grant arrives), while a **held-epoch decrypt failure** (corruption, forgery, or a cross-device epoch-key collision), a **malformed/unknown envelope**, or a **non-grant plaintext event** (anti-downgrade) is *skipped with a loud warning* and Pull continues. Bad events are never applied — the security property (no unauthenticated data enters the log) is preserved — but one bad object can no longer permanently brick a device. (`ErrPlaintextEventFromHub`/`ErrUnknownEnvelopeVersion` still surface from `ParseEncryptedEnvelope`, and `ErrMissingWorkspaceKey` still guards `Push`.)
+
+SQLite holds only non-secret metadata (`workspace_keys`, `workspace_key_grants` — migration 00013); the secret WCK lives only in the keychain / 0600 file fallback.
 
 ## Namespace snapshot export
 

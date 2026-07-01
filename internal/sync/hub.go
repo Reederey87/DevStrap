@@ -30,7 +30,12 @@ var ErrInvalidBlobKey = errors.New("invalid blob key")
 
 // Hub is the two-plane zero-knowledge sync backend (HUB-01): (a) the signed
 // HLC-ordered namespace-map event log and (b) the content-addressed encrypted
-// blob store. The hub sees only ciphertext plus a signed map. Implementations
+// blob store. The hub sees only ciphertext plus a signed carrier map. When
+// wrapped by EncryptedHub (P4-SEC-02/SEC-07), event-log payloads are
+// envelope-encrypted (XChaCha20-Poly1305 under a per-epoch Workspace Content
+// Key) so the hub never stores plaintext Type/PayloadJSON/ContentHash; the
+// carrier (ID/DeviceID/Seq/HLC/DeviceSig) remains plaintext so hub ordering,
+// dedup, and Ed25519 signature verification are unchanged. Implementations
 // must be safe for concurrent use.
 //
 // Event plane:
