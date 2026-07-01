@@ -6,7 +6,7 @@ tracks_code: [cmd/**, internal/**, .github/**, docs/audits/AUDIT_RECOMMENDATIONS
 
 ## MVP definition
 
-The MVP is successful when one user can register multiple Macs/Linux machines, keep a consistent `~/Code` structure, materialize repos (on-demand `hydrate` today, moving to eager clone-everything on `sync` — `EAGER-*`), hydrate env safely, and create fresh worktrees for agents.
+The MVP is successful when one user can register multiple Macs/Linux machines, keep a consistent `~/Code` structure, materialize repos (eager clone-everything on `sync` — `EAGER-*`, shipped — with on-demand `hydrate` retained for single repos), hydrate env safely, and create fresh worktrees for agents.
 
 The "Dropbox experience for code" target — one identical `~/Code` tree that appears automatically across the owner's fleet — is delivered by the 2026-06-28 cloud-sync architecture: content split by type (repo content rides git's own blobless clone/fetch from its existing remote and never transits the hub; env + non-git/draft folders ride age-encrypted content-addressed `age_blob:<sha256>` blobs; the project map rides the signed HLC-ordered event log), eager materialization on `sync`, and a two-plane zero-knowledge hub on Cloudflare R2. See `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`.
 
@@ -32,11 +32,11 @@ Milestone 7: multi-device hub                               [reframed as the clo
 The next cycle is re-sequenced around the **eager-clone core + cloud backend**, not a native daemon. IDs reference `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`. This overlay supersedes the priority of the historic M5–M7 above without renumbering them:
 
 ```text
-Next:      eager-clone materialization (EAGER-*) — clone-everything (blobless) on `devstrap sync`;
+Next:      eager-clone materialization (EAGER-*) — clone-everything (blobless) on `devstrap sync`;   [shipped 2026-06-29]
            the whole ~/Code tree is present after sync; no FUSE/placeholder/lazy-VFS
-Then:      non-git/draft content sync + .devstrapignore compiler + encrypted bundles (DRAFT-*)
-Then:      cloud zero-knowledge hub on Cloudflare R2, two planes (event log + blob store) (HUB-*)
-Alongside: cross-platform core — portable Go on macOS + Ubuntu, no native daemon (XP-*)
+Then:      non-git/draft content sync + .devstrapignore compiler + encrypted bundles (DRAFT-*)         [shipped 2026-06-29]
+Then:      cloud zero-knowledge hub on Cloudflare R2, two planes (event log + blob store) (HUB-*)      [shipped 2026-06-30]
+Alongside: cross-platform core — portable Go on macOS + Ubuntu, no native daemon (XP-*)               [shipped]
 
 --- deferred this cycle ---
 Mac daemon + native watcher (historic M5):      behind its entry gate, not this cycle
@@ -142,7 +142,7 @@ Concurrent same-path/different-remote events converge to the canonical `(hlc, de
 
 This milestone is required before the daemon and watcher become the main implementation focus.
 
-Current implementation has the core HLC, persisted local event stamping with per-device sequence numbers, project event helpers, `add`/`scan --adopt` project-event emission, transactional idempotent insert/apply, HLC-gated project delete tombstones/restores, content-hash duplicate validation, order-independent same-path/different-remote conflict reconciliation, a file-backed hub adapter for tests, and `devstrap sync --hub-file` for file-backed namespace event push/pull. Remote device registration, tombstone garbage collection, and skeleton reconciliation across real roots remain future work.
+Current implementation has the core HLC, persisted local event stamping with per-device sequence numbers, project event helpers, `add`/`scan --adopt` project-event emission, transactional idempotent insert/apply, HLC-gated project delete tombstones/restores, content-hash duplicate validation, order-independent same-path/different-remote conflict reconciliation, a file-backed hub adapter for tests, and `devstrap sync --hub-file` for file-backed namespace event push/pull. Automatic remote device registration remains future work; tombstone GC and cross-root materialization have since shipped (see Milestone 7 status and the `EAGER-*` workstream).
 
 Decision note: the `device_sig` / `prev_event_hash` chain columns were implemented locally as a deliberate, accepted divergence from the right-size-the-spike guidance (ARCH-2). Their on-wire format must be re-reviewed before a production hub freezes it.
 
@@ -390,7 +390,7 @@ Status shows both devices.
 
 ```text
 [ ] TUI dashboard
-[ ] 1Password adapter
+[ ] 1Password adapter beyond op run/op inject provider refs (item browsing, write-back)
 [ ] Doppler adapter
 [ ] Infisical adapter
 [ ] DevPod adapter
@@ -398,7 +398,7 @@ Status shows both devices.
 [ ] GitHub App integration
 [x] Git LFS policy support
 [ ] sparse checkout profiles
-[ ] draft project encrypted sync
+[x] draft project encrypted sync (DRAFT-*, shipped 2026-06-29)
 [ ] conflict resolution UI
 [ ] shell cd hydration hook
 [ ] zsh/fish/bash integrations
@@ -491,7 +491,7 @@ Workstreams added by the second-pass design & implementation audit (`docs/audits
 
 ### Sync hub (Phase 2)
 - Logical Hub interface + file-backed conformance backend + R2/S3 direct production backend first; HTTP/SSE `cmd/devstraphub` relay and mTLS device certs are deferred until live push or multi-tenant routing needs a service.
-- Wire the resume cursor (`ARCH2-02`) and full-state snapshot exchange before retention GC; `sync` currently replays from HLC 0.
+- The resume cursor is shipped (per-hub push cursor `SYNC-04` + low-water-mark pull cursor `SYNC-01` via `hub_cursors`); remaining work is full-state snapshot exchange before retention GC.
 
 ### Architecture & hygiene epics
 - Extract `internal/engine` from `internal/cli` (`ARCH2-01`) before the daemon phase.
@@ -518,12 +518,12 @@ Workstreams added by the cloud-sync architecture pass (`docs/audits/AUDIT_RECOMM
 - **Cloudflare R2 backend from the start** (S3 API, zero egress, namespaced by `workspace_id`; client-side age encryption). **No NAS-first phase.** Keep the backend pluggable behind one `Hub` interface; retain a file-backed local backend **only for tests**.
 - R2 event log must use immutable unique object keys, conditional puts, cursor pagination, snapshots, and cost-aware polling/backoff. Never append by overwriting one manifest object.
 - SaaS/runners require temporary prefix-scoped R2 credentials or presigned URLs; bucket-wide long-lived keys are acceptable only for single-owner self-hosted mode.
-- Full-state snapshot exchange before retention GC, and wire the resume cursor (`ARCH2-02`, `sync` currently replays from HLC 0). HTTP/SSE mTLS relay remains deferred.
+- The resume cursor is shipped (per-hub push cursor `SYNC-04` + low-water-mark pull cursor `SYNC-01` via `hub_cursors`); remaining work is full-state snapshot exchange before retention GC. HTTP/SSE mTLS relay remains deferred.
 - **Device trust must fail closed** once enrollment exists (today `SECU-03` fails open for non-destructive event types). Revoke ⇒ re-encrypt affected blobs to the reduced recipient set + flag secrets for rotation (age has no native revocation).
 
 ### XP-* — cross-platform core first
 - Ship a **portable Go core on macOS + Ubuntu** with OS-specific magic deferred: no native daemon, no StrapFS this cycle. Eager-clone on `sync` plus periodic reconciliation cover the loop without a resident watcher.
-- Validates the GMKtec Ubuntu box and graphics-laptop targets alongside the Mac Minis.
+- Validated on both macOS and Ubuntu targets from the single Go binary.
 
 ### SCALE-* — multi-user / multi-tenant scaling (future direction, documented not built)
 - **Chosen stack remains sound:** Fly.io for Go-native compute and per-task runner Machines + Cloudflare R2 for the encrypted sync data plane + Neon managed Postgres as the low-idle control-plane DB default. R2 gives low storage cost and free egress; Neon gives scale-to-zero/branching; Fly runs the Go binary and isolates runner tasks with VMs. No immediate provider switch is recommended.
@@ -541,10 +541,18 @@ Workstreams added by the cloud-sync architecture pass (`docs/audits/AUDIT_RECOMM
 
 The sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`; index in `docs/audits/README.md`) verified the shipped system against trunk `8c739b8`. Five **P1 must-fix** findings form the near-term wave; land them before broadening the product surface further:
 
-- **P6-SEC-01** — close the identified gap in the zero-knowledge / recipient-set enforcement path so revoked or non-approved recipients cannot decrypt current blobs.
-- **P6-SYNC-01** — fix the sync-engine correctness issue in event ordering/apply so replay stays deterministic and idempotent across devices.
-- **P6-HUB-01** — harden the R2/S3 hub adapter (keying, conditional puts, or GC/retention path) against the identified data-integrity/loss risk.
-- **P6-GIT-01** — correct the git materialization / worktree base-resolution defect so agent bases never resolve from stale or incorrect refs.
-- **P6-DATA-01** — repair the identified SQLite schema/migration or data-model invariant so state stays consistent.
+- **P6-SEC-01** — Verify grant-carrier signatures and refuse WCK overwrite before writing to the keychain.
+- **P6-SYNC-01** — Quarantine verification/trust failures per-event instead of aborting the whole pull batch.
+- **P6-HUB-01** — Make `hub gc` sync-first and grace-windowed; refuse to sweep on a truncated mark set (live draft blobs are currently deletable).
+- **P6-GIT-01** — Split the git subprocess timeout by command class and stop classifying self-imposed deadline kills as retryable (the 2-minute cap breaks eager materialization of large repos).
+- **P6-DATA-01** — Record the origin device's own `draft_snapshots` row at snapshot-create time, in one transaction with the event.
 
 P6-DOC-02's audit-ledger reconciliation was applied this cycle (the `docs/audits/` status ledger and cross-references were brought back in line with shipped state).
+
+### Pass 6 direction (2026-07-01) — forward-looking, not yet built
+
+These are validated forward-direction decisions from the sixth-pass viability review. They are recorded here as roadmap direction and backlog intent, not as shipped work.
+
+- **DIRECTION — hardening freeze before new planes (AD-2).** Sequence the near-term roadmap so the P5/P6 sync + crypto criticals close *before* any new capability plane (HTTP/SSE relay, native daemon, StrapFS, hosted SaaS) begins: the confidentiality/keychain gap (`P6-SEC-01`), the whole-batch pull wedge (`P6-SYNC-01`), the live-blob-loss GC (`P6-HUB-01`), and the dropped-cursor path (`P5-SYNC-01`). This supersedes the priority of broadening the product surface until those land.
+- **DIRECTION — zero-infrastructure Hub backend for first-run adoption (AD-1).** The R2/S3 hub needs a provisioned cloud bucket, which undercuts the "new machine in 5 minutes" promise. Add a zero-infra backend behind the existing pluggable `Hub` interface — a private-git-repo-backed and/or local-folder / cloud-drive-folder backend (the hub only ever holds ciphertext + signed events, so a "dumb" folder or git repo is a safe zero-knowledge carrier). Make it the quickstart default and keep `r2://` as the scale/power option. Backlog row: `[ ] zero-infrastructure Hub backend (private-git-repo / shared-folder carrier; quickstart default) (AD-1)`.
+- **DIRECTION — distribution + OSS onboarding workstream (AD-8).** Adoption is bottlenecked on distribution and contributor friction, not features. Planned goals: cut `v0.1.0` through the existing GoReleaser pipeline; add a Homebrew tap + `curl|sh` installer + shell completions; make the spec-drift/work-log gate **advisory on fork PRs** (maintainer completes the bookkeeping at merge) with a documented small-fix fast path; extract a user-facing `docs/` tier (install / quickstart / self-hosting) distinct from the `spec/` design corpus; write a short human `ARCHITECTURE.md`; enable GitHub Discussions + good-first-issue labels; reframe `AGENTS.md` as the maintainer's agent workflow rather than a contributor obligation; and plan for bus-factor by recruiting a second write-access maintainer.

@@ -1,6 +1,6 @@
 ---
-last_reviewed: 2026-06-28
-tracks_code: [internal/platform/**, internal/cli/open.go, .github/**]
+last_reviewed: 2026-07-01
+tracks_code: [internal/platform/**, internal/cli/open.go, internal/cli/hydrate.go, .github/**]
 ---
 # Mac-First Implementation Guide
 
@@ -10,7 +10,7 @@ Build a Mac solution that feels native enough to solve the daily pain, while kee
 
 ## Sequencing note (2026-06-28): cross-platform core first
 
-The 2026-06-28 cloud-sync decisions (see `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`, workstream `XP-*`) re-order this guide's build sequence: ship the **portable Go core first on both macOS and Ubuntu**, before any native macOS magic. The "Dropbox experience for code" — one identical `~/Code` tree on every device in the fleet (two Mac Minis, an incoming GMKtec Ubuntu box, a graphics laptop, a NAS) — is delivered this cycle by the portable core (eager blobless clone on `devstrap sync`, age-encrypted env/draft blobs, and the signed HLC-ordered namespace map), not by a daemon or virtual filesystem.
+The 2026-06-28 cloud-sync decisions (see `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`, workstream `XP-*`) re-order this guide's build sequence: ship the **portable Go core first on both macOS and Ubuntu**, before any native macOS magic. The "Dropbox experience for code" — one identical `~/Code` tree on every device in a mixed macOS/Linux fleet (workstations, laptops, headless boxes, agent runners) — is delivered this cycle by the portable core (eager blobless clone on `devstrap sync`, age-encrypted env/draft blobs, and the signed HLC-ordered namespace map), not by a daemon or virtual filesystem.
 
 Consequently, treat the daemon, native FSEvents watcher, LaunchAgent, Endpoint Security, File Provider, and FUSE/StrapFS content below as **later layers, not this-cycle work**. The Mac-specific adapter seams in `internal/platform` stay valuable as the eventual home for that behavior and as the proof that Mac specifics stay behind adapters so Ubuntu remains first-class — but they are deferred. Materialization in the cross-platform core is **eager clone-everything on `devstrap sync`** (partial/blobless clone up front); there is no placeholder/lazy-VFS step in this design.
 
@@ -79,17 +79,19 @@ LaunchDaemon is only needed later if you need system-wide service behavior befor
 </plist>
 ```
 
-Install command:
+Install command (deferred — daemon layer, not shipped):
 
 ```bash
 devstrap daemon install
 ```
 
-Uninstall command:
+Uninstall command (deferred — daemon layer, not shipped):
 
 ```bash
 devstrap daemon uninstall
 ```
+
+There is no `devstrap daemon` command in the current binary; these are target commands for the deferred Phase 1 daemon.
 
 The installer renders the plist with Go `text/template` using `os.UserHomeDir()` and `os.Executable()`. Do not hardcode `/Users/USER`, `~`, or Homebrew paths; launchd does not expand them in plist fields. `devstrapd serve` runs in the foreground under launchd and never self-daemonizes.
 
@@ -144,32 +146,25 @@ Example:
   README.devstrap.md
 ```
 
-`placeholder.json`:
+`placeholder.json` (shipped on-disk format, written by `writeSkeleton` in `internal/cli/hydrate.go`):
 
 ```json
 {
-  "version": 1,
   "path": "work/acme/api",
-  "type": "git_repo",
   "remote": "git@github.com:acme/api.git",
-  "default_branch": "main",
-  "materialization": "skeleton"
+  "state": "skeleton"
 }
 ```
 
-`README.devstrap.md`:
+The richer `{version, type, default_branch, materialization}` schema is a **planned** extension, not the current on-disk format — any tooling (e.g. the zsh `chpwd` hook below) must parse only the three shipped fields today.
 
-````markdown
-# DevStrap placeholder
+`README.devstrap.md` (shipped text, written verbatim by `writeSkeleton`):
 
-This project is known to DevStrap but is not hydrated on this machine yet.
+```markdown
+# DevStrap skeleton
 
-Run:
-
-```bash
-devstrap open work/acme/api --cursor
+This directory maps to `work/acme/api` and will be hydrated from `git@github.com:acme/api.git`.
 ```
-````
 
 ## Shell integration
 
@@ -318,15 +313,15 @@ Production distribution should include:
 
 ## Mac MVP acceptance criteria
 
-- `devstrap init ~/Code` creates state, config, and managed root.
-- LaunchAgent keeps daemon running after login.
-- Daemon recreates skeleton folders from namespace state.
-- Scanner adopts existing Git repos.
-- `devstrap open <path> --cursor` hydrates and opens repo.
-- `devstrap worktree new <path> --fresh-upstream` fetches origin and creates worktree from remote SHA.
-- Env capture/hydrate now stores and restores encrypted local blobs, provider ref hydration delegates to `op inject`, and runtime injection delegates encrypted profiles or 1Password refs through `devstrap run`.
-- Dirty repos are detected and not overwritten.
-- Logs are readable under `~/.devstrap/logs`.
+- `devstrap init ~/Code` creates state, config, and managed root. (shipped)
+- LaunchAgent keeps daemon running after login. (deferred — daemon layer, not shipped)
+- Daemon recreates skeleton folders from namespace state. (deferred — daemon layer, not shipped)
+- Scanner adopts existing Git repos. (shipped)
+- `devstrap open <path> --cursor` hydrates and opens repo. (shipped)
+- `devstrap worktree new <path> --fresh-upstream` fetches origin and creates worktree from remote SHA. (shipped)
+- Env capture/hydrate now stores and restores encrypted local blobs, provider ref hydration delegates to `op inject`, and runtime injection delegates encrypted profiles or 1Password refs through `devstrap run`. (shipped)
+- Dirty repos are detected and not overwritten. (shipped)
+- Logs are readable under `~/.devstrap/logs`. (shipped)
 
 ## Audit follow-ups (2026-06-27)
 

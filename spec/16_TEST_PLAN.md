@@ -10,7 +10,7 @@ This project can destroy trust if it loses code, leaks secrets, or creates stale
 
 ## Current coverage gate
 
-Phase 0 currently implements `cmd/devstrap`, `internal/cli`, `internal/config`, `internal/git`, `internal/logging`, `internal/pathkey`, `internal/platform`, `internal/scan`, `internal/state`, and `internal/sync`. These packages must have executable tests before handoff.
+Phase 0 currently implements `cmd/devstrap`, `cmd/spec-drift`, and `internal/{childenv, cli, config, devicekeys, draftbundle, envbundle, envfile, git, hub, ignore, logging, pathkey, platform, redact, scan, specdrift, state, sync, workspacekeys}`. Every package under `cmd/` and `internal/` except `internal/id` (a trivial ID generator, exempt — matching `spec/00`) must have executable tests before handoff.
 
 Required now:
 
@@ -100,9 +100,9 @@ Cases:
 - `node_modules` excluded;
 - generated managed block preserves user rules.
 
-#### `.devstrapignore` single-compiler consumers (planned, `DRAFT-*`)
+#### `.devstrapignore` single-compiler consumers (shipped compiler, `DRAFT-*`)
 
-The 2026-06-28 cloud-sync design makes one `.devstrapignore` compiler load-bearing for confidentiality: scan pruning, the `.gitignore` managed block, the watcher exclusion set, the agent denylist, and the draft-bundle exclusion set must all derive from the *same* compiled output (`11_IGNORE_AND_LOCAL_GARBAGE.md`). These tests are required before the non-git content-sync feature ships.
+The 2026-06-28 cloud-sync design makes one `.devstrapignore` compiler load-bearing for confidentiality: scan pruning, the `.gitignore` managed block, the watcher exclusion set, the agent denylist, and the draft-bundle exclusion set should all derive from the *same* compiled output (`11_IGNORE_AND_LOCAL_GARBAGE.md`). The compiler (`internal/ignore`) and the non-git/draft content-sync feature (`DRAFT-*`) are shipped, so these tests guard shipped behavior; the watcher-exclusion-set and agent-denylist consumer views remain unwired and are marked as remaining below.
 
 Cases:
 
@@ -326,9 +326,9 @@ Device B: hydrate repo
 Device A: status shows Device B ready after heartbeat
 ```
 
-### Eager-clone two-machine end-to-end (planned, `EAGER-*`/`DRAFT-*`/`HUB-*`)
+### Eager-clone two-machine end-to-end (shipped — see `cmd/devstrap/testdata/script/sync_materialize.txtar` and `sync_encrypted.txtar`)
 
-Proves the "Dropbox experience for code" round trip: one `devstrap sync` on Device B reconstructs the whole `~/Code` tree — repos blobless-cloned from their existing remotes, drafts restored from encrypted blobs, env hydrated — with no skeletons left behind. Required before eager-clone materialization ships.
+Proves the "Dropbox experience for code" round trip: one `devstrap sync` on Device B reconstructs the whole `~/Code` tree — repos blobless-cloned from their existing remotes, drafts restored from encrypted blobs, env hydrated — with no skeletons left behind. Eager-clone materialization shipped and this suite guards it; the two-device testscripts (`sync_materialize.txtar`, `sync_encrypted.txtar`) cover the core round trip. Any assertion below not yet covered by those testscripts (e.g. the byte-identical draft restore and node_modules-absent checks) is a remaining gap.
 
 ```text
 1. Device A: scan --adopt a git repo (with an existing remote) and a remote-less draft folder
@@ -453,30 +453,55 @@ Assert conflict
 - Git lock file exists;
 - repo deleted manually outside DevStrap.
 
-## Manual acceptance scenario
+## Pass 6 test direction (2026-07-01) — forward-looking, not yet built
 
-End-to-end personal scenario:
+These test workstreams back the sixth-pass architecture-direction decisions. They are recorded here as target coverage to build alongside the corresponding features, not as shipped suites.
+
+### One-bad-object invariant — chaos multi-device tests (AD-6)
+
+DIRECTION: make "one bad object never wedges or silently skips a device" a first-class, tested invariant. The target discipline is a uniform per-event quarantine — a persisted `sync_skipped_events` table surfaced in `status`/`doctor` and replayable (record-and-continue for permanent causes, bounded hold for transient), sticky enrollment (count `trust_state IN ('approved','revoked','lost')`), and a real applied `device.revoked` path. Add chaos-style multi-device tests against a hostile hub:
 
 ```text
-1. Mac Mini A: init workspace.
+- hub reorders / omits / substitutes events: no device wedges; a skipped event is quarantined, surfaced, and replayable — the origin device's later events are NOT permanently stranded (regression guard for P6-SYNC-01/02)
+- approval arrives mid-rotation: a device approved between epochs can still decrypt history across the epoch bump
+- revoked-device traffic: events from a revoked device are rejected per-event without aborting the whole pull batch
+- a single un-decryptable / malformed envelope quarantines just that event, not the batch
+```
+
+### Durability / disaster-recovery drill (AD-7)
+
+DIRECTION: add a plain-text workspace manifest export/import (`workspace.yaml`) as an escape hatch and interop format, document recovering the namespace without DevStrap, and ship `db backup --full` (state.db + blobs + key material) with a `db restore` path (`P6-DATA-04`). Add a recovery drill to the plan:
+
+```text
+- total hub loss: rebuild the hub from local state + git remotes; prove every device reconverges
+- total local loss on one device: restore from db backup --full and re-sync; prove the namespace, env blobs, and keys are reconstructed
+- manifest round trip: export workspace.yaml, wipe, import, and assert the namespace map is byte-equivalent
+```
+
+## Manual acceptance scenario
+
+End-to-end acceptance scenario:
+
+```text
+1. Machine A (macOS): init workspace.
 2. Add 5 repos and 1 draft project.
 3. Capture env for 2 repos.
 4. Start hub.
-5. GMK Ubuntu: install DevStrap and join workspace.
+5. Machine B (Ubuntu): install DevStrap and join workspace.
 6. Confirm tree appears.
 7. Open one repo on Ubuntu.
 8. Confirm env/tooling readiness.
 9. Start agent worktree from fresh main.
 10. Push PR or show diff.
-11. Delete a project on Mac A and verify Ubuntu dirty clone is not deleted.
+11. Delete a project on Machine A and verify Machine B's dirty clone is not deleted.
 ```
 
 ## Audit follow-ups (2026-06-27)
 
 Testing gaps (`TEST-*`, from `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md`):
 
-- **No fuzz targets** for any untrusted-input parser, incl. the env parser, pathkey, and the secret scrubber (`TEST-01`); add `go test -fuzz`.
-- **e2e harness covers only `init`/`status`** (`TEST-02`); the riskiest flows (scan/hydrate/worktree/agent/env/sync) are tested in-process and bypass the real exit-code/`--json` contract. Extend the `rogpeppe/go-internal` testscript suite.
+- **No fuzz targets** for any untrusted-input parser, incl. the env parser, pathkey, and the secret scrubber (`TEST-01`); add `go test -fuzz`. **[Partially implemented: fuzz targets shipped for the env parser (`internal/envfile`) and the ignore compiler (`internal/ignore`); pathkey and the secret scrubber remain.]**
+- **e2e harness covers only `init`/`status`** (`TEST-02`); the riskiest flows (scan/hydrate/worktree/agent/env/sync) are tested in-process and bypass the real exit-code/`--json` contract. Extend the `rogpeppe/go-internal` testscript suite. **[Largely implemented: 12 testscripts now cover clone/doctor/draft/materialize/run-loop/encrypted sync; remaining gaps: worktree/agent/env flows through the real binary.]**
 - **Coverage profile is computed then discarded** and the vacuous-test guard checks only 3 packages; `internal/id` is untested (`TEST-03`).
 - **gosec is narrowed to a 6-rule allowlist** disabling hardcoded-credential and weak-crypto checks (`TEST-04`); widen it. **[Implemented 2026-06-28: removed `includes` allowlist, all gosec rules now run; added `errorlint`; set `max-same-issues: 0`.]**
 - **`govulncheck` is unpinned (`@latest`) and bundled into the "Go tests" job** (`TEST-05`/`CI-01`); pin it and split it into its own (non-blocking/scheduled) job. **[Implemented 2026-06-28: pinned `@v1.1.4`, split into own `vuln` CI job, `continue-on-error` on PRs, daily scheduled run.]**
@@ -486,12 +511,12 @@ Testing gaps (`TEST-*`, from `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md`):
 
 ## Audit follow-ups (2026-06-28)
 
-New test workstreams from `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` (cloud-sync design; all planned/future until their features ship — they do not satisfy the Phase 0 gate):
+Test workstreams from `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` (cloud-sync design). Status as of 2026-06-30:
 
-- **Eager-clone two-machine e2e** (`EAGER-*`): the round trip in *Multi-device tests* — Device B reconstructs the whole `~/Code` tree from one `sync`, repos blobless-cloned at the same path, drafts byte-identical, env hydrated, a second sync pulls 0 events, and no `.git` bytes transit the hub.
-- **`.devstrapignore` single-compiler tests** (`DRAFT-*`): all consumers derive from one compiled output; the draft-bundle exclusion set is the compiler output and nothing else, so secrets, `.git`, and `node_modules` can never be age-encrypted into a blob.
-- **Hub backend conformance** (`HUB-*`): one suite passes against the file-backed test backend and the Cloudflare R2 / S3 backend behind the same `Hub` interface, plus the zero-knowledge property (server can decrypt nothing).
-- **Device revocation re-encryption** (device-trust): revoke -> affected blobs re-encrypted to the reduced recipient set and secrets flagged for rotation; signed-event verification must **fail closed** once enrollment exists (today `SECU-03` fails open).
+- **Eager-clone two-machine e2e** (`EAGER-*`) [shipped — see the two-device testscripts under *Multi-device tests*]: the round trip — Device B reconstructs the whole `~/Code` tree from one `sync`, repos blobless-cloned at the same path, drafts byte-identical, env hydrated, a second sync pulls 0 events, and no `.git` bytes transit the hub.
+- **`.devstrapignore` single-compiler tests** (`DRAFT-*`) [shipped compiler; single-source consumer fan-out remains]: all consumers derive from one compiled output; the draft-bundle exclusion set should be the compiler output and nothing else, so secrets, `.git`, and `node_modules` can never be age-encrypted into a blob.
+- **Hub backend conformance** (`HUB-*`) [shipped, `P5-HUB-01` — see *Shipped conformance* above]: one suite passes against the file-backed test backend and the Cloudflare R2 / S3 backend behind the same `Hub` interface, plus the zero-knowledge property (server can decrypt nothing).
+- **Device revocation re-encryption** (device-trust) [shipped, `HUB-04`/`SEC-01`]: revoke -> affected blobs re-encrypted to the reduced recipient set and secrets flagged for rotation; signed-event verification **fails closed** once enrollment exists [shipped, `HUB-03`].
 - **Cross-platform parity** (`XP-*`): the eager-clone, draft-sync, and hub-backend suites run identically on macOS and Ubuntu from the one Go binary.
 - **Deferred:** OS-native daemon/StrapFS sync paths and multi-user/multi-tenant hub scaling (`SCALE-*`) are documented-not-built; no tests required this cycle.
 

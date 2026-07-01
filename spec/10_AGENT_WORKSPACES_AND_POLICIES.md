@@ -1,6 +1,6 @@
 ---
 last_reviewed: 2026-07-01
-tracks_code: [internal/cli/agent.go, internal/cli/worktree.go, internal/git/**]
+tracks_code: [internal/cli/agent.go, internal/cli/forge.go, internal/cli/worktree.go, internal/childenv/**, internal/git/**]
 ---
 # Agent Workspaces and Policies
 
@@ -56,7 +56,7 @@ devstrap agent run work/acme/api \
 agent_run_id: arun_01jz...
 repo_id: repo_01jz...
 project_path: work/acme/api
-engine: cursor
+engine: generic  # cursor/codex/copilot adapters are planned; only `generic` ships today
 task: fix failing tests
 base_ref: origin/<default_branch>
 base_sha: abc123
@@ -91,8 +91,9 @@ filesystem:
     - repo/.env
     - repo/.env.*
     - ~/.ssh/**
-    - ~/.snowflake/**
     - ~/.aws/**
+    - ~/.kube/**
+    - ~/.config/gcloud/**
     - ~/.config/gh/hosts.yml
     - "**/*service-account*.json"
 ```
@@ -124,7 +125,7 @@ commands:
   deny_patterns:
     - "rm -rf /"
     - "cat .env"
-    - "cat ~/.snowflake/config.toml"
+    - "cat ~/.aws/credentials"
     - "curl * | sh"
     - "chmod -R 777"
 ```
@@ -137,7 +138,7 @@ MVP enforcement options:
 4. terminal/session recording;
 5. later: sandbox/container.
 
-Current implementation has the shared `internal/childenv` environment sanitizer used by Git/editor/agent subprocesses. `devstrap agent run` supports the `generic` engine: it creates a fresh upstream worktree, runs explicit argv commands in that isolated cwd with a sanitized no-secret default environment, applies a wrapper-level command policy (`readonly`, `cautious`, `guarded`, or explicit `yolo-local`) plus a wrapper-level file path policy that denies explicit sensitive-path and outside-worktree references for non-`yolo-local` runs, records an `agent_runs` row, captures a `0600` log under `~/.devstrap/logs/agent-runs`, and stores a Git status/diff summary. `devstrap agent pr` reuses the stale-base gate before pushing and creating a forge-aware PR/MR via `gh`/`glab`/`tea` when available, or a compare URL fallback for unsupported forges. OS-enforced sandboxing, project-env allowlists for agents, `agent cleanup`, non-generic engine adapters, and forge `doctor` probes remain future work.
+Current implementation has the shared `internal/childenv` environment sanitizer used by Git/editor/agent subprocesses. `devstrap agent run` supports the `generic` engine: it creates a fresh upstream worktree, runs explicit argv commands in that isolated cwd with a sanitized no-secret default environment, applies a wrapper-level command policy (`readonly`, `cautious`, `guarded`, or explicit `yolo-local`) plus a wrapper-level file path policy that denies explicit sensitive-path and outside-worktree references for non-`yolo-local` runs, records an `agent_runs` row, captures a `0600` log under `~/.devstrap/logs/agent-runs`, and stores a Git status/diff summary. `devstrap agent pr` reuses the stale-base gate before pushing and creating a forge-aware PR/MR via `gh`/`glab`/`tea` when available, or a compare URL fallback for unsupported forges. OS-enforced sandboxing, project-env allowlists for agents, `agent cleanup`, and non-generic engine adapters remain future work; `doctor` now probes the matching forge CLI per adopted remote (`FORGE-04`/`GIT-05`).
 
 ## Enforcement reality (audit `AGEN-01..06`, `SECU-02`)
 
@@ -145,11 +146,23 @@ The current wrapper-level enforcement oversells its safety and must not be prese
 
 - **Command/file policy is argv-substring matching, trivially bypassed by any interpreter** (`AGEN-01`). `bash -c "…"`, `python -c`, base64-decode, `rm -fr /` (variant spacing), variable indirection, or a script file all evade the deny list, so the default `guarded` profile actually gives an agent full filesystem **read** and **network exfil**. Treat substring matching as a guardrail against accidents, not a security boundary.
 - **Credential-env inheritance is fixed, but the wrapper is still not a sandbox** (`AGEN-02`/`SECU-02`): `AgentAllowlist` excludes `SSH_AUTH_SOCK`, avoids inheriting the user's `HOME`, and repoints `HOME` to the worktree. The remaining risk is broader: the subprocess still has normal filesystem and network capability unless an OS sandbox (Seatbelt / bubblewrap-landlock-seccomp) constrains it.
-- **Profile semantics are misleading** (`AGEN-04`): `cautious` is currently identical to `guarded`, `readonly` is not actually read-only, and `ephemeral-ci` (listed above) is rejected by the code. Either implement the distinctions or rename/remove the profiles so names match behavior.
+- **Profile semantics are partially misleading** (`AGEN-04`, partly fixed): `ephemeral-ci` is now accepted and `readonly` denies redirection and known mutating commands (argv-aware, wrapper-level only); but `cautious` is still behaviorally identical to `guarded`, and `ephemeral-ci` has no cloud/auto-cleanup semantics yet — implement the distinctions or fold the profiles.
 - **There is no OS-enforced sandbox** under a profile literally named `guarded` (`AGEN-03`). Real isolation needs `sandbox-exec`/Seatbelt (macOS) or bubblewrap/landlock/seccomp (Linux); until then, say so plainly.
 - **The file-path deny list is narrower than this spec** and ignores the project's stronger sensitive-file detector (`AGEN-05`); unify on the single `spec/11` ignore/deny compiler.
 
 Direction: move to an **allowlist + OS sandbox** model, strip credential-bearing env by default, and make the default profile's true capability legible.
+
+## Direction: DevStrap as the substrate agents run on (AD-5)
+
+> Forward direction, not shipped. From the sixth-pass viability review; see `docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`.
+
+Modern agent harnesses (Claude Code, Cursor, Codex, Copilot) increasingly manage their own worktrees and OS-level sandboxes, and the generic wrapper runner here cannot authenticate a real harness (it strips API keys and repoints `$HOME`). DevStrap's durable value is therefore the **substrate** agents run on — cross-machine workspace consistency plus fresh-base provenance (fetched `origin/<default_branch>`, recorded base SHA), a queryable run/worktree registry, and the stale-base gate — not the wrapper itself. Planned direction:
+
+- expose `devstrap worktree new --fresh-upstream --json` as a **provisioning primitive** that harnesses call to obtain an isolated, fresh-based worktree;
+- add `devstrap worktree adopt` / `devstrap agent adopt` to register externally-created worktrees so the registry and stale-base gate keep their value regardless of who runs the agent;
+- ship one reference integration — a harness hook/plugin or a small MCP server over the namespace — rather than growing the bespoke wrapper;
+- reframe the wrapper command/file policy honestly as **guardrails, not a sandbox**, and delegate real isolation to harness-native sandboxes composed *inside* a DevStrap worktree;
+- the shipped engine set is `generic` only; the `cursor`/`codex`/`copilot` adapters listed under "Agent engines" are planned, and this substrate framing is the preferred path over per-harness wrapper adapters.
 
 ## Secret policy
 
@@ -167,7 +180,7 @@ Project opt-in:
 agent_secrets:
   allow:
     - GITHUB_TOKEN_READONLY
-    - SNOWFLAKE_ACCOUNT
+    - API_BASE_URL
   deny:
     - OPENAI_ADMIN_KEY
     - AWS_SECRET_ACCESS_KEY
@@ -232,8 +245,9 @@ Commands:
 
 ```bash
 devstrap agent list
-devstrap agent cleanup --merged
-devstrap agent cleanup --older-than 14d
+devstrap agent cleanup --merged          # planned — use `devstrap worktree cleanup` today
+devstrap agent cleanup --older-than 14d  # planned — use `devstrap worktree cleanup` today
+devstrap worktree cleanup --merged
 devstrap worktree remove <id> [--force]
 ```
 
@@ -251,11 +265,13 @@ Example:
 ```text
 Agent runs
 
-ID        Repo       Branch                    Base      Status    Tests
-arun_a13  api        agent/fix-tests-a13       abc123    complete  passed
-arun_b92  gss-agent  agent/add-check-b92       def456    running   pending
-arun_c11  ui         agent/refactor-c11        old       stale     failed
+ID        Repo        Branch                    Base      Status    Tests
+arun_a13  api         agent/fix-tests-a13       abc123    complete  passed
+arun_b92  api-worker  agent/add-check-b92       def456    running   pending
+arun_c11  ui          agent/refactor-c11        old       stale     failed
 ```
+
+The `Tests` column is a **planned** surface — no test-result tracking is wired today (only the `generic` engine ships), so shipped output omits it.
 
 ## MVP acceptance criteria
 

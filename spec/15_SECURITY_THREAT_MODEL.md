@@ -1,6 +1,6 @@
 ---
 last_reviewed: 2026-07-01
-tracks_code: [internal/childenv/**, internal/cli/**, internal/devicekeys/**, internal/envbundle/**, internal/git/**, internal/hub/**, internal/redact/**, internal/sync/**, internal/logging/**, internal/workspacekeys/**]
+tracks_code: [internal/childenv/**, internal/cli/**, internal/devicekeys/**, internal/envbundle/**, internal/git/**, internal/hub/**, internal/redact/**, internal/state/**, internal/sync/**, internal/logging/**, internal/workspacekeys/**]
 ---
 # Security Threat Model
 
@@ -18,7 +18,7 @@ Protect:
 - SSH keys;
 - API keys;
 - `.env` values;
-- Snowflake/cloud configs;
+- cloud/provider configs (AWS, GCP, Snowflake, etc.);
 - private source code;
 - draft project contents;
 - agent logs;
@@ -38,6 +38,8 @@ local filesystem / Git / secret providers
   ↕ network
 DevStrap Hub
 ```
+
+The `devstrapd` daemon and local socket are Phase 1 (gated, not built); today the `devstrap` CLI and `run-loop` cross the filesystem / Git / provider / Hub boundaries directly, so every daemon-plane mitigation below applies to the CLI process itself.
 
 Hub should be treated as semi-trusted:
 
@@ -351,3 +353,33 @@ if cur, ok := k.cached(grant.Epoch); ok && !bytes.Equal(cur, wck) {
 ```text
 enc.v2 AAD = ID || DeviceID || uint64(Seq) || uint64(HLC) || uint64(epoch)   // length-prefixed
 ```
+
+### Direction: one coordinated wire-format break (AD-3, future)
+
+The three critical crypto findings above (`P6-SEC-01`, `P6-SYNC-04`) plus the epoch-selection
+gap all touch the envelope wire format. Because only the file-hub spike and fresh R2 buckets
+exist today, the format can still change cheaply. DIRECTION — land a **single coordinated
+break** rather than a string of compatible patches:
+
+- `enc.v2` full-carrier AEAD AAD binding `ID || DeviceID || Seq || HLC || epoch` (`P6-SYNC-04`);
+- a WCK keyring keyed by `(epoch, kid)` where `kid = sha256(wck)` prefixed to ≥128 bits, and a
+  verified grant chain gating `CurrentKeyEpoch` (`P6-SEC-01`/`P6-SEC-02`);
+- founder-vs-`--join` `init` so a joining device never self-bootstraps epoch 1 (`P6-SEC-02`);
+- a signed hub-side retention marker so GC floors are authenticated (`P6-HUB-04`).
+
+Declare `enc.v1` and bare-integer epochs **dead**, not supported legacy — there is no
+production data to migrate.
+
+### Direction: reduce the crypto surface, seek external review (AD-4, future)
+
+Three of the four critical security findings live in the bespoke WCK epoch/rotation protocol,
+yet the namespace map it protects leaks paths/remotes, not secret *values* (those already ride
+the per-recipient age blob plane). DIRECTION — before this "zero-knowledge" property is
+advertised to other users:
+
+- evaluate **descoping event-log envelope encryption to the simpler per-recipient age-wrap**
+  already proven in the blob plane, unless forward secrecy on the namespace map is a firm
+  requirement;
+- if the epoch design stays, obtain at least **one external cryptographic review** of the
+  WCK epoch/rotation protocol before making the zero-knowledge claim load-bearing for
+  third-party users.

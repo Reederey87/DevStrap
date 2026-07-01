@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-30
+last_reviewed: 2026-07-01
 tracks_code: [cmd/**, internal/**, README.md]
 ---
 # Product Requirements
@@ -54,7 +54,7 @@ Agent tasks         → isolated fresh worktrees
 
 Uses:
 
-- a personal fleet of machines — e.g. a Mac Mini upstairs, a second Mac Mini downstairs, an incoming GMKtec Ubuntu box, a graphics laptop, and a NAS — plus cloud/agent runners;
+- a personal fleet of machines — e.g. two desktops, a Linux box, a laptop, and a home server/NAS — plus cloud/agent runners;
 - Cursor, VS Code, Codex/Copilot/Cursor/Claude Code agents;
 - multiple repos and worktrees;
 - many `.env` files;
@@ -127,6 +127,8 @@ Acceptance:
 - command/file policy applied;
 - output summarized.
 
+> **Direction (`AD-5`, future-facing).** DevStrap's durable agent value is the **substrate** agents run on — cross-machine workspace consistency, fresh-base provenance (fetched `origin/<default_branch>` + recorded base SHA), a queryable worktree/run registry, and the stale-base gate — not the generic wrapper runner itself. The plan is to expose `worktree new --fresh-upstream --json` as a provisioning primitive that agent harnesses (Claude Code, Cursor, Codex, Copilot) call, add `worktree adopt`/`agent adopt` to register externally-created worktrees so the registry and stale-base gate keep value regardless of who runs the agent, and ship one reference integration (a harness hook/plugin or a small MCP server). The wrapper's command/file policy is **guardrails, not a sandbox**; real isolation is delegated to harness-native sandboxes composed inside a DevStrap worktree. See `10_AGENT_WORKSPACES_AND_POLICIES.md`.
+
 ### JTBD 4 — Capture and distribute env safely
 
 When I configure env variables on one machine, I want other machines to have them without copying plaintext `.env` files casually.
@@ -167,42 +169,42 @@ Do not build these first:
 
 ### Must have
 
-- `devstrap init ~/Code`
-- `devstrap scan ~/Code --adopt`
-- namespace entries for Git repos and draft projects;
-- skeleton directory creation as a safe pre-materialization/failure state;
-- repo hydration using Git;
-- safe fetch/pull behavior;
-- fresh worktree creation from remote branch;
-- env capture/hydrate with encrypted local store;
-- device registration;
-- local SQLite state;
-- basic status and doctor commands.
+- `devstrap init ~/Code` (shipped);
+- `devstrap scan ~/Code --adopt` (shipped);
+- namespace entries for Git repos and draft projects (shipped);
+- skeleton directory creation as a safe pre-materialization/failure state (shipped);
+- repo hydration using Git (shipped);
+- safe fetch/pull behavior (shipped);
+- fresh worktree creation from remote branch (shipped);
+- env capture/hydrate with encrypted local store (shipped);
+- device registration (shipped);
+- local SQLite state (shipped);
+- basic status and doctor commands (shipped).
 
 ### Should have
 
-- Cursor and VS Code open adapters;
-- 1Password / Apple Password adapter;
-- Doppler adapter;
-- forge-aware PR/MR creation (`gh`/`glab`/`tea` with graceful fallback);
-- eager `devstrap sync` materialization and portable `devstrap run-loop`;
-- Linux-compatible abstractions;
-- shell `cd` hydration hook.
+- Cursor and VS Code open adapters (shipped);
+- 1Password adapter (shipped); Apple Password adapter (open);
+- Doppler adapter (open);
+- forge-aware PR/MR creation (`gh`/`glab`/`tea` with graceful fallback) (shipped);
+- eager `devstrap sync` materialization and portable `devstrap run-loop` (shipped);
+- universal ignore compiler (`.devstrapignore`, `internal/ignore`) (shipped);
+- encrypted draft-project sync (`draft snapshot create` + blob plane) (shipped);
+- Linux-compatible abstractions (shipped);
+- shell `cd` hydration hook (open).
 
 ### Deferred from current MVP
 
 - Mac LaunchAgent daemon and Linux systemd installer;
 - native FSEvents/inotify watcher installers;
 - hosted control plane (the production R2/S3 hub backend is shipped, `P5-HUB-01`);
-- StrapFS / FUSE / File Provider lazy filesystem layer.
-- universal ignore compiler;
+- StrapFS / FUSE / File Provider lazy filesystem layer;
 - TUI status view.
 
 ### Could have
 
 - DevPod/Coder target adapters;
 - cloud agent runner support;
-- encrypted draft-project sync;
 - macOS menu bar helper;
 - File Provider experiment;
 - FUSE/StrapFS experiment.
@@ -250,6 +252,7 @@ failed       last job failed
 For personal/MVP use:
 
 - new machine from zero to visible `~/Code` tree in under 5 minutes;
+- **Direction (`AD-1`, planned):** first run on a new machine succeeds with zero cloud provisioning — a zero-infrastructure Hub backend (a private git repo or a local/cloud-drive folder, both safe because the hub only holds ciphertext + signed events) becomes the quickstart default so no R2 bucket is required to get the tree; `r2://` stays the scale/power option (today a first run still needs `--hub-file` or a provisioned R2 bucket);
 - materialize average repo in under 2 minutes, excluding dependency install;
 - after `devstrap sync` completes, the full `~/Code` namespace tree is present on the device with every clonable repo eagerly materialized via blobless clone — no skeleton placeholders left behind (eager-clone target, workstream `EAGER-*`);
 - the same namespace tree appears automatically on every enrolled device in the fleet, with no manual file copying;
@@ -267,6 +270,17 @@ For future product use:
 - agent tasks run through DevStrap;
 - env/profile errors caught before runtime.
 
+## Adoption & distribution direction (pass-6, future-facing)
+
+Distribution and OSS onboarding are the current adoption bottleneck (`AD-8`) — no release tags exist yet, so the README install path is empty, and the mandatory spec-drift + work-log gate will bounce drive-by contributors. Recorded as goals/backlog, not shipped:
+
+- cut `v0.1.0` through the existing GoReleaser pipeline; add a Homebrew tap, a `curl | sh` installer, and shell completions;
+- make the spec-drift/work-log gate advisory on fork PRs (the maintainer completes the bookkeeping at merge), with a documented "small fix" fast path;
+- extract a short user-facing `docs/` tier (install / quickstart / self-hosting) distinct from the `spec/` design corpus, plus a 2–3 page human `ARCHITECTURE.md`;
+- enable GitHub Discussions and good-first-issue labels; reframe `AGENTS.md` as the maintainer's agent workflow, not a contributor obligation; plan for bus-factor by recruiting a second write-access maintainer.
+
+Adoption metrics to track once distribution exists: time-to-first-successful-sync on a fresh machine, fork-PR merge rate, and quickstart completion without reading the spec corpus. See `14_MVP_ROADMAP_AND_BACKLOG.md`.
+
 ## Future web/admin surface requirements
 
 The MVP does not include a team admin UI or hosted SaaS console. If/when DevStrap adds a web surface for Hub administration, team policy, or billing, it must follow current web-product guardrails:
@@ -283,9 +297,9 @@ The MVP does not include a team admin UI or hosted SaaS console. If/when DevStra
 
 From `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md`:
 
-- **Readiness model half-implemented (`PROD-01`):** `env_ready`/`tooling_ready` are never written and the derived 9-value display status is never computed; `status` shows only materialization + dirty. Implement a pure `deriveDisplayStatus`, or mark the extra states deferred.
-- **Conflicts are write-only (`PROD-02`):** rows are recorded but no `devstrap conflicts` command or status/doctor surface reads them. Add `conflicts [--json]` + a count in status/doctor.
-- **Draft limits unenforced (`PROD-03`):** invariant #8 (size/ignore limits) and draft lifecycle commands are unbuilt.
+- **Readiness model (`PROD-01`) — partially resolved:** `deriveDisplayStatus` is implemented in `internal/cli/status.go` and drives `status` output; it branches only on materialization + dirty state. `env_ready`/`tooling_ready` remain schema-only with no writer and are deferred by design.
+- **Conflicts (`PROD-02`) — resolved:** `devstrap conflicts list/show/resolve` shipped (`internal/cli/conflicts.go`); conflicts are readable and resolvable from the CLI.
+- **Draft limits (`PROD-03`) — largely resolved:** `draft snapshot create` enforces size/ignore limits via `internal/draftbundle` `Limits` + the `internal/ignore` compiler; remaining lifecycle commands (promotion draft→repo, deletion) are still open.
 - **MVP framing (`PROD-04`):** the "Must have"/MVP definition implies a multi-machine daemon MVP that is deliberately deferred; align with the re-ordered roadmap (agents before daemon).
 - **New requirements:** first-class non-VCS/remote-less projects (audit Section 2), forge-agnostic PR (Section 3), and cross-machine working-state sync (Section 5) — add personas/JTBD/invariants for each and make success metrics measurable.
 
@@ -294,5 +308,5 @@ From `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md`:
 From `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`, extending (not replacing) the 2026-06-27 audit. These decisions sharpen the "Dropbox experience for code" promise into measurable product requirements:
 
 - **Eager-clone materialization (`EAGER-*`):** the target sync model is eager, not lazy. `devstrap sync` clones every clonable repo up front via blobless/partial clone (`--filter=blob:none`) from its existing remote, so the whole `~/Code` tree is present afterward. There is no FUSE/placeholder/lazy-VFS layer in this design — StrapFS stays explicitly deferred. Repo content rides Git's own transport and never passes through the DevStrap hub. The success metrics above are updated to reflect this.
-- **Dropbox-for-code fleet promise:** the primary persona runs a personal fleet (multiple Macs, an Ubuntu box, a graphics laptop, a NAS); the same `~/Code` namespace must appear automatically on every enrolled device. Content is split by type — repo content via Git, env + non-git/draft folders via age-encrypted content-addressed blobs, the project map via the signed HLC-ordered event log — and `node_modules`/build artifacts are never synced (rebuilt on hydrate). See `07_NAMESPACE_AND_SYNC_MODEL.md` and `09_SECRETS_AND_ENVIRONMENT.md`.
+- **Dropbox-for-code fleet promise:** the primary persona runs a personal fleet (multiple desktops and laptops across macOS and Linux, plus a home server/NAS); the same `~/Code` namespace must appear automatically on every enrolled device. Content is split by type — repo content via Git, env + non-git/draft folders via age-encrypted content-addressed blobs, the project map via the signed HLC-ordered event log — and `node_modules`/build artifacts are never synced (rebuilt on hydrate). See `07_NAMESPACE_AND_SYNC_MODEL.md` and `09_SECRETS_AND_ENVIRONMENT.md`.
 - **Multi-user / SaaS is a documented-not-built future direction (`SCALE-*`):** a hosted multi-tenant product remains possible — control/data-plane split, a pooled→dedicated tenancy spectrum, and a zero-knowledge hub where client-side encryption gives tenant confidentiality by construction while integrity/availability still require signed verification, scoped credentials, snapshots, and backups — but it is not committed for the personal MVP and adds no scope here. It stays a non-goal (see "Non-goals for MVP"); hosting and scaling choices are documented, not built, in `03_SYSTEM_ARCHITECTURE.md` and `14_MVP_ROADMAP_AND_BACKLOG.md`.

@@ -175,11 +175,13 @@ Multi-tenant scaling principles (for the eventual SaaS): a **control-plane / dat
 
 ### No-daemon mode (correctness guarantee)
 
-Every `devstrap` CLI command works correctly without the daemon. State is materialized on demand, and reconciliation today is the **explicit `devstrap scan`** — there is no periodic-scan reconciler yet (`ARCH2-04`); periodic reconciliation arrives with the daemon. No command depends on `devstrapd` being installed or running. The daemon is purely a performance/UX optimization — its filesystem watcher is a hint, not the source of truth — and is never a correctness dependency. If the daemon is absent, stopped, or behind, results stay correct; only freshness and latency degrade until the next on-demand materialization or the next explicit `devstrap scan`. (The daemon socket/IPC/job API in `13_CLI_DAEMON_API.md` and the reserved `exitDaemonUnavailable=3` are design intent for the M5 daemon, not shipped behavior.)
+Every `devstrap` CLI command works correctly without the daemon. State is materialized on demand. Reconciliation of local filesystem changes today is the **explicit `devstrap scan`**; there is no watcher-driven reconciler yet (`ARCH2-04`). The shipped `devstrap run-loop` already provides daemonless periodic convergence (a jittered sync + eager-materialize tick, default every 5 minutes), but it does not scan the local tree for new projects — that still requires `devstrap scan` (its advertised scan stage is tracked as `P6-XP-03` and not yet run by the loop). Watcher-driven and periodic local-scan reconciliation arrive with the daemon. No command depends on `devstrapd` being installed or running. The daemon is purely a performance/UX optimization — its filesystem watcher is a hint, not the source of truth — and is never a correctness dependency. If the daemon is absent, stopped, or behind, results stay correct; only freshness and latency degrade until the next on-demand materialization or the next explicit `devstrap scan`. (The daemon socket/IPC/job API in `13_CLI_DAEMON_API.md` and the reserved `exitDaemonUnavailable=3` are design intent for the M5 daemon, not shipped behavior.)
 
 ## Data flows
 
 ### New project created locally
+
+(design intent — the watcher/daemon steps 2 and 5 are unbuilt; today this flow is `devstrap add`/`scan --adopt` followed by `devstrap sync`.)
 
 ```text
 1. User creates ~/Code/experiments/fs2.
@@ -209,9 +211,9 @@ Materialization is **eager, not lazy** (`EAGER-*`, `docs/audits/AUDIT_RECOMMENDA
 
 ```text
 1. User runs devstrap agent run repo --task "...".
-2. Daemon resolves the remote default branch from `origin/HEAD` or stored repo metadata.
-3. Daemon fetches that upstream ref.
-4. Daemon resolves `origin/<default_branch>` SHA.
+2. The engine (today: the CLI, per the ARCH2-01 seam note) resolves the remote default branch from `origin/HEAD` or stored repo metadata.
+3. The engine (today: the CLI) fetches that upstream ref.
+4. The engine (today: the CLI) resolves `origin/<default_branch>` SHA.
 5. Worktree is created from that SHA.
 6. New branch is created.
 7. Env is injected according to policy.
@@ -263,7 +265,7 @@ Event examples:
 {"type":"project.added","path":"work/acme/api","remote":"git@github.com:acme/api.git"}
 {"type":"project.renamed","old_path":"work/api","new_path":"work/acme/api"}
 {"type":"env.profile.bound","path":"work/acme/api","profile":"acme-dev"}
-{"type":"device.seen","device_id":"mac-mini-upstairs"}
+{"type":"device.seen","device_id":"dev_01jz…"}
 ```
 
 Why event log:
@@ -333,7 +335,9 @@ type EditorAdapter interface {
 // Hub is the pluggable two-plane backend boundary (HUB-*).
 // Intended package: internal/hub. Implementations: file-backed (tests only),
 // Cloudflare R2/S3 (production), HTTP/SSE hub service (later networked backend).
-// All implementations handle signed events (envelope-encrypted payloads under a per-epoch WCK, P4-SEC-02/SEC-07) + age-encrypted blobs only.
+// Backends store opaque signed events and age-encrypted blobs only; envelope encryption of event
+// payloads (per-epoch WCK, P4-SEC-02/SEC-07) is applied by the EncryptedHub decorator in internal/sync,
+// which hubFromOptions wraps around every backend.
 type Hub interface {
     Name() string
 
@@ -355,7 +359,7 @@ The interface contract is idempotent for duplicate event/blob writes and fails w
 ```text
 workspaces/<workspace_id>/events/<hlc-padded>/<device_id>/<seq>/<event_id>.json
 workspaces/<workspace_id>/blobs/<sha256>
-workspaces/<workspace_id>/snapshots/<hlc-padded>.json.age
+workspaces/<workspace_id>/snapshots/<hlc-padded>.json.age   # planned — full-state snapshot exchange (deferred with the HTTP/SSE backend); not yet implemented in internal/hub
 ```
 
 Hub backends:
@@ -363,6 +367,8 @@ Hub backends:
 - **file-backed**: the `devstrap sync --hub-file` (or `hub: file:<path>`) backend — **tests only**, never production;
 - **Cloudflare R2 / S3**: the chosen **production** backend, **shipped** (`P5-HUB-01`) — the `aws-sdk-go-v2` S3 adapter behind `hub: r2://<bucket>` (S3 API, zero egress, namespaced by `workspace_id`);
 - **HTTP/SSE hub service**: the later networked backend implementing the wire protocol above (still deferred).
+
+**DIRECTION — zero-infrastructure Hub backend (`AD-1`, planned; not yet built).** Requiring a provisioned R2/S3 bucket undercuts the "new machine in a few minutes" promise and is the top first-run adoption friction. Because the hub only ever holds ciphertext plus signed events, even a "dumb" carrier is a safe zero-knowledge boundary. Add a **zero-infrastructure backend behind this same pluggable `Hub` interface** — a private-git-repo-backed and/or local-folder / cloud-drive-folder backend — and make it the quickstart default, keeping `r2://` as the scale/power option. This is design direction only; no code exists this cycle.
 
 Mac implementation:
 
@@ -402,7 +408,7 @@ As of `2026-06-30`, the repository contains the Go workspace:
 - a thin generic agent runner that creates fresh worktrees, runs explicit argv commands with sanitized no-secret env, applies wrapper-level command and file path policy, records `agent_runs`, captures logs/diff summaries, and gates `agent pr` on stale-base detection;
 - CI for macOS/Linux Go tests, race tests, vet, build, vuln scanning, and module hygiene;
 - focused tests for the implemented CLI/config/state/platform packages;
-- the cloud-sync layer (`P5`/`HUB-*`): `internal/sync` (the `Hub` interface, `FileHub`, event apply/dedup, cursor logic), `internal/hub` (the `R2Hub` two-plane backend with keying/retry/conditional-put/retention-floor logic and the **shipped** `aws-sdk-go-v2` `S3Adapter` behind `hubFromOptions` `r2://` wiring, `P5-HUB-01`), `internal/envbundle`/`internal/ignore`/`internal/childenv`/`internal/git`/`internal/devicekeys`/`internal/redact`, `devstrap sync`/`run-loop`/`hub gc`/`devices revoke`, and an env-gated MinIO conformance test.
+- the cloud-sync layer (`P5`/`HUB-*`): `internal/sync` (the `Hub` interface, `FileHub`, the `EncryptedHub` envelope-encryption decorator, event apply/dedup, cursor logic), `internal/workspacekeys` (the per-epoch Workspace Content Key keyring, `P4-SEC-02`/`SEC-07`), `internal/hub` (the `R2Hub` two-plane backend with keying/retry/conditional-put/retention-floor logic and the **shipped** `aws-sdk-go-v2` `S3Adapter` behind `hubFromOptions` `r2://` wiring, `P5-HUB-01`), `internal/envbundle`/`internal/draftbundle`/`internal/ignore`/`internal/childenv`/`internal/git`/`internal/devicekeys`/`internal/redact`, `devstrap sync`/`run-loop`/`hub gc`/`devices revoke`, and an env-gated MinIO conformance test.
 
 The daemon, FSEvents-specific Mac watcher, and service installers are still design targets. Native platform-specific watcher or service-manager code must implement the `internal/platform` interfaces instead of branching through the core.
 
@@ -411,6 +417,8 @@ The daemon, FSEvents-specific Mac watcher, and service installers are still desi
 From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
 
 The near-term hub-hardening imperative is that these `HUB` items land alongside the zero-knowledge namespace-map encryption gap (`P6-SEC-01`, `spec/15`) and the transport-vs-logical-clock cursor gap (`P6-SYNC-01`, `spec/07`), which bound the correctness of every hub push/pull/GC path described above.
+
+**DIRECTION — multi-device hardening freeze before new planes (`AD-2`).** The shipped multi-device plane has confirmed criticals (`P6-SEC-01` confidentiality break, `P6-SYNC-01` whole-batch wedge, `P6-HUB-01` live-data-loss GC, `P5-SYNC-01` cursor drops). The intended sequencing is a **hardening freeze**: close the P5/P6 sync + crypto criticals before building new capability planes (the HTTP/SSE relay, the daemon, StrapFS, hosting/SaaS docs). See `spec/14` for the roadmap ordering.
 
 ### P6-HUB-01 — `hub gc` sweeps a stale local replica with no pre-GC sync, no grace window, and a truncated mark set
 
@@ -428,6 +436,15 @@ type ObjectInfo struct {
 }
 // hub gc: skip when time.Since(info.LastModified) < 24*time.Hour
 ```
+
+### P6-HUB-02 — hub S3 credentials are plaintext env/config only; the promised keychain/`op://` resolution is unbuilt
+
+**Problem.** `selectBackendHub` accepts the S3 secret access key only from a plaintext env var or config value and passes it to a static credentials provider (`internal/cli/hub.go:106-110` → `NewS3Client`). The keychain / `op://` / `age_blob:` credential resolution promised (and falsely marked "shipped") in `spec/19` does not exist, and `spec/13`/`spec/15`/`spec/19` contradict each other on hub credential custody.
+
+**Actionable steps.**
+1. Resolve hub S3 credentials through the same custody path as other secrets (OS keychain / `op://` provider ref), not a bare env/config string.
+2. Reconcile `spec/19` with `spec/13`/`spec/15` so one document owns the credential-custody claim and none marks the unbuilt resolution "shipped".
+3. Add an auth-error branch to `mapS3Error` so a rejected/expired credential surfaces a typed, actionable error. See `docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`.
 
 ### P6-HUB-03 — `R2Hub.Push` uploads one event per serial round-trip
 

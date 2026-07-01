@@ -97,6 +97,8 @@ Phase 4: Optional StrapFS
 
 **These phases describe capability layers, not the build order.** The actual, deliberately re-ordered sequencing — the thin agent runner ships *before* the daemon and hub — is canonical in `14_MVP_ROADMAP_AND_BACKLOG.md`; defer to it rather than reading the list above as a schedule. **Current position:** Phase 0 CLI and the Phase 3 agent loop are shipped; the Phase 1 daemon is gated; Phase 2 multi-device sync now eager-materializes the whole `~/Code` tree (blobless clone + env hydrate + draft bundle extract) on `devstrap sync` behind a pluggable `Hub` interface with a file-backed test backend and a Cloudflare R2/S3 production backend. Cursor-based incremental pull, fail-closed event verification, device-revoke blob re-encryption, and the `.devstrapignore` compiler are shipped. The portable `run-loop` delivers periodic convergence without a daemon.
 
+> **Near-term direction (pass-6, future-facing).** Before building new capability planes (HTTP/SSE relay, daemon, StrapFS, hosting/SaaS docs), sequence a **multi-device hardening freeze** that closes the confirmed sync/crypto criticals (`P6-SEC-01`, `P6-SYNC-01`, `P6-HUB-01`, `P5-SYNC-01`) first (`AD-2`; see `14_MVP_ROADMAP_AND_BACKLOG.md`). **Positioning:** DevStrap's durable value is as the **substrate agents run on** — cross-machine workspace consistency, fresh-base provenance (fetched `origin/<default_branch>`, recorded base SHA), and a queryable worktree/run registry — not itself an agent runner; the generic wrapper's command/file policy is guardrails, not a sandbox (`AD-5`; see `10_AGENT_WORKSPACES_AND_POLICIES.md`).
+
 ## Recommended implementation stack
 
 ```text
@@ -158,14 +160,14 @@ Not implemented yet (genuinely unbuilt — features that are partly shipped are 
 - daemon, local socket API, FSEvents-specific Mac watcher, LaunchAgent/systemd installers;
 - OS-enforced agent sandboxing, project-env allowlists, and non-generic engine adapters;
 - cross-machine working-state sync — git-state validation plane (`repo.gitstate.observed`) and WIP refs (`refs/devstrap/wip/*`); the encrypted draft-bundle layer (Layer C) is shipped;
-- forge hardening beyond the shipped PR/MR routing — `agent pr` detects GitHub/GitLab/Gitea/Bitbucket/Azure and routes through `gh`/`glab`/`tea` (or a compare-URL fallback) and resolves SSH host aliases via `ssh -G` (`P5-CLI-04`); `doctor` still needs forge-specific CLI probes and broader hermetic test coverage (`FORGE-04/05`).
+- forge hardening beyond the shipped PR/MR routing — `agent pr` detects GitHub/GitLab/Gitea/Bitbucket/Azure and routes through `gh`/`glab`/`tea` (or a compare-URL fallback) and resolves SSH host aliases via `ssh -G` (`P5-CLI-04`); `doctor` now probes the matching forge CLI per adopted remote (`FORGE-04`, shipped — `checkForgeCLIs` in `internal/cli/doctor.go`), leaving broader hermetic test coverage (`FORGE-05`) as the remaining gap.
 
 Cloud-sync workstreams from the 2026-06-28 audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`), now built:
 
 - eager-clone materialization (`EAGER-*`) — `devstrap sync` reconstructs the whole `~/Code` tree by blobless/partial-cloning every repo from its existing remote up front with bounded concurrency and per-project failure isolation; env profiles hydrate; `node_modules`/build artifacts are rebuilt on hydrate (opt-in), never synced;
 - non-git/draft content sync (`DRAFT-*`) — a `.devstrapignore` compiler (`internal/ignore`) and age-encrypted, content-addressed `age_blob:<sha256>` bundles for non-git/draft folders pushed/pulled through the blob plane (`draft snapshot create`, `draft.snapshot.created` event);
 - cloud hub backend (`HUB-*`) — the two-plane zero-knowledge `Hub` interface (event log + content-addressed encrypted blob store) with the Cloudflare R2/S3 backend (`internal/hub`, the `aws-sdk-go-v2` S3 adapter wired behind `hub: r2://<bucket>`) and the file-backed backend retained for tests; the event log is envelope-encrypted at the hub boundary (`EncryptedHub`, XChaCha20-Poly1305 under a per-epoch Workspace Content Key, `P4-SEC-02`/`SEC-07`);
-- cross-platform hardening (`XP-*`) — portable `devstrap run-loop` (scan → sync → materialize, no daemon); e2e testscript proving two-device materialization; headless key custody test; NFC/case-fold path invariant test;
+- cross-platform hardening (`XP-*`) — portable `devstrap run-loop` (sync → materialize on an interval, no daemon; the scan stage is tracked as `P6-XP-03` and not yet run by the loop); e2e testscript proving two-device materialization; headless key custody test; NFC/case-fold path invariant test;
 - multi-user future (`SCALE-*`) — documented-not-built hosting/scaling direction (Fly.io compute + R2 hub + managed Postgres control plane; control/data-plane split and cell-based tenancy);
 - fail-closed event verification on enrollment (`HUB-03`) — once any approved device exists, all non-local events require valid signatures from approved devices; device revoke re-encrypts affected blobs to the reduced recipient set, deletes superseded hub ciphertext when `--hub-file` is given, and flags secrets for rotation (`HUB-04`/`SEC-01`).
 
@@ -189,10 +191,10 @@ Build the boring but powerful version first:
 devstrap init ~/Code
 devstrap scan ~/Code --adopt
 devstrap status
-devstrap open work/nclh/foc-models --cursor
-devstrap worktree new work/nclh/foc-models --fresh-upstream --name route-tests
-devstrap env capture work/nclh/foc-models .env
-devstrap env hydrate work/nclh/foc-models --write .env.local
+devstrap open work/acme/api-server --cursor
+devstrap worktree new work/acme/api-server --fresh-upstream --name route-tests
+devstrap env capture work/acme/api-server .env
+devstrap env hydrate work/acme/api-server --write .env.local
 devstrap sync   # shipped: pushes/pulls signed, envelope-encrypted events (--hub-file or hub: r2://<bucket>),
                 # then eagerly blobless-clones every repo, extracts draft blobs, and hydrates env (EAGER-01/02).
 ```
@@ -202,10 +204,12 @@ The first killer loop (eager-clone Workspace Passport):
 ```text
 1. Add or create a project on Machine A.
 2. DevStrap records it in the signed HLC namespace map (path, remote, env profile, policy),
-   and pushes any non-git/draft content + env as age-encrypted blobs to the hub.
+   and pushes any non-git/draft content as age-encrypted blobs to the hub (env-bundle hub
+   exchange is not yet shipped — env blobs are still local-only).
 3. Machine B runs `devstrap sync` and pulls the updated namespace map.
 4. Sync eagerly materializes the whole tree: every repo is blobless/partial-cloned from its
-   existing remote, env/draft folders are pulled from encrypted blobs, env profiles hydrate.
+   existing remote, draft folders are pulled from encrypted blobs; env profiles hydrate from
+   locally captured blobs (cross-device env exchange pending).
    (.git is never file-synced; node_modules/build artifacts are rebuilt, not synced.)
 5. The same folder paths are really present on disk — no skeleton to "open" first.
 6. Agent work starts from a fresh remote default branch, not a stale local default branch.

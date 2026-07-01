@@ -1,6 +1,6 @@
 ---
 last_reviewed: 2026-07-01
-tracks_code: []
+tracks_code: [internal/hub/**, internal/cli/hub.go]
 ---
 # Cloud Provisioning & Configuration Guide
 
@@ -13,6 +13,16 @@ tracks_code: []
 > those marked *planned* name the intended SaaS surface and are provisional until `SCALE-*`
 > ships. See `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` (decisions 5 and 6) and
 > `14_MVP_ROADMAP_AND_BACKLOG.md`.
+
+> **Direction — zero-infrastructure quickstart (AD-1, planned).** Provisioning an R2 bucket
+> is real first-run friction and undercuts the "new machine in minutes" promise. Because the
+> hub only ever holds ciphertext plus signed events, even a "dumb" carrier is a safe
+> zero-knowledge boundary. DIRECTION: add a **zero-infrastructure Hub backend behind the
+> existing pluggable `Hub` interface** — a private-git-repo-backed and/or
+> local-folder / cloud-drive-folder backend — and make it the quickstart default, keeping
+> `hub: r2://<bucket>` (this guide) as the scale/power option. This guide then becomes the
+> *power-user / self-hosting* path rather than a precondition for first sync. Not built yet;
+> tracked with the adoption workstream in `14_MVP_ROADMAP_AND_BACKLOG.md`.
 
 ## Scope
 
@@ -83,7 +93,7 @@ regulated or large tenants:
 ```text
 s3://devstrap-hub/workspaces/<workspace_id>/events/<hlc-padded>/<device_id>/<seq>/<event_id>.json
 s3://devstrap-hub/workspaces/<workspace_id>/blobs/<sha256>
-s3://devstrap-hub/workspaces/<workspace_id>/snapshots/<hlc-padded>.json.age
+s3://devstrap-hub/workspaces/<workspace_id>/snapshots/<hlc-padded>.json.age   # PLANNED — snapshot exchange (410->snapshot) is not built; only events/ and blobs/ exist today
 ```
 
 `<workspace_id>` is the local `ws_<uuidv7>` identity minted during `devstrap init`. Because
@@ -135,7 +145,7 @@ credentials in `state.db`"):
   spec/13 and spec/15, which sanction plaintext-env custody); server-side Fly secrets inject
   a plaintext env var at runtime and work as documented.
 
-Planned client invocation (a developer box running sync):
+Client invocation (shipped, `P5-HUB-01`) — a developer box running sync:
 
 ```bash
 # shipped (P5-HUB-01): the bucket is the r2:// URI host; --hub-file stays for tests only
@@ -149,7 +159,7 @@ DEVSTRAP_HUB_S3_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com  # shippe
 DEVSTRAP_HUB_S3_REGION=auto                                          # shipped (default: auto)
 ```
 
-Secret values — supply via the secrets path, **not** as plaintext env in a shell profile:
+Secret values — target custody is the secrets path; until `P6-HUB-02` lands the client reads them from a plaintext env var (prefer an ephemeral export or direnv-ignored file over a shell profile):
 
 ```text
 DEVSTRAP_HUB_S3_ACCESS_KEY_ID                                        # shipped (id; low sensitivity, still not committed; AWS_ACCESS_KEY_ID fallback)
@@ -416,7 +426,7 @@ then the compute that holds their credentials:
 Checklist:
 
 - [ ] Cloudflare account created; R2 enabled; `devstrap-hub` bucket created.
-- [ ] R2 **Object Read & Write** token scoped to `devstrap-hub` only; Account ID + keys + endpoint captured into the secrets path (not a file).
+- [ ] R2 **Object Read & Write** token scoped to `devstrap-hub` only; Account ID + keys + endpoint captured into Fly secrets (server) and a non-committed env source (client, pending `P6-HUB-02`).
 - [ ] Neon project created; least-privilege `devstrap_app` role created (not the owner).
 - [ ] `DATABASE_URL` built from the app role with `sslmode=require`.
 - [ ] flyctl installed; authenticated; payment added.
@@ -451,7 +461,7 @@ Checklist:
 
 | Platform        | DevStrap role                                | Holds                                         | Credential custody                         |
 | --------------- | -------------------------------------------- | --------------------------------------------- | ------------------------------------------ |
-| Cloudflare R2   | Hub **data plane** (zero-knowledge)          | Signed event log + `age_blob:<sha256>` ciphertext | Secret key via keychain / age blob / `op://` / Fly secret |
+| Cloudflare R2   | Hub **data plane** (zero-knowledge)          | Signed event log + `age_blob:<sha256>` ciphertext | Fly secret (server, shipped); client target: keychain / age blob / `op://` — today plaintext env only (`P6-HUB-02`) |
 | Neon (Postgres) | **Control-plane DB**                         | Accounts, devices, billing, metering, tenants | `DATABASE_URL` as a Fly secret             |
 | Fly.io          | **Compute** for both planes + runner microVMs | Control-plane API; ephemeral per-task runners | All secrets via `fly secrets`              |
 

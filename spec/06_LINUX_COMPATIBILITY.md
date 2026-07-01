@@ -1,14 +1,14 @@
 ---
 last_reviewed: 2026-07-01
-tracks_code: [internal/platform/**, .github/**]
+tracks_code: [internal/platform/**, internal/devicekeys/**, .github/**]
 ---
 # Linux Compatibility Plan
 
 ## Goal
 
-Keep the portable Go core identical on macOS and Linux so an incoming GMKtec Ubuntu box becomes a first-class DevStrap node now, not "early" — Ubuntu parity is a present requirement, not a later port.
+Keep the portable Go core identical on macOS and Linux so a Linux box is a first-class DevStrap node now, not "early" — Ubuntu parity is a present requirement, not a later port. DevStrap targets mixed macOS/Linux fleets (developer workstations, headless servers, cloud machines, and agent runners), so the same `~/Code` tree and the same `devstrap sync` behavior must appear identically on both platforms from the one portable binary.
 
-The 2026-06-28 cloud-sync decisions (recorded in `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`, extending the 2026-06-27 second-pass audit) make this explicit: **cross-platform core first, OS-specific magic deferred** (workstream `XP-*`). The owner's fleet is mixed by design — two Mac Minis, the GMKtec Ubuntu box, a graphics laptop, and a NAS — so the same `~/Code` tree and the same `devstrap sync` eager-clone behavior must appear identically on macOS and Ubuntu running the one portable binary. No native daemon, FSEvents/inotify-specific watcher, or StrapFS is built this cycle on either platform; those remain deferred. The systemd unit below is a documented target, not shipped code.
+The 2026-06-28 cloud-sync decisions (recorded in `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`, extending the 2026-06-27 second-pass audit) make this explicit: **cross-platform core first, OS-specific magic deferred** (workstream `XP-*`). Because target fleets are mixed by design — desktops and laptops across macOS and Linux, plus headless/cloud/agent runners — the same `~/Code` tree and the same `devstrap sync` eager-clone behavior must appear identically on macOS and Ubuntu running the one portable binary. No native daemon, FSEvents/inotify-specific watcher, or StrapFS is built this cycle on either platform; those remain deferred. The systemd unit below is a documented target, not shipped code.
 
 ## Linux target
 
@@ -23,7 +23,7 @@ inotify watcher               (deferred OS layer)
 ~/.devstrap state             (portable core, runs now)
 ```
 
-The portable core — `init`, `scan/adopt`, `add`, `hydrate`, `open`, `worktree`, `env`, and the file-backed `devstrap sync --hub-file` spike — must run identically on Ubuntu and macOS this cycle from the single Go binary. The `devstrap sync` eager blobless clone-everything flow (`EAGER-*`) and the cloud hub backend (`HUB-*`) are shipped and platform-neutral (the live R2/S3 adapter landed in `P5-HUB-01`). The systemd user service and native inotify watcher are deferred OS-specific layers (see "systemd user service" and "Linux watcher" below); the product is usable on Ubuntu through the foreground CLI before they land.
+The portable core — `init`, `scan/adopt`, `add`, `hydrate`, `open`, `worktree`, `env`, and `devstrap sync` (`--hub-file <path>` for the file-backed test backend, or `hub: r2://<bucket>` for the shipped R2/S3 production backend) — must run identically on Ubuntu and macOS this cycle from the single Go binary. The `devstrap sync` eager blobless clone-everything flow (`EAGER-*`) and the cloud hub backend (`HUB-*`) are shipped and platform-neutral (the live R2/S3 adapter landed in `P5-HUB-01`). The systemd user service and native inotify watcher are deferred OS-specific layers (see "systemd user service" and "Linux watcher" below); the product is usable on Ubuntu through the foreground CLI before they land.
 
 ## Platform-neutral core
 
@@ -181,7 +181,7 @@ Rules:
 - encrypted cache files mode `0600`;
 - socket mode restricted to user.
 
-The Unix socket is created under a `umask(077)` path, checked for stale instances by dialing before unlink, and removed on SIGTERM/SIGINT. CLI commands that require the daemon exit with code 3 when the socket is unavailable.
+When the deferred daemon ships, its Unix socket must be created under a `umask(077)` path, checked for stale instances by dialing before unlink, and removed on SIGTERM/SIGINT; CLI commands that require the daemon will exit with the reserved code 3 (`exitDaemonUnavailable`, currently reserved and never returned — see `internal/cli/root.go`). No daemon, socket, or socket-requiring command exists today.
 
 ## Secret handling on Linux
 
@@ -229,16 +229,18 @@ Recommended:
 
 ## Linux MVP acceptance criteria
 
-- `devstrap init ~/Code` works on Ubuntu.
-- systemd user service starts daemon.
-- daemon creates skeleton directories.
-- Git hydration works.
-- fresh worktree creation works.
-- env capture/hydrate works with encrypted local blobs, and runtime injection is added before Linux packaging is called complete.
-- watcher detects new folders and Git repos.
-- same namespace event stream syncs with Mac.
+- `devstrap init ~/Code` works on Ubuntu. (shipped)
+- systemd user service starts daemon. (deferred — daemon layer)
+- daemon creates skeleton directories. (deferred — daemon layer)
+- Git hydration works. (shipped)
+- fresh worktree creation works. (shipped)
+- env capture/hydrate works with encrypted local blobs, and runtime injection is added before Linux packaging is called complete. (shipped)
+- watcher detects new folders and Git repos. (deferred — daemon layer)
+- same namespace event stream syncs with Mac. (shipped)
 
-Current repository implementation covers the portable CLI pieces for init, scan/adopt, add, hydrate, env capture/hydrate/bind, provider-backed env runtime injection through `op run`, provider file hydration through `op inject`, status, fresh worktree creation, the file-backed `devstrap sync --hub-file` spike, platform adapter interfaces, build-tagged platform detection, and a polling watcher fallback. These already run from the one portable binary on both platforms. The systemd service and native inotify watcher remain future work shared across macOS and Ubuntu — not Linux-specific. (The cloud hub backend `HUB-*` and the `devstrap sync` eager blobless clone-everything materialization `EAGER-*` are now shipped; the live R2/S3 adapter landed in `P5-HUB-01`.)
+Shipped daemonless operation: `devstrap run-loop` runs sync + materialize on an interval from the one portable binary (its advertised scan stage is pending, `P6-XP-03`); pair it with cron or a systemd user timer until the native daemon lands.
+
+Current repository implementation covers the portable CLI pieces for init, scan/adopt, add, hydrate, env capture/hydrate/bind, provider-backed env runtime injection through `op run`, provider file hydration through `op inject`, status, fresh worktree creation, `devstrap sync` (`--hub-file <path>` for the file-backed test backend, or `hub: r2://<bucket>` for the shipped R2/S3 production backend), `run-loop`, `materialize`, `draft snapshot create`, the `devices` trust CLI, `conflicts`, `doctor`, `hub gc`, platform adapter interfaces, build-tagged platform detection, and a polling watcher fallback (see `spec/00`'s command inventory for the full list). These already run from the one portable binary on both platforms. The systemd service and native inotify watcher remain future work shared across macOS and Ubuntu — not Linux-specific. (The cloud hub backend `HUB-*` and the `devstrap sync` eager blobless clone-everything materialization `EAGER-*` are now shipped; the live R2/S3 adapter landed in `P5-HUB-01`.)
 
 ## Audit follow-ups (2026-06-27)
 
@@ -248,7 +250,7 @@ The platform findings in `05_MAC_FIRST_IMPLEMENTATION.md` (`PLAT-01..05`) apply 
 
 The 2026-06-28 cloud-sync architecture (`docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`, workstream `XP-*`) sets the ordering this file follows: **cross-platform core first, OS-specific magic deferred.**
 
-- Ubuntu is a first-class target now because the owner's fleet already includes an incoming GMKtec Ubuntu box alongside two Mac Minis, a graphics laptop, and a NAS. The same `~/Code` tree must appear on all of them via the one Go binary.
+- Ubuntu is a first-class target now because DevStrap targets mixed macOS/Linux fleets — desktops and laptops across both platforms, plus headless/cloud machines and agent runners. The same `~/Code` tree must appear on all of them via the one Go binary.
 - The cloud sync hub (`devstraphub`) is platform-neutral by construction: repo content rides git's own blobless clone/fetch transport from each repo's existing remote and never touches the hub, env/draft content moves as age-encrypted content-addressed `age_blob:<sha256>` blobs, and the namespace map is a signed HLC-ordered event log. None of these planes are OS-specific, so Ubuntu and macOS sync identically (`HUB-*`, `DRAFT-*`). Backend is Cloudflare R2 from the start, pluggable behind one Hub interface, with a file-backed local backend kept only for tests — see `07_NAMESPACE_AND_SYNC_MODEL.md` and `13_CLI_DAEMON_API.md`.
 - `devstrap sync` materializes eagerly (blobless/partial clone-everything up front; `node_modules`/build artifacts are never synced and are rebuilt on hydrate). There is no FUSE/placeholder/lazy-VFS layer in this design on either platform; StrapFS (the "Linux future virtual filesystem" section above) stays explicitly deferred (`EAGER-*`).
 - The native systemd daemon and native inotify watcher remain deferred OS layers; the portable foreground CLI is the supported Ubuntu entry point this cycle.
