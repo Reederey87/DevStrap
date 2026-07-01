@@ -497,7 +497,8 @@ CREATE UNIQUE INDEX idx_workspaces_singleton ON workspaces((1));                
 CREATE INDEX idx_hub_cursors_workspace ON hub_cursors(workspace_id);                         -- 00008
 CREATE INDEX idx_draft_snapshots_namespace ON draft_snapshots(namespace_id);                 -- 00009
 CREATE UNIQUE INDEX idx_draft_snapshots_source_event
-  ON draft_snapshots(namespace_id, source_event_id) WHERE source_event_id IS NOT NULL;       -- 00012
+  ON draft_snapshots(namespace_id, source_event_id)
+  WHERE source_event_id IS NOT NULL AND source_event_id != '';                                -- 00012 (unsourced rows stay non-unique)
 CREATE INDEX idx_workspace_key_grants_epoch ON workspace_key_grants(workspace_id, epoch);    -- 00013
 ```
 
