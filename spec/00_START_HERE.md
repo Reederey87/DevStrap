@@ -160,7 +160,7 @@ Not implemented yet (genuinely unbuilt — features that are partly shipped are 
 - daemon, local socket API, FSEvents-specific Mac watcher, LaunchAgent/systemd installers;
 - OS-enforced agent sandboxing, project-env allowlists, and non-generic engine adapters;
 - cross-machine working-state sync — git-state validation plane (`repo.gitstate.observed`) and WIP refs (`refs/devstrap/wip/*`); the encrypted draft-bundle layer (Layer C) is shipped;
-- forge hardening beyond the shipped PR/MR routing — `agent pr` detects GitHub/GitLab/Gitea/Bitbucket/Azure and routes through `gh`/`glab`/`tea` (or a compare-URL fallback) and resolves SSH host aliases via `ssh -G` (`P5-CLI-04`); `doctor` still needs forge-specific CLI probes and broader hermetic test coverage (`FORGE-04/05`).
+- forge hardening beyond the shipped PR/MR routing — `agent pr` detects GitHub/GitLab/Gitea/Bitbucket/Azure and routes through `gh`/`glab`/`tea` (or a compare-URL fallback) and resolves SSH host aliases via `ssh -G` (`P5-CLI-04`); `doctor` now probes the matching forge CLI per adopted remote (`FORGE-04`, shipped — `checkForgeCLIs` in `internal/cli/doctor.go`), leaving broader hermetic test coverage (`FORGE-05`) as the remaining gap.
 
 Cloud-sync workstreams from the 2026-06-28 audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`), now built:
 

@@ -158,20 +158,13 @@ Example:
 
 The richer `{version, type, default_branch, materialization}` schema is a **planned** extension, not the current on-disk format — any tooling (e.g. the zsh `chpwd` hook below) must parse only the three shipped fields today.
 
-`README.devstrap.md` (shipped text):
+`README.devstrap.md` (shipped text, written verbatim by `writeSkeleton`):
 
-````markdown
+```markdown
 # DevStrap skeleton
 
-This project is known to DevStrap but is not hydrated on this machine yet.
-It will be hydrated from git@github.com:acme/api.git.
-
-Run:
-
-```bash
-devstrap open work/acme/api --cursor
+This directory maps to `work/acme/api` and will be hydrated from `git@github.com:acme/api.git`.
 ```
-````
 
 ## Shell integration
 

@@ -138,13 +138,12 @@ CREATE TABLE draft_snapshots (
   id TEXT PRIMARY KEY,
   namespace_id TEXT NOT NULL,
   blob_ref TEXT NOT NULL,                 -- 'age_blob:<sha256>'
-  byte_size INTEGER NOT NULL,
-  file_count INTEGER NOT NULL,
-  source_event_id TEXT,
+  byte_size INTEGER NOT NULL DEFAULT 0,
+  file_count INTEGER NOT NULL DEFAULT 0,
   source_event_hlc INTEGER,
   source_event_device_id TEXT,
+  source_event_id TEXT,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
   FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id) ON DELETE CASCADE
 );
 ```
@@ -438,7 +437,7 @@ CREATE TABLE workspace_key_grants (
   workspace_id TEXT NOT NULL,
   epoch INTEGER NOT NULL,
   recipient TEXT NOT NULL,
-  source_event_id TEXT,
+  source_event_id TEXT NOT NULL,
   source_event_hlc INTEGER,
   source_event_device_id TEXT,
   created_at TEXT NOT NULL,
