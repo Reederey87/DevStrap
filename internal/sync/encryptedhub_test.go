@@ -214,31 +214,58 @@ func TestEncryptedHubIngestThenDecrypt(t *testing.T) {
 	}
 }
 
+// TestEncryptedHubAntiDowngrade proves a non-grant plaintext event (a downgrade
+// attempt or a pre-envelope legacy event) is refused — never applied — but does
+// NOT wedge the pull: it is skipped and the surrounding encrypted events still
+// come through, so a hostile or stale hub cannot brick sync.
 func TestEncryptedHubAntiDowngrade(t *testing.T) {
 	ctx := context.Background()
 	kr := newFakeKeyring(t, 1)
+	wck1, _ := kr.WCK(1)
+	good, _ := EncryptEvent(state.Event{ID: "good", DeviceID: "dev_a", HLC: 2, Type: EventProjectAdded, PayloadJSON: `{"path":"work/ok"}`, ContentHash: state.ContentHash(`{"path":"work/ok"}`)}, wck1, 1)
 	// A plaintext project event on the hub is a downgrade.
-	back := &recordingHub{events: []state.Event{{ID: "plain", DeviceID: "dev_a", HLC: 1, Type: EventProjectAdded, PayloadJSON: `{}`}}}
+	plain := state.Event{ID: "plain", DeviceID: "dev_a", HLC: 1, Type: EventProjectAdded, PayloadJSON: `{"path":"work/attacker"}`}
+	back := &recordingHub{events: []state.Event{plain, good}}
 	hub := EncryptedHub{Hub: back, Keyring: kr}
-	_, err := hub.Pull(ctx, 0)
-	if !errors.Is(err, ErrPlaintextEventFromHub) {
-		t.Fatalf("Pull plaintext: got %v, want ErrPlaintextEventFromHub", err)
+	got, err := hub.Pull(ctx, 0)
+	if err != nil {
+		t.Fatalf("Pull plaintext: unexpected error %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "good" {
+		t.Fatalf("Pull returned %+v, want only the encrypted 'good' event (plaintext skipped)", got)
+	}
+	for _, e := range got {
+		if e.ID == "plain" {
+			t.Fatal("Pull applied a plaintext downgrade event")
+		}
 	}
 }
 
+// TestEncryptedHubMissingEpoch proves that an event whose epoch key has not yet
+// been granted TRUNCATES the batch: the decryptable prefix is returned so it can
+// apply, and the not-yet-decryptable event (and anything after it) is deferred
+// to a later sync — the cursor never jumps over it.
 func TestEncryptedHubMissingEpoch(t *testing.T) {
 	ctx := context.Background()
 	kr := newFakeKeyring(t, 1) // holds epoch 1 only
+	wck1, _ := kr.WCK(1)
+	prefix, _ := EncryptEvent(state.Event{ID: "e1", DeviceID: "dev_a", HLC: 1, Type: EventProjectAdded, PayloadJSON: `{"path":"work/a"}`, ContentHash: state.ContentHash(`{"path":"work/a"}`)}, wck1, 1)
 	wck5, _ := NewWCK()
-	enc, _ := EncryptEvent(state.Event{ID: "e5", DeviceID: "dev_a", HLC: 1, Type: EventProjectAdded, PayloadJSON: `{}`, ContentHash: state.ContentHash(`{}`)}, wck5, 5)
-	back := &recordingHub{events: []state.Event{enc}}
+	future, _ := EncryptEvent(state.Event{ID: "e5", DeviceID: "dev_a", HLC: 2, Type: EventProjectAdded, PayloadJSON: `{}`, ContentHash: state.ContentHash(`{}`)}, wck5, 5)
+	back := &recordingHub{events: []state.Event{prefix, future}}
 	hub := EncryptedHub{Hub: back, Keyring: kr}
-	_, err := hub.Pull(ctx, 0)
-	if !errors.Is(err, ErrMissingWorkspaceKey) {
-		t.Fatalf("Pull missing epoch: got %v, want ErrMissingWorkspaceKey", err)
+	got, err := hub.Pull(ctx, 0)
+	if err != nil {
+		t.Fatalf("Pull missing epoch: unexpected error %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "e1" {
+		t.Fatalf("Pull returned %+v, want the epoch-1 prefix only (epoch-5 event deferred)", got)
 	}
 }
 
+// TestEncryptedHubUnknownVersion proves an envelope version this build cannot
+// read is refused but skipped (not fatal), so a newer client's events cannot
+// wedge an older client.
 func TestEncryptedHubUnknownVersion(t *testing.T) {
 	ctx := context.Background()
 	kr := newFakeKeyring(t, 1)
@@ -252,9 +279,38 @@ func TestEncryptedHubUnknownVersion(t *testing.T) {
 	enc.PayloadJSON = string(raw)
 	back := &recordingHub{events: []state.Event{enc}}
 	hub := EncryptedHub{Hub: back, Keyring: kr}
-	_, err := hub.Pull(ctx, 0)
-	if !errors.Is(err, ErrUnknownEnvelopeVersion) {
-		t.Fatalf("Pull unknown version: got %v, want ErrUnknownEnvelopeVersion", err)
+	got, err := hub.Pull(ctx, 0)
+	if err != nil {
+		t.Fatalf("Pull unknown version: unexpected error %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Pull returned %+v, want the unknown-version event skipped", got)
+	}
+}
+
+// TestEncryptedHubPoisonEventDoesNotWedge is the core regression for the wedge
+// bug: an event this device holds the epoch for but cannot authenticate (a
+// wrong-key/cross-device epoch collision, corruption, or forgery) is skipped
+// with the good events on either side still delivered — one bad object can no
+// longer brick a device's sync by aborting the whole batch forever.
+func TestEncryptedHubPoisonEventDoesNotWedge(t *testing.T) {
+	ctx := context.Background()
+	kr := newFakeKeyring(t, 1)
+	wck1, _ := kr.WCK(1)
+	before, _ := EncryptEvent(state.Event{ID: "before", DeviceID: "dev_a", HLC: 1, Type: EventProjectAdded, PayloadJSON: `{"path":"work/before"}`, ContentHash: state.ContentHash(`{"path":"work/before"}`)}, wck1, 1)
+	// Poison: encrypted under a DIFFERENT key at the same epoch 1 (the P4-SEC-07
+	// cross-device collision). This device's WCK(1) opens it and Open() fails.
+	otherWCK1, _ := NewWCK()
+	poison, _ := EncryptEvent(state.Event{ID: "poison", DeviceID: "dev_b", HLC: 2, Type: EventProjectAdded, PayloadJSON: `{"path":"work/poison"}`, ContentHash: state.ContentHash(`{"path":"work/poison"}`)}, otherWCK1, 1)
+	after, _ := EncryptEvent(state.Event{ID: "after", DeviceID: "dev_a", HLC: 3, Type: EventProjectAdded, PayloadJSON: `{"path":"work/after"}`, ContentHash: state.ContentHash(`{"path":"work/after"}`)}, wck1, 1)
+	back := &recordingHub{events: []state.Event{before, poison, after}}
+	hub := EncryptedHub{Hub: back, Keyring: kr}
+	got, err := hub.Pull(ctx, 0)
+	if err != nil {
+		t.Fatalf("Pull with poison event: unexpected error %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "before" || got[1].ID != "after" {
+		t.Fatalf("Pull returned %+v, want [before, after] with poison skipped", got)
 	}
 }
 

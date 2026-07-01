@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/Reederey87/DevStrap/internal/logging"
 	"github.com/Reederey87/DevStrap/internal/state"
 )
 
@@ -88,11 +89,27 @@ func (h EncryptedHub) Push(ctx context.Context, events []state.Event) error {
 }
 
 // Pull fetches events from the backend, primes the keyring, ingests in-batch
-// grants in HLC order, then decrypts enc.v1 envelopes back to plaintext. Any
-// non-grant plaintext event from the hub is rejected as a downgrade
-// (ErrPlaintextEventFromHub). A missing epoch key (after ingest) returns
-// ErrMissingWorkspaceKey before any events are returned, so the caller does not
-// advance the pull cursor and the next sync retries once the grant arrives.
+// grants in HLC order, then decrypts enc.v1 envelopes back to plaintext.
+//
+// The hub is untrusted (zero-knowledge), so a single non-conforming object must
+// never be able to wedge sync. Pull therefore degrades instead of aborting the
+// whole batch:
+//
+//   - Missing epoch key: the grant for this event's epoch has not propagated
+//     yet. Pull TRUNCATES the batch here — it returns the decryptable prefix so
+//     it applies and the caller advances the cursor up to (but not past) this
+//     event, then retries from here on the next sync once the grant arrives.
+//     Truncating (not skipping) is required so a legitimately-decryptable-later
+//     event is never permanently stranded by the cursor jumping over it.
+//   - Held-epoch decrypt failure (corruption, forgery, or a cross-device
+//     epoch-key collision), a malformed/unknown envelope, or a non-grant
+//     plaintext event (a downgrade attempt or a pre-envelope legacy event):
+//     the event can never be applied by this device, so Pull SKIPS it with a
+//     loud warning and continues. The event is never applied (the security
+//     property is preserved — no unauthenticated data enters the log), but one
+//     bad object cannot brick the device. This routes bad events through the
+//     same "refuse but keep going" posture the plaintext apply path already
+//     relies on (ApplyEvents' quarantine + safe cursor).
 func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, error) {
 	raw, err := h.Hub.Pull(ctx, afterHLC)
 	if err != nil {
@@ -103,20 +120,27 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 	}
 	// First pass: ingest grants in (HLC, device, id) order so the WCK for an
 	// epoch is available before events encrypted under it are decrypted within
-	// the same batch. The inner hub already returns events in that order.
+	// the same batch. The inner hub already returns events in that order. A
+	// malformed or non-ingestable grant is skipped (logged) rather than aborting
+	// the batch — the same untrusted-hub resilience as the second pass.
 	for _, event := range raw {
 		if event.Type != EventDeviceKeyGranted {
 			continue
 		}
 		var grant DeviceKeyGrant
 		if err := json.Unmarshal([]byte(event.PayloadJSON), &grant); err != nil {
-			return nil, fmt.Errorf("decode grant event %s: %w", event.ID, err)
+			logging.Logger(ctx).Warn("encrypted hub pull: skipping undecodable grant event",
+				"event_id", event.ID, "err", err.Error())
+			continue
 		}
 		if err := h.Keyring.IngestGrant(ctx, grant); err != nil {
-			return nil, fmt.Errorf("ingest grant event %s: %w", event.ID, err)
+			logging.Logger(ctx).Warn("encrypted hub pull: skipping ungrantable key event",
+				"event_id", event.ID, "epoch", grant.Epoch, "err", err.Error())
+			continue
 		}
 	}
-	// Second pass: decrypt enc.v1, passthrough grants, reject other plaintext.
+	// Second pass: decrypt enc.v1, passthrough grants, skip anything this device
+	// cannot apply, and truncate at the first not-yet-granted epoch.
 	out := make([]state.Event, 0, len(raw))
 	for _, event := range raw {
 		switch event.Type {
@@ -125,19 +149,41 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 		case EventEncryptedV1:
 			env, err := ParseEncryptedEnvelope(event)
 			if err != nil {
-				return nil, err
+				// Malformed envelope or unknown version: an untrusted hub can
+				// serve junk, and a newer client may write a version this build
+				// cannot read. Refuse it, but skip rather than wedge.
+				logging.Logger(ctx).Warn("encrypted hub pull: skipping undecodable event",
+					"event_id", event.ID, "err", err.Error())
+				continue
 			}
 			wck, ok := h.Keyring.WCK(env.Epoch)
 			if !ok {
-				return nil, fmt.Errorf("%w: epoch %d (event %s)", ErrMissingWorkspaceKey, env.Epoch, event.ID)
+				// The grant for this epoch has not arrived. Truncate: return the
+				// decryptable prefix and stop, so the cursor advances only up to
+				// here and the next sync retries from this event once granted.
+				logging.Logger(ctx).Info("encrypted hub pull: awaiting workspace key grant; deferring remaining events",
+					"epoch", env.Epoch, "event_id", event.ID)
+				return out, nil
 			}
 			restored, err := DecryptEvent(event, wck)
 			if err != nil {
-				return nil, err
+				// We hold the epoch key but authentication failed: corruption,
+				// forgery, or a cross-device epoch-key collision (P4-SEC-07
+				// pairing). The event can never be decrypted by this device, so
+				// skip it — never apply unauthenticated data — and continue.
+				logging.Logger(ctx).Warn("encrypted hub pull: skipping undecryptable event",
+					"epoch", env.Epoch, "event_id", event.ID, "err", err.Error())
+				continue
 			}
 			out = append(out, restored)
 		default:
-			return nil, fmt.Errorf("%w: event %s type %q", ErrPlaintextEventFromHub, event.ID, event.Type)
+			// A non-grant plaintext event where ciphertext is required: a
+			// downgrade attempt or a pre-envelope legacy event. Never apply it,
+			// but skip (logged) rather than abort so a hostile or stale hub
+			// cannot wedge sync.
+			logging.Logger(ctx).Warn("encrypted hub pull: skipping non-encrypted event (anti-downgrade)",
+				"event_id", event.ID, "type", event.Type)
+			continue
 		}
 	}
 	return out, nil
