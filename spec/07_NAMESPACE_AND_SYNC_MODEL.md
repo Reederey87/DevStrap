@@ -11,8 +11,8 @@ The core object is a **namespace entry**.
 A namespace entry maps a stable relative path to an intention:
 
 ```text
-work/nclh/foc-models → Git repo at git@github.com:org/foc-models.git
-experiments/fs2      → encrypted draft project
+work/acme/api        → Git repo at git@github.com:acme/api.git
+experiments/scratch  → encrypted draft project
 personal/scripts     → plain managed folder
 ```
 
@@ -22,13 +22,13 @@ The path is the product.
 
 ```yaml
 id: prj_01jz8devstrapabc
-path: work/nclh/foc-models
+path: work/acme/api
 type: git_repo
-remote: git@github.com:org/foc-models.git
+remote: git@github.com:acme/api.git
 default_branch: main
 materialization_policy: eager
-env_profile: snowflake-dev
-tooling_profile: python-uv-snowflake
+env_profile: api-dev
+tooling_profile: python-uv
 agent_policy: guarded
 ignore_profile: default-code
 created_at: 2026-06-23T12:00:00Z
@@ -63,7 +63,7 @@ working tree bytes, .git internals, dependencies
 
 ### `local_git`
 
-A git repository with **no usable remote** (just ran `git init`, or the remote is not added yet). Tracked so the path appears everywhere, but its content syncs via an encrypted bundle (like `draft_project`), never via clone. Promote to `git_repo` once a remote is added (`devstrap promote <path> --git-remote <url>`).
+A git repository with **no usable remote** (just ran `git init`, or the remote is not added yet). Tracked so the path appears everywhere, but its content syncs via an encrypted bundle (like `draft_project`), never via clone. Promote to `git_repo` once a remote is added (planned command: `devstrap promote <path> --git-remote <url>`; not yet implemented — today re-adopt via `devstrap add` after adding the remote).
 
 ### `draft_project`
 
@@ -120,10 +120,10 @@ Each device has local state for every namespace entry.
 Example:
 
 ```yaml
-device_id: dev_macmini_upstairs
-path: work/nclh/foc-models
+device_id: dev_01jz…
+path: work/acme/api
 state: ready
-local_path: /Users/artem/Code/work/nclh/foc-models
+local_path: /Users/<you>/Code/work/acme/api
 current_branch: main
 last_fetch_sha: abc123
 local_dirty: false
@@ -137,23 +137,25 @@ last_seen_at: 2026-06-23T12:03:00Z
 DevStrap stores readiness as an orthogonal tuple, not one overloaded string:
 
 ```text
-materialization_state: skeleton | hydrating | available | failed
+materialization_state: skeleton | available | materialized-empty | failed   (hydrating: reserved, no writer yet)
 dirty_state:           unknown | clean | dirty | ahead | behind | diverged | conflicted
 env_ready:             true | false
 tooling_ready:         true | false
 ```
 
-Display status is derived from that tuple:
+Display status is derived from that tuple by `deriveDisplayStatus` (`internal/cli/status.go`):
 
 ```text
-conflicted  dirty_state=conflicted
-failed      materialization_state=failed
-skeleton    materialization_state=skeleton
-hydrating   materialization_state=hydrating
-dirty       dirty_state=dirty|ahead|diverged
-current     materialization_state=available && dirty_state=clean
-ready       current && env_ready && tooling_ready
+conflicted     dirty_state=conflicted
+failed         materialization_state=failed
+skeleton       materialization_state=skeleton
+empty checkout materialization_state=materialized-empty
+dirty          dirty_state=dirty|ahead|diverged
+current        materialization_state=available && dirty_state=clean
+ready          current  (shipped ready = available && clean; env_ready/tooling_ready gating is planned — the fields exist but are unwired, PROD-01)
 ```
+
+The `hydrating` branch was removed as dead code (no writer ever set it, `P5-PROD-01`); the state remains reserved.
 
 ## Event log
 
@@ -165,7 +167,7 @@ Event fields:
 {
   "event_id": "evt_01jz...",
   "workspace_id": "ws_01jz...",
-  "device_id": "dev_macmini_upstairs",
+  "device_id": "dev_01jz...",
   "seq": 42,
   "hlc": 115763879690240001,
   "type": "project.added",
@@ -177,7 +179,7 @@ Event fields:
 }
 ```
 
-Rows in `events` are insert-only. Delivery/apply state lives in `event_delivery`, and per-peer progress lives in `sync_cursors`; implementations must not update event payload, HLC, signatures, or hashes in place. Local event creation links each sequential same-device event to the previous event content hash before signing. Incoming events with a non-empty `prev_event_hash` must match the previous same-device event already present locally; a missing or mismatched predecessor is treated as a hash-chain break and recorded as an `event_hash_chain_break` conflict.
+Rows in `events` are insert-only. The shipped per-hub progress cursor is `hub_cursors` (migration 00008); the richer per-peer `event_delivery` / `sync_cursors` shape is defined in the schema but **not yet wired** (future per-peer optimization). Implementations must not update event payload, HLC, signatures, or hashes in place. Local event creation links each sequential same-device event to the previous event content hash before signing. Incoming events with a non-empty `prev_event_hash` must match the previous same-device event already present locally; a missing or mismatched predecessor is treated as a hash-chain break and recorded as an `event_hash_chain_break` conflict.
 
 ## Clock and ordering
 
@@ -210,28 +212,33 @@ receive:
 
 The HLC implementation is mutex-protected for concurrent daemon/agent use. Local outgoing events are stamped through the state store, which persists `(last_hlc, next_seq)` per device in the same SQLite transaction that inserts the event. If the persisted clock row is missing, startup/event creation seeds from `MAX(hlc)` and `MAX(seq)` for the local device so restarts cannot regress or reuse local timestamps. The `(hlc, device_id)` pair is the deterministic tiebreaker. The device id and workspace id are stable generated identifiers created during `devstrap init`, not hardcoded local rows. Phase 0 enforces one local workspace row, but all workspace-scoped tables still carry `workspace_id` so future pairing can provision the same logical `ws_...` id across devices.
 
-Event types:
+Event types. **Shipped (emitted/applied today** — `internal/sync`**):**
 
 ```text
-workspace.created
-device.registered
-device.revoked
-device.heartbeat
 project.added
 project.updated
 project.renamed
 project.deleted
-project.restored
+draft.snapshot.created        # encrypted working-tree bundle (non-git / draft fallback — Layer C)
+device.key.granted            # age-wrapped Workspace Content Key for a recipient+epoch (P4-SEC-07)
+conflict.created
+conflict.resolved
+```
+
+**Planned (no constructor or apply handler yet):**
+
+```text
+workspace.created
+device.registered
+device.revoked                # revoke is local-only today; no applied event path (P6-SYNC-01/03)
+device.heartbeat
+project.restored              # today restoration happens via a project.added event with HLC above the tombstone
 repo.remote.changed
 env.profile.bound
 tooling.profile.bound
 agent.policy.bound
-draft.snapshot.created        # encrypted working-tree bundle (non-git / draft fallback — Layer C)
-device.key.granted            # age-wrapped Workspace Content Key for a recipient+epoch (P4-SEC-07)
 repo.gitstate.observed        # signed read-only git-state snapshot (working-state validation plane — Layer A)
 repo.wip.pushed               # a WIP commit pushed to refs/devstrap/wip/<device>/<path_key> (recovery — Layer B)
-conflict.created
-conflict.resolved
 ```
 
 ### Working-state plane (cross-machine "forgot to push")
@@ -246,25 +253,26 @@ The human-convenience plane that answers "I forgot to push and I'm now on anothe
 
 ## Sync protocol
 
-Each device maintains a cursor:
+Each device maintains a per-hub cursor — shipped as `hub_cursors(workspace_id, hub_id, last_hlc_applied)` (migration 00008). The richer per-peer shape `sync_cursors(workspace_id, peer_id, last_hlc_applied, last_seq_applied)` plus `event_delivery` is defined in the schema but **not yet wired** (future per-peer optimization):
 
 ```text
-sync_cursors(workspace_id, peer_id, last_hlc_applied, last_seq_applied)
+hub_cursors(workspace_id, hub_id, last_hlc_applied)             # shipped
+sync_cursors(workspace_id, peer_id, last_hlc_applied, last_seq_applied)   # planned
 ```
 
 Sync loop:
 
 ```text
-1. push local queued events to the hub (only events past the peer's last delivered cursor)
-2. cursor-based incremental pull: GET events after sync_cursors.last_hlc_applied — never a full replay from HLC 0
+1. push local queued events to the hub (only local-origin events past the push:<hubID> watermark)
+2. cursor-based incremental pull: GET events after hub_cursors.last_hlc_applied — never a full replay from HLC 0
 3. verify signatures / decrypt blob refs where needed
 4. apply events to local SQLite in (hlc, device_id) order
 5. materialize the local filesystem to match the applied namespace (eager clone-everything; see below)
-6. write event_delivery and advance sync_cursors (last_hlc_applied, last_seq_applied) transactionally
+6. advance hub_cursors.last_hlc_applied transactionally (per-peer event_delivery/sync_cursors: planned)
 7. update device heartbeat
 ```
 
-The pull cursor is `sync_cursors.last_hlc_applied`. Because the HLC int64 is simultaneously the global ordering key and the resume cursor, an incremental pull only ever transfers events the device has not already applied — there is no full-history replay on a steady-state sync. A full replay is reserved for the `410 Gone {snapshot_required:true}` recovery path.
+The pull cursor is `hub_cursors.last_hlc_applied`. Because the HLC int64 is simultaneously the global ordering key and the resume cursor, an incremental pull only ever transfers events the device has not already applied — there is no full-history replay on a steady-state sync. A full replay is reserved for the `410 Gone {snapshot_required:true}` recovery path.
 
 If the hub no longer retains events after a cursor, the device must fall back to a full-state snapshot plus cursor reset. Silent divergence is not allowed.
 
@@ -293,11 +301,19 @@ PUT/GET /v1/{ws}/blobs/{sha256}   # encrypted bundles, content-addressed (age_bl
 
 The HLC int64 is simultaneously the ordering key, the resume cursor, and the SSE `Last-Event-ID`. SSE is a freshness hint only; correctness rests on cursor-based pull, preserving the no-daemon guarantee. WebSocket/gRPC/QUIC/P2P/mobile-push are deferred. See `03_SYSTEM_ARCHITECTURE.md` and `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 6.
 
-**Cursor-wiring status (`ARCH2-02`/`EAGER-02`/`SYNC-01`/`HUB-13`):** `hub_cursors` (migration 00008) is wired — `devstrap sync` reads `last_hlc_applied` before `Pull`, passes it as `afterHLC`, and advances it after `ApplyEvents`. `ApplyEvents` returns a **low-water-mark** safe cursor (`SYNC-01`): `min(maxAppliedHLC, lowestUnappliedHLC-1)`, so a transiently-skipped event (skew-ahead quarantine or hash-chain break) with a lower HLC than a higher-HLC applied event is never permanently stranded — the cursor never advances past it, so it is re-delivered next cycle. Permanently-invalid events (`HLC<=0` / below epoch floor) do not hold the cursor. `Pull` uses an **inclusive `>= afterHLC` boundary** (`HUB-13`): packed HLC is not globally unique across devices, so a same-HLC event from another device that arrives after the cursor was advanced to that HLC is still delivered on the next pull; `ApplyEvents`/`InsertEvent` dedup by event ID, so re-delivering the boundary is a no-op for already-applied events (a no-op sync therefore re-pulls only the boundary overlap, deduped — not the whole log). The composite-`(HLC,device,id)` cursor (zero re-delivery) and the `sync_cursors`/`event_delivery` per-peer tables remain available as future optimizations. Build the full-state snapshot exchange **before** enabling hub retention GC.
+**Cursor-wiring status (`ARCH2-02`/`EAGER-02`/`SYNC-01`/`HUB-13`):** `hub_cursors` (migration 00008) is wired — `devstrap sync` reads `last_hlc_applied` before `Pull`, passes it as `afterHLC`, and advances it after `ApplyEvents`. `ApplyEvents` returns a **low-water-mark** safe cursor (`SYNC-01`): `min(maxAppliedHLC, lowestUnappliedHLC-1)`, so a transiently-skipped event (skew-ahead quarantine or hash-chain break) with a lower HLC than a higher-HLC applied event is never permanently stranded — the cursor never advances past it, so it is re-delivered next cycle. This protection covers only events that reach `ApplyEvents`; events skipped earlier by `EncryptedHub.Pull` (decrypt failures, malformed envelopes) are dropped before the low-water mark can see them and ARE permanently passed by the cursor — see the **P6-SYNC-02** section below. Permanently-invalid events (`HLC<=0` / below epoch floor) do not hold the cursor. `Pull` uses an **inclusive `>= afterHLC` boundary** (`HUB-13`): packed HLC is not globally unique across devices, so a same-HLC event from another device that arrives after the cursor was advanced to that HLC is still delivered on the next pull; `ApplyEvents`/`InsertEvent` dedup by event ID, so re-delivering the boundary is a no-op for already-applied events (a no-op sync therefore re-pulls only the boundary overlap, deduped — not the whole log). The composite-`(HLC,device,id)` cursor (zero re-delivery) and the `sync_cursors`/`event_delivery` per-peer tables remain available as future optimizations. Build the full-state snapshot exchange **before** enabling hub retention GC.
 
 **Known limitation — cross-batch late arrivals (`P5-SYNC-01`, open):** the SYNC-01 low-water mark only protects events skipped *within the current batch*. An event that lands on the hub **after** a peer has already advanced its cursor past that event's HLC is not re-pulled — exactly the "offline device forgot to push, syncs late" scenario DevStrap exists to solve. The HLC is doing double duty as both the logical ordering key and the transport cursor. The planned fix is to **decouple the transport cursor from the logical clock**: the hub assigns each event an arrival-ordered, monotonically increasing *ingestion position* (an append index for `FileHub`; an ingestion-sequence/timestamp prefix in the R2 object key), the device pulls by that position (so no appended event is ever skipped regardless of HLC), and `ApplyEvents` keeps using HLC strictly for apply ordering. This is a core-engine change best landed as its own focused PR with dedicated multi-device tests, paired with the snapshot/compaction work (`SYNC-02`/`HUB-11`); it is **exposed now that the live R2 hub is wired** (`P5-HUB-01`); the `--hub-file` backend is a single-writer spike where it does not manifest, and the decoupling fix remains a focused follow-up.
 
 **Push cursor (`SYNC-04`):** the push side is also cursor-bounded. `devstrap sync` reads a per-hub `push:<hubID>` watermark from `hub_cursors`, fetches only local-origin events with `HLC > pushCursor` via `LocalPendingEvents`, pushes them, and advances the watermark to their max HLC. Remote-origin events are never re-pushed (the hub already holds them from their origin device), so a no-op sync pushes zero and the client no longer re-uploads the entire event log every cycle.
+
+**DIRECTION — "one bad object never wedges or silently skips a device" as a tested invariant (AD-6, planned).** The pass-6 criticals (`P6-SYNC-01` whole-batch abort, `P6-SYNC-02` skip-past-cursor, `P6-SYNC-03` sticky-enrollment gap) share one root: the apply/pull path lacks a uniform per-event failure discipline. The forward direction makes this a first-class architectural invariant:
+
+- a persisted `sync_skipped_events` quarantine table (see the P6-SYNC-02 section) surfaced in `status`/`doctor` and replayable via `sync --replay-skipped`;
+- **record-and-continue** for permanent causes (bad signature, divergent, revoked origin), **bounded hold** for possibly-transient causes (pending grant, skew);
+- **sticky enrollment** — count `trust_state IN ('approved','revoked','lost')` so revoking the last peer cannot reopen the bootstrap window (`P6-SYNC-03`);
+- a real applied `device.revoked` path so revoked traffic is rejected by trust, not by an aborting signature check;
+- **chaos-style multi-device tests** (hostile hub reorder/omit/substitute, mid-rotation approval, revoked-device traffic) in `16_TEST_PLAN.md`.
 
 Current implementation includes the local HLC type, persisted local event stamping with per-device sequence numbers, project event constructors, `add`/`scan --adopt` project-event emission, local previous-event hash linking, content-hash and previous-hash verification, transactional event claim plus side-effect apply, hash-chain break conflict recording, HLC-gated project delete tombstones/restores, deterministic replay order, exact duplicate no-ops, divergent duplicate rejection, order-independent same-path/different-remote conflict reconciliation, a file-backed hub adapter and the live R2/S3 hub adapter (`aws-sdk-go-v2`, `P5-HUB-01`), and user-facing `devstrap sync` (file-backed `--hub-file` or live `hub: r2://<bucket>`), `hub gc`, and `devices revoke` commands. Production peer authentication, remote device registration, full snapshot exchange, and real cross-root skeleton reconciliation remain future work (encrypted payload handling and hub/blob GC are shipped).
 
@@ -309,7 +325,7 @@ Deletes create HLC-stamped tombstones instead of immediate purges:
 project.deleted -> namespace_entries.status=deleted, tombstone_hlc=<event hlc>
 ```
 
-Incoming `project.added` or `project.restored` events older than the tombstone are ignored. Tombstones can be garbage-collected only after every approved device cursor has advanced beyond the tombstone HLC and the local filesystem is clean or quarantined.
+Incoming `project.added` or `project.restored` events older than the tombstone are ignored. (`project.restored` is planned and has no constructor yet; today restoration happens via a `project.added` event carrying an HLC above the tombstone.) Tombstones can be garbage-collected only after every approved device cursor has advanced beyond the tombstone HLC and the local filesystem is clean or quarantined.
 
 ## Conflict detection
 
@@ -355,7 +371,7 @@ Hub does not store:
 
 ### Option A — Home hub
 
-Run `devstraphub` on Mac Mini or GMK Ubuntu box.
+Run `devstraphub` on any always-on home machine (a Mac mini, a small Linux box, or a NAS-adjacent server).
 
 Pros:
 
@@ -567,13 +583,26 @@ Lifecycle:
 - **Init** (`devstrap init`): `EnsureBootstrap` mints epoch 1 WCK, stored in the OS keychain / 0600 file fallback (`devicekeys.HybridStore`, keyed `wck.<workspace_id>.<epoch>`). No self-grant is emitted (avoids epoch collision when a second device joins and its bootstrap WCK is overwritten by the origin's grant on first pull).
 - **Approve** (`devices approve` / `enroll --approve`): `GrantAllEpochs(recipient)` wraps every held epoch's WCK to the newly-approved device and emits one `device.key.granted` event per epoch. The new device ingests them on its first pull and decrypts the entire history.
 - **Revoke / lost** (`devices revoke` / `lost`): `Rotate` mints a fresh WCK at epoch+1 and wraps it to the remaining `ApprovedRecipients` (the revoked device is already excluded), emitting grant events. Go-forward events encrypt under the new epoch, giving forward secrecy without re-encrypting past events (a revoked device keeps its already-downloaded history — the residual risk age's no-native-revocation model accepts, bounded by secret rotation). The existing blob re-encryption pass runs after the rotate.
-- **Pull**: `EncryptedHub.Pull` primes the keyring, ingests in-batch grants in HLC order (so a new device obtains its WCKs before decrypting history), then decrypts `enc.v1` envelopes. Because the hub is untrusted, a single non-conforming object must never wedge sync, so Pull degrades instead of aborting the whole batch: an event whose **epoch key has not yet been granted** *truncates* the batch (the decryptable prefix is returned and applies; the cursor advances up to but not past it; the next sync retries once the grant arrives), while a **held-epoch decrypt failure** (corruption, forgery, or a cross-device epoch-key collision), a **malformed/unknown envelope**, or a **non-grant plaintext event** (anti-downgrade) is *skipped with a loud warning* and Pull continues. Bad events are never applied — the security property (no unauthenticated data enters the log) is preserved — but one bad object can no longer permanently brick a device. (`ErrPlaintextEventFromHub`/`ErrUnknownEnvelopeVersion` still surface from `ParseEncryptedEnvelope`, and `ErrMissingWorkspaceKey` still guards `Push`.)
+- **Pull**: `EncryptedHub.Pull` primes the keyring, ingests in-batch grants in HLC order (so a new device obtains its WCKs before decrypting history), then decrypts `enc.v1` envelopes. Because the hub is untrusted, a single non-conforming object must never wedge sync, so Pull degrades instead of aborting the whole batch: an event whose **epoch key has not yet been granted** *truncates* the batch (the decryptable prefix is returned and applies; the cursor advances up to but not past it; the next sync retries once the grant arrives), while a **held-epoch decrypt failure** (corruption, forgery, or a cross-device epoch-key collision), a **malformed/unknown envelope**, or a **non-grant plaintext event** (anti-downgrade) is *skipped with a loud warning* and Pull continues. Bad events are never applied — the security property (no unauthenticated data enters the log) is preserved. **Known defect (P6-SYNC-02, open):** because skipped events are dropped before `ApplyEvents`, the low-water-mark cursor cannot see them; a skipped event punches a hole in its origin device's hash chain and permanently wedges that device's subsequent events. The skip path does not yet deliver the non-wedging behavior it was designed for; see the P6-SYNC-02 section below. (`ErrPlaintextEventFromHub`/`ErrUnknownEnvelopeVersion` still surface from `ParseEncryptedEnvelope`, and `ErrMissingWorkspaceKey` still guards `Push`.)
 
 SQLite holds only non-secret metadata (`workspace_keys`, `workspace_key_grants` — migration 00013); the secret WCK lives only in the keychain / 0600 file fallback.
 
+#### DIRECTION — break the wire format once (AD-3, planned)
+
+Only the file-hub spike and fresh R2 buckets exist, so the envelope format can still change cheaply. The forward direction is a **single coordinated break** — declare `enc.v1` and bare-integer epochs **dead** (not supported legacy) and land together:
+
+- **`enc.v2`** with a full-carrier AEAD AAD binding `ID || DeviceID || Seq || HLC || epoch` (`P6-SYNC-04`), so a carrier field cannot be swapped without failing decryption;
+- a keyring keyed by `(epoch, kid)` where `kid = hex(sha256(wck))` (full digest, or at least a ≥128-bit prefix — **not** 8 hex chars), so self-minted colliding keys never alias (`P6-SEC-01`/`P6-SEC-02`);
+- founder-vs-`--join` `init` so a joining device does **not** self-bootstrap epoch 1 (`P6-SEC-02`);
+- a signed hub-side retention marker so a truncating hub cannot silently drop history (`P6-HUB-04`).
+
+#### DIRECTION — reduce the crypto surface; seek external review (AD-4, planned)
+
+Three of the four critical pass-6 security findings live in this bespoke WCK epoch/rotation protocol, and the namespace map it protects leaks paths/remotes, not secrets. Forward direction: **evaluate descoping event-log envelope encryption to a simpler per-recipient age-wrap** (the model already proven in the blob plane) unless forward secrecy on the namespace map is a firm requirement; if the epoch design stays, obtain at least **one external cryptographic review before advertising the "zero-knowledge" property** to other users. See `15_SECURITY_THREAT_MODEL.md`.
+
 ## Namespace snapshot export
 
-Support disaster recovery:
+**Planned disaster-recovery export (not yet implemented).** No `export` command exists in `internal/cli` today; the only shipped backup is `devstrap db backup`, which captures `state.db` but **not** blobs or key material (see `P6-DATA-04` in `12_DATA_MODEL_SQLITE.md`). The intended command:
 
 ```bash
 devstrap export --output devstrap-workspace-20260623.tar.age
@@ -587,6 +616,14 @@ Contains:
 - ignore rules;
 - encrypted env bundles if requested;
 - draft snapshots if requested.
+
+### DIRECTION — human-readable escape hatch + recovery drill (AD-7, planned)
+
+The SQLite event log is opaque relative to a human-readable manifest, which raises the trust barrier of a tool that owns `~/Code`. Future direction (not shipped):
+
+- add a plain-text **workspace manifest** export/import (`workspace.yaml` — paths, remotes, profile bindings) as an escape hatch, a team-sharing surface, and an interop format that reconstructs the namespace **without DevStrap**;
+- pair it with `db backup --full` / `db restore` (state.db + referenced blobs + key material) — see `P6-DATA-04` in `12_DATA_MODEL_SQLITE.md`;
+- back both with a durability/recovery drill in `16_TEST_PLAN.md` (simulate total hub loss and total local loss; prove the tree reconstructs).
 
 ## Audit implementation notes (2026-06-28)
 

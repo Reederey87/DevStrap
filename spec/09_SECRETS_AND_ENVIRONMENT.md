@@ -1,6 +1,6 @@
 ---
 last_reviewed: 2026-07-01
-tracks_code: [internal/childenv/**, internal/cli/env.go, internal/devicekeys/**, internal/envbundle/**, internal/envfile/**, internal/platform/**, internal/workspacekeys/**]
+tracks_code: [internal/childenv/**, internal/cli/devices.go, internal/cli/env.go, internal/cli/run.go, internal/devicekeys/**, internal/envbundle/**, internal/envfile/**, internal/platform/**, internal/workspacekeys/**]
 ---
 # Secrets and Environment Design
 
@@ -31,7 +31,7 @@ Behavior:
 - hydrates on another device only after device approval;
 - can write local `.env.local` or inject at runtime.
 
-Current implementation covers local capture, hydrate, provider binding, runtime injection, local OS-backed device private-key storage, manual remote-device enrollment, and local device trust-state commands: `devstrap env capture` parses without mutating process env, rejects dangerous variable names and interpolation-looking values unless `--literal` is explicit, encrypts the parsed bundle to the local device plus approved device age recipients, writes a `0600` ciphertext blob under `~/.devstrap/blobs`, records only `age_blob:<sha256>` references in SQLite, and adds the captured file to `.gitignore` when it is inside the project. `devstrap env hydrate --write <file>` decrypts local encrypted blobs with the local device age identity or resolves 1Password `op://` refs through `op inject`, writes the requested env file atomically with mode `0600`, refuses overwrites unless `--force`, and gitignores the hydrated target when it is inside the project. `devstrap run` injects encrypted local profiles into subprocess env or delegates 1Password refs to `op run`. `devstrap devices enroll/list/approve/revoke/lost/rename` exposes local device registration and trust-state management and refuses revocation of the current local device. The encrypted blobs are still local-only — they do not yet travel between devices. Hub-backed env-bundle exchange (`DRAFT-*`, see *Env-bundle exchange over the Hub*), out-of-band fingerprint confirmation, and automatic remote enrollment remain future work.
+Current implementation covers local capture, hydrate, provider binding, runtime injection, local OS-backed device private-key storage, manual remote-device enrollment, and local device trust-state commands: `devstrap env capture` parses without mutating process env, rejects dangerous variable names and interpolation-looking values unless `--literal` is explicit, encrypts the parsed bundle to the local device plus approved device age recipients, writes a `0600` ciphertext blob under `~/.devstrap/blobs`, records only `age_blob:<sha256>` references in SQLite, and adds the captured file to `.gitignore` when it is inside the project. `devstrap env hydrate --write <file>` decrypts local encrypted blobs with the local device age identity or resolves 1Password `op://` refs through `op inject`, writes the requested env file atomically with mode `0600`, refuses overwrites unless `--force`, and gitignores the hydrated target when it is inside the project. `devstrap run` injects encrypted local profiles into subprocess env or delegates 1Password refs to `op run`. `devstrap devices enroll/list/approve/revoke/lost/rename/recipient` exposes local device registration and trust-state management and refuses revocation of the current local device; `devices recipient` prints the local device's public age recipient and signing key for manual out-of-band enrollment on another device. The encrypted blobs are still local-only — they do not yet travel between devices. Hub-backed env-bundle exchange (`DRAFT-*`, see *Env-bundle exchange over the Hub*), out-of-band fingerprint confirmation, and automatic remote enrollment remain future work.
 
 ### Mode B — Secret-manager references
 
@@ -40,7 +40,7 @@ Best for team/company projects.
 Flow:
 
 ```bash
-devstrap env bind work/acme/api --provider 1password --profile acme-dev
+devstrap env bind work/acme/api ./secrets.op.env --provider 1password --profile acme-dev
 devstrap run work/acme/api -- uv run pytest
 ```
 
@@ -53,7 +53,7 @@ Behavior:
 
 ## Env-bundle exchange over the Hub (`DRAFT-*`, `HUB-*`)
 
-Today env values are age-encrypted into content-addressed `age_blob:<sha256>` blobs and stored only under the local `~/.devstrap/blobs` directory; `state.db` keeps just the `age_blob:<sha256>` reference. The blobs are correctly encrypted for the approved device recipient set, but they do not yet travel between devices — so a profile captured on the Mac Mini upstairs cannot be hydrated on the GMKtec Ubuntu box. This is the open local-only gap (`DRAFT-*`).
+Today env values are age-encrypted into content-addressed `age_blob:<sha256>` blobs and stored only under the local `~/.devstrap/blobs` directory; `state.db` keeps just the `age_blob:<sha256>` reference. The blobs are correctly encrypted for the approved device recipient set, but they do not yet travel between devices — so a profile captured on your laptop cannot be hydrated on your desktop or cloud dev box. This is the open local-only gap (`DRAFT-*`).
 
 Closing it (planned, not built) reuses the two-plane, zero-knowledge hub from `03_SYSTEM_ARCHITECTURE.md` and `07_NAMESPACE_AND_SYNC_MODEL.md` rather than introducing a new channel:
 
@@ -81,13 +81,12 @@ MVP provider priority:
 Example:
 
 ```yaml
-id: snowflake-dev
+id: api-dev
 provider: 1password
 mode: runtime
 bindings:
-  SNOWFLAKE_ACCOUNT: op://Engineering/Snowflake/account
-  SNOWFLAKE_USER: op://Engineering/Snowflake/user
-  SNOWFLAKE_ROLE: op://Engineering/Snowflake/role
+  DATABASE_URL: op://Engineering/App/database_url
+  STRIPE_API_KEY: op://Engineering/Stripe/api_key
   OPENAI_API_KEY: op://Engineering/OpenAI/api_key
 ```
 
@@ -147,7 +146,7 @@ Generated header:
 
 ```text
 # Generated by DevStrap. Do not commit.
-# Source profile: snowflake-dev
+# Source profile: api-dev
 # Generated at: 2026-06-23T12:00:00Z
 ```
 
@@ -155,15 +154,17 @@ Status (`SECR-01`, `SECR-02`, `SECR-05`): env hydrate now quotes safely, emits t
 
 ## Env schema
 
+**Status: PLANNED, not built.** No `env check` command exists yet (`internal/cli/env.go` has only `capture`/`hydrate`/`bind`/`rotate`); `.env.schema`/`.env.template` validation is future work.
+
 Each project should have `.env.schema` or `.env.template`.
 
 Example:
 
 ```dotenv
-SNOWFLAKE_ACCOUNT=required
-SNOWFLAKE_USER=required
-SNOWFLAKE_ROLE=optional
-OPENAI_API_KEY=required
+DATABASE_URL=required
+STRIPE_API_KEY=required
+OPENAI_API_KEY=optional
+SENTRY_DSN=required
 ```
 
 DevStrap validation:
@@ -175,10 +176,10 @@ devstrap env check work/acme/api
 Output:
 
 ```text
-✓ SNOWFLAKE_ACCOUNT mapped
-✓ SNOWFLAKE_USER mapped
-⚠ SNOWFLAKE_ROLE optional missing
-✗ OPENAI_API_KEY required but missing
+✓ DATABASE_URL mapped
+✓ STRIPE_API_KEY mapped
+⚠ OPENAI_API_KEY optional missing
+✗ SENTRY_DSN required but missing
 ```
 
 ## Device trust
@@ -208,12 +209,14 @@ lost
 New device approval:
 
 ```bash
-devstrap devices approve dev_gmk_ubuntu
+devstrap devices approve dev_linux_desktop
 ```
 
 Approval requires out-of-band fingerprint verification. The approving device shows the public key fingerprint advertised by the Hub, and the user must confirm that it matches the new device before the new key can receive bundles. A mismatch means the Hub may be substituting keys and approval must fail.
 
 Device add, revoke, lost, or rotate events trigger re-encryption of affected bundles to the current approved-recipient set. Re-encryption removes future access to stored bundle ciphertext but does not make previously exposed secret values safe; revocation workflows must also mark affected values as requiring provider-side or service-side value rotation. At least one approved device must retain recoverable plaintext for every bundle before revocation completes.
+
+`devstrap env rotate <path> <env-file>` re-captures and re-encrypts a profile to the current approved recipient set and clears its `needs_rotation` flags; `devstrap env rotate --all` clears flags workspace-wide. **Known defect (P6-DATA-02, open):** the one-argument flag-clear-only form (`devstrap env rotate <path>`) is currently broken — it filters on a phantom `env_profiles.namespace_id` column and fails with a SQL logic error; only `env rotate --all` is exercised today (see the P6-DATA-02 section below).
 
 ## Secret redaction
 
@@ -230,7 +233,7 @@ Redaction is a backstop for:
 Log output should show:
 
 ```text
-SNOWFLAKE_ACCOUNT=***
+DATABASE_URL=***
 OPENAI_API_KEY=***
 ```
 
@@ -246,7 +249,7 @@ Example:
 agent_env:
   allow:
     - GITHUB_TOKEN_READONLY
-    - SNOWFLAKE_ACCOUNT
+    - DATABASE_URL
   deny:
     - AWS_SECRET_ACCESS_KEY
     - SSH_PRIVATE_KEY
@@ -317,8 +320,8 @@ secrets:
   mode: encrypted_sync
   write_file_default: .env.local
   approved_devices:
-    - mac-mini-upstairs
-    - gmk-ubuntu
+    - macbook
+    - linux-desktop
 ```
 
 Company project:

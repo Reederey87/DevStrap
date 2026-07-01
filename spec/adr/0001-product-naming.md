@@ -26,8 +26,9 @@ competing brand strings with no single source of truth cause inconsistent usage.
 ## Consequences
 
 - Other docs reference this ADR instead of re-deriving the naming.
-- "Workspace Passport" must not appear as a product/binary string outside this
-  ADR and the concept tagline in `spec/00`/`spec/02`.
+- "Workspace Passport" must never appear as a product/binary string;
+  concept-tagline usage is permitted in this ADR, `spec/00`, `spec/02`,
+  `README.md`, and prose that explicitly frames it as the core concept.
 - The non-recursive spec-drift gate (`spec/*.md`) does not scan `spec/adr/`, so
   this file uses MADR frontmatter (status/date) rather than the
   `last_reviewed`/`tracks_code` frontmatter the gate requires.

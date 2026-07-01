@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-30
+last_reviewed: 2026-07-01
 tracks_code: [cmd/**, internal/**]
 ---
 # Challenge Matrix and Viable Approaches
@@ -27,14 +27,14 @@ Alternatives:
 
 Problem: a new device must end with a usable `~/Code` tree, but full cloning every repo can be slow if done without partial clone, bounded concurrency, and resumability.
 
-Recommended target solution (`EAGER-*`):
+Shipped solution (`EAGER-*`):
 
-- `devstrap sync` eagerly materializes the whole namespace by blobless/partial-cloning every `git_repo` from its existing remote;
-- extract a shared materialization engine from the current single-project `hydrate` path and use it from `sync`, `open`, and the future run-loop;
-- use bounded workers, per-project failure isolation, and resumable `failed`/`skeleton` states;
-- keep skeleton directories only as transient/failure state and as a fallback for non-materializable project types.
+- `devstrap sync` eagerly materializes the whole namespace by blobless/partial-cloning every `git_repo` from its existing remote — shipped (`internal/cli/sync.go` `runSyncCycle` → `materializePass`);
+- the shared materialization engine is used from `sync` and the shipped `devstrap run-loop` (`internal/cli/materialize.go`), with `hydrate`/`open` reusing the same code path;
+- it uses bounded workers, per-project failure isolation, and resumable `failed`/`skeleton` states — shipped;
+- skeleton directories are kept only as transient/failure state and as a fallback for non-materializable project types.
 
-Lazy-on-open remains a later opt-in/fallback solution:
+Lazy-on-open remains a later opt-in/fallback solution (deferred StrapFS layer):
 
 - StrapFS virtual filesystem;
 - macOS File Provider or macFUSE/FSKit;
@@ -110,7 +110,8 @@ Recommended solution:
 - never sync dependency folders;
 - use lockfiles and bootstrap commands;
 - record toolchain profile;
-- maintain per-device readiness status.
+- maintain per-device readiness status;
+- run dependency rebuilds BEFORE any env hydrate so lifecycle/postinstall scripts never see decrypted secrets, and capture rebuild output to a `0600` log (`P6-GIT-03`, open); gate rebuilds per-project (`rebuild_on_hydrate: ask|always|never`), not by a single global env var. **Known defect (P6-GIT-03, open):** the shipped path gates rebuild on the global `DEVSTRAP_REBUILD_DEPS` env var, runs it after `.env` is decrypted with `$HOME` pointed at the project, and discards output.
 
 Examples:
 
@@ -140,9 +141,9 @@ Problem: the user's real pain — uncommitted/unpushed work stranded on machine 
 
 Recommended solution — a git-native, three-layer human-convenience plane, strictly walled off from the agent plane (agents always base from `origin/<default_branch>`):
 
-- **Layer A — validation (Phase 0):** signed read-only `repo.gitstate.observed` snapshots (dirty/untracked/unmerged/ahead/behind/stash counts) so every device knows where every other device's tree stands; `status --all-devices`/`doctor` warn and always render snapshot age (never silent all-clear).
-- **Layer B — WIP recovery (Phase 1):** `git stash create` → push to `refs/devstrap/wip/<device>/<path_key>` over git's integrity-checked transport (forge-agnostic); machine B `wip apply` on demand, never as a branch/base.
-- **Layer C — encrypted bundle (Phase 3):** for non-git/draft folders only, via `draft.snapshot.created` + age encryption.
+- **Layer A — validation (planned; not yet built):** signed read-only `repo.gitstate.observed` snapshots (dirty/untracked/unmerged/ahead/behind/stash counts) so every device knows where every other device's tree stands; `status --all-devices`/`doctor` warn and always render snapshot age (never silent all-clear).
+- **Layer B — WIP recovery (planned; not yet built):** `git stash create` → push to `refs/devstrap/wip/<device>/<path_key>` over git's integrity-checked transport (forge-agnostic); machine B `wip apply` on demand, never as a branch/base.
+- **Layer C — encrypted bundle (SHIPPED, `DRAFT-*`):** for non-git/draft folders only, via `draft snapshot create` + `draft.snapshot.created` + age encryption.
 
 See `07_NAMESPACE_AND_SYNC_MODEL.md` (working-state plane) and `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 5.
 
@@ -281,7 +282,8 @@ Recommended solution:
 - Git LFS for repo-managed large files;
 - DVC/object storage for datasets and model artifacts;
 - DevStrap ignore rules for local data folders;
-- draft sync size cap.
+- draft sync size cap;
+- the materialize/hydrate path must honor the stored `lfs_policy` (today only `worktree new` does — `P6-GIT-04`, open): `always` → `git lfs install --local` + LFS pull (fail the project on error); otherwise warn that pointer files remain. Note DevStrap's sanitized git env (`GIT_CONFIG_GLOBAL=/dev/null`) hides any global `git lfs install`, so the local install is mandatory.
 
 ## 14. Offline behavior
 
@@ -338,8 +340,8 @@ Commands:
 
 ```bash
 devstrap agent list
-devstrap agent cleanup --merged
-devstrap worktree list --stale
+devstrap worktree cleanup --merged
+devstrap worktree list   # stale-base status is shown per row; `worktree status` reports stale-base detail
 ```
 
 ## 18. Editor direct access
@@ -354,9 +356,9 @@ Recommended solution:
 - future Finder extension or File Provider;
 - future virtual filesystem.
 
-## 19. NAS backup
+## 19. Local/NAS backup
 
-Problem: the user wants reliable backup of code structure/content.
+Problem: users need reliable backup of the code namespace structure and encrypted state independent of the sync hub.
 
 Recommended solution:
 
@@ -365,7 +367,7 @@ Recommended solution:
 - do not rely on NAS backup of `node_modules` or `.venv`;
 - export namespace snapshot periodically.
 
-Command:
+Planned command (not yet implemented — no `export` command exists in `internal/cli`; see `P6-DATA-04`):
 
 ```bash
 devstrap export --output ~/Backup/devstrap-snapshot.tar.age
@@ -393,7 +395,7 @@ MVP options:
 
 ## 20b. Cloud-backend trust and reachability
 
-Problem: the multi-device hub must be reachable from every device in the fleet (the Mac Minis, an incoming GMKtec Ubuntu box, a graphics laptop, a NAS) yet must never be trusted with code, secrets, or drafts — and a home NAS is neither reliably reachable off-LAN nor a credible zero-knowledge boundary.
+Problem: the multi-device hub must be reachable from every device in a user's fleet (multiple desktops and laptops across macOS and Linux, plus cloud machines and agent runners) yet must never be trusted with code, secrets, or drafts — and a home NAS is neither reliably reachable off-LAN nor a credible zero-knowledge boundary.
 
 Recommended solution — a two-plane, zero-knowledge hub (working name `devstraphub`):
 
@@ -411,7 +413,7 @@ Device revocation (age has no native revocation, so this is not a no-op):
 
 - per-device enrollment/approval gates blob decryption (see §15);
 - on revoke, **re-encrypt affected blobs to the reduced recipient set and flag the affected secrets for rotation** — removing a recipient only protects future blobs, never past ciphertext a held key could already read;
-- event verification must **fail closed** once enrollment exists (today it fails open — audit `SECU-03`).
+- event verification **fails closed** once enrollment exists (shipped, `HUB-03`): non-local events require a valid signature from a known approved device (`internal/state`), closing audit finding `SECU-03`.
 
 See `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` (`HUB-*`), `07_NAMESPACE_AND_SYNC_MODEL.md`, and `15_SECURITY_THREAT_MODEL.md`.
 

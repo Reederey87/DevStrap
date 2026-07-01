@@ -1,6 +1,6 @@
 ---
 last_reviewed: 2026-07-01
-tracks_code: [internal/git/**, internal/cli/add.go, internal/cli/hydrate.go, internal/cli/open.go, internal/cli/repo_lock.go, internal/cli/worktree.go]
+tracks_code: [internal/git/**, internal/cli/add.go, internal/cli/clone.go, internal/cli/forge.go, internal/cli/hydrate.go, internal/cli/materialize.go, internal/cli/open.go, internal/cli/repo_lock.go, internal/cli/worktree.go]
 ---
 # Git Materialization and Worktree Design
 
@@ -49,7 +49,7 @@ Use for monorepos or large repos where the user only needs a subset.
 
 ## Materialization policy
 
-Each repo can specify:
+Each repo can specify (illustrative, planned config surface):
 
 ```yaml
 materialization:
@@ -60,6 +60,8 @@ materialization:
   bootstrap_on_open: ask
 ```
 
+Shipped config keys today: `materialization.submodules` (auto|never) and `materialization.maintenance` (bool); the `mode`/`clone_filter`/`sparse`/`bootstrap_on_open` knobs above are not yet implemented.
+
 Modes:
 
 ```text
@@ -69,11 +71,11 @@ manual     only hydrate when explicitly requested
 ephemeral  hydrate for agent/cloud task, then cleanup
 ```
 
-Current hydrate implementation uses lazy skeleton directories and clones into a hidden sibling temp directory named like `.repo.devstrap-tmp-*` on the same filesystem as the final target. It validates the target before staging and revalidates it immediately before promotion, so a late local file blocks promotion without removing the dirty target. Clone failures leave the original skeleton in place and the caller cleans staged temp directories before returning.
+The hydrate implementation stages clones in a hidden sibling temp directory named like `.repo.devstrap-tmp-*` on the same filesystem as the final target, with atomic promotion after a successful clone. It validates the target before staging and revalidates it immediately before promotion, so a late local file blocks promotion without removing the dirty target; clone failures leave the original skeleton in place and the caller cleans staged temp directories before returning. `devstrap sync` drives this same code path eagerly for every namespace entry (`internal/cli/materialize.go`), while explicit `devstrap hydrate` remains for lazy/manual use.
 
-### Eager clone-everything on sync (EAGER-*, planned)
+### Eager clone-everything on sync (EAGER-*, shipped)
 
-The 2026-06-28 cloud-sync direction (`docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`, `EAGER-*`) makes the "Dropbox experience for code" the materialization default: after `devstrap sync` the whole `~/Code` tree is present, not skeletons. This is deliberately **eager clone-everything**, not a FUSE/placeholder/lazy-VFS scheme — StrapFS stays explicitly deferred (Phase 4, see `00_START_HERE.md`).
+Eager whole-tree materialization is shipped (`EAGER-01/02`, `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`): the "Dropbox experience for code" is the materialization default, so after `devstrap sync` the whole `~/Code` tree is present, not skeletons. This is deliberately **eager clone-everything**, not a FUSE/placeholder/lazy-VFS scheme — StrapFS stays explicitly deferred (Phase 4, see `00_START_HERE.md`).
 
 Decisions:
 
@@ -85,9 +87,9 @@ Decisions:
 
 This makes the materialization `mode` effectively `eager` for synced projects. The `lazy`/`manual`/`ephemeral` modes above remain available for opt-out and for agent/cloud-task workflows.
 
-## Post-hydrate dependency rebuild (DRAFT-*, planned)
+## Post-hydrate dependency rebuild (DRAFT-*, partially shipped)
 
-Derived dependency trees (`node_modules`, virtualenvs, `target/`, `dist/`, build caches) are **never synced** — they are large, OS/arch-specific, and reproducible from manifests. Instead, hydrate runs a **post-hydrate dependency rebuild hook** that regenerates them locally per-OS, keeping cross-platform devices (macOS + Ubuntu, and the planned NAS/Linux fleet) consistent without shipping platform-specific binaries.
+Derived dependency trees (`node_modules`, virtualenvs, `target/`, `dist/`, build caches) are **never synced** — they are large, OS/arch-specific, and reproducible from manifests. Instead, hydrate runs a **post-hydrate dependency rebuild hook** that regenerates them locally per-OS, keeping cross-platform devices (e.g. a macOS laptop and a Linux workstation or headless runner) consistent without shipping platform-specific binaries.
 
 Detection and rebuild are manifest-driven:
 
@@ -102,10 +104,10 @@ requirements.txt                         -> python -m venv + pip install -r
 
 Rules:
 
-- the rebuild is **opt-in/gated** (per-project policy, e.g. `materialization.rebuild_on_hydrate: ask|always|never`) and never runs untrusted lifecycle scripts implicitly; the default for synced projects asks before running;
+- the rebuild is **opt-in/gated** — today only globally, via the `DEVSTRAP_REBUILD_DEPS` env var (`internal/cli/materialize.go`); the per-project `materialization.rebuild_on_hydrate: ask|always|never` policy and the "ask before running" default are **target design, not yet implemented** (`P6-GIT-03`), and the shipped rebuild currently runs **after** env hydrate rather than before it;
 - the hook runs **after** atomic promotion of the cloned/hydrated tree, in the project root, with the shared sanitized child-process environment (no secrets injected unless an env profile is explicitly bound);
 - the package-manager binary is resolved from the chosen tool adapter; a missing tool produces a typed, actionable warning rather than a hard failure, and the tree is left dependency-less;
-- rebuild output is captured to a `0600` log; rebuilds are best-effort and never block the rest of `devstrap sync`;
+- rebuild output should be captured to a `0600` log and rebuilds are best-effort and never block the rest of `devstrap sync`; **today the shipped rebuild discards its output with no log** (`P6-GIT-03`);
 - the rebuild map is OS-aware so the same project resolves to the correct toolchain on macOS and Linux, keeping Mac-specific behavior behind adapters (see `00_START_HERE.md`).
 
 `node_modules` and equivalents stay gitignored and `.devstrapignore`-excluded so they are never adopted, never event-logged, and never bundled into `age_blob:<sha256>` content (cross-reference `11_IGNORE_AND_LOCAL_GARBAGE.md`).
@@ -220,7 +222,7 @@ Before PR or finalization:
      - rerun tests
 ```
 
-Current implementation provides this as `devstrap worktree finalize <id>`. It re-fetches the recorded `base_ref`, compares it with the stored `base_sha`, and exits with a conflict if the base moved. `--allow-stale-base` permits an explicit override and prints a warning. Future `agent pr`/GitHub integration must call the same gate before pushing or creating a PR.
+Current implementation provides this as `devstrap worktree finalize <id>`. It re-fetches the recorded `base_ref`, compares it with the stored `base_sha`, and exits with a conflict if the base moved. `--allow-stale-base` permits an explicit override and prints a warning. `devstrap agent pr` (shipped) calls this same gate before pushing and creating a PR/MR; see `10_AGENT_WORKSPACES_AND_POLICIES.md`.
 
 ## Branch naming
 
@@ -234,8 +236,8 @@ human/<short-task>-<date>-<time>-<random-suffix>
 Examples:
 
 ```text
-agent/fix-gss-tests-20260623-120405-a13f92c0b31d
-agent/add-snowflake-env-check-20260623-120406-b92c4818df20
+agent/fix-flaky-tests-20260623-120405-a13f92c0b31d
+agent/add-ci-env-check-20260623-120406-b92c4818df20
 human/refactor-devstrap-sync-20260623-130000-c11a8134fd44
 ```
 
@@ -406,6 +408,15 @@ ctx, cancel := context.WithTimeout(ctx, r.CloneTimeout) // default 30m
 defer cancel()
 // self-imposed DeadlineExceeded → return ErrTimeout (terminal), never retry
 ```
+
+### P6-GIT-03 — Dependency rebuild runs after env hydrate, discards output, and is gated by one global env var
+
+**Problem.** The shipped rebuild path gates all rebuilds on the single global `DEVSTRAP_REBUILD_DEPS` env var (`internal/cli/materialize.go:205`), runs `npm ci`/`uv sync`/etc. **after** the project's `.env` has been decrypted into the working tree with `$HOME` pointed at it, and discards rebuild stdout/stderr with no log (`:361-362`) — so lifecycle/postinstall scripts can read freshly-decrypted secrets, and failures leave no trace. This contradicts the "opt-in per-project, secrets-free, `0600`-logged" rules in "Post-hydrate dependency rebuild" above.
+
+**Actionable steps.**
+1. Run dependency rebuilds **before** any env hydrate so lifecycle/postinstall scripts never see decrypted secrets.
+2. Capture rebuild output to a `0600` log under `~/.devstrap/logs/rebuilds/`.
+3. Gate rebuilds per-project (`materialization.rebuild_on_hydrate: ask|always|never`) rather than by a single global env var; keep the env var as an override only.
 
 ### P6-GIT-04 — Eager materialize/hydrate ignore stored `lfs_policy`; `always` repos land as silent pointer files
 

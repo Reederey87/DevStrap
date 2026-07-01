@@ -106,13 +106,14 @@ CREATE TABLE git_repos (
   clone_filter TEXT,
   sparse_config TEXT,
   lfs_policy TEXT NOT NULL DEFAULT 'auto',
+  forge_kind TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id) ON DELETE CASCADE
 );
 ```
 
-`remote_url`/`remote_key` are `NOT NULL`, but SQLite accepts `''` against `NOT NULL`. A `git_repo` MUST have a non-empty validated `remote_key`; a remote-less repo is the distinct `local_git` namespace type (see `07_NAMESPACE_AND_SYNC_MODEL.md`), never persisted here with an empty remote (`NOVCS-01`). Add `CHECK (remote_key <> '')`, and consider declaring enum/status tables `STRICT` with `CHECK` constraints generally (`DATA-04`).
+`forge_kind` is the per-project forge override (`GIT-05`, migration 00010); resolution order: `--forge` flag > this column > `[forge]` host map > `DetectForge` heuristic; empty = not set. `remote_url`/`remote_key` are `NOT NULL`, but SQLite accepts `''` against `NOT NULL`. A `git_repo` MUST have a non-empty validated `remote_key`; a remote-less repo is the distinct `local_git` namespace type (see `07_NAMESPACE_AND_SYNC_MODEL.md`), never persisted here with an empty remote (`NOVCS-01`). Add `CHECK (remote_key <> '')`, and consider declaring enum/status tables `STRICT` with `CHECK` constraints generally (`DATA-04`).
 
 ### draft_projects
 
@@ -128,7 +129,27 @@ CREATE TABLE draft_projects (
 );
 ```
 
-`draft_projects` backs the non-git / draft folder content sync (`DRAFT-*`, see `07_NAMESPACE_AND_SYNC_MODEL.md` and `09_SECRETS_AND_ENVIRONMENT.md`). Draft content is captured via a `.devstrapignore` compiler (node_modules / build artifacts excluded, rebuilt on hydrate), packed into age-encrypted content-addressed bundles, and referenced by `current_snapshot_id` — never blanket file-synced and never carried as `.git`. `max_bytes`/`max_files` are intended caps but are **not yet enforced** (`DRAFT-04`): nothing rejects an oversized draft capture today. Enforce them at capture time (refuse the snapshot when the packed tree exceeds the cap) or mark them deferred.
+`draft_projects` backs the non-git / draft folder content sync (`DRAFT-*`, see `07_NAMESPACE_AND_SYNC_MODEL.md` and `09_SECRETS_AND_ENVIRONMENT.md`). Draft content is captured via a `.devstrapignore` compiler (node_modules / build artifacts excluded, rebuilt on hydrate), packed into age-encrypted content-addressed bundles, and referenced by `current_snapshot_id` — never blanket file-synced and never carried as `.git`. `max_bytes`/`max_files` are enforced at capture time (`DRAFT-04`, **shipped**): `devstrap draft snapshot create` loads the per-project limits via `DraftProjectLimits` and `draftbundle.Pack` refuses to pack a tree exceeding either cap (mapped to `exitInvalidConfig`); the same byte budget guards extraction against decompression bombs (`P5-SEC-02`).
+
+### draft_snapshots (shipped)
+
+```sql
+CREATE TABLE draft_snapshots (
+  id TEXT PRIMARY KEY,
+  namespace_id TEXT NOT NULL,
+  blob_ref TEXT NOT NULL,                 -- 'age_blob:<sha256>'
+  byte_size INTEGER NOT NULL,
+  file_count INTEGER NOT NULL,
+  source_event_id TEXT,
+  source_event_hlc INTEGER,
+  source_event_device_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id) ON DELETE CASCADE
+);
+```
+
+`draft_snapshots` (migration 00009) records each `draft.snapshot.created` bundle for a `draft_project`/`local_git` entry; `draft_projects.current_snapshot_id` points at the newest row, and the packed `age_blob:<sha256>` bundle it references is the live blob the GC must retain. Migration 00012 adds a partial `UNIQUE` index on `(namespace_id, source_event_id)` so idempotent re-apply is DB-enforced (`P5-DATA-02`). **Known defect (`P6-DATA-01`, open):** the creating device inserts the event but no `draft_snapshots` row, so GC can delete the only bundle copy — see the P6-DATA-01 section below.
 
 ### device_project_state
 
@@ -154,7 +175,7 @@ CREATE TABLE device_project_state (
 );
 ```
 
-Note: `env_ready`/`tooling_ready` exist but are not yet written or read, and the derived display-status set is not computed (`PROD-01`). Either wire them or mark them deferred.
+Note: `env_ready`/`tooling_ready` exist but are not yet written or read; the derived display status IS computed (`deriveDisplayStatus`, `P5-PROD-01`) from `materialization_state` + `dirty_state` only — expand it to require `env_ready`/`tooling_ready` once those are wired.
 
 ### device_gitstate (working-state validation plane — sidecar)
 
@@ -290,7 +311,7 @@ CREATE TABLE events (
 
 Rows in `events` are insert-only. Mutable delivery/apply state belongs in `event_delivery`.
 
-Local event creation links the new event to the previous same-device event content hash, then signs the canonical event payload `(id, hlc, type, payload_json, content_hash, prev_event_hash)` with the local Ed25519 device signing identity. Event insertion verifies `content_hash`, verifies any non-empty `prev_event_hash` against the previous same-device event already stored locally, and verifies `device_sig` when the source device has a known `signing_public_key`; unsigned events from devices without a known signing key remain accepted for current local-only sync tests and pre-approval bootstrap flows. Sync records an `event_hash_chain_break` conflict when incoming previous-hash validation fails.
+Local event creation links the new event to the previous same-device event content hash, then signs the canonical event payload `(id, hlc, type, payload_json, content_hash, prev_event_hash)` with the local Ed25519 device signing identity. Event insertion verifies `content_hash`, verifies any non-empty `prev_event_hash` against the previous same-device event already stored locally, and verifies `device_sig` when the source device has a known `signing_public_key`; unsigned events are accepted only during the pre-enrollment bootstrap window (and always from the local device); once any approved device exists, verification fails closed (`HUB-03`) — events from unknown, keyless, or non-approved devices are rejected for every event type. Sync records an `event_hash_chain_break` conflict when incoming previous-hash validation fails.
 
 ### device_sync_state
 
@@ -321,7 +342,22 @@ CREATE TABLE sync_cursors (
 );
 ```
 
-`sync_cursors` is the planned (`DATA-02`, `HUB-*`) per-peer resume point for cursor-based incremental sync: one row per remote peer (or hub) holding the highest applied HLC/seq so a pull requests only events after `last_hlc_applied` instead of replaying full history from HLC 0. The cloud hub exposes the same shape as an opaque `cursor=<HLC>` over its event-log plane (`410 -> snapshot` when the cursor is too old, see `07_NAMESPACE_AND_SYNC_MODEL.md`). Until wired, sync ignores this table and replays from 0 (`ARCH2-02`).
+`sync_cursors` is the planned (`DATA-02`, `HUB-*`) per-peer resume point for cursor-based incremental sync: one row per remote peer (or hub) holding the highest applied HLC/seq so a pull requests only events after `last_hlc_applied` instead of replaying full history from HLC 0. The cloud hub exposes the same shape as an opaque `cursor=<HLC>` over its event-log plane (`410 -> snapshot` when the cursor is too old, see `07_NAMESPACE_AND_SYNC_MODEL.md`). `sync_cursors` itself is still unwired, but cursor-based incremental pull IS shipped through the simpler `hub_cursors` table (00008): sync pulls with `afterHLC = hub_cursors.last_hlc_applied` and never replays from 0 (`ARCH2-02` resolved). `sync_cursors`/`event_delivery` remain the planned richer per-peer shape.
+
+### hub_cursors (shipped — per-hub resume cursor)
+
+```sql
+CREATE TABLE hub_cursors (
+  workspace_id TEXT NOT NULL,
+  hub_id TEXT NOT NULL,
+  last_hlc_applied INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(workspace_id, hub_id),
+  FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+);
+```
+
+`hub_cursors` (migration 00008) is the wired cursor for cursor-based incremental pull (`EAGER-02`): `devstrap sync` reads `last_hlc_applied` before `Pull`, passes it as `afterHLC`, and advances it after `ApplyEvents`. A separate `push:<hubID>` synthetic `hub_id` row holds the push watermark so only local-origin events past it are pushed (`SYNC-04`).
 
 ```sql
 CREATE TABLE event_delivery (
@@ -373,9 +409,49 @@ CREATE TABLE conflicts (
 );
 ```
 
+### pending_hub_deletes (shipped)
+
+```sql
+CREATE TABLE pending_hub_deletes (
+  workspace_id TEXT NOT NULL,
+  blob_ref TEXT NOT NULL,
+  queued_at TEXT NOT NULL,
+  PRIMARY KEY(workspace_id, blob_ref),
+  FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+);
+```
+
+`pending_hub_deletes` (migration 00011) queues blobs orphaned by a local-only `devices revoke`/`lost` (no `--hub-file`) for deletion on the next hub-enabled sync (`P5-PROD-02`/`P5-SEC-01`).
+
+### workspace_keys / workspace_key_grants (shipped)
+
+```sql
+CREATE TABLE workspace_keys (
+  workspace_id TEXT NOT NULL,
+  epoch INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(workspace_id, epoch),
+  FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+);
+
+CREATE TABLE workspace_key_grants (
+  workspace_id TEXT NOT NULL,
+  epoch INTEGER NOT NULL,
+  recipient TEXT NOT NULL,
+  source_event_id TEXT,
+  source_event_hlc INTEGER,
+  source_event_device_id TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(workspace_id, epoch, recipient),
+  FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+);
+```
+
+`workspace_keys`/`workspace_key_grants` (migration 00013) back the per-epoch Workspace Content Key keyring for envelope encryption of the event log (`P4-SEC-02`/`P4-SEC-07`): `workspace_keys` records which epochs this device holds, and `workspace_key_grants` is a membership audit of `device.key.granted` events. Both hold only non-secret metadata — the wrapped WCK itself rides the event payload and the raw WCK lives only in the keychain / 0600 file fallback, never in `state.db`.
+
 ### blobs (content-addressed encrypted blob index — planned)
 
-Planned (`HUB-*`, `DRAFT-*`) local index of the content-addressed encrypted blob store — the hub's second plane (env values + non-git/draft bundles), all age-encrypted client-side and named `age_blob:<sha256>`. The hub sees only ciphertext; this table is the local bookkeeping for what each blob is, whether it is cached locally and/or uploaded, and when it may be reclaimed.
+**Status: PLANNED — no migration exists.** Planned (`HUB-*`, `DRAFT-*`) local index of the content-addressed encrypted blob store — the hub's second plane (env values + non-git/draft bundles), all age-encrypted client-side and named `age_blob:<sha256>`. The hub sees only ciphertext; this table is the local bookkeeping for what each blob is, whether it is cached locally and/or uploaded, and when it may be reclaimed.
 
 ```sql
 CREATE TABLE blobs (
@@ -415,7 +491,18 @@ CREATE INDEX idx_worktrees_device ON worktrees(device_id);
 CREATE INDEX idx_agent_runs_namespace ON agent_runs(namespace_id);
 CREATE INDEX idx_jobs_namespace ON jobs(namespace_id);
 CREATE INDEX idx_conflicts_namespace ON conflicts(namespace_id);
+
+-- added by later migrations
+CREATE INDEX idx_event_delivery_state ON event_delivery(sync_state);                        -- 00002
+CREATE UNIQUE INDEX idx_workspaces_singleton ON workspaces((1));                             -- 00006 (single-workspace invariant)
+CREATE INDEX idx_hub_cursors_workspace ON hub_cursors(workspace_id);                         -- 00008
+CREATE INDEX idx_draft_snapshots_namespace ON draft_snapshots(namespace_id);                 -- 00009
+CREATE UNIQUE INDEX idx_draft_snapshots_source_event
+  ON draft_snapshots(namespace_id, source_event_id) WHERE source_event_id IS NOT NULL;       -- 00012
+CREATE INDEX idx_workspace_key_grants_epoch ON workspace_key_grants(workspace_id, epoch);    -- 00013
 ```
+
+Pending (`P6-DATA-05`): add `idx_events_device_hlc ON events(device_id, hlc, id)` so `LocalPendingEvents` (the push path) stops full-scanning the event log — see the P6-DATA-05 section below.
 
 `idx_namespace_active` supports the Phase-0 `ListProjects` query shape:
 
@@ -503,13 +590,17 @@ Local backup command:
 devstrap db backup ~/.devstrap/backups/state-20260623.db
 ```
 
-Backups use SQLite `VACUUM INTO`, not file copy, so WAL/SHM state is captured consistently.
+Backups use SQLite `VACUUM INTO`, not file copy, so WAL/SHM state is captured consistently. Today `db backup` captures `state.db` **only** — env blobs (`~/.devstrap/blobs/<hash>.age`) and file-fallback key material are excluded and there is no `restore` command (`P6-DATA-04`, see the section below).
 
-Workspace export:
+Workspace export (**planned** — no command exists yet):
 
 ```bash
 devstrap export --encrypted --output devstrap-snapshot.tar.age
 ```
+
+### DIRECTION — full backup/restore + recovery drill (AD-7, planned)
+
+`db backup` is incomplete for disaster recovery because a restored `state.db` holds dangling `age_blob:` refs (`P6-DATA-04`). Forward direction (not shipped): ship `db backup --full <out.tar>` bundling `state.db` + referenced `blobs/` + `keys/` (file fallback) + keychain escrow (age identity + WCK `wck-<ws>-<epoch>.key`), all `0600`, and a `db restore <in>` that refuses over a non-empty state dir without `--force`; add a doctor "dangling blob refs" check; and back both with a durability/recovery drill in `16_TEST_PLAN.md`. This pairs with the human-readable `workspace.yaml` escape hatch in `07_NAMESPACE_AND_SYNC_MODEL.md`.
 
 ## Hub backend (planned)
 

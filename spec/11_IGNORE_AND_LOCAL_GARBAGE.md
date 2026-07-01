@@ -1,6 +1,6 @@
 ---
 last_reviewed: 2026-07-01
-tracks_code: [internal/scan/**, .gitignore]
+tracks_code: [internal/ignore/**, internal/draftbundle/**, internal/scan/**, .gitignore]
 ---
 # Ignore Rules and Local Garbage
 
@@ -31,7 +31,66 @@ DevStrap needs one canonical ignore policy that can compile to multiple systems.
 
 As of the 2026-06-28 cloud-sync design, this single `.devstrapignore` compiler is **designed and required** (no longer an optional convenience). It is the prerequisite for safe non-git content sync: the draft-bundling layer that ships env vars and non-git/draft folders as age-encrypted, content-addressed `age_blob:<sha256>` blobs must derive its exclusion set from exactly the same compiler that drives scan, the watcher, and the agent deny-list. Any divergence between those consumers can leak a secret or a `node_modules` tree into a draft bundle, so they MUST all read one compiled output rather than maintain separate hardcoded lists (workstream `DRAFT-*` in `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`).
 
-## Default `.devstrapignore`
+## Shipped default table (`internal/ignore` `defaultPatterns`)
+
+This is the table the shipped compiler actually applies when no project `.devstrapignore` is present (`internal/ignore/ignore.go`, `defaultPatterns`):
+
+```gitignore
+# VCS internals
+.git/
+
+# OS junk
+.DS_Store
+Thumbs.db
+ehthumbs.db
+.AppleDouble
+.LSOverride
+desktop.ini
+
+# Build artifacts
+node_modules/
+dist/
+build/
+out/
+target/
+bin/
+obj/
+.next/
+.nuxt/
+.turbo/
+.gradle/
+.stack-work/
+_build/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Coverage / checkpoints
+coverage/
+.nyc_output/
+checkpoints/
+
+# Data conventions
+data/raw/
+data/interim/
+
+# DevStrap internals
+.devstrap/tmp/
+.devstrap/cache/
+```
+
+> **Warning: the shipped defaults contain NO secret patterns** — no `.env`, `.aws/credentials`, `*.pem`, `id_rsa`, or `id_ed25519`. Do not assume the default policy keeps secrets out of draft bundles; secret exclusion in draft sync is enforced separately by a hardcoded detector (see "Draft sync" below and `P6-XP-06`). The defaults also prune `env/` and `bin/` at any depth, which is the source of the `P6-XP-06` scan discovery blind spot.
+
+## Recommended per-project `.devstrapignore` (target)
+
+The following is the recommended per-project policy (a target, not the shipped default table above); notably it adds the secret patterns and the ML-artifact conventions the defaults omit:
 
 ```gitignore
 # Secrets
@@ -95,7 +154,7 @@ As of the 2026-06-28 cloud-sync design, this single `.devstrapignore` compiler i
 
 ## Ignore compiler targets
 
-### Git
+### Git (unbuilt — API exists, no writer)
 
 Generate or update `.gitignore` safely.
 
@@ -113,21 +172,25 @@ Managed block:
 # END DEVSTRAP MANAGED
 ```
 
-### Docker
+Status: `ignore.GitignoreFragment`/`DefaultGitignoreFragment` exist but have no consumer — no code writes a `# BEGIN DEVSTRAP MANAGED` block (`env capture` appends its own individual entries in `internal/cli/env.go`). This managed-block target is not yet built.
 
-Generate `.dockerignore` block to avoid huge Docker build contexts.
+### Docker (unbuilt)
 
-### Draft sync
+Generate `.dockerignore` block to avoid huge Docker build contexts. Not yet built.
+
+### Draft sync (built)
 
 Use the compiled `.devstrapignore` output directly to exclude files from encrypted draft bundles. This consumer is load-bearing for confidentiality: anything not pruned here is what gets age-encrypted into an `age_blob:<sha256>` blob and pushed to the hub, so the draft-sync exclusion set MUST be the exact compiler output (not a re-derived list) and MUST cover secrets, `node_modules`, build artifacts, and OS junk.
 
-### Watcher exclusion set
+Current state: the compiler output drives directory/artifact exclusion in `draftbundle.Pack`, but secret exclusion is enforced by a separate hardcoded secret-name detector (`draftbundle.isSecretPath`, duplicated from `internal/scan`) because the shipped compiler defaults carry no secret patterns. Folding that detector's patterns into the canonical compiler table — so scan, draft sync, and the future agent denylist read one source — is the open follow-up (extends `PLAT-01`/`AGEN-05`).
 
-Compile the same source into the FSEvents/inotify watcher's exclusion set so the watcher never raises change events for ignored or generated trees. Today the watcher carries its own hardcoded list (`PLAT-01`/`PLAT-04`); it must consume the compiler instead.
+### Watcher exclusion set (unbuilt — `PLAT-01`/`PLAT-04`)
 
-### Agent denylist
+Compile the same source into the FSEvents/inotify watcher's exclusion set so the watcher never raises change events for ignored or generated trees. Today the watcher carries its own hardcoded list (`PLAT-01`/`PLAT-04`); it must consume the compiler instead. Not yet built.
 
-Translate secret patterns to agent file-deny policy from the same compiled source (`AGEN-05`).
+### Agent denylist (unbuilt — `AGEN-05`)
+
+Translate secret patterns to agent file-deny policy from the same compiled source (`AGEN-05`). Not yet built.
 
 ## OS-specific local garbage
 
@@ -181,7 +244,7 @@ cargo build
 
 Rules:
 
-- never descend into `.git` internals, `node_modules`, `.venv`, `dist`, `build`, `target`, `.gradle`, or configured ignored directories;
+- never descend into `.git`, `node_modules`, `.venv`/`venv`/`env`, `dist`, `build`, `out`, `target`, `bin`, `obj`, `.gradle`, and the other default generated trees (see the shipped default table above). Note: because the defaults prune `env/` and `bin/` at any depth and the scanner currently ignores the project `.devstrapignore` (defaults-only matcher — `configured ignored directories` is not yet implemented on the scan path), repos under those names are invisible to `scan --adopt` — see `P6-XP-06` below;
 - bound parallelism to `GOMAXPROCS`;
 - batch namespace writes in one short `BEGIN IMMEDIATE` transaction per scan batch;
 - use mtime/inode markers for incremental rescans;
@@ -250,7 +313,7 @@ Loose:
 
 ## Audit follow-ups (2026-06-27)
 
-**The single `.devstrapignore` compiler is now built** as `internal/ignore` (DRAFT-03). It compiles *gitignore-inspired* patterns from a project's `.devstrapignore` file plus a canonical default OS-junk/build-artifact table, and feeds the draft-bundle allow-list and generated `.gitignore` fragments from one source. Note the compiler is **not** fully gitignore-compatible today despite its doc header claim: it anchors only on a leading `/` (not a middle separator), mishandles bracket classes, and fails the whole file on an unclosed `[` — see `P6-XP-02` below. Also, the scanner prune predicate does **not** yet read the project's `.devstrapignore` at all — `scan.Walk` hardwires the defaults-only matcher (see `P6-XP-06`), so only the defaults half of "feeds the scanner prune predicate" is currently true. The watcher and agent deny-list still carry some hardcoded entries to be folded in as follow-up.
+**The single `.devstrapignore` compiler is now built** as `internal/ignore` (DRAFT-03). It compiles *gitignore-inspired* patterns from a project's `.devstrapignore` file plus a canonical default OS-junk/build-artifact table, and feeds the draft-bundle allow-list from one source; a `GitignoreFragment` API exists but has no consumer yet (no code writes a managed `.gitignore` block). Note the compiler is **not** fully gitignore-compatible today despite its doc header claim: it anchors only on a leading `/` (not a middle separator), mishandles bracket classes, and fails the whole file on an unclosed `[` — see `P6-XP-02` below. Also, the scanner prune predicate does **not** yet read the project's `.devstrapignore` at all — `scan.Walk` hardwires the defaults-only matcher (see `P6-XP-06`), so only the defaults half of "feeds the scanner prune predicate" is currently true. The watcher and agent deny-list still carry some hardcoded entries to be folded in as follow-up.
 
 ## Audit follow-ups (2026-06-28)
 

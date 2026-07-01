@@ -27,6 +27,27 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-01 — Sixth-pass spec revision (verification + architecture direction)
+
+Changed:
+- Re-verified every one of the 43 sixth-pass audit findings (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`) against the code via a verification-driven multi-agent workflow (nine dimension verifiers, each adversarially re-opening the cited `file:line` evidence and trying to refute the claim): **all 43 CONFIRMED, none refuted, all OSS-aligned** — 28 ready to implement as written, 15 needing design (the `P6-SEC-*`/`P6-SYNC-01/02/04`/`P6-HUB-*` crypto-and-sync cluster, plus `P6-DATA-04`, `P6-XP-02/03/04`). No new code changed; the findings remain open backlog for future implementation PRs.
+- Ran a four-lens viability brainstorm (product / technical-risk / OSS-sustainability / AI-agent-fit) and a full 20-file spec review (109 issues), anchored by six exa-backed best-practice topics (local-first sync engines, E2E multi-device key management, Go CLI distribution, multi-repo workspace tools, agent worktree isolation, object-store logs).
+- Revised **all 20 spec files** (spec/00–17, 19, adr/0001): applied the 109 code-verified staleness/contradiction fixes (shipped-vs-planned honesty for run-loop, eager materialize, cursor-based pull, conflicts CLI, fail-closed HUB-03, forge doctor probes, draft caps, `deriveDisplayStatus`, live R2 adapter; corrected broken/nonexistent command examples `env bind`/`promote`/`export`/`env check`; fixed `sync_cursors`↔`hub_cursors`, schema/index inventories, `--hub-file` test-vs-user framing). 151 edits total across the clusters.
+- **De-personalized the corpus for the OSS audience** (OSS-alignment): removed every personal-environment leak — `work/nclh/foc-models`→`work/acme/api`, `/Users/artem`/`artem-main`, author hardware fleets (Mac Minis / GMKtec Ubuntu box / graphics laptop / NAS), and the employer stack in examples (`SNOWFLAKE_*`, `python-uv-snowflake`, `op://Engineering/Snowflake`, `~/.snowflake/**` deny rules, `gss-agent`) → vendor-neutral names. Zero residual leaks remain (grep-verified).
+- **Recorded 8 validated architecture-direction decisions** as clearly future-facing DIRECTION sections (never as shipped), cross-referencing finding IDs: AD-1 zero-infrastructure Hub backend for first-run adoption (spec/02/03/14/19), AD-2 multi-device hardening freeze before new planes (spec/00/14), AD-3 one coordinated wire-format break — `enc.v2` full-carrier AAD + `(epoch,kid)` keyring + founder/`--join` init + signed retention marker (spec/07/15), AD-4 reduce the crypto surface / seek external review (spec/07/15), AD-5 position DevStrap as the substrate agents run on, not a runner — `worktree new --json` primitive + `worktree/agent adopt` + guardrails-not-sandbox (spec/00/02/10), AD-6 "one bad object never wedges" as a tested invariant + chaos multi-device tests (spec/07/16), AD-7 human-readable `workspace.yaml` export/import + `db backup --full`/restore + recovery drill (spec/07/12/16), AD-8 distribution + OSS onboarding workstream — v0.1.0/GoReleaser, Homebrew tap, fork-advisory drift gate, user-facing `docs/` tier, `ARCHITECTURE.md`, Discussions/good-first-issues, bus-factor (spec/02/14).
+- Added granular `tracks_code` owners (additive, P6-DOC-04) to spec/05/06/08/09/10/11/15/17/19 where a file documents a package its glob did not cover; left the broad `internal/**`/`cmd/**` catch-alls in place (the P6-QUAL-01 narrowing is a separate code-side change). Bumped `last_reviewed` to 2026-07-01 on every touched spec.
+
+Validated:
+- Docs/spec-only cycle — no Go source changed (`gofmt -l cmd internal` clean).
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `go test ./internal/cli` (TestEveryCommandIsDocumented, TestMigrationsDocumented) + `go build ./...`
+- `go test -race ./...`
+
+Follow-ups:
+- Implement the 40 open pass-6 findings (the 3 pure-doc `P6-DOC-*` items were applied in the audit PR + this revision); start with the AD-2 hardening-freeze cluster (`P6-SEC-01`, `P6-SYNC-01`, `P6-HUB-01`, `P6-DATA-01`, `P6-GIT-01`).
+- Land AD-1 (zero-infrastructure Hub backend) and AD-8 (v0.1.0 release + Homebrew tap) to unblock outside adoption.
+- Extract the user-facing `docs/` tier and `ARCHITECTURE.md` from the spec corpus; make the fork-PR contribution gate advisory.
+
 ## 2026-07-01 — Sixth-pass design & implementation audit (post-PR-#25)
 
 Changed:

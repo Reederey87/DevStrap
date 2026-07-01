@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-30
+last_reviewed: 2026-07-01
 tracks_code: [cmd/**, internal/**, spec/**]
 ---
 # Architecture Decision: Mac-First Managed Code Namespace
@@ -41,18 +41,18 @@ DevStrap maintains the structure, metadata, device state, Git freshness, secrets
 └──────────────┘    └──────────────┘   └────────────────────┘
 ```
 
-Local services:
+Target local services (Phase 1 daemon — not yet built; only the SQLite WAL store is shipped today):
 
 ```text
-Mac:   launchd LaunchAgent + FSEvents watcher
-Linux: systemd user service + inotify watcher
-DB:    SQLite WAL under ~/.devstrap/state.db
-IPC:   Unix domain socket: ~/.devstrap/devstrapd.sock
+Mac:   launchd LaunchAgent + FSEvents watcher   (planned)
+Linux: systemd user service + inotify watcher   (planned)
+DB:    SQLite WAL under ~/.devstrap/state.db     (shipped)
+IPC:   Unix domain socket: ~/.devstrap/devstrapd.sock   (planned)
 ```
 
 ## Cloud-sync architecture (2026-06-28 extension)
 
-> Extends the 2026-06-27 second-pass audit (see `00_START_HERE.md` and `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md`); driven by `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` (workstreams `EAGER-*`, `DRAFT-*`, `HUB-*`, `XP-*`, `SCALE-*`). The product goal is the **Dropbox experience for code**: one identical `~/Code` tree that appears automatically on every device in the owner's fleet (multiple Mac Minis, an incoming Ubuntu box, a graphics laptop, a NAS).
+> Extends the 2026-06-27 second-pass audit (see `00_START_HERE.md` and `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md`); driven by `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` (workstreams `EAGER-*`, `DRAFT-*`, `HUB-*`, `XP-*`, `SCALE-*`). The product goal is the **Dropbox experience for code**: one identical `~/Code` tree that appears automatically on every device in a developer's fleet (e.g. multiple desktops, a laptop, a home server or NAS, and cloud/agent runners).
 
 ### Sync is split by content type — never blanket file-sync
 
@@ -80,7 +80,7 @@ See `07_NAMESPACE_AND_SYNC_MODEL.md` and `08_GIT_MATERIALIZATION_AND_WORKTREES.m
 
 The hub sees **only ciphertext plus a signed map**; it cannot read code, secrets, or drafts. Repo content is absent from the hub entirely (it rides git, above).
 
-The chosen cloud backend is **Cloudflare R2 from the start** (S3 API, zero egress, namespaced by `workspace_id`; client-side age encryption gives confidentiality by construction). Integrity and availability still require signed hash chains, fail-closed event verification, scoped credentials, snapshots/backups, and retention discipline. There is **no NAS-first phase**. The `Hub` interface stays pluggable, and the existing file-backed backend (`devstrap sync --hub-file`) is retained **only for tests**.
+The chosen cloud backend is **Cloudflare R2 from the start** (S3 API, zero egress, namespaced by `workspace_id`; client-side age encryption gives confidentiality by construction). Integrity and availability still require signed hash chains, fail-closed event verification, scoped credentials, snapshots/backups, and retention discipline. There is **no NAS-first phase**. The `Hub` interface stays pluggable, and the file-backed backend (`devstrap sync --hub-file`) remains a supported local/offline escape hatch and is the backend used by the test suite; R2/S3 (`hub: r2://<bucket>`) is the production backend.
 
 The cloud hub sync path and R2 backend selection are **shipped** (`P5-HUB-01`): `hub: r2://<bucket>` (or `s3://`) wires the `aws-sdk-go-v2` S3 adapter behind `hubFromOptions`, with `DEVSTRAP_HUB_S3_*` env/config credentials and `--hub-file` retained for tests. See `13_CLI_DAEMON_API.md` and `14_MVP_ROADMAP_AND_BACKLOG.md`.
 
@@ -188,7 +188,7 @@ Apple File Provider is designed for local/remote file-provider sync and Finder-i
 
 Rejected for product feel, acceptable for Phase 0.
 
-A CLI-only tool is useful but will not feel like Dropbox forever. It is acceptable for the current portable cycle when paired with `devstrap run-loop` (planned) to run scan -> sync -> materialize without native launchd/systemd installers. A native daemon remains the later product-feel layer for noticing new projects, reconciling state, and integrating with OS watchers.
+A CLI-only tool is useful but will not feel like Dropbox forever. It is acceptable for the current portable cycle when paired with the shipped `devstrap run-loop` to run sync -> materialize on an interval (the advertised scan stage is not yet wired; tracked as `P6-XP-03`) without native launchd/systemd installers. A native daemon remains the later product-feel layer for noticing new projects, reconciling state, and integrating with OS watchers.
 
 ### Alternative F — Reuse an existing sync substrate (Syncthing/Mutagen) or a hidden manifest Git repo for namespace + blob transport
 
@@ -197,6 +197,8 @@ Deferred and superseded for the current cloud-sync cycle.
 Instead of hand-rolling the logical Hub (HLC + content-hash chain + Ed25519 signatures + R2/S3 or later HTTP/SSE transport), the namespace event log and encrypted blobs could ride an existing local-first sync engine, or a hidden manifest Git repo (Alternative B as a transport adapter). This remains a useful historical comparison, but it is **not** the M7 target after the 2026-06-28 rebaseline: M7 builds the Hub interface and direct R2/S3 backend first, with file-backed tests and HTTP/SSE deferred.
 
 Rejected as the current implementation path because the direct R2/S3 Hub keeps end-to-end encryption (age, per-device recipients), signed-event integrity, provider-independent object-store semantics, and forge-agnostic repo transport without returning Git merge conflicts to the namespace map. Reopen only if R2/S3 conformance fails or a later product decision intentionally trades those properties for a different sync substrate.
+
+> **Future direction (`AD-1`, not yet built).** Because the hub only ever holds ciphertext plus signed events, a **zero-infrastructure backend behind the same pluggable `Hub` interface** — a private-git-repo-backed and/or local-folder/cloud-drive-folder carrier — is a safe zero-knowledge option that removes the "provision an R2 bucket first" adoption friction. The intent is to make such a backend the quickstart default and keep `r2://` as the scale/power option; see `03_SYSTEM_ARCHITECTURE.md` (Hub backends) and `14_MVP_ROADMAP_AND_BACKLOG.md`.
 
 ### Alternative G — devcontainer/DevPod-style committed config as the cross-device source of truth
 
@@ -213,7 +215,7 @@ Build in this order:
 2. Thin agent runner: branch/worktree per task, scoped env, logs, diff summary, PR gate.
 3. Shared materialization engine + eager sync: cursor pull, blobless clone/fetch, env/draft hydrate, bounded resumable workers.
 4. Logical Hub interface + R2/S3 backend: immutable event objects, encrypted blob store, scoped credentials, fail-closed enrollment, snapshots.
-5. Portable run-loop: foreground scan -> sync -> materialize loop for macOS/Linux before native services.
+5. Portable run-loop: foreground sync -> materialize loop (the advertised scan stage is not yet wired; tracked as `P6-XP-03`) for macOS/Linux before native services.
 6. Local daemon: watcher, reconciler, LaunchAgent/systemd installers, socket API.
 7. StrapFS: optional virtual filesystem layer.
 ```

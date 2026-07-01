@@ -26,6 +26,7 @@ devstrap sync
 devstrap open
 devstrap hydrate
 devstrap add
+devstrap clone
 devstrap env
 devstrap run
 devstrap worktree
@@ -33,14 +34,16 @@ devstrap agent
 devstrap devices
 devstrap conflicts
 devstrap doctor
+devstrap hub
+devstrap materialize
+devstrap run-loop
+devstrap draft
+devstrap completion
 
 Planned:
 devstrap ignore
 devstrap daemon
-devstrap hub
 devstrap export
-devstrap materialize
-devstrap run-loop
 devstrap promote
 devstrap gitstate
 devstrap wip
@@ -73,11 +76,11 @@ Creates:
 Options:
 
 ```bash
---workspace-name artem-main
+--workspace-name my-workspace
 --dry-run
 ```
 
-`init` normalizes the root to an absolute clean path, creates `~/.devstrap/config.yaml` with mode `0600` if missing, and does not overwrite an existing config file. `--scan` (`PROD-03`) runs the existing `scan --adopt` path inline after workspace creation so a populated root is adopted on the first command, prints the adopted count, and always prints a short next-steps hint (`devstrap status • devstrap scan --adopt • devstrap sync --hub-file <path>`).
+`init` normalizes the root to an absolute clean path, creates `~/.devstrap/config.yaml` with mode `0600` if missing, and does not overwrite an existing config file. `--scan` (`PROD-03`) runs the existing `scan --adopt` path inline after workspace creation so a populated root is adopted on the first command, prints the adopted count, and always prints a short next-steps hint (`devstrap status • devstrap scan --adopt • devstrap sync --hub-file <path>`). Per `P6-CLI-05`, this hint is slated to change: it should teach the shipped production path (`hub: r2://<bucket>` in `~/.devstrap/config.yaml`, then `devstrap sync`) rather than the file-backed `--hub-file` test hub — see the P6-CLI-05 section below.
 
 ### db
 
@@ -95,7 +98,7 @@ Rules:
 - `backup` uses `VACUUM INTO`, not file copy;
 - state DB and backups are mode `0600`.
 
-`doctor` (`PROD-02`) is a severity-graded health report: each check returns `{name, status: ok|warning|error, detail, remedy}`, rendered as a graded table with a summary line and a non-zero exit code when any check is error (so it can gate CI). Checks cover git/gh/go tools (git required, gh/go optional), state home + permissions, schema version, SQLite `quick_check`/`foreign_key_check`, secrets needing rotation, local age + Ed25519 device-key health, and held repo locks (stale = warning). `--json` emits the check array; `--fix` applies safe remediations (create the missing state home, run pending migrations, clear stale repo locks) and re-runs the checks.
+`doctor` (`PROD-02`) is a severity-graded health report: each check returns `{name, status: ok|warning|error, detail, remedy}`, rendered as a graded table with a summary line and a non-zero exit code when any check is error (so it can gate CI). Checks cover git/gh/go tools (git required, gh/go optional), state home + permissions, schema version, SQLite `quick_check`/`foreign_key_check`, secrets needing rotation, local age + Ed25519 device-key health, and held repo locks (stale = warning). `--json` emits the check array; `--fix` applies safe remediations (create the missing state home, run pending migrations, clear stale repo locks) and re-runs the checks. `--remote` (`P5-PROD-05`) additionally probes the configured sync hub (reachability, pending push, queued deletes, device trust); `--hub-file` selects the file-backed hub for that probe.
 
 ### scan
 
@@ -128,7 +131,10 @@ Current implementation:
 ```bash
 devstrap status
 devstrap status --json
+devstrap status --watch [--interval 2s]
 ```
+
+`status --watch` re-renders the snapshot on an interval until interrupted.
 
 Current Phase-0 status shows workspace name, root path, project count, local device ID, and adopted project rows. Future daemon-backed status adds:
 
@@ -153,29 +159,15 @@ devstrap sync --hub-file ~/.devstrap/test-hub/events.json
 devstrap sync   # hub: r2://devstrap-hub (shipped; one bucket, tenants separated by key prefix)
 ```
 
-Current implementation does:
-
-- push local events;
-- pull remote events;
-- apply namespace events idempotently;
-- support `--namespace-only` and `--dry-run`;
-- leave filesystem materialization/fetch reconciliation unimplemented.
-
-Planned `EAGER-*` behavior adds:
-
-- reconcile skeletons;
-- fetch or blobless-clone repos if policy allows;
-- hydrate env/draft blobs;
-- never overwrite dirty worktrees.
+Current implementation pushes local events, pulls hub events from the stored cursor, applies namespace events idempotently, then eagerly materializes the tree (blobless clone, draft-bundle extract, env hydrate) unless `--namespace-only` is set; dirty worktrees are never overwritten. `--dry-run` reports the plan without writing.
 
 Options:
 
 ```bash
 --hub-file <path>     # file-backed test hub (tests only)
 hub: r2://<bucket>    # shipped: Cloudflare R2 / S3 zero-knowledge hub backend (creds via DEVSTRAP_HUB_S3_*)
---namespace-only
---fetch               # planned
---hydrate-eager       # planned default: eager blobless clone of the whole tree
+--namespace-only      # opt out of eager whole-tree materialization (the shipped default)
+--fetch               # planned: fetch-only reconciliation mode, distinct from the shipped default
 --dry-run
 ```
 
@@ -311,11 +303,11 @@ Current implementation supports `agent run/list/show/pr`. `agent run` creates a 
 
 ```bash
 devstrap devices list
-devstrap devices enroll dev_01jz... --name gmk-ubuntu --os linux --arch arm64 --age-recipient age1...
+devstrap devices enroll dev_01jz... --name linux-desktop --os linux --arch arm64 --age-recipient age1...
 devstrap devices approve dev_01jz...
 devstrap devices revoke dev_01jz...
 devstrap devices lost dev_01jz...
-devstrap devices rename dev_01jz... gmk-ubuntu
+devstrap devices rename dev_01jz... linux-desktop
 devstrap devices recipient              # print local device's age recipient (for out-of-band enrollment)
 devstrap devices recipient --signing    # print local device's Ed25519 signing public key
 ```
@@ -413,8 +405,8 @@ Future project-level status response:
 
 ```json
 {
-  "workspace": "artem-main",
-  "device": "mac-mini-upstairs",
+  "workspace": "my-workspace",
+  "device": "laptop",
   "projects": [
     {
       "path": "work/acme/api",
@@ -480,6 +472,8 @@ Rules:
 7 Git error
 8 network/sync error
 9 policy violation
+10 usage error (partially wired: only hand-mapped sites; Cobra flag/arg/unknown-command errors still exit 1 — see P6-CLI-03)
+100+N child process exit code
 ```
 
 ## Audit follow-ups (2026-06-27)
@@ -510,7 +504,7 @@ PR creation becomes forge-agnostic (`gh`/`glab`/`tea`) with a `--forge` override
 
 - **CLI-02**: `scan --quarantine` progress lines now go to stderr, preserving valid JSON on stdout.
 - **CLI-03**: `run` and `agent run` propagate child exit codes as `100+N` (new `childExitBase`).
-- **CLI-04**: Added `exitUsage = 10` for bad-flag/missing-flag/arg-count errors; `childExitBase = 100` for child process exit codes.
+- **CLI-04**: Added `exitUsage = 10` and `childExitBase = 100` (child process exit codes). Note (`P6-CLI-03`): `exitUsage` is only wired at hand-mapped sites; Cobra flag-parse, Args-validation, and unknown-command errors still bypass `appError` and exit 1 — the `SetFlagErrorFunc`/Args-validator wiring is not yet in place.
 - **PROD-01**: `deriveDisplayStatus` maps materialization+dirty states to user-facing labels; `status` output uses it.
 - **PROD-02/PROD-06**: `devstrap conflicts` is a command group (`list`/`show`/`resolve --keep-local|--keep-remote|--keep-both`) that surfaces and resolves open conflicts; `status` shows the open-conflict count and it converges as rows are resolved.
 - **ARCH2-04**: Reserved `exitDaemonUnavailable` code for M5 daemon.
@@ -519,7 +513,7 @@ PR creation becomes forge-agnostic (`gh`/`glab`/`tea`) with a `--forge` override
 
 The cloud-sync architecture (`docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`) shapes the sync/materialization commands. The eager-clone materialization and R2/S3 hub items below are shipped; the rest remain planned:
 
-- **Eager materialization (`EAGER-*`)**: `devstrap sync --hydrate-eager` (planned default) clones the whole `~/Code` tree up front via blobless/partial clone — no FUSE, placeholder, or lazy-VFS layer (StrapFS stays deferred). After sync the full tree is present on disk.
+- **Eager materialization (`EAGER-*`)**: `devstrap sync` (shipped) clones the whole `~/Code` tree up front via blobless/partial clone as the default behavior (`--namespace-only` opts out) — no FUSE, placeholder, or lazy-VFS layer (StrapFS stays deferred). After sync the full tree is present on disk.
 - **Two-plane zero-knowledge hub (`HUB-*`)**: the hub carries only (a) the signed, HLC-ordered namespace map (event log) and (b) content-addressed `age_blob:<sha256>` ciphertext for env and non-git/draft content. Repo content never traverses the hub — it rides git transport from the existing remote. `hub: r2://<bucket>` (or `s3://`) selects the shipped Cloudflare R2 / S3 backend (`aws-sdk-go-v2` adapter behind `hubFromOptions`) behind one pluggable Hub interface; `--hub-file` stays for tests only. Credentials come from `DEVSTRAP_HUB_S3_*` env/config, never the URI.
 - **Content-type split (`DRAFT-*`)**: env plus non-git/draft folders sync as age-encrypted blobs; `node_modules`/build artifacts are never synced and are rebuilt on hydrate. `hydrate`/`open` extend to `local_git`/`plain_folder`/draft project types; `devstrap promote` walks a folder from plain -> draft -> git (`NOVCS-03`).
 - **Conflicts stay detect-don't-merge**: HLC ordering plus tombstones; `devstrap conflicts` (shipped) surfaces them. Files are never byte-merged.
