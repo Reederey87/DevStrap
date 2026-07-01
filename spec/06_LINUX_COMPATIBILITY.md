@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-30
+last_reviewed: 2026-07-01
 tracks_code: [internal/platform/**, .github/**]
 ---
 # Linux Compatibility Plan
@@ -252,3 +252,36 @@ The 2026-06-28 cloud-sync architecture (`docs/audits/AUDIT_RECOMMENDATIONS_2026-
 - The cloud sync hub (`devstraphub`) is platform-neutral by construction: repo content rides git's own blobless clone/fetch transport from each repo's existing remote and never touches the hub, env/draft content moves as age-encrypted content-addressed `age_blob:<sha256>` blobs, and the namespace map is a signed HLC-ordered event log. None of these planes are OS-specific, so Ubuntu and macOS sync identically (`HUB-*`, `DRAFT-*`). Backend is Cloudflare R2 from the start, pluggable behind one Hub interface, with a file-backed local backend kept only for tests — see `07_NAMESPACE_AND_SYNC_MODEL.md` and `13_CLI_DAEMON_API.md`.
 - `devstrap sync` materializes eagerly (blobless/partial clone-everything up front; `node_modules`/build artifacts are never synced and are rebuilt on hydrate). There is no FUSE/placeholder/lazy-VFS layer in this design on either platform; StrapFS (the "Linux future virtual filesystem" section above) stays explicitly deferred (`EAGER-*`).
 - The native systemd daemon and native inotify watcher remain deferred OS layers; the portable foreground CLI is the supported Ubuntu entry point this cycle.
+
+## Pass 6 audit recommendations (2026-07-01)
+
+From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
+
+### P6-XP-04 — headless Linux keychain-`unavailable` heuristic mints a divergent identity, wedging sync
+
+**Problem.** On headless Linux — the exact cron/systemd-unit target of the deferred `service install` work — the Secret Service is session-scoped, so any event-stamping command run without `DBUS_SESSION_BUS_ADDRESS` produces a `"dbus"`/`"connection refused"` error. `keychainUnavailable` (`internal/devicekeys/devicekeys.go:414-430`) classifies these by substring, `loadSecret` (`devicekeys.go:394-396`) maps them to `os.ErrNotExist`, and `EnsureSigning` (`devicekeys.go:180-204`) mints a brand-new signing identity into `~/.devstrap/keys` without ever consulting the device's already-published `devices.signing_public_key`. The too-late SQL guard in `store.go:2325-2344` then rejects the mismatch after the orphan key file is on disk, permanently wedging every later headless run (`run-loop` aborts after 5 failing ticks) while desktop runs keep working. The same substring heuristic also guards the WCK custody path (`StoreWCK`/`LoadWCK`, `devicekeys.go:291-322`), extending the blast radius to the workspace-key foundation.
+
+**Actionable steps.**
+1. Thread `devices.signing_public_key` into `ensureLocalEventSignature`/`EnsureSigning` and refuse to mint whenever it is already set and the keychain is merely unreachable.
+2. **Keep** the existing Linux D-Bus substring classification (raw `"dbus"`/`"connection refused"` errors from a session-less Secret Service are not `errors.Is`-matchable), and **layer** `errors.Is` against `internal/platform`'s `ErrSecretNotFound`/`ErrUnsupported` sentinels (already `%w`-wrapped at `platform.go:205-213`) on top only where the backend already wraps those errors — do not swap the substring cases out, or the file-store fallback stops on headless Linux and the sync wedge returns.
+3. Apply the identical fix to `StoreWCK`/`LoadWCK` (`devicekeys.go:291-322`).
+4. Record a one-time `key_custody` decision on first successful probe (config/DB field) and honor it on later runs — a prerequisite for the deferred `service install` daemon, whose unit runs in exactly this D-Bus-less context.
+5. Add a headless-Linux regression test simulating a dead D-Bus session on a device with an already-published signing key.
+
+**Example.**
+
+```go
+if storedPub != "" {
+    return fmt.Errorf(
+        "device signing key exists (%s) but keychain is unreachable "+
+            "(session bus missing?); run from your desktop session, or set %s=1 and migrate the key",
+        storedPub, platform.NoKeychainEnv,
+    )
+}
+switch {
+case errors.Is(err, platform.ErrSecretNotFound):
+    return generateAndStore() // key genuinely absent
+case errors.Is(err, platform.ErrUnsupported):
+    return nil, fmt.Errorf("keychain unreachable, refusing to mint a divergent key: %w", err)
+}
+```

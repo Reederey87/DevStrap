@@ -1,14 +1,10 @@
 ---
-last_reviewed: 2026-06-30
-tracks_code: [cmd/**, internal/**, .github/**, AGENTS.md, README.md, go.mod, go.sum, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md]
+last_reviewed: 2026-07-01
+tracks_code: [cmd/**, internal/**, .github/**, AGENTS.md, README.md, go.mod, go.sum, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md]
 ---
 # DevStrap — Start Here
 
-> A second-pass design & implementation audit (2026-06-27) is recorded at the repo root in `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md`. It drives the new workstreams referenced throughout the specs: cross-machine working-state sync, non-VCS/remote-less project support, forge-agnostic PR creation, and the zero-knowledge sync hub.
-
-> A cloud-sync architecture pass (2026-06-28) is recorded at the repo root in `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`. It extends — does not revert — the 2026-06-27 audit, and pins the "Dropbox experience for code" model: `devstrap sync` eagerly reconstructs the whole `~/Code` tree (blobless-clone repos from their existing remotes + pull age-encrypted env/draft blobs + hydrate env); file-sync is split by content type and never blanket-syncs `.git`; the two-plane zero-knowledge hub (signed HLC namespace-map event log + content-addressed encrypted blob store) ships on Cloudflare R2 behind one pluggable Hub interface; cross-platform Go core comes first and StrapFS/FUSE stays explicitly deferred. Its workstream IDs are `EAGER-*`, `DRAFT-*`, `HUB-*`, `XP-*`, and `SCALE-*`. **The `EAGER-*`/`DRAFT-*`/`HUB-01..08`/`XP-*` workstreams from this pass shipped in PR #16.**
-
-> A fourth-pass design & implementation audit (2026-06-28, post-PR-#16) is recorded at the repo root in `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md`. It audits the *now-shipped* cloud-sync system (not a re-plan) across six dimensions — Security & Cryptography (`SEC-*`), Sync Engine & Data Model (`SYNC-*`), Cloud Hub & Scalability (`HUB-09..16`, continuing the shipped `HUB-01..08` series), Git Materialization & Agents (`GIT-*`), Code Quality & Testing (`QUAL-*`), and Product/UX & New Features (`PROD-*`) — with 44 grounded findings. Its headline imperative: harden the hub's zero-knowledge guarantees (encrypt the namespace map, verify blob hashes on fetch, make revocation real) and bound sync-log growth (compaction/snapshot, GC) **before** the R2 backend is switched on, then grow the product surface (`devstrap clone`, a graded `doctor --fix`, a `service install` daemon).
+> Audit history and the open backlog live in `docs/audits/README.md`; the latest pass is `docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`. The sixth pass (2026-07-01, trunk `8c739b8`) produced 43 findings tracked in that ledger.
 
 "Workspace Passport" is the core-concept tagline — the portable, managed code namespace that appears identically on every device — not a separate product name (see `spec/adr/0001-product-naming.md`).
 
@@ -128,7 +124,7 @@ Implemented in this repository:
 
 - Go module: `github.com/Reederey87/DevStrap`.
 - CLI entrypoint: `cmd/devstrap`.
-- Commands: `version`, `init`, `scan`, `add`, `clone`, `hydrate`, `open`, `sync --hub-file`, `hub gc`, `materialize`, `draft snapshot create`, `run-loop`, `worktree new/status/finalize/list/remove/cleanup/unlock`, `env capture/hydrate/bind/rotate`, `run`, `agent run/list/show/pr`, `devices enroll/list/approve/revoke/lost/rename`, `conflicts list/show/resolve`, `status` (`--watch`), `doctor` (`--remote`), and `db migrate/status/backup/down`.
+- Commands: `version`, `init`, `scan`, `add`, `clone`, `hydrate`, `open`, `sync --hub-file`, `hub gc`, `materialize`, `draft snapshot create`, `run-loop`, `worktree new/status/finalize/list/remove/cleanup/unlock`, `env capture/hydrate/bind/rotate`, `run`, `agent run/list/show/pr`, `devices enroll/list/approve/revoke/lost/rename/recipient`, `conflicts list/show/resolve`, `status` (`--watch`), `doctor` (`--remote`), and `db migrate/status/backup/down`.
 - Structured `slog` setup with CLI/env log-level control, secret-key/value redaction helpers, and no whole-context log attributes.
 - Local state package with embedded Goose SQLite migrations.
 - SQLite open path with per-connection pragmas, WAL, busy timeout, asserted foreign-key enforcement, startup `foreign_key_check`, `0600` database mode, and single-writer pool.
@@ -145,13 +141,13 @@ Implemented in this repository:
 - Thin generic agent runner that creates a fresh worktree, runs explicit argv commands with a sanitized no-secret default environment and wrapper-level command/file path policy, captures a `0600` log, records `agent_runs`, summarizes Git status/diff, and gates `agent pr` on the recorded base before pushing and creating a forge-aware PR/MR when the relevant CLI is available (`gh`/`glab`/`tea`) or printing a compare URL for unsupported forges.
 - Device trust-state CLI for listing, renaming, approving, revoking, and marking non-local devices lost, with refusal to revoke the current local device.
 - In-process/file-backed sync spike with mutex-protected HLC send/receive, persisted local HLC/sequence stamping, local event signatures, signed-event verification when the source signing key is known, logical-counter overflow handling, clock-skew rejection, append-only event helpers, HLC-gated project delete tombstones, deterministic replay ordering, duplicate event idempotency, and order-independent same-path/different-remote conflict reconciliation.
-- User-facing `devstrap sync --hub-file <path>` for the file-backed test hub; `add` and `scan --adopt` stamp local project events, sync pushes local events, pulls hub events, applies namespace events idempotently, and reports that hydration/fetch reconciliation remains future work.
+- User-facing `devstrap sync --hub-file <path>` (or `hub: r2://<bucket>`); `add` and `scan --adopt` stamp local project events, sync pushes local events, pulls hub events, applies namespace events idempotently, and then eagerly materializes the tree — blobless/partial-cloning every repo, extracting draft blobs, and hydrating env (EAGER-01/02).
 - Value-level secret redaction in `internal/redact` (a `Secret` capability type plus URL/userinfo stripping, a token-shape scrubber, and a line-buffering scrubbing writer) wired into sync event payloads, CLI error output, the persisted agent log, and slog attributes.
 - Scan boundary hardening: only validated remotes are persisted, escaping symlinks are typed and hard-excluded with use-time revalidation before materialization, and `scan --quarantine` isolates secret-looking files in a dated `0600` quarantine.
 - Authoritative default-branch resolution for fresh worktrees (`ls-remote --symref` with `set-head --auto` repair and a non-authoritative warning), `worktree cleanup --force`, `worktree unlock <path>`, and `doctor` repo-lock reporting.
 - Sync apply-path clock-skew quarantine, local-clock advance on receive, `project.renamed` handling, delete-vs-dirty conflicts, and tombstone GC; plus `secret_bindings.needs_rotation` flagging on device revoke/lost surfaced in `doctor`.
 - A `DEVSTRAP_NO_KEYCHAIN` gate forcing the file-backed key store for headless/CI runs.
-- Focused tests for `internal/cli`, `internal/config`, `internal/git`, `internal/logging`, `internal/pathkey`, `internal/redact`, `internal/scan`, `internal/specdrift`, `internal/sync`, and `internal/state`, plus a `rogpeppe/go-internal` testscript end-to-end harness exercising `cmd/devstrap` through the real binary.
+- Focused tests for every internal package except `internal/id` (which is a trivial ID generator), plus a `rogpeppe/go-internal` testscript end-to-end harness exercising `cmd/devstrap` through the real binary.
 - Spec frontmatter and a Go-based `cmd/spec-drift` CI gate that maps changed code/config paths to tracked spec files and requires the work log on code/spec/doc changes, plus a command-doc drift test that keeps the spec command list in sync with the binary, and a product-naming ADR at `spec/adr/0001-product-naming.md`.
 - README, MIT license, `.gitignore`, GitHub Actions CI with separate spec-drift, test, and golangci-lint jobs, `CONTRIBUTING.md`, `SECURITY.md`, `CODEOWNERS`, Dependabot, issue/PR templates, and concise `AGENTS.md`.
 
@@ -197,9 +193,8 @@ devstrap open work/nclh/foc-models --cursor
 devstrap worktree new work/nclh/foc-models --fresh-upstream --name route-tests
 devstrap env capture work/nclh/foc-models .env
 devstrap env hydrate work/nclh/foc-models --write .env.local
-devstrap sync   # today: namespace-map reconcile + --hub-file spike.
-                # planned (EAGER-*/HUB-*): eagerly blobless-clone every repo and pull
-                # encrypted env/draft blobs so the whole ~/Code tree materializes.
+devstrap sync   # shipped: pushes/pulls signed, envelope-encrypted events (--hub-file or hub: r2://<bucket>),
+                # then eagerly blobless-clones every repo, extracts draft blobs, and hydrates env (EAGER-01/02).
 ```
 
 The first killer loop (eager-clone Workspace Passport):

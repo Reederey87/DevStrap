@@ -1,6 +1,6 @@
 ---
-last_reviewed: 2026-06-30
-tracks_code: [cmd/**, internal/**, .github/**, docs/audits/AUDIT_RECOMMENDATIONS.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md]
+last_reviewed: 2026-07-01
+tracks_code: [cmd/**, internal/**, .github/**, docs/audits/AUDIT_RECOMMENDATIONS.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md]
 ---
 # MVP Roadmap and Backlog
 
@@ -536,3 +536,15 @@ Workstreams added by the cloud-sync architecture pass (`docs/audits/AUDIT_RECOMM
 - **Mac daemon + native FSEvents watcher and Linux native systemd/inotify adapters** — portable Go core first (`XP-*`); native service work stays behind the Milestone 5/6 entry gates.
 - **Multi-user / multi-tenant build-out (`SCALE-*`)** — documented direction only; nothing built this cycle.
 - Out of scope for these docs: which LLM/agent API the runner uses (a separate concern, deliberately not specified here).
+
+### Pass 6 backlog (2026-07-01)
+
+The sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`; index in `docs/audits/README.md`) verified the shipped system against trunk `8c739b8`. Five **P1 must-fix** findings form the near-term wave; land them before broadening the product surface further:
+
+- **P6-SEC-01** — close the identified gap in the zero-knowledge / recipient-set enforcement path so revoked or non-approved recipients cannot decrypt current blobs.
+- **P6-SYNC-01** — fix the sync-engine correctness issue in event ordering/apply so replay stays deterministic and idempotent across devices.
+- **P6-HUB-01** — harden the R2/S3 hub adapter (keying, conditional puts, or GC/retention path) against the identified data-integrity/loss risk.
+- **P6-GIT-01** — correct the git materialization / worktree base-resolution defect so agent bases never resolve from stale or incorrect refs.
+- **P6-DATA-01** — repair the identified SQLite schema/migration or data-model invariant so state stays consistent.
+
+P6-DOC-02's audit-ledger reconciliation was applied this cycle (the `docs/audits/` status ledger and cross-references were brought back in line with shipped state).

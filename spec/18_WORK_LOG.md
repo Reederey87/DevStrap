@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-30
+last_reviewed: 2026-07-01
 tracks_code: [**]
 ---
 # Work Log
@@ -26,6 +26,26 @@ Follow-ups:
 ```
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
+
+## 2026-07-01 — Sixth-pass design & implementation audit (post-PR-#25)
+
+Changed:
+- Added `docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`: a 43-finding sixth-pass audit (P1=5, P2=25, P3=13) of trunk `8c739b8` (PR #25 — live R2 hub + envelope-encryption foundation). Produced by a verification-driven nine-dimension multi-agent workflow (SEC/SYNC/HUB/GIT/CLI/DATA/QUAL/XP/DOC): every candidate finding was adversarially re-verified against the code (several by building/probing) and novelty-checked against the open backlog; ~22 candidates were refuted or dropped as duplicates. Six exa-backed best-practice research topics anchor the recommendations (local-first sync, e2e crypto, CLI/Cobra, object-store logs, Go supply-chain, git automation) with real source URLs; an Appendix maps P6 findings to the still-open P4/P5 backlog.
+- Headline findings: `P6-SEC-01`/`P6-SYNC-01` (P1 — the envelope layer still trusts the hub: unverified `device.key.granted` ingestion, and a single bad event aborts the whole `ApplyEvents` batch and wedges the pull cursor); `P6-HUB-01`/`P6-DATA-01` (P1 — the now-live hub GC deletes live draft blobs; the origin never records its own `draft_snapshots` row); `P6-GIT-01` (P1 — a universal 2-minute git timeout, classified retryable, silently breaks eager materialization of large repos).
+- Reconciled the audit ledger (`docs/audits/README.md`) per convention #3: added the pass-6 index row + open backlog (43 rows), moved fully-shipped `P4-SEC-02` into a new *Recently shipped* section, corrected `P4-SEC-05` to *partial* (SHA-pin only), and scoped `P4-SEC-07` to its open remainder. (This applies `P6-DOC-02`.)
+- Wove the verified recommendations into 16 spec files, each with a `## Pass 6 audit recommendations (2026-07-01)` section carrying per-finding actionable steps + concrete code/schema/command examples. Applied the pure-doc corrections directly: `P6-DOC-03` (spec/00 stale "planned" sync comment → shipped eager-clone; added `devices recipient`; blockquote chain → single ledger pointer), `P6-DOC-01` (spec/13 status block → R2/S3 Implemented; documented `env rotate`/`hub gc`), and `P6-DOC-04` (added `internal/workspacekeys/**` to spec/07/09/15 `tracks_code`). Added the new audit file to the `tracks_code` of spec/00/12/14/17 and the six research URLs to spec/17. Bumped `last_reviewed` to 2026-07-01 on every touched spec.
+- No Go code changed — this is a docs/spec-only cycle; the findings themselves remain open backlog for future implementation PRs.
+
+Validated:
+- `gofmt -l cmd internal` (clean — no Go changed)
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/cli ./internal/state ./internal/specdrift -run 'TestEveryCommandIsDocumented|TestMigrationsDocumented|.' -count=1` (content-staleness + specdrift green; no command/migration reference dropped)
+- `GOCACHE=/tmp/devstrap-gocache go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run`
+- `GOCACHE=/tmp/devstrap-gocache go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
+
+Follow-ups:
+- Implement the pass-6 backlog, near-term wave first: `P6-SEC-01`, `P6-SYNC-01`, `P6-HUB-01`, `P6-GIT-01`, `P6-DATA-01` (the five P1s), then the P2 cluster. All 43 tracked in `docs/audits/README.md`.
+- Work-log rotation (this file is now 1,260+ lines): rotate older cycles into a dated archive (`P6-DOC-02` recommends promoting this to a tracked backlog row).
 
 ## 2026-06-30 — Envelope-encrypt the namespace-map event log (P4-SEC-02 + P4-SEC-07 foundation)
 

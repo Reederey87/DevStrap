@@ -1,6 +1,6 @@
 ---
-last_reviewed: 2026-06-30
-tracks_code: [internal/childenv/**, internal/cli/env.go, internal/devicekeys/**, internal/envbundle/**, internal/envfile/**, internal/platform/**]
+last_reviewed: 2026-07-01
+tracks_code: [internal/childenv/**, internal/cli/env.go, internal/devicekeys/**, internal/envbundle/**, internal/envfile/**, internal/platform/**, internal/workspacekeys/**]
 ---
 # Secrets and Environment Design
 
@@ -348,3 +348,57 @@ secrets:
 - **SECR-04**: Key custody fallback (`HybridStore`) now gates file storage on `IsKeychainUnavailable(err)`; a present-but-failing keychain fails closed. `slog.Warn` fires when the file fallback is taken.
 - **SECR-05**: `env hydrate` calls `ensureIgnored` before writing the secret content.
 - **CODE-04**: `writeEnvBlob` uses named return + deferred Close observation + `file.Sync()` for durability.
+
+## Pass 6 audit recommendations (2026-07-01)
+
+From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
+
+### P6-GIT-03 — Dependency rebuild runs untrusted postinstall scripts after `.env` hydration
+
+**Problem.** `materializeGitRepo` calls `hydrateProjectEnv` (writing cleartext `.env` into `localPath`) *before* `runRebuildCommand`, which runs `npm ci`/`pnpm install`/etc. with `HOME: dir` and discarded output (`internal/cli/materialize.go:198,205-208,361-362,371`), so a malicious postinstall can `cat $HOME/.env` at the freshly decrypted secrets with no forensic trail. The env-var gate is not the per-project `rebuild_on_hydrate: ask|always|never` and no 0600 log exists (spec/08:105,108).
+
+**Actionable steps.**
+1. Swap the calls so `rebuildDependencies` runs before `hydrateProjectEnv` in `materializeGitRepo`.
+2. Capture rebuild stdout/stderr to a 0600 log under `~/.devstrap/logs/rebuilds/<project>.log`.
+3. Implement the per-project `materialization.rebuild_on_hydrate` policy or reconcile spec/08:105 with the env-var gate.
+4. Test that `.env` does not exist at rebuild time.
+
+**Example.**
+```go
+// materializeGitRepo: rebuild BEFORE hydrating secrets into the tree
+if err := rebuildDependencies(ctx, dir); err != nil { /* logged to 0600 log */ }
+if err := hydrateProjectEnv(ctx, project, dir); err != nil { return err }
+```
+
+### P6-DATA-02 — `ClearRotationForProject` filters on a non-existent `env_profiles.namespace_id`
+
+**Problem.** The one-arg `devstrap env rotate <path>` (flag-clear-only) runs a subquery `SELECT id FROM env_profiles WHERE namespace_id = ?`, but `env_profiles` has no `namespace_id` column (`internal/state/store.go:1632-1637`); the link is `namespace_entries.env_profile_id`. Every invocation fails with `no such column: namespace_id` → "clear rotation for project: SQL logic error"; only `env rotate --all` is tested.
+
+**Actionable steps.**
+1. Join through `namespace_entries` instead of the phantom column.
+2. Add a per-project store test (capture → `MarkEncryptedBindingsNeedingRotation` → `ClearRotationForProject` → assert cleared).
+3. Add a CI lint that `db.Prepare`s every static query in `store.go` against a migrated in-memory DB.
+
+**Example.**
+```sql
+UPDATE secret_bindings SET needs_rotation = 0, updated_at = ?
+WHERE needs_rotation = 1
+  AND env_profile_id IN (
+    SELECT env_profile_id FROM namespace_entries
+    WHERE id = ? AND env_profile_id IS NOT NULL);
+```
+
+### P6-DATA-04 — `db backup` produces an incomplete, unrestorable workspace backup
+
+**Problem.** `Backup` is `VACUUM INTO` + chmod + `validateBackup` — the SQLite file only (`internal/state/store.go:292-306`). Encrypted env values live outside the DB as `~/.devstrap/blobs/<hash>.age` (local-only per `P5-SEC-04`, `blob_gc.go:53-56`) and key fallback (age/signing identities, PR-#25 `wck-<ws>-<epoch>.key`) lives in `<statedir>/keys`; there is no restore command, yet `doctor.go:203-205` recommends "restore from a `devstrap db backup`." Restoring only `state.db` leaves dangling `age_blob:` refs and unrecoverable secrets.
+
+**Actionable steps.**
+1. Ship `devstrap db backup --full <out.tar>` (state.db + referenced `blobs/` + `keys/` when file-fallback active + keychain export/escrow in default mode, all 0600) and `devstrap db restore <in>` (refuse over a non-empty state dir without `--force`).
+2. Add a doctor "dangling blob refs" check over `AllBlobRefs` (stat local blob, fall back to hub `HasBlob` for draft refs).
+3. Fix the `doctor.go:203-205` remedy text once `--full` exists.
+
+**Example.**
+```bash
+devstrap db backup --full ~/devstrap-recovery.tar   # state.db + blobs/ + keys/ + keychain escrow (0600)
+devstrap db restore ~/devstrap-recovery.tar         # refuses non-empty state dir without --force
+```

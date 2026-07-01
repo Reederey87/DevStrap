@@ -11,22 +11,84 @@ This directory holds DevStrap's chronological design & implementation audits. **
 | 1 | (initial) | [`AUDIT_RECOMMENDATIONS.md`](AUDIT_RECOMMENDATIONS.md) | First-pass design & implementation review | — | Largely implemented / superseded by later passes |
 | 2 | 2026-06-27 | [`AUDIT_RECOMMENDATIONS_2026-06-27.md`](AUDIT_RECOMMENDATIONS_2026-06-27.md) | Second pass: CI (`CI-*`), non-VCS/remote-less (`NOVCS-*`), forges (`FORGE-*`), working-state sync, zero-knowledge hub | 65 | Largely implemented / superseded |
 | 3 | 2026-06-28 | [`AUDIT_RECOMMENDATIONS_2026-06-28.md`](AUDIT_RECOMMENDATIONS_2026-06-28.md) | Cloud-sync architecture: `EAGER-*`, `DRAFT-*`, `HUB-01..08`, `XP-*`, `SCALE-*` | workstreams | `EAGER-*`/`DRAFT-*`/`HUB-01..08`/`XP-*` shipped (PR #16); `SCALE-*` documented-not-built |
-| 4 | 2026-06-28 | [`AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md`](AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md) | Fourth pass: audit of the now-shipped cloud-sync system | 44 (P1=17, P2=23, P3=4) | ~19 shipped (PR #20), ~25 open — see below |
-| 5 | 2026-06-29 | [`AUDIT_RECOMMENDATIONS_2026-06-29_PASS5.md`](AUDIT_RECOMMENDATIONS_2026-06-29_PASS5.md) | Fifth pass: adversarial review of the PASS4 batch + under-examined dimensions + new features | 36 (P1=1, P2=12, P3=23) | Open — see below |
+| 4 | 2026-06-28 | [`AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md`](AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md) | Fourth pass: audit of the now-shipped cloud-sync system | 44 (P1=17, P2=23, P3=4) | ~22 shipped/partial across PRs #20/#23/#25 (incl. P4-SEC-02, P4-SEC-07 foundation, P4-SEC-05 partial); remainder open — see below |
+| 5 | 2026-06-29 | [`AUDIT_RECOMMENDATIONS_2026-06-29_PASS5.md`](AUDIT_RECOMMENDATIONS_2026-06-29_PASS5.md) | Fifth pass: adversarial review of the PASS4 batch + under-examined dimensions + new features | 36 (P1=1, P2=12, P3=23) | 32 shipped (PR #23); 4 open — see below |
+| 6 | 2026-07-01 | [`AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`](AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md) | Sixth pass: adversarial audit of the PR #24/#25 batch (live R2 hub + envelope-encryption foundation) + under-examined dimensions | 43 (P1=5, P2=25, P3=13) | Open — see below |
 
 ## Conventions (going forward)
 
 1. **Pass-scoped, globally-unique finding IDs.** Prefix every finding with its pass: `P4-SEC-01`, `P5-HUB-01`, etc. The bare-`ID` scheme of passes 1–4 caused collisions (`GIT-01` denotes a repo-lock bug in pass 2 *and* an empty-checkout bug in pass 4). Pass 5 onward is pass-scoped; this ledger back-labels earlier passes with `P<n>-` where it lists them.
 2. **New audits live in `docs/audits/`**, not the repo root.
 3. **Update this ledger every pass:** add the new file to the index and reconcile the open backlog (move shipped findings out, add new ones).
-4. **Work-log rotation** (`spec/18_WORK_LOG.md`, now 1,100+ lines): rotating older cycles into a dated archive is recommended but deliberately deferred from the consolidation PR to keep it reviewable; track it as a follow-up.
+4. **Work-log rotation** (`spec/18_WORK_LOG.md`, now 1,200+ lines): rotating older cycles into a dated archive is recommended but deliberately deferred to keep each PR reviewable; tracked as a follow-up (see `P6-DOC-02`, which recommends promoting this from a convention bullet into an actual backlog row).
 5. The spec-drift gate (`internal/specdrift`) treats any change under `docs/` as requiring a `spec/18_WORK_LOG.md` entry, and the four specs that track audit files (`spec/00`, `spec/12`, `spec/14`, `spec/17`) point their `tracks_code:` frontmatter at `docs/audits/`.
 
 ## Open backlog — single source of truth for "what's left"
 
-Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely implemented or superseded (see `spec/18_WORK_LOG.md` for the shipped history); the open backlog is concentrated in passes 4 and 5.
+Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely implemented or superseded (see `spec/18_WORK_LOG.md` for the shipped history); the open backlog is concentrated in passes 4, 5, and 6.
 
-> **2026-06-30 — most of Pass 5 shipped.** The PASS5 implementation cycle (`fix/pass5-backlog`, see `spec/18_WORK_LOG.md`) landed **32 of the 36** Pass-5 findings (now including `P5-HUB-01`) plus `P4-SEC-05` and `P4-QUAL-07` (partial). **Still open:** `P5-SYNC-01` (transport-cursor redesign — deferred with design in `spec/07`, latent), `P5-CLI-01` (the `render` seam landed and is wired into `materialize`; full rollout to every leaf command remains), `P5-ARCH-01` (convergence property tests shipped; the formal pure `Decide` extraction remains), and `P4-QUAL-07`'s `contextcheck` (deferred — needs threading a context through the forge chain). `P5-HUB-01` shipped today (branch `fix/p5-hub-01`): the `aws-sdk-go-v2` S3 adapter is wired behind `hub: r2://<bucket>` (`hubFromOptions`), with `DEVSTRAP_HUB_S3_*` env/config credentials, `aws.NopRetryer{}` single-retry, and an env-gated MinIO conformance test (`TestR2MinIOConformance`) plus hermetic `mapS3Error`/conformance unit tests. The PASS4 carried-forward XL items (`SEC-07` envelope encryption **foundation shipped** 2026-06-30, `GIT-03` OS sandbox, `SEC-02` **shipped** 2026-06-30, `SEC-04`, `SYNC-02`/`HUB-11` compaction) — `SEC-07` full workspace-ID pairing and `SEC-08` remain open.
+> **2026-07-01 — Pass 6 landed.** The sixth pass ([`AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`](AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md)) audited trunk `8c739b8` (PR #25) via a verification-driven nine-dimension workflow: 43 findings (P1=5, P2=25, P3=13), each adversarially verified against the code and checked for novelty against this backlog. Headlines: `P6-SEC-01`/`P6-SYNC-01` (the envelope layer still trusts the hub — unverified grant ingestion + whole-batch abort on one bad event), `P6-HUB-01`/`P6-DATA-01` (the now-live hub GC deletes live draft blobs), and `P6-GIT-01` (a universal 2-minute git timeout silently breaks eager materialization of large repos). This pass also **reconciled the ledger** below per convention #3: `P4-SEC-02` moved to *Recently shipped*, `P4-SEC-05` corrected to *partial* (its own finding is `P6-DOC-02`).
+
+<!-- MD028 separator between adjacent dated blockquotes -->
+
+> **2026-06-30 — most of Pass 5 shipped.** The PASS5 implementation cycle (`fix/pass5-backlog`, see `spec/18_WORK_LOG.md`) landed **32 of the 36** Pass-5 findings (now including `P5-HUB-01`) plus `P4-SEC-05` (partial — `goreleaser-action` SHA-pin only) and `P4-QUAL-07` (partial). **Still open:** `P5-SYNC-01` (transport-cursor redesign — deferred with design in `spec/07`, latent), `P5-CLI-01` (the `render` seam landed and is wired into `materialize`; full rollout to every leaf command remains), `P5-ARCH-01` (convergence property tests shipped; the formal pure `Decide` extraction remains), and `P4-QUAL-07`'s `contextcheck` (deferred — needs threading a context through the forge chain). `P5-HUB-01` shipped today (branch `fix/p5-hub-01`): the `aws-sdk-go-v2` S3 adapter is wired behind `hub: r2://<bucket>` (`hubFromOptions`), with `DEVSTRAP_HUB_S3_*` env/config credentials, `aws.NopRetryer{}` single-retry, and an env-gated MinIO conformance test (`TestR2MinIOConformance`) plus hermetic `mapS3Error`/conformance unit tests. The PASS4 carried-forward XL items (`SEC-07` envelope encryption **foundation shipped** 2026-06-30, `GIT-03` OS sandbox, `SEC-02` **shipped** 2026-06-30, `SEC-04`, `SYNC-02`/`HUB-11` compaction) — `SEC-07` full workspace-ID pairing and `SEC-08` remain open.
+
+### Recently shipped (moved out of "still open" per convention #3)
+
+| ID | Sev | Shipped | Note |
+|---|---|---|---|
+| P4-SEC-02 | P1 | PR #25 (`8c739b8`) | Namespace-map event log is envelope-encrypted at rest on the hub (`internal/sync/eventcrypt.go`, `encryptedhub.go`). Fully shipped — no longer open. |
+| P4-SEC-07 | P2 | PR #25 (`8c739b8`), foundation | WCK epoch keyring (`internal/workspacekeys`) + age-wrapped grants + `Rotate` on revoke. Foundation only; **open remainder** tracked below. |
+
+### Pass 6 (2026-07-01) — 40 open; the 3 pure-doc fixes (`P6-DOC-01`/`03`/`04`) were applied in the audit PR
+
+> The `P6-DOC-*` findings are documentation/gate accuracy fixes; their doc portions were applied in the same PR that landed this audit (spec/00, spec/13, spec/07/09/15 `tracks_code`, and this ledger). The remaining 40 findings are open backlog for future implementation PRs.
+
+| ID | Sev | Effort | Finding |
+|---|---|---|---|
+| P6-DATA-01 | P1 | S | Record the origin's own `draft_snapshots` row at create time (one txn with the event) |
+| P6-GIT-01 | P1 | M | Split the git timeout by command class; stop retrying self-imposed deadline kills |
+| P6-HUB-01 | P1 | M | Make `hub gc` sync-first, grace-windowed, and refuse to sweep on a truncated mark set |
+| P6-SEC-01 | P1 | M | Verify grant carrier signatures + refuse WCK overwrite before writing to the keychain |
+| P6-SYNC-01 | P1 | M | Quarantine verification/trust failures per-event instead of aborting the whole batch |
+| P6-CLI-01 | P2 | S | Detect a root change on re-`init`; rewrite config.yaml or refuse |
+| P6-CLI-02 | P2 | S | Gate `scan --adopt` on the scanned root matching the workspace root |
+| P6-DATA-02 | P2 | S | Fix `ClearRotationForProject` to join through `namespace_entries` (`env rotate` always fails today) |
+| P6-DATA-03 | P2 | M | Emit event + state mutation in one transaction at every emission site |
+| P6-DATA-04 | P2 | M | Ship `db backup --full` (blobs + keys) and a restore path/runbook |
+| P6-DOC-01 | P2 | S | Fix spec/13's stale status block; document `env rotate`; path-anchor the command gate _(doc portion applied this PR; command-gate test hardening open)_ |
+| P6-DOC-02 | P2 | S | Reconcile the audit ledger's P4-SEC-05 contradiction + convention-#3 violation _(applied this PR)_ |
+| P6-GIT-02 | P2 | S | Diff `agent` runs against the recorded base SHA, not just the working tree |
+| P6-GIT-03 | P2 | S | Run dependency rebuild before `.env` hydrate; capture a 0600 log |
+| P6-GIT-04 | P2 | M | Honor the stored `lfs_policy` on materialize/hydrate (mirror the worktree path) |
+| P6-GIT-05 | P2 | S | Clean up the worktree+branch on any failure after `git worktree add` |
+| P6-HUB-02 | P2 | M | Implement the promised keychain/`op://`/age-blob S3 credential resolution |
+| P6-QUAL-01 | P2 | S | Exclude catch-all specs (`**`) from the mapped-spec drift check |
+| P6-QUAL-02 | P2 | S | Add a `verify` job gating release on tests + vuln + main-ancestry |
+| P6-QUAL-03 | P2 | S | Run the MinIO hub conformance test in a CI job |
+| P6-SEC-02 | P2 | M | Founder/join split: joiners don't self-bootstrap epoch 1; key WCKs by (epoch,kid) |
+| P6-SEC-03 | P2 | L | Separate transient- from permanently-missing epoch; don't truncate-forever |
+| P6-SYNC-02 | P2 | M | Split skip classes by recoverability; quarantine + surface skipped events |
+| P6-SYNC-03 | P2 | S | Make the fail-closed window sticky once enrollment has ever happened |
+| P6-SYNC-04 | P2 | S | Bind the full enc.v1 carrier tuple into the AEAD AAD (enc.v2) |
+| P6-XP-01 | P2 | S | Delete `ShouldPruneDir`'s bare-name fallback; make relSlash authoritative |
+| P6-XP-02 | P2 | M | Align the ignore compiler with real gitignore semantics |
+| P6-XP-03 | P2 | M | Implement `run-loop`'s advertised scan stage (or fix the docs) |
+| P6-XP-04 | P2 | M | Never mint a WCK when one is published; type-check keychain errors |
+| P6-XP-05 | P2 | M | Keep `scan` offline; defer `set-head --auto` to materialization |
+| P6-CLI-03 | P3 | S | Wire Cobra usage errors to `exitUsage=10`; fix the spec table |
+| P6-CLI-04 | P3 | S | Make `--quiet` actually suppress progress chatter (or fix its help) |
+| P6-CLI-05 | P3 | S | Document the shipped `r2://` hub path; stop steering users to the file hub |
+| P6-DATA-05 | P3 | S | Add `idx_events_device_hlc` to serve the hot push/doctor query |
+| P6-DATA-06 | P3 | S | Add a single-`local`-device partial unique index + race-tolerant `EnsureDevice` |
+| P6-DOC-03 | P3 | S | Fix spec/00's re-drift (planned-sync comment, command/test inventories) _(applied this PR)_ |
+| P6-DOC-04 | P3 | S | Add `internal/workspacekeys/**` to the spec/07/09/15 `tracks_code` frontmatter _(applied this PR; new-package mapping gate test open)_ |
+| P6-GIT-06 | P3 | S | Gate `agent pr` on run status; reconcile crash-stuck `running` rows |
+| P6-HUB-03 | P3 | S | Fan-out `R2Hub.Push` in HLC-ordered waves |
+| P6-HUB-04 | P3 | M | Give the retention floor a signed hub-side marker object |
+| P6-QUAL-04 | P3 | S | Stub `ssh` via a PATH shim so the alias tests are hermetic |
+| P6-QUAL-05 | P3 | S | Scope CI push triggers to main + add `concurrency` cancellation |
+| P6-XP-06 | P3 | S | Compile the scan prune matcher from the root `.devstrapignore` |
 
 ### Pass 5 (2026-06-29) — 32 shipped (2026-06-30), 4 open: `P5-SYNC-01`, `P5-CLI-01`, `P5-ARCH-01` (partial), `contextcheck`
 
@@ -73,10 +135,10 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 
 | ID | Sev | Finding |
 |---|---|---|
-| P4-SEC-02 | P1 | Encrypt namespace-map events at rest on R2 (stop leaking paths/remotes/device timelines) — **shipped 2026-06-30** (`fix/p4-sec-02-envelope-encryption`) |
-| P4-SEC-04 | P1 | Close the bootstrap window: fail-closed enrollment verification |
-| P4-SEC-05 | P1 | Sign release binaries (cosign/SLSA/SBOM); pin `goreleaser-action` to a commit SHA |
-| P4-SEC-07 | P2 | Envelope encryption (KEK/DEK) + key rotation + forward secrecy — **foundation shipped 2026-06-30** (`fix/p4-sec-02-envelope-encryption`: WCK epoch keyring + age-wrapped grants + Rotate on revoke; full workspace-ID pairing across devices remains) |
+| P4-SEC-02 | — | **Shipped PR #25** — moved to _Recently shipped_ above (was here in violation of convention #3; fixed by `P6-DOC-02`). |
+| P4-SEC-04 | P1 | Close the bootstrap window: fail-closed enrollment verification (deepened by `P6-SEC-01`/`P6-SYNC-01`) |
+| P4-SEC-05 | P1 | Sign release binaries — **partial 2026-06-30**: `goreleaser-action` SHA-pinned (`release.yml`); cosign keyless signing + SLSA provenance + SBOM still open (fold into `P4-QUAL-05`; see `P6-QUAL-02`) |
+| P4-SEC-07 | P2 | Envelope encryption (KEK/DEK) + key rotation + forward secrecy — **foundation shipped PR #25** (WCK epoch keyring + age-wrapped grants + Rotate on revoke); open remainder = full workspace-ID pairing across devices + periodic (not just revoke-triggered) rotation (see `P6-SEC-02`/`P6-SEC-03`) |
 | P4-SEC-08 | P2 | Hosted-mode prefix-scoped/temporary credentials + object immutability |
 | P4-SYNC-02 | P1 | Event-log compaction + snapshot exchange (events table grows forever) |
 | P4-SYNC-03 | P2 | Raise `epochFloorMS` above 0; past-direction quarantine |

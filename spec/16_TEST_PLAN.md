@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-30
+last_reviewed: 2026-07-01
 tracks_code: [cmd/**, internal/**, .github/**, go.mod, go.sum]
 ---
 # Test Plan
@@ -494,3 +494,90 @@ New test workstreams from `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` (clo
 - **Device revocation re-encryption** (device-trust): revoke -> affected blobs re-encrypted to the reduced recipient set and secrets flagged for rotation; signed-event verification must **fail closed** once enrollment exists (today `SECU-03` fails open).
 - **Cross-platform parity** (`XP-*`): the eager-clone, draft-sync, and hub-backend suites run identically on macOS and Ubuntu from the one Go binary.
 - **Deferred:** OS-native daemon/StrapFS sync paths and multi-user/multi-tenant hub scaling (`SCALE-*`) are documented-not-built; no tests required this cycle.
+
+## Pass 6 audit recommendations (2026-07-01)
+
+From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
+
+### P6-QUAL-01 — Spec-drift mapped-spec check is vacuously satisfied by the mandatory work-log entry
+
+**Problem.** `Check()` (`internal/specdrift/specdrift.go:76-83`) emits a mapped-spec finding only when *no* mapped spec changed, but `spec/18_WORK_LOG.md:3` declares `tracks_code: [**]`, so spec/18 is in `mapped` for every changed file — and touching spec/18 is already mandatory. The entire path→spec mapping table is therefore dead in practice.
+
+**Actionable steps.**
+1. Exclude `**`-matched specs (record the matched pattern; `if pattern == "**" { continue }`) from `mapped` before `anyChanged`, and add a regression test.
+2. When a file has any specific (non-broad) mapping, require one of those specific specs to change.
+3. Assert `[internal/cli/root.go, spec/18_WORK_LOG.md]` produces a drift finding.
+
+```go
+// specdrift_test.go — regression guard
+res := Check(Inputs{ChangedFiles: []string{"internal/cli/root.go", "spec/18_WORK_LOG.md"}, RequireWorkLog: true})
+// must fail: spec/13 (internal/cli) was NOT touched; the work log alone must not satisfy the mapping
+if res.OK() { t.Fatal("mapped-spec drift for internal/cli was vacuously satisfied by spec/18") }
+```
+
+### P6-QUAL-02 — Release workflow publishes binaries from any `v*` tag with zero verification
+
+**Problem.** `.github/workflows/release.yml:12-33` is a single `goreleaser` job (`contents: write`, no `needs:` gate, no test/lint/govulncheck), and `ci.yml` has no `tags:` trigger, so a tag never validated on a branch ships signed GitHub Release binaries unverified.
+
+**Actionable steps.**
+1. Add a `verify` job and gate goreleaser on it (`needs: verify`): `fetch-depth: 0`, assert the tagged commit is contained in `origin/main` or `release/*`, run `go vet ./... && go test -race ./...` and `govulncheck ./...`.
+2. Add a GitHub tag-protection ruleset for `v*`; optionally publish SLSA provenance / cosign-signed checksums.
+
+```yaml
+verify:
+  runs-on: ubuntu-latest
+  steps:
+    - uses: actions/checkout@<pinned-sha>
+      with: { fetch-depth: 0 }
+    - run: git branch -r --contains "$GITHUB_SHA" | grep -Eq 'origin/(main|release/)'
+    - run: go vet ./... && go test -race ./... && govulncheck ./...
+release:
+  needs: verify
+```
+
+### P6-QUAL-03 — The S3/R2 adapter's only real-backend integration test never runs in CI
+
+**Problem.** `TestR2MinIOConformance` (`internal/hub/r2_minio_test.go:31-38`) skips unless `DEVSTRAP_HUB_S3_ENDPOINT` is set; `ci.yml` sets no `DEVSTRAP_HUB_S3_*` and boots no MinIO, so the production `aws-sdk-go-v2` adapter is only ever exercised against the in-memory `memS3` fake — conditional-put/`If-None-Match`, pagination, `mapS3Error`, and checksum regressions pass CI.
+
+**Actionable steps.**
+1. Add a Linux CI job that boots MinIO via `docker run` (a `services:` block can't pass the `server` command), digest-pinned to a 2024+ image (`If-None-Match: *` support), and runs the test unmodified with `DEVSTRAP_HUB_S3_*` set. `go test` stays hermetic, satisfying the "default CI hermetic" constraint.
+2. Run non-required first (Docker flakiness); promote to a required check once stable.
+
+```bash
+docker run -d -p 9000:9000 minio/minio@sha256:<pinned> server /data
+DEVSTRAP_HUB_S3_ENDPOINT=http://localhost:9000 \
+DEVSTRAP_HUB_S3_ACCESS_KEY_ID=minioadmin DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY=minioadmin \
+  go test -run TestR2MinIOConformance ./internal/hub
+```
+
+### P6-QUAL-04 — SSH-alias forge tests shell out to the real `ssh -G`, so the preferred branch is never deterministically tested
+
+**Problem.** `TestResolveSSHHostAlias` (`internal/cli/forge_test.go:106-130`) writes a fixture `~/.ssh/config` but `resolveSSHHostAlias` (`internal/cli/forge.go:154,167-174`) first runs the real `ssh -G`, which reads the machine's real ssh config (pw_dir, not `$HOME`); the test only passes via the Go fallback parser, and the `sshDashGHostName` path has zero coverage and can flip on multi-account machines.
+
+**Actionable steps.**
+1. Add a `stubSSH(t, script)` helper that writes a temp `ssh` script and prepends its dir to `PATH` via `t.Setenv` (covers both `exec.LookPath` and absolute exec).
+2. Test the `ssh -G` branch (`stubSSH` echoing a hostname override) and the fallback (`stubSSH` exiting non-zero) deterministically.
+
+```go
+func stubSSH(t *testing.T, body string) {
+    dir := t.TempDir()
+    os.WriteFile(filepath.Join(dir, "ssh"), []byte("#!/bin/sh\n"+body+"\n"), 0o755)
+    t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+stubSSH(t, `echo "hostname git.acme.com"`) // exercises the ssh -G branch
+stubSSH(t, `exit 1`)                        // forces the fallback parser
+```
+
+### P6-QUAL-05 — CI runs the full 5-job matrix twice per PR commit with no concurrency cancellation
+
+**Problem.** `.github/workflows/ci.yml:3-10` triggers on both `push: branches: ["**"]` and `pull_request` with no `concurrency:` block anywhere, so every in-repo topic-branch commit runs spec-drift + lint + 2×test + vuln twice, and rapid pushes stack uncancelled duplicate matrices.
+
+**Actionable steps.**
+1. Scope `push` to `main` (post-merge coverage) and add a `concurrency:` block that cancels superseded in-progress PR runs.
+
+```yaml
+on: { push: { branches: [main] }, pull_request: {}, schedule: [{cron: "17 6 * * *"}] }
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+```

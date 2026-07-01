@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-28
+last_reviewed: 2026-07-01
 tracks_code: [internal/cli/agent.go, internal/cli/worktree.go, internal/git/**]
 ---
 # Agent Workspaces and Policies
@@ -275,3 +275,37 @@ arun_c11  ui         agent/refactor-c11        old       stale     failed
 - **AGEN-05**: `agentTokenLooksSensitive` now includes `credentials.json`, `service-account*.json`, `*.pem`, `*.key`; deny list expanded with `/.kube`, `/.docker`.
 - **AGEN-06**: Agent PR body scrubbed through `redact.Scrub` before forge submission.
 - **CLI-03**: `agent run` now propagates child exit codes as `100+N`.
+
+## Pass 6 audit recommendations (2026-07-01)
+
+From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
+
+### P6-GIT-02 — diff summary misses committed agent work
+
+**Problem.** `agentDiffSummary` (`internal/cli/agent.go:479-480`) only runs revision-less `git status --short` + `git diff --stat`, so an agent that commits its work records "(no changes)"; `agent show` (`:181`) and the PR body gate (`:504`) then omit the real diff, violating the "diff summary is available" acceptance criterion. The recorded `BaseSHA` (`:97`) is never diffed against.
+
+**Actionable steps.**
+1. Change the signature to take the worktree; diff base-vs-HEAD plus uncommitted residue in labeled sections.
+2. Guard the unborn-HEAD case by falling back when `rev-parse --verify HEAD` fails.
+3. Test: agent command runs `git commit -am x`; assert the summary contains the committed file stat.
+
+**Example.**
+```go
+committed, _ := r.Run(ctx, wt.Path, "diff", "--stat", wt.BaseSHA+"..HEAD")
+uncommitted, _ := r.Run(ctx, wt.Path, "status", "--short")
+// join with labeled "committed:" / "uncommitted:" sections
+```
+
+### P6-GIT-06 — `agent pr` never checks run status
+
+**Problem.** `newAgentPRCommand` (`internal/cli/agent.go:203`) proceeds through drift check, push, and PR creation (`:220-246`) without ever reading `run.Status`, so a failed run (`status='failed'`) opens a PR of broken work; a SIGKILL/crash also leaves the row stuck at `running` (`:95-99`, corrected only at `:112`) with no reconciliation, and that phantom run is also PR-able.
+
+**Actionable steps.**
+1. Reject unless `Status == "complete"` with a `--allow-incomplete` override that warns.
+2. Add an `agent_runs` runner-PID column migration (update spec/12) and have `doctor`/`agent list` sweep dead PIDs to `interrupted`.
+3. Testscript: failed run → `agent pr` exits invalid-config; `--allow-incomplete` proceeds to dry-run.
+
+**Example.**
+```sql
+UPDATE agent_runs SET status='interrupted' WHERE status='running'; -- for dead runner PIDs
+```

@@ -1,6 +1,6 @@
 ---
-last_reviewed: 2026-06-29
-tracks_code: [internal/state/**, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md]
+last_reviewed: 2026-07-01
+tracks_code: [internal/state/**, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md]
 ---
 # SQLite Data Model
 
@@ -519,6 +519,96 @@ devstrap export --encrypted --output devstrap-snapshot.tar.age
 - the **content-addressed encrypted blob store** (env + non-git/draft bundles), indexed locally by `blobs`.
 
 The chosen (`HUB-*`) production backend is **Cloudflare R2** (S3-compatible API, zero egress), keyed under a per-workspace prefix so each workspace's objects are namespaced by `workspace_id` (e.g. `s3://<bucket>/workspaces/<workspace_id>/events/...` and `.../blobs/<sha256>`). Because all payloads are age-encrypted client-side and the map is signed, the backend stores only ciphertext plus a signed map and cannot read code, secrets, or drafts. This gives confidentiality by construction; integrity and availability still require scoped credentials, signed hash-chain verification, snapshots/backups, and retention rules. A **file-backed local backend remains only for tests** (`devstrap sync --hub-file <path>`); there is no NAS-first phase. Repo content never transits the hub — it rides git's own transport via blobless clone/fetch from each repo's existing remote. Hub connection settings (backend kind, bucket, region/endpoint, workspace prefix) are configuration, not schema, and never include plaintext credentials in `state.db`.
+
+## Pass 6 audit recommendations (2026-07-01)
+
+From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
+
+### P6-DATA-01 — Origin never records its own draft snapshot row, so GC deletes the live bundle
+
+**Problem.** `draft.go:92` inserts the `draft.snapshot.created` event but writes no `draft_snapshots` row; the only writer is the sync apply path, which `ApplyEvents` skips for already-present events (`events.go:299`). So on the creating device the blob is referenced by nothing (`LatestDraftSnapshot` nil, `RetainedBlobRefs` omit it), and `sync` local GC plus `hub gc` delete the only copies — permanent data loss on a single device.
+
+**Actionable steps.**
+1. Record the `draft_snapshots` row atomically at create time in one transaction with the event insert (`tx.InsertEvent` + `tx.RecordDraftSnapshotTx`).
+2. Audit `emitSupersedingDraftSnapshot` (`blob_gc.go:181`) for the same missing-row assumption, including the revoke-rewrap loop that walks `DraftBlobRefs`.
+3. Test: create snapshot on A → `sync` + `hub gc` on A → assert `LatestDraftSnapshot` non-nil and the blob survives locally and on the hub.
+
+```go
+store.WithTx(ctx, func(tx *state.Tx) error {
+    if err := tx.InsertEvent(ev); err != nil { return err }
+    return tx.RecordDraftSnapshotTx(ev.NamespaceID, ev.ID, blobRef)
+})
+```
+
+### P6-DATA-02 — `ClearRotationForProject` filters on a non-existent `env_profiles.namespace_id` column
+
+**Problem.** The one-arg `env rotate <path>` (flag-clear-only) subquery in `store.go:1632-1637` references `env_profiles.namespace_id`, which does not exist (the link is `namespace_entries.env_profile_id`), so it fails on every call with `no such column: namespace_id`. Only `env rotate --all` is tested.
+
+**Actionable steps.**
+1. Rewrite the subquery to join through `namespace_entries` and add a per-project store test.
+2. Add a CI lint that `db.Prepare`s every static query in `store.go` against a migrated in-memory DB.
+
+```sql
+UPDATE secret_bindings SET needs_rotation = 0, updated_at = ?
+WHERE needs_rotation = 1 AND env_profile_id IN (
+  SELECT env_profile_id FROM namespace_entries
+  WHERE id = ? AND env_profile_id IS NOT NULL);
+```
+
+### P6-DATA-03 — Event emission and derived-state mutation are dual-written in separate transactions
+
+**Problem.** `add.go:68-92` calls `CreateProjectEvent` (its own `WithTx`) then `UpsertProject` (a second transaction); `scan.go` adopt and both `conflict_resolve.go` sites share the pattern. A crash between the two commits leaves a synced `project.added` event with no `namespace_entries` row on the origin, and `ApplyEvents` (`events.go:299`) never re-applies the origin's own event — silent permanent divergence.
+
+**Actionable steps.**
+1. Add `Tx`-scoped emission helpers (`CreateProjectEventTx` reusing `tx.InsertEvent` + `nextLocalEventStamp` + `tx.UpsertProject`) and wrap every emission site (`add`, `adoptFindings`, both `conflict_resolve.go` sites) in one `WithTx`.
+2. (Optional, defense-in-depth) re-run `applyEventTx` even when `inserted==false`; handlers are idempotent.
+3. Test: simulate a crash between the two commits and assert the origin heals on retry or never diverges.
+
+```go
+store.WithTx(ctx, func(tx *state.Tx) error {
+    if err := tx.CreateProjectEventTx(ev); err != nil { return err }
+    return tx.UpsertProject(project)
+})
+```
+
+### P6-DATA-04 — `db backup` is incomplete: env blobs and file-fallback keys excluded, no restore path
+
+**Problem.** `Backup` (`store.go:292-306`) is `VACUUM INTO` the `state.db` file only. Encrypted env values live outside the DB as `~/.devstrap/blobs/<hash>.age` (env blobs are local-only per `P5-SEC-04`) and key material lives in `<statedir>/keys`, so a restored DB holds dangling `age_blob:` refs; there is no `restore` command and `doctor.go:203-205` wrongly recommends restoring from a backup.
+
+**Actionable steps.**
+1. Ship `db backup --full <out.tar>` bundling `state.db` + referenced `blobs/` + `keys/` (file-fallback) + keychain escrow (age identity + WCK `wck-<ws>-<epoch>.key` files), all `0600`, and a `db restore <in>` (refuse over a non-empty state dir without `--force`).
+2. Add a doctor "dangling blob refs" check that stats each `AllBlobRefs` entry (draft refs falling back to hub `HasBlob`).
+3. Fix the `doctor.go:203-205` remedy text once `--full` exists.
+
+```bash
+devstrap db backup --full ~/.devstrap/backups/state-20260701.tar   # state.db + blobs + keys + escrow
+devstrap db restore ~/.devstrap/backups/state-20260701.tar         # refuses over non-empty state dir without --force
+```
+
+### P6-DATA-05 — No index serves `events(device_id, hlc)`; every push/doctor full-scans the log
+
+**Problem.** `LocalPendingEvents` (`store.go:2682-2687`) filters `device_id = ? AND hlc > ? ORDER BY hlc, id`, but neither `idx_events_order` (leads with `workspace_id`) nor partial `idx_events_device_seq` serves it, so `EXPLAIN QUERY PLAN` reports `SCAN events` + `USE TEMP B-TREE FOR ORDER BY` on a table that grows unbounded (`P4-SYNC-02`).
+
+**Actionable steps.**
+1. Add a migration `idx_events_device_hlc ON events(device_id, hlc, id)` (trailing `id` satisfies the ORDER BY tiebreak) and update the migration list / index inventory in this file; note spec/12 reserves `00014` for `gitstate_mirror`, so renumber accordingly.
+2. Verify `EXPLAIN` reports `SEARCH events USING INDEX` with no temp B-tree.
+
+```sql
+CREATE INDEX idx_events_device_hlc ON events(device_id, hlc, id);
+```
+
+### P6-DATA-06 — No DB invariant enforces a single `local` device; concurrent `init` can fork identity
+
+**Problem.** `EnsureDevice` (`store.go:487-538`) runs a SELECT for `trust_state = 'local'` then, on `ErrNoRows`, an INSERT as two autocommit statements with no flock, so racing `devstrap init` processes can each insert a `local` device. Migration 00006 gives `workspaces` a singleton index but `devices` has no counterpart, and the three `LEFT JOIN devices d ON d.trust_state = 'local'` sites (`store.go:1262,1287,1316`) then row-multiply `ListProjects`.
+
+**Actionable steps.**
+1. Add a partial unique index (with a dedup guard keeping MIN(created_at)) mirroring 00006.
+2. Make `EnsureDevice` transactional/race-tolerant (SELECT+INSERT inside `s.WithTx`, or treat a UNIQUE error as "lost the race" and re-SELECT).
+3. Add a doctor check asserting `SUM(trust_state = 'local') = 1` (note: `COUNT(trust_state='local')` counts every row, since the expression is non-NULL — use `SUM` of the boolean predicate).
+
+```sql
+CREATE UNIQUE INDEX idx_devices_local_singleton ON devices((1)) WHERE trust_state = 'local';
+```
 
 ## Audit implementation notes (2026-06-28)
 
