@@ -605,11 +605,11 @@ From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.m
 
 **Actionable steps.**
 1. Split `init` into founder-bootstrap vs `--join` (empty keyring + `Push` refusal that keeps `ErrMissingWorkspaceKey` when `CurrentEpoch==0`).
-2. Add `kid = hex(sha256(wck)[:8])` to `DeviceKeyGrant` and the `enc.v1` envelope; key the keyring/keystore by `(epoch,kid)` so colliding keys coexist.
+2. Add `kid = hex(sha256(wck))` (the full 32-byte digest, or at least a ≥128-bit / 16-byte prefix — **not** 8 hex chars, which is only 32 bits and not collision-resistant) to `DeviceKeyGrant` and the `enc.v1` envelope; key the keyring/keystore by `(epoch,kid)` so colliding keys coexist.
 3. Reorder Pull-then-Push for keyless devices; add a testscript asserting B's pre-approval project materializes on A after approve.
 
 ```text
-kid = hex(sha256(wck)[:8])   # carry in DeviceKeyGrant + enc.v1 envelope
+kid = hex(sha256(wck))       # full digest (or >=128-bit prefix); carry in DeviceKeyGrant + enc.v1 envelope
 keyring key: (epoch, kid)    # colliding self-minted keys never alias
 ```
 

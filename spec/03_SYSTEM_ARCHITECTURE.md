@@ -452,7 +452,7 @@ for _, wave := range groupByHLCWave(events) { // ascending HLC
 **Problem.** Production wiring always builds `R2Hub{RetentionHLC: 0}` (`internal/cli/hub.go:116`) and `R2Hub.Pull` gates only on that local field (`internal/hub/r2.go:152-154`); nothing reads a retention marker from the hub, so once event-log compaction lands every non-compacting device pulls a silently partial log and permanently diverges.
 
 **Actionable steps.**
-1. Define a per-workspace `workspaces/<ws>/meta/retention.json` marker signed by an approved device's Ed25519 key; `R2Hub.Pull` fetches it first (404 → floor 0, cached per process) and compares before listing.
+1. Define a per-workspace `workspaces/<ws>/meta/retention.json` marker signed by an approved device's Ed25519 key; `R2Hub.Pull` re-fetches and re-validates it on **every** pull (or with a short TTL) — 404 → floor 0 — and **rejects any retention-HLC regression** so a replayed older signed marker can't silently downgrade the floor. Do not cache the floor indefinitely per process.
 2. Give `FileHub`/memS3 the same file-based marker and add a conformance case "pull below a written retention marker → `ErrSnapshotRequired`."
 3. Fold the signed-marker requirement into the `P4-HUB-11` compaction work; verify the signature so a malicious hub can only DoS, not silently truncate.
 

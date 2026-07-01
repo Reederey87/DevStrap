@@ -604,7 +604,7 @@ CREATE INDEX idx_events_device_hlc ON events(device_id, hlc, id);
 **Actionable steps.**
 1. Add a partial unique index (with a dedup guard keeping MIN(created_at)) mirroring 00006.
 2. Make `EnsureDevice` transactional/race-tolerant (SELECT+INSERT inside `s.WithTx`, or treat a UNIQUE error as "lost the race" and re-SELECT).
-3. Add a doctor check asserting `COUNT(trust_state='local') == 1`.
+3. Add a doctor check asserting `SUM(trust_state = 'local') = 1` (note: `COUNT(trust_state='local')` counts every row, since the expression is non-NULL — use `SUM` of the boolean predicate).
 
 ```sql
 CREATE UNIQUE INDEX idx_devices_local_singleton ON devices((1)) WHERE trust_state = 'local';

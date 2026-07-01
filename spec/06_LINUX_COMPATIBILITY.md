@@ -263,7 +263,7 @@ From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.m
 
 **Actionable steps.**
 1. Thread `devices.signing_public_key` into `ensureLocalEventSignature`/`EnsureSigning` and refuse to mint whenever it is already set and the keychain is merely unreachable.
-2. Replace `keychainUnavailable`'s substring matching with `errors.Is` against `internal/platform`'s existing `ErrSecretNotFound`/`ErrUnsupported` sentinels (already wrapped with `%w` at `platform.go:205-213`).
+2. **Keep** the existing Linux D-Bus substring classification (raw `"dbus"`/`"connection refused"` errors from a session-less Secret Service are not `errors.Is`-matchable), and **layer** `errors.Is` against `internal/platform`'s `ErrSecretNotFound`/`ErrUnsupported` sentinels (already `%w`-wrapped at `platform.go:205-213`) on top only where the backend already wraps those errors — do not swap the substring cases out, or the file-store fallback stops on headless Linux and the sync wedge returns.
 3. Apply the identical fix to `StoreWCK`/`LoadWCK` (`devicekeys.go:291-322`).
 4. Record a one-time `key_custody` decision on first successful probe (config/DB field) and honor it on later runs — a prerequisite for the deferred `service install` daemon, whose unit runs in exactly this D-Bus-less context.
 5. Add a headless-Linux regression test simulating a dead D-Bus session on a device with an already-published signing key.

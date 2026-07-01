@@ -324,7 +324,7 @@ From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.m
 **Problem.** `EncryptedHub.Pull` calls `IngestGrant` for every `device.key.granted` event in the raw, unverified hub batch before any signature/trust check (`internal/sync/encryptedhub.go:126-141`; `internal/workspacekeys/keyring.go:229-251`), so a hostile hub can forge a grant wrapping an attacker-chosen WCK to the victim's own recipient — breaking `P4-SEC-02` confidentiality or DoSing decryption.
 
 **Actionable steps.**
-1. Thread the carrier `Event` into `IngestGrant` and add a `Verify`/`VerifyGrant` call gated on `hasEnrolledDevices`; skip (do not ingest) grants whose carrier fails verification once any device is enrolled.
+1. Thread the carrier `Event` into `IngestGrant` and add a `Verify`/`VerifyGrant` call gated on `hasEnrolledDevices`. **Verification must complete before any keyring mutation:** an unverified grant must never reach `StoreWCK`, `RecordKeyEpoch`, or the WCK cache — not even transiently — so a poisoned grant leaves the keystore, cache, and `CurrentKeyEpoch` untouched. Reject-and-skip (do not ingest) once any device is enrolled.
 2. In `IngestGrant`, refuse to change an already-held epoch's key (check store/keychain, not just cache).
 3. Constrain `CurrentKeyEpoch` (`internal/state/store.go:2776`) to epochs reached via a verified grant chain.
 4. Test: a well-formed forged grant to the victim's own recipient is rejected and changes neither the keystore nor `CurrentKeyEpoch`.
