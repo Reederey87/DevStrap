@@ -1,6 +1,6 @@
 ---
-last_reviewed: 2026-06-30
-tracks_code: [internal/childenv/**, internal/cli/**, internal/devicekeys/**, internal/envbundle/**, internal/git/**, internal/hub/**, internal/redact/**, internal/sync/**, internal/logging/**]
+last_reviewed: 2026-07-01
+tracks_code: [internal/childenv/**, internal/cli/**, internal/devicekeys/**, internal/envbundle/**, internal/git/**, internal/hub/**, internal/redact/**, internal/sync/**, internal/logging/**, internal/workspacekeys/**]
 ---
 # Security Threat Model
 
@@ -142,6 +142,18 @@ Residual risk: a malicious approved device can decrypt bundles it is authorized 
 Reality (`SECU-03`/`SECU-05`/`HUB-03`): event signature verification **fails closed once any approved device is enrolled** — `verifyEventSignature` requires a valid signature from a known, approved, non-local device for **all** event types once `hasEnrolledDevices` is true; unknown devices, devices with no signing key, and non-approved devices are rejected (not applied). The local device is exempt from the signing-key requirement (pre-enrollment grace). Destructive event types (`project.deleted`, `project.renamed`) require verification unconditionally. The remaining gap is the **pre-enrollment bootstrap window** (`SEC-04`): before any peer is approved, non-destructive events from unknown devices are accepted so a fresh device can sync its first tree; closing this requires an out-of-band peer-signing-key pinning ceremony plus an authenticated full-state snapshot, which changes the core sync-without-enroll flow and is deferred. The hub must be treated as **zero-knowledge / semi-trusted** (ciphertext + routing metadata only); mTLS device certs should enforce revocation at the transport layer.
 
 Multi-tenant isolation (future SaaS direction, `SCALE-*`): when the hub serves more than one owner, **confidentiality** is by construction — every blob and event is client-side age-encrypted before upload and namespaced by `workspace_id`, so a zero-knowledge hub cannot decrypt across tenants even if its access controls fail. Integrity and availability are not automatic: a leaked bucket-wide key can still delete, overwrite, withhold, or reorder ciphertext. Hosted mode therefore requires prefix-scoped temporary credentials, signed hash chains, fail-closed verification, snapshots/backups, retention discipline, rate limits, and cell/tenant scoping.
+
+### Threat: hub key-substitution defeats envelope confidentiality (`P6-SEC-01`)
+
+Attacker = the untrusted/zero-knowledge hub (or a MITM/revoked device). Because age encryption to a public X25519 recipient needs no secret and every device's recipient string rides the hub as plaintext, a hostile hub can forge a `device.key.granted` grant that wraps an **attacker-chosen** Workspace Content Key to the victim's own recipient. `EncryptedHub.Pull` ingests grants from the **raw, unverified** batch (`internal/sync/encryptedhub.go:126-141`) before any signature/trust check, and `IngestGrant` (`internal/workspacekeys/keyring.go:229-251`) performs no Ed25519 verification and unconditionally persists the key. A forged high epoch then becomes the active `Push` epoch (`CurrentKeyEpoch = MAX(epoch)`, `internal/state/store.go:2776`), so the victim envelope-encrypts all new namespace events under a key the attacker knows — a full break of `P4-SEC-02`. A low-epoch variant overwrites the legitimate WCK and silently DoSes decryption.
+
+Mitigation (target, see `P6-SEC-01` below): verify the carrier event before ingesting any grant once devices are enrolled; refuse to overwrite an already-held epoch's key; and bound `CurrentKeyEpoch` to epochs reached via a verified grant chain.
+
+### Threat: hub tampers with unauthenticated `enc.v1` carrier fields (`P6-SYNC-04`)
+
+Attacker = the untrusted hub. The `enc.v1` envelope AAD binds only `event.ID || epoch` and the signature covers only content/HLC/ID/payload/prev-hash/type, so the carrier `DeviceID` and `Seq` are authenticated by **nothing** end-to-end (`internal/sync/eventcrypt.go:213-222`, `internal/state/store.go:2509-2516`). A hostile hub can rewrite `Seq` (forcing an `ErrEventHashChain` soft-wedge that holds the cursor forever) or re-attribute `DeviceID` (corrupting the conflict tiebreak) without breaking AEAD or the signature. Mitigation (target, see `P6-SYNC-04` below): widen the AAD to the full carrier tuple under a new `enc.v2` and hold-or-conflict on AEAD failure.
+
+**Related (owned elsewhere):** `P6-HUB-01` — hub-side blob GC data-loss (availability, owned in `spec/03`); `P6-SYNC-03` — device revoke reopens a decryption/integrity window (owned in `spec/07`).
 
 ### Threat: device lost/stolen
 
@@ -302,3 +314,40 @@ Key-custody status (`SECR-04`/`SECU-01`): the file fallback is now gated on true
 - **SECU-03**: `verifyEventSignature` requires valid signatures from known approved devices for destructive event types (`project.deleted`, `project.renamed`) unconditionally, and for **all** non-local event types once any approved device is enrolled (`HUB-03` fail-closed-once-enrolled). The pre-enrollment bootstrap window for non-destructive events remains (`SEC-04`).
 - **SECU-04**: `redact.Writer` suppresses multi-line PEM private key blocks across line boundaries. Fixed `pemBegin` pattern indexing bug (was pointing to age-key pattern instead of PEM header). Added test coverage.
 - **SECU-05**: `devices enroll --approve` now requires `--signing-public-key`.
+
+## Pass 6 audit recommendations (2026-07-01)
+
+From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
+
+### P6-SEC-01 — Unauthenticated grant ingestion lets the hub substitute a device's WCK
+
+**Problem.** `EncryptedHub.Pull` calls `IngestGrant` for every `device.key.granted` event in the raw, unverified hub batch before any signature/trust check (`internal/sync/encryptedhub.go:126-141`; `internal/workspacekeys/keyring.go:229-251`), so a hostile hub can forge a grant wrapping an attacker-chosen WCK to the victim's own recipient — breaking `P4-SEC-02` confidentiality or DoSing decryption.
+
+**Actionable steps.**
+1. Thread the carrier `Event` into `IngestGrant` and add a `Verify`/`VerifyGrant` call gated on `hasEnrolledDevices`; skip (do not ingest) grants whose carrier fails verification once any device is enrolled.
+2. In `IngestGrant`, refuse to change an already-held epoch's key (check store/keychain, not just cache).
+3. Constrain `CurrentKeyEpoch` (`internal/state/store.go:2776`) to epochs reached via a verified grant chain.
+4. Test: a well-formed forged grant to the victim's own recipient is rejected and changes neither the keystore nor `CurrentKeyEpoch`.
+
+**Example.**
+```go
+// IngestGrant: refuse conflicting WCK for an epoch we already hold.
+if cur, ok := k.cached(grant.Epoch); ok && !bytes.Equal(cur, wck) {
+    return fmt.Errorf("refusing conflicting WCK for held epoch %d", grant.Epoch)
+}
+```
+
+### P6-SYNC-04 — `enc.v1` carrier fields are bound by neither AAD nor signature
+
+**Problem.** `envelopeAAD` binds only `event.ID || epoch` (`internal/sync/eventcrypt.go:213-222`) and `eventSignaturePayload` omits `DeviceID`/`Seq` (`internal/state/store.go:2509-2516`), so an untrusted hub can rewrite `Seq` (forcing an `ErrEventHashChain` cursor wedge) or re-attribute `DeviceID` without breaking AEAD or the signature.
+
+**Actionable steps.**
+1. Widen `envelopeAAD` to the full carrier tuple and introduce `enc.v2` (backward-incompatible; bump now while only the file-hub spike and fresh R2 buckets exist).
+2. Add `DeviceID`/`Seq` to `eventSignaturePayload` under a `devstrap:event:v2` signature domain.
+3. On AEAD failure, hold-or-conflict (per `P6-SYNC-02`) rather than silently skip. Reconcile with open `P4-SYNC-05`.
+4. Test: mutating `Seq`/`DeviceID`/`HLC` on a stored object yields an AEAD authentication failure, not an apply-path wedge.
+
+**Example.**
+```text
+enc.v2 AAD = ID || DeviceID || uint64(Seq) || uint64(HLC) || uint64(epoch)   // length-prefixed
+```

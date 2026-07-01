@@ -1,6 +1,6 @@
 ---
-last_reviewed: 2026-06-30
-tracks_code: [internal/pathkey/**, internal/scan/**, internal/state/**, internal/sync/**]
+last_reviewed: 2026-07-01
+tracks_code: [internal/pathkey/**, internal/scan/**, internal/state/**, internal/sync/**, internal/workspacekeys/**, internal/devicekeys/**]
 ---
 # Namespace and Sync Model
 
@@ -594,3 +594,106 @@ Contains:
 - **SYNC-03**: Added lower-bound HLC validation (`event.HLC <= 0` → quarantine) with `epochFloorMS` constant.
 - **SYNC-05/CODE-01**: `ApplyEvents` now `continue`s after recording a hash-chain-break conflict (was `return err`), so the rest of the batch converges.
 - **CODE-02**: Removed volatile `OffsetMS` from persisted `skewConflictDetails` so re-delivered skewed events dedup instead of inserting duplicate conflict rows.
+
+## Pass 6 audit recommendations (2026-07-01)
+
+From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
+
+### P6-SEC-02 — Every `init` self-bootstraps epoch 1, so a joining device's pre-approval events are lost fleet-wide
+
+**Problem.** `init` unconditionally calls `EnsureBootstrap` (`internal/cli/init.go:96`), minting a fresh epoch-1 WCK even on a device *joining* an existing workspace. If B runs `add`/`sync` before A approves it, B's events are sealed under a never-granted epoch-1 WCK — peers fail AEAD and skip them forever, and `IngestGrant`'s unconditional `StoreWCK` (`keyring.go:243`) later overwrites B's own key, destroying hub-based recovery. The same bare-integer-epoch collision fires on concurrent `Rotate`.
+
+**Actionable steps.**
+1. Split `init` into founder-bootstrap vs `--join` (empty keyring + `Push` refusal that keeps `ErrMissingWorkspaceKey` when `CurrentEpoch==0`).
+2. Add `kid = hex(sha256(wck)[:8])` to `DeviceKeyGrant` and the `enc.v1` envelope; key the keyring/keystore by `(epoch,kid)` so colliding keys coexist.
+3. Reorder Pull-then-Push for keyless devices; add a testscript asserting B's pre-approval project materializes on A after approve.
+
+```text
+kid = hex(sha256(wck)[:8])   # carry in DeviceKeyGrant + enc.v1 envelope
+keyring key: (epoch, kid)    # colliding self-minted keys never alias
+```
+
+### P6-SEC-03 — `Pull` truncates permanently on a never-granted epoch, wedging a validly-approved device
+
+**Problem.** `Pull`'s second pass truncates the batch at the first event whose epoch this device lacks (`internal/sync/encryptedhub.go:159-166`); `sync.go` advances the cursor only over the applied prefix, so the same blocking event re-fetches and re-truncates forever. A device approved after a `Rotate` minted epoch N (but before the approver pulled its own epoch-N grant) never receives epoch N and wedges permanently.
+
+**Actionable steps.**
+1. After a bounded retry/grace window, treat a still-missing epoch as permanently undecryptable and **skip** (like the held-epoch branch), recording a conflict/quarantine so a composite `(HLC,device,id)` cursor can pass it.
+2. Make grants transitive on approval, or add a contiguity guard to `devices approve` that warns/refuses when the approver's held epochs aren't `1..CurrentEpoch`.
+3. Surface the "awaiting workspace key grant" condition (and the re-run-`devices approve` recovery) in `doctor`/sync output; ship the snapshot exchange for late joiners.
+
+```text
+# recovery today (undocumented): re-grant every held epoch from a complete device
+devstrap devices approve <D>   # clears the wedge
+```
+
+### P6-SYNC-01 — Any signature/trust failure in `ApplyEvents` aborts the whole batch and wedges the cursor
+
+**Problem.** Only `state.ErrEventHashChain` gets record-and-continue in `ApplyEvents` (`internal/sync/events.go:306-323`); every other `insertEvent` error (signature/trust, content-hash, `ErrDivergentEvent`) returns before `AdvanceHubCursor` (`cli/sync.go:112-117`), so the poisoned event re-pulls and re-fails forever. Reachable by legitimate revocation traffic: `devices revoke` is local-only, so a revoked device keeps pushing signed events that hit the `trustState != "approved"` gate and abort every remaining device.
+
+**Actionable steps.**
+1. Add sentinel `ErrEventVerification`; wrap `verifyEventSignature`/content-hash/`ErrDivergentEvent` returns.
+2. Add a per-event quarantine branch alongside the hash-chain branch; advance the cursor for permanent causes (revoked/bad-sig/divergent) only, hold bounded for possibly-transient pending-device failures.
+3. Ship a real `device.revoked` apply path so revoked events are rejected by trust, not signature-abort.
+
+```go
+if errors.Is(err, state.ErrEventVerification) { insertVerificationConflict(...); continue }
+// batch [validC1, revokedB1, validC2] applies C1+C2, records one conflict, advances past all three
+```
+
+### P6-SYNC-02 — Skip-on-decrypt-failure advances the cursor past recoverable events and chain-pins later events
+
+**Problem.** `EncryptedHub.Pull` skips `ParseEncryptedEnvelope` failures (incl. `ErrUnknownEnvelopeVersion`) and held-epoch decrypt failures (`encryptedhub.go:149-157,168-177`); skipped events drop before `ApplyEvents`, so the SYNC-01 low-water mark can't hold the cursor and any higher-HLC applied event advances past them for good. The origin device's per-device hash chain then has a hole, so its **next** event hits `ErrEventHashChain` and is held "transiently" forever — the exact soft-brick the decorator claims (spec:570) to prevent.
+
+**Actionable steps.**
+1. **Truncate** (not skip) on `ErrUnknownEnvelopeVersion` — decryptable after upgrade, so wedging-until-upgrade is correct.
+2. For held-epoch decrypt failures and malformed envelopes, persist a `sync_skipped_events` quarantine row instead of dropping; surface the count in `status`/`doctor`; add `sync --replay-skipped` re-pulling from `min(skipped HLC)`.
+3. When an event is skipped, record that the origin's chain is broken so the successor references the root cause instead of being held forever.
+
+```sql
+sync_skipped_events(id, device_id, hlc, epoch, reason)   -- surfaced in status/doctor
+```
+
+### P6-SYNC-03 — Revoking the last approved device reopens the bootstrap window; revoked-device events are accepted again
+
+**Problem.** `hasEnrolledDevices` counts only `trust_state = 'approved'` rows (`internal/state/store.go:2593-2608`). After revoking the only other device the count is 0, so `enrolled=false` and the final gate (`:2581`) lets non-destructive events from the revoked device — even unknown/unsigned ones — fall through to `Verify` and apply, silently disengaging fail-closed HUB-03.
+
+**Actionable steps.**
+1. Make the closed window sticky: count `trust_state IN ('approved','revoked','lost')` (a revoked/lost row proves enrollment completed, excluding auto-created `pending` placeholders), or persist a monotonic `enrollment_closed` flag OR'd into `hasEnrolledDevices`.
+2. Test: approve B, revoke B, then a signed `project.added` from B must be rejected (and, with P6-SYNC-01, recorded as a conflict).
+
+```sql
+SELECT COUNT(*) FROM devices WHERE trust_state IN ('approved','revoked','lost');
+```
+
+### P6-XP-03 — `run-loop` never runs its advertised scan stage, so new local projects never reach the hub
+
+**Problem.** `runLoopTick` calls only `runSyncCycle` — there is no `scan.Walk`/adopt anywhere in `run_loop.go` — yet its `Short`, doc comment, README, and `spec/00` all promise "scan → sync → materialize" (`internal/cli/run_loop.go:32,20-24,69-73`). With the watcher unwired and the daemon deferred, there is no automatic local→hub path: a repo cloned into `~/Code` on A is never adopted and B never sees it.
+
+**Actionable steps.**
+1. Add a `scan.Walk` + adopt step before `runSyncCycle` in `runLoopTick`.
+2. Make adoption idempotent first: skip findings whose `store.ProjectByPath` row already matches the same `remote_key`/type (else `adoptFindings` at `scan.go:125` appends a duplicate `project.added` every tick).
+3. Route secret/symlink-escape/duplicate-remote warning findings to stderr; never auto-adopt them. If the scan stage is deliberately out of scope, correct the `Short`/doc/README/spec-00 text to "sync + materialize" instead.
+
+```go
+if res, err := scan.Walk(ctx, opts.paths().Root, scan.Options{IncludePlainFolders: true}); err == nil {
+    n, _ := adoptNewFindings(ctx, store, opts.paths().Root, res) // idempotent vs ProjectByPath
+    _ = n
+}
+return runSyncCycle(ctx, opts, stderr)
+```
+
+### P6-XP-05 — `scan` makes a serial per-repo network call (`set-head --auto`), stalling offline onboarding
+
+**Problem.** `scan.Walk` calls `Git.DefaultBranch` per repo (`internal/scan/scan.go:154`); when `refs/remotes/origin/HEAD` is missing/stale that runs `git remote set-head origin --auto` — a network round-trip, serially inside the `WalkDir` callback, under the 2-minute per-command timeout with no worker pool or offline mode. Both `scan` and first-run `init` hit it, so 30 no-`origin/HEAD` repos offline turn onboarding into an hour-long stall.
+
+**Actionable steps.**
+1. Add a scan-only, local-only default-branch resolver that reads the symbolic ref/packed-refs without invoking `set-head`.
+2. Surface a `DefaultBranchStored`/non-authoritative warning in `Finding.Warnings` on fallback.
+3. If remote repair must stay reachable from scan, gate it behind an explicit `--online` flag with a short (~5s) timeout and bounded concurrency; leave authoritative resolution to hydrate/worktree materialization.
+
+```go
+opts.Git = dsgit.Runner{Timeout: 5 * time.Second} // only if remote repair must stay reachable
+g, ctx := errgroup.WithContext(ctx)
+g.SetLimit(8) // bounded fan-out instead of serial per-repo calls
+```

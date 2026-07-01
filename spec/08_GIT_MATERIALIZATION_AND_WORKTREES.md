@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-28
+last_reviewed: 2026-07-01
 tracks_code: [internal/git/**, internal/cli/add.go, internal/cli/hydrate.go, internal/cli/open.go, internal/cli/repo_lock.go, internal/cli/worktree.go]
 ---
 # Git Materialization and Worktree Design
@@ -387,3 +387,59 @@ Later:
 - **NOVCS-01**: Scanner classifies no-remote/unvalidated-remote repos as `local_git` instead of `git_repo`.
 - **NOVCS-04**: `createFreshWorktree` preflights `project.RemoteKey == ""` with an actionable error.
 - **M2 (review fix)**: Agent run cleans up the just-created worktree when `enforceAgentFilePolicy` denies the command, preventing orphan git worktrees and DB rows.
+
+## Pass 6 audit recommendations (2026-07-01)
+
+From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
+
+### P6-GIT-01 — Universal 2-minute git timeout makes large-repo materialization impossible and triple-downloads
+
+**Problem.** `NewRunner()` applies `Timeout: 2*time.Minute` to every command including clone (`internal/git/git.go:40,80-84`); a `DeadlineExceeded` is classified retryable `ErrNetwork` (`:115-117`) and `CloneWithOptions` retries up to 3× while wiping the staging dir each time (`:163-170,176`), so any blobless clone taking > 2:00 can never materialize and burns ~6 min / 3× bandwidth. `LFSPull` hits the same cap once (`:433-436`).
+
+**Actionable steps.**
+1. Add `CloneTimeout` (default 30m, config `materialization.clone_timeout`) and derive per-clone/per-LFS/per-fetch deadlines via `context.WithTimeout` before `Run`.
+2. Return a distinct terminal `ErrTimeout` sentinel for the runner's self-imposed deadline instead of `ErrNetwork`, and stop the wipe-and-retry on it; cover `Fetch`/`runWithNetworkRetry` too.
+3. Tests: a clone that sleeps past a tiny `CloneTimeout` → exactly one attempt + a "timed out" error; a 3-minute-simulated clone succeeds under the new default.
+
+```go
+ctx, cancel := context.WithTimeout(ctx, r.CloneTimeout) // default 30m
+defer cancel()
+// self-imposed DeadlineExceeded → return ErrTimeout (terminal), never retry
+```
+
+### P6-GIT-04 — Eager materialize/hydrate ignore stored `lfs_policy`; `always` repos land as silent pointer files
+
+**Problem.** `materializeGitRepo` and `hydrateProjectUnlocked` never read `project.LFSPolicy` or call `UsesLFS`/`LFSPull` (`internal/cli/materialize.go:182-211`, `internal/cli/hydrate.go:93-190`); only the worktree path applies policy (`worktree.go:217-240`). Because `gitEnv` forces `GIT_CONFIG_GLOBAL=/dev/null` (`internal/git/git.go:704-712`), the user's global LFS smudge filter is invisible, so an `lfs-policy=always` repo materializes as pointer files that match the index and are recorded available/clean with no warning.
+
+**Actionable steps.**
+1. On the materialize/hydrate path, after hydration `install --local` + `LFSPull` for `always` (fail the project on error), warn otherwise; give `LFSPull` the P6-GIT-01 large-operation timeout.
+2. Record available/clean only after the LFS decision.
+3. Testscript: a fake-LFS repo with `always` pulls; with `auto` warns.
+
+```go
+if used, _ := dsgit.UsesLFS(ctx, localPath); used {
+    switch policy {
+    case "always":
+        r.Run(ctx, localPath, "lfs", "install", "--local")
+        if err := r.LFSPull(ctx, localPath); err != nil { /* fail project */ }
+    default:
+        log.Warn("LFS pointer files remain", "path", localPath)
+    }
+}
+```
+
+### P6-GIT-05 — `createFreshWorktree` leaks a DB-invisible worktree + branch on post-`worktree add` failure
+
+**Problem.** `addWorktreeWithFreshBranch` creates the branch and worktree, but the later `applyWorktreeLFSPolicy`, `store.CurrentDevice`, and `store.InsertWorktree` failures all `return state.Worktree{}, err` without removing them (`internal/cli/worktree.go:170,174-193`). On an LFS repo with a flaky network (or any DB error) every retry leaves a full checkout under `~/.devstrap/worktrees/<project>/` plus an `agent/...` branch untracked by SQLite, so `worktree list`/`cleanup` can't reap it; the M2 cleanup runs only after success and removes only the worktree (`agent.go:72-81`).
+
+**Actionable steps.**
+1. Register a `cleanup` closure (`WorktreeRemove` + `branch -D <branch>`) and invoke it on the three failure returns and the M2 path; include `wtPath` in the LFS error.
+2. Add a `doctor` orphan-worktree check listing on-disk worktrees (`git worktree list --porcelain`) with no `worktrees` row.
+3. Test: stub the worktree adder so LFS pull fails; assert neither the path nor the branch survives.
+
+```go
+cleanup := func() {
+    _ = r.WorktreeRemove(ctx, localPath, wtPath, true)
+    _, _ = r.Run(ctx, localPath, "branch", "-D", branch)
+}
+```

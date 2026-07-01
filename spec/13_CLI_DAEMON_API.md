@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-30
+last_reviewed: 2026-07-01
 tracks_code: [cmd/**, internal/cli/**, internal/platform/**]
 ---
 # CLI and Daemon API
@@ -48,11 +48,11 @@ devstrap wip
 
 ## Initial commands
 
-Current repository status as of `2026-06-28`:
+Current repository status as of `2026-07-01`:
 
 ```text
-Implemented: devstrap init, version, scan, add, clone, hydrate, open, sync --hub-file, materialize, draft snapshot create, run-loop, status, doctor, conflicts list/show/resolve, db migrate/status/backup/down, env capture/hydrate/bind, run, worktree new/status/finalize/list/remove/cleanup/unlock, agent run/list/show/pr, devices enroll/list/approve/revoke/lost/rename/recipient
-Planned: production R2/S3 SDK wiring, env check, OS-enforced agent sandboxing, automatic remote device enrollment/fingerprint confirmation, daemon/socket API, export, promote, gitstate, wip
+Implemented: devstrap init, version, scan, add, clone, hydrate, open, sync --hub-file, sync (hub: r2://<bucket> production R2/S3 SDK wiring), hub gc, materialize, draft snapshot create, run-loop, status, doctor, conflicts list/show/resolve, db migrate/status/backup/down, env capture/hydrate/bind/rotate, run, worktree new/status/finalize/list/remove/cleanup/unlock, agent run/list/show/pr, devices enroll/list/approve/revoke/lost/rename/recipient
+Planned: env check, OS-enforced agent sandboxing, automatic remote device enrollment/fingerprint confirmation, daemon/socket API, export, promote, gitstate, wip
 ```
 
 ### init
@@ -273,10 +273,13 @@ devstrap env capture work/acme/api .env
 devstrap env hydrate work/acme/api --write .env.local
 devstrap env check work/acme/api
 devstrap env bind work/acme/api .env.refs --provider 1password --profile acme-dev
+devstrap env rotate work/acme/api
 devstrap run work/acme/api -- uv run pytest
 ```
 
-Current implementation supports `env capture`, `env hydrate`, `env bind`, and top-level `run`. Capture parses a local env file with a non-interpolating grammar, refuses dangerous names, rejects interpolation-looking values unless `--literal` is passed, encrypts the bundle to the local device age recipient, writes a `0600` age blob under `~/.devstrap/blobs`, stores only `age_blob:<sha256>` references in `secret_bindings`, and appends the captured file path to project `.gitignore` when possible. Hydrate decrypts the local age blob with the local device identity or resolves 1Password provider refs through `op inject`, writes only to an explicit `--write` target, creates the file atomically with mode `0600`, refuses to overwrite unless `--force` is passed, and appends the hydrated target to project `.gitignore` when possible. Bind stores 1Password `op://` provider refs without resolving plaintext. `run` injects encrypted profiles directly into the subprocess environment or delegates provider refs to `op run --env-file <temp-refs-file> -- <command>`.
+`env rotate` re-encrypts a project's captured env blobs to the current set of approved-device age recipients (dropping any device that was revoked/marked lost) and clears the `needs_rotation` flag on the affected `secret_bindings` rows once the fresh ciphertext is written, so `doctor`'s rotation warnings converge. Provider-ref bindings (`op://`) hold no local plaintext and are marked rotated without re-encryption.
+
+Current implementation supports `env capture`, `env hydrate`, `env bind`, `env rotate`, and top-level `run`. Capture parses a local env file with a non-interpolating grammar, refuses dangerous names, rejects interpolation-looking values unless `--literal` is passed, encrypts the bundle to the local device age recipient, writes a `0600` age blob under `~/.devstrap/blobs`, stores only `age_blob:<sha256>` references in `secret_bindings`, and appends the captured file path to project `.gitignore` when possible. Hydrate decrypts the local age blob with the local device identity or resolves 1Password provider refs through `op inject`, writes only to an explicit `--write` target, creates the file atomically with mode `0600`, refuses to overwrite unless `--force` is passed, and appends the hydrated target to project `.gitignore` when possible. Bind stores 1Password `op://` provider refs without resolving plaintext. `run` injects encrypted profiles directly into the subprocess environment or delegates provider refs to `op run --env-file <temp-refs-file> -- <command>`.
 
 ## Worktree commands
 
@@ -521,3 +524,82 @@ The cloud-sync architecture (`docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`) 
 - **Content-type split (`DRAFT-*`)**: env plus non-git/draft folders sync as age-encrypted blobs; `node_modules`/build artifacts are never synced and are rebuilt on hydrate. `hydrate`/`open` extend to `local_git`/`plain_folder`/draft project types; `devstrap promote` walks a folder from plain -> draft -> git (`NOVCS-03`).
 - **Conflicts stay detect-don't-merge**: HLC ordering plus tombstones; `devstrap conflicts` (shipped) surfaces them. Files are never byte-merged.
 - **Device trust**: revocation re-encrypts affected blobs to the reduced recipient set and flags secrets for rotation; once device enrollment exists, event verification must fail closed (`SECU-03`).
+
+## Pass 6 audit recommendations (2026-07-01)
+
+From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
+
+### P6-CLI-01 — Re-running `init` with a new root splits DB root vs config.yaml
+
+**Problem.** `writeDefaultConfig` early-returns without writing when config.yaml exists (`internal/cli/init.go:182-183`), while `state.EnsureWorkspace` unconditionally updates `root_path` (`internal/state/store.go:473-480`), so `init root2` after `init root1` makes `status` (DB) report root2 while config-driven `scan`/`materialize`/`sync` keep using root1.
+
+**Actionable steps.**
+1. Before `EnsureWorkspace`, read the existing workspace root and compare against the *effective resolved* requested root (`DEVSTRAP_ROOT`/`--root`/positional all resolved via viper).
+2. On a mismatch, refuse with `exitConflict` unless `--move-root`; when accepted (or by default), rewrite config.yaml atomically (temp + rename, `0600`) instead of early-returning; leave `--dry-run` touching neither.
+3. Longer term make the DB workspace row the single source of truth for root; add a testscript asserting `scan` and `status` agree after `init A; init B`.
+
+```go
+if oldRoot != "" && oldRoot != effectiveRoot && !moveRoot {
+    return appError{code: exitConflict,
+        err: fmt.Errorf("workspace already rooted at %s; re-run with --move-root to relocate", oldRoot)}
+}
+```
+
+### P6-CLI-02 — `scan <dir> --adopt` adopts out-of-tree repos into the shared namespace
+
+**Problem.** `scan` accepts any positional root (`internal/cli/scan.go:28-31`) and `adoptFindings` emits signed `project.added` events with no check that the scanned root is the workspace root, so `devstrap scan ~/Downloads --adopt` turns every repo there into a fleet-wide namespace event that other devices eagerly blobless-clone into `~/Code`.
+
+**Actionable steps.**
+1. After resolving `rootAbs`, gate `--adopt` on `rootAbs == wsRoot`; refuse otherwise with `exitUsage`, keeping read-only scans of arbitrary directories working.
+2. Add a CLI test asserting the refusal for an out-of-root `--adopt`; if subtree adoption is wanted later, rebase `finding.Path` against `wsRoot`.
+
+```go
+if adopt && rootAbs != wsRoot {
+    return appError{code: exitUsage, err: fmt.Errorf(
+        "--adopt only adopts from the workspace root %s (scanned %s); scan without --adopt to inspect, or use 'devstrap add' for a single repo", wsRoot, rootAbs)}
+}
+```
+
+### P6-CLI-03 — Usage errors exit 1, not the documented `exitUsage=10`
+
+**Problem.** `root.go:30` declares `exitUsage = 10` but only two hand-mapped sites use it; Cobra flag-parse, Args-validation, and unknown-command errors bypass `appError` and exit `1`, so the exit-code table (this file, "Exit codes") and the `CLI-04` note that claims 10 covers these are false.
+
+**Actionable steps.**
+1. Wire `cmd.SetFlagErrorFunc(func(c, err) error { return appError{code: exitUsage, err: err} })`, wrap positional validators once (`usageArgs(cobra.ExactArgs(1))`), and map unknown-command errors to `exitUsage`.
+2. Extend the Exit codes table to include `10 usage error` and `100+N child process exit` (the shipped `childExitBase`).
+3. Add a `root_test` asserting `devstrap --frobnicate` exits 10.
+
+```go
+cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+    return appError{code: exitUsage, err: err}
+})
+```
+
+### P6-CLI-04 — `--quiet` only lowers slog verbosity; stdout chatter ignores it
+
+**Problem.** `--quiet` (help: "only print errors") is consumed solely by `logging.Configure` (`internal/cli/root.go:69` → `logging/logging.go:19`); `sync.go:144`, `materialize.go:81`, `init.go:126`, and `run_loop.go:71` print progress/summary lines unconditionally, so `run-loop --once --quiet` from cron still emits "pushed 0, pulled 0; materialized 0/0" every tick.
+
+**Actionable steps.**
+1. Add a render-seam helper `progressf` that no-ops when `o.quiet`, and route sync/materialize/init/hub-gc summary and progress lines through it; keep errors and explicitly-requested data (`--json`, `status`/`list`/`show` tables) printing.
+2. Zero-cost stopgap: reword the flag help to "suppress log output (command results still print)" so it matches the verbosity-only behavior documented under Logging.
+
+```go
+func (o *options) progressf(w io.Writer, format string, a ...any) {
+    if o.quiet { return }
+    fmt.Fprintf(w, format, a...)
+}
+```
+
+### P6-CLI-05 — README/init hint steer users to the test-only file hub; shipped `r2://` undocumented
+
+**Problem.** README (project-status/roadmap/quickstart) still calls the R2 backend "wired but not switched on" and shows only `sync --hub-file`, `init.go:126` hardcodes the `--hub-file` hint, and `sync.go:65`'s dry-run prints an empty target when the hub comes from config — even though PR #24 shipped `hub: r2://<bucket>` with `DEVSTRAP_HUB_S3_*` credentials.
+
+**Actionable steps.**
+1. Flip README project-status + roadmap to "R2/S3 backend shipped (`hub: r2://<bucket>` + `DEVSTRAP_HUB_S3_*`)" and add a quickstart step showing the config line + env vars (link `spec/19`).
+2. Change the `init` next-steps hint to mention configuring a hub instead of `--hub-file`, and fix the dry-run to print the resolved hub ID rather than the raw `--hub-file` flag; optionally add `devstrap init --hub <uri>`.
+
+```yaml
+# ~/.devstrap/config.yaml
+hub: r2://my-devstrap-bucket
+# env: DEVSTRAP_HUB_S3_ACCESS_KEY_ID, DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY, DEVSTRAP_HUB_S3_ENDPOINT
+```

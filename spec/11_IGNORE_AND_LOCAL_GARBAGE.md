@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-28
+last_reviewed: 2026-07-01
 tracks_code: [internal/scan/**, .gitignore]
 ---
 # Ignore Rules and Local Garbage
@@ -250,7 +250,7 @@ Loose:
 
 ## Audit follow-ups (2026-06-27)
 
-**The single `.devstrapignore` compiler is now built** as `internal/ignore` (DRAFT-03). It compiles gitignore-compatible patterns from a project's `.devstrapignore` file plus a canonical default OS-junk/build-artifact table, and feeds the scanner prune predicate, the draft-bundle allow-list, and generated `.gitignore` fragments from one source. The watcher and agent deny-list still carry some hardcoded entries to be folded in as follow-up.
+**The single `.devstrapignore` compiler is now built** as `internal/ignore` (DRAFT-03). It compiles *gitignore-inspired* patterns from a project's `.devstrapignore` file plus a canonical default OS-junk/build-artifact table, and feeds the draft-bundle allow-list and generated `.gitignore` fragments from one source. Note the compiler is **not** fully gitignore-compatible today despite its doc header claim: it anchors only on a leading `/` (not a middle separator), mishandles bracket classes, and fails the whole file on an unclosed `[` — see `P6-XP-02` below. Also, the scanner prune predicate does **not** yet read the project's `.devstrapignore` at all — `scan.Walk` hardwires the defaults-only matcher (see `P6-XP-06`), so only the defaults half of "feeds the scanner prune predicate" is currently true. The watcher and agent deny-list still carry some hardcoded entries to be folded in as follow-up.
 
 ## Audit follow-ups (2026-06-28)
 
@@ -261,3 +261,65 @@ Required follow-ups (workstream `DRAFT-*` in `docs/audits/AUDIT_RECOMMENDATIONS_
 - build the one canonical compiler and route every consumer through it — `internal/scan`, the draft-bundling/encrypted-blob layer, the platform watcher, and the agent deny-list — retiring the divergent hardcoded lists behind `PLAT-01`, `PLAT-04`, and `AGEN-05`;
 - guarantee OS junk (`.DS_Store`, `.AppleDouble`, `Thumbs.db`, `Icon?`, `desktop.ini`) is compiled into every consumer, especially draft sync, so it never enters an encrypted blob or the namespace map;
 - treat this compiler as a blocking prerequisite for shipping non-git content sync: no draft bundle is created until its exclusion set is sourced from the compiler.
+
+## Pass 6 audit recommendations (2026-07-01)
+
+From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
+
+### P6-XP-01 — `ShouldPruneDir` bare-name fallback defeats anchored and negation patterns
+
+**Problem.** `ShouldPruneDir`'s bare-name fallback (`internal/ignore/ignore.go:73-78`) re-evaluates patterns against a directory's bare name with all path context stripped, so root-anchored patterns (`/build/`) prune at every depth and a negation re-including a nested dir (`!keep/build/`) is silently defeated. The only live consumer is `devstrap draft snapshot create` → `draftbundle.Pack` (`internal/draftbundle/draftbundle.go:113`), which then silently omits re-included content from the age-encrypted bundle.
+
+**Actionable steps.**
+1. Replace `ShouldPruneDir`'s body with a `relSlash`-authoritative form, keeping the empty-path guard only for callers that genuinely lack a path.
+2. Add regression tests: `/dist/` must not prune `packages/foo/dist`; `build/` + `!keep/build/` must keep `keep/build`.
+3. Extend the draft-bundle test to assert the packed manifest actually contains `keep/build/...` under that policy.
+
+```go
+func (m *Matcher) ShouldPruneDir(name, relSlash string) bool {
+    if m == nil {
+        return DefaultMatcher().ShouldPruneDir(name, relSlash)
+    }
+    if relSlash == "" {
+        relSlash = name
+    }
+    return m.Match(relSlash, true)
+}
+```
+
+### P6-XP-02 — Ignore compiler diverges from the gitignore semantics it advertises
+
+**Problem.** The compiler's doc header claims "Pattern semantics follow .gitignore," but `parseLine` (`internal/ignore/ignore.go:185-188`) anchors only on a *leading* `/` (git anchors on a leading **or** middle separator), `patternToRegex` (`ignore.go:246`) omits `[`/`]` from its escape set so `[!a]log` matches the wrong set, and one unclosed `[` makes `Compile` fail the *whole file* (`Compile("foo[1.txt")` → `error parsing regexp: missing closing ]`), hard-failing `devstrap draft snapshot create`.
+
+**Actionable steps.**
+1. Change `parseLine` to set `anchored = strings.Contains(body, "/")`.
+2. Rewrite bracket-class handling to a proper regex class with correct negation, and degrade an unclosed `[` to a literal match instead of failing `Compile`.
+3. Fix `**` so it only crosses `/` when explicitly slash-bounded on both sides.
+4. Add a `git check-ignore --verbose` differential test (skipped when git is absent) over middle-slash, bracket, and `a**b` patterns.
+
+```go
+body := strings.TrimSuffix(strings.TrimPrefix(raw, "!"), "/")
+p.anchored = strings.Contains(body, "/")
+// bracket classes: map leading '!'/'^' to '[^...]', escape '\', and
+// fall back to a literal '\[' when unclosed instead of failing Compile.
+// '**' not slash-bounded on both sides -> '[^/]*' (regular *), not '.*'.
+```
+
+### P6-XP-06 — Scanner hardwires the defaults-only ignore matcher, skipping repos under `env/`/`bin/`/`build/`
+
+**Problem.** `scan.go:191` declares `var pruneMatcher = ignore.DefaultMatcher()` and `scan.Walk` never calls `ignore.CompileFromDir`, so the per-project `.devstrapignore` is ignored on the discovery path. Because the prune check (`scan.go:111`) runs before `dsgit.IsRepo` (`scan.go:131`) and the defaults prune `env/`/`bin/`/`build/`/`dist/`/`out/`/`target/` at any depth, a repo at `~/Code/env/...` is skipped with no `Finding` or warning; `init --scan` (`internal/cli/init.go:106`) shares the blind spot.
+
+**Actionable steps.**
+1. Call `ignore.CompileFromDir(root, true)` in `scan.Walk`, falling back to `DefaultMatcher()` with a warning on error.
+2. Add an `Options.Ignore *ignore.Matcher` field for test injection.
+3. Count pruned directories and emit one summary warning pointing users to add negations in `~/Code/.devstrapignore`.
+4. Wire the same compiled matcher through `init.go:106`'s `scan.Walk` call.
+
+```go
+m, err := ignore.CompileFromDir(cleanRoot, true)
+if err != nil {
+    result.Warnings = append(result.Warnings, fmt.Sprintf("ignore compile failed, using defaults: %v", err))
+    m = ignore.DefaultMatcher()
+}
+// thread m through as Options.Ignore for test injection
+```

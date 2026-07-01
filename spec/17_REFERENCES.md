@@ -1,6 +1,6 @@
 ---
-last_reviewed: 2026-06-30
-tracks_code: [.github/**, go.mod, go.sum, docs/audits/AUDIT_RECOMMENDATIONS.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md]
+last_reviewed: 2026-07-01
+tracks_code: [.github/**, go.mod, go.sum, docs/audits/AUDIT_RECOMMENDATIONS.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md]
 ---
 # References
 
@@ -198,3 +198,67 @@ These sources back the cloud-sync architecture cycle: the "Dropbox experience fo
 - Render and Railway app-hosting alternatives for simpler trusted deployments: https://render.com/pricing ; https://railway.com/pricing
 - Cloudflare Workers/Durable Objects/D1 + R2 alternative for a future serverless edge control/hub layer if the project accepts a non-Go edge runtime: https://developers.cloudflare.com/workers/platform/pricing/ ; https://developers.cloudflare.com/durable-objects/platform/pricing/ ; https://developers.cloudflare.com/d1/platform/pricing/
 - Full per-finding sources: `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`.
+
+## Pass 6 best-practice references (2026-07-01)
+
+Six external best-practice topics anchored the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`), each cross-checked against DevStrap's shipped code. The key sources per topic:
+
+### Local-first sync & replicated logs
+
+Backs the envelope/cursor/compaction and tombstone-GC findings (P6-HUB-04, P6-SYNC-01/02): separate causal order from delivery order, and gate destructive cleanup on provable delivery.
+
+- Automerge storage — frontier-hash snapshot keys: https://automerge.org/docs/reference/under-the-hood/storage/
+- Convex + Automerge — cursor on ingestion order, not HLC: https://stack.convex.dev/automerge-and-convex
+- ElectricSQL compaction PR — fold updates, preserve cursors, dirty-ratio trigger: https://github.com/electric-sql/electric/pull/2231
+- Ditto delta-state CRDTs — anti-entropy via frontier-hash diff, GC on a stability frontier: https://www.ditto.com/blog/an-inside-look-at-dittos-delta-state-crdts
+- Replicache server-pull — formal 410-snapshot reset protocol: https://doc.replicache.dev/reference/server-pull
+
+### End-to-end multi-device encryption
+
+Backs the signature-binding and key-rotation findings (P6-SEC-01/02/03, P6-SYNC-04): an unauthenticated age transport demands that no decrypted artifact be trusted before it is signature-bound.
+
+- Filippo Valsorda — age is not sender-authenticated: https://words.filippo.io/age-authentication/
+- Keybase PUK — signed, strictly-sequential key generations + prev-boxes: https://book.keybase.io/docs/teams/puk
+- Post-compromise security paper — rotate-on-removal alone is insufficient: https://eprint.iacr.org/2023/1385.pdf
+- Tailnet Lock whitepaper — trust-authority changes must be signed by an already-trusted key: https://tailscale.com/docs/concepts/tailnet-lock-whitepaper
+- GCP KMS CMEK rotation — lazy, off-critical-path re-wrap: https://docs.cloud.google.com/kms/docs/cmek-rotation
+
+### CLI design & Cobra
+
+Backs the machine-output and discoverability findings (P6-CLI-03/04/05, P6-QUAL-01): honor the `--json` contract everywhere it is advertised and make layered config discoverable.
+
+- clispec.dev — structured JSON error envelope on failure: https://clispec.dev/
+- clig.dev — data to stdout, messaging to stderr: https://clig.dev/
+- NO_COLOR — gate ANSI/color on TTY: https://no-color.org/
+- Cobra how-to — group subcommands with `AddGroup`/`GroupID`: https://cobra.dev/docs/how-to-guides/working-with-commands/
+
+### Object storage as an event log / blob store
+
+Backs the hub GC/retention/manifest findings (P6-HUB-01/03/04): a log on object storage needs an authoritative, discoverable manifest recording the GC watermark.
+
+- OSWALD — CAS-updated manifest recording the GC watermark; age-based grace window: https://nvartolomei.com/oswald/
+- WarpStream architecture — compact small per-record objects into segments: https://docs.warpstream.com/warpstream/overview/architecture
+- Cloudflare R2 S3 extensions — `If-Match` CAS beyond plain S3: https://developers.cloudflare.com/r2/api/s3/extensions/
+- S3 conditional-write leader election — epoch-numbered lock objects via `PUT If-None-Match`: https://www.morling.dev/blog/leader-election-with-s3-conditional-writes/
+
+### Go engineering & supply chain
+
+Backs the pool-split, release-signing, and CI-gate findings (P6-QUAL-02/03, P6-DATA-04): a single-writer pool serializes reads, release artifacts are unsigned, and some CI gates look like coverage but don't run.
+
+- go-sqlite — split reads into a separate pool from the single writer: https://github.com/hollis-labs/go-sqlite
+- goreleaser SLSA — sign release checksums and publish build provenance: https://goreleaser.com/blog/slsa-generation-for-your-artifacts/
+- rapid — property-based state-machine testing bridged into the native fuzzer: https://github.com/flyingmutant/rapid
+- Wiz tj-actions writeup — enforce SHA-pinned Actions + least-privilege tokens: https://www.wiz.io/blog/github-action-tj-actions-changed-files-supply-chain-attack-cve-2025-30066
+- Litestream — continuous WAL-shipping complements point-in-time backup: https://litestream.io/how-it-works/
+
+### Git automation at scale
+
+Backs the timeout/LFS/worktree/offline findings (P6-GIT-01/04/05): blobless clone is validated as the long-lived default; gaps are in timeout policy, LFS/worktree lifecycle, and offline-prep tooling.
+
+- GitHub clone data study — blobless clone as the long-lived default, shallow/treeless for throwaway CI only: https://github.blog/open-source/git/git-clone-a-data-driven-study-on-cloning-behaviors/
+- git-backfill — batch historical-blob downloads by path: https://git-scm.com/docs/git-backfill
+- git-maintenance — incremental background maintenance (`maintenance.strategy=incremental`): https://git-scm.com/docs/git-maintenance
+- git-worktree — `prune`/`repair` lifecycle primitives (repair after a parent-repo path move): https://git-scm.com/docs/git-worktree.html
+- git-credential — non-interactive fail-fast + `git credential reject` on auth failure: https://git-scm.com/docs/git-credential
+
+Full per-finding sources: `docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`.

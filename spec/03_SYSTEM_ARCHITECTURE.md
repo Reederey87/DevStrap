@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-06-30
+last_reviewed: 2026-07-01
 tracks_code: [cmd/**, internal/**, .github/**]
 ---
 # System Architecture
@@ -405,3 +405,58 @@ As of `2026-06-30`, the repository contains the Go workspace:
 - the cloud-sync layer (`P5`/`HUB-*`): `internal/sync` (the `Hub` interface, `FileHub`, event apply/dedup, cursor logic), `internal/hub` (the `R2Hub` two-plane backend with keying/retry/conditional-put/retention-floor logic and the **shipped** `aws-sdk-go-v2` `S3Adapter` behind `hubFromOptions` `r2://` wiring, `P5-HUB-01`), `internal/envbundle`/`internal/ignore`/`internal/childenv`/`internal/git`/`internal/devicekeys`/`internal/redact`, `devstrap sync`/`run-loop`/`hub gc`/`devices revoke`, and an env-gated MinIO conformance test.
 
 The daemon, FSEvents-specific Mac watcher, and service installers are still design targets. Native platform-specific watcher or service-manager code must implement the `internal/platform` interfaces instead of branching through the core.
+
+## Pass 6 audit recommendations (2026-07-01)
+
+From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
+
+The near-term hub-hardening imperative is that these `HUB` items land alongside the zero-knowledge namespace-map encryption gap (`P6-SEC-01`, `spec/15`) and the transport-vs-logical-clock cursor gap (`P6-SYNC-01`, `spec/07`), which bound the correctness of every hub push/pull/GC path described above.
+
+### P6-HUB-01 — `hub gc` sweeps a stale local replica with no pre-GC sync, no grace window, and a truncated mark set
+
+**Problem.** `hubGC` (`internal/cli/hub.go:238-278`) deletes any hub blob absent from the purely-local `store.RetainedBlobRefs` without pulling first; remote draft blobs only enter that set on `draft.snapshot.created` apply (`internal/sync/events.go:475-491`), and `EncryptedHub.Pull` silently truncates at the first ungranted epoch, so a stale or awaiting-grant device deletes other devices' live blobs.
+
+**Actionable steps.**
+1. Run a full pull+apply inside `hubGC` before computing refs, and refuse to sweep if `Pull` deferred/skipped any events or `ApplyEvents` quarantined anything (thread those signals out).
+2. Extend the list interface with `LastModified` and skip blobs younger than a ~24h grace window.
+3. Test: device B creates+syncs a draft; an unsynced device A `hub gc` must not delete B's blob.
+
+```go
+type ObjectInfo struct {
+    Key          string
+    LastModified time.Time // S3: out.Contents[i].LastModified; memS3/FileHub record on put
+}
+// hub gc: skip when time.Since(info.LastModified) < 24*time.Hour
+```
+
+### P6-HUB-03 — `R2Hub.Push` uploads one event per serial round-trip
+
+**Problem.** `Push` (`internal/hub/r2.go:120-146`) loops one marshal + conditional-PUT per event with no `errgroup`, while `Pull` got bounded fan-out (`r2PullConcurrency=8`, `r2.go:182-203`) under `P5-HUB-04`; `pushReferencedBlobs` (`internal/cli/sync.go:151-166`) is likewise serial, so a first sync after a large `scan --adopt` stalls 30-60+ s on sequential PUTs.
+
+**Actionable steps.**
+1. Fan out PUTs with an `errgroup` `SetLimit(r2PushConcurrency)`, but push in HLC-ordered waves (finish all PUTs at `HLC <= h` before starting `HLC > h`) — or sequence this after `P6-SYNC-01`'s ingestion-position cursor to avoid widening the intra-device clock gap.
+2. Fan out `pushReferencedBlobs` similarly.
+3. Document the wave-ordering invariant in the `Push` comment.
+
+```go
+g, ctx := errgroup.WithContext(ctx)
+g.SetLimit(r2PushConcurrency)
+for _, wave := range groupByHLCWave(events) { // ascending HLC
+    for _, ev := range wave { ev := ev; g.Go(func() error { return putEvent(ctx, ev) }) }
+    if err := g.Wait(); err != nil { return err } // barrier per wave
+}
+```
+
+### P6-HUB-04 — the retention horizon has no hub-side representation, so `ErrSnapshotRequired` can never fire in production
+
+**Problem.** Production wiring always builds `R2Hub{RetentionHLC: 0}` (`internal/cli/hub.go:116`) and `R2Hub.Pull` gates only on that local field (`internal/hub/r2.go:152-154`); nothing reads a retention marker from the hub, so once event-log compaction lands every non-compacting device pulls a silently partial log and permanently diverges.
+
+**Actionable steps.**
+1. Define a per-workspace `workspaces/<ws>/meta/retention.json` marker signed by an approved device's Ed25519 key; `R2Hub.Pull` fetches it first (404 → floor 0, cached per process) and compares before listing.
+2. Give `FileHub`/memS3 the same file-based marker and add a conformance case "pull below a written retention marker → `ErrSnapshotRequired`."
+3. Fold the signed-marker requirement into the `P4-HUB-11` compaction work; verify the signature so a malicious hub can only DoS, not silently truncate.
+
+```json
+// workspaces/<ws>/meta/retention.json (Ed25519-signed by an approved device)
+{"retention_hlc": 174213, "compacted_at": "2026-07-01T12:00:00Z", "device_id": "dev_..."}
+```
