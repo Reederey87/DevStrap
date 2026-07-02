@@ -27,6 +27,23 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-02 — P6-DATA-01: origin records its own draft_snapshots row atomically at create time (PR 1/3 of the P1 wave)
+
+Changed:
+- Extracted `Store.InsertLocalEvent`'s stamping body into the exported `Store.InsertLocalEventTx(ctx, tx, event)` (behavior-preserving: pre-stamp defaults, HLC/seq stamp, prev-hash backfill, signature, `ErrDivergentEvent` on duplicate); `InsertLocalEvent` is now a thin `WithTx` wrapper.
+- `draft snapshot create` (`internal/cli/draft.go`) and the revoke-rewrap `emitSupersedingDraftSnapshot` (`internal/cli/blob_gc.go`) now insert the `draft.snapshot.created` event and the origin's own `draft_snapshots` row in **one SQLite transaction** (`InsertLocalEventTx` + `tx.RecordDraftSnapshotTx`), closing the P1 data-loss path where routine `sync` local GC + `hub gc` deleted the origin's only bundle copy (the apply path never re-applies the origin's own event, `events.go` `if !inserted`).
+- `DraftSnapshotRef` gained `NamespaceID` (SELECT/Scan in `DraftSnapshotsForBlobRef`) so the rewrap path can record the superseding row; the P5-SEC-01 event-before-repoint ordering is unchanged.
+- Ledger reconciliation (`docs/audits/README.md`, convention #3): moved shipped `P6-SYNC-01`, `P6-SEC-01`, `P6-SEC-02` (PRs #30–#34) and `P6-DATA-01` to *Recently shipped*; Pass 6 now 36 open of 43, remaining P1s `P6-HUB-01`/`P6-GIT-01`. Corrected spec/14's stale `P6-SEC-01` "remain open" status (b/c shipped in #33/#34).
+- Specs: 07 (snapshot flow step 7 records the origin row atomically), 12 (`draft_snapshots` defect note → shipped; P6-DATA-01 section rewritten as shipped), 14 (P1-wave statuses), 16 (test inventory), 18 (this entry).
+- Model policy note (CLAUDE.md): implementation + tests delegated to gpt-5.5 (Codex rescue) against a written line-level spec; diff reviewed line-by-line and accepted. Docs/ledger authored directly.
+
+Validated:
+- `gofmt -w cmd internal` (clean), `GOCACHE=/tmp/devstrap-gocache go test ./internal/state ./internal/cli ./internal/sync ./cmd/devstrap/...`, `GOCACHE=/tmp/devstrap-gocache go test -race ./...` (all green).
+- New tests: `TestInsertLocalEventTxMatchesInsertLocalEvent` (wrapper/Tx parity: stamping, seq/HLC advance, prev-hash chain, divergent duplicate), `TestDraftSnapshotCreateRecordsOriginSnapshotRow` (`LatestDraftSnapshot` non-nil + `RetainedBlobRefs` includes the ref immediately after create), `TestRewrapDraftBlobRecordsOriginSupersedingSnapshot` (superseding row recorded, `DraftBlobRefs` carries the new ref), e2e `draft_snapshot_gc_retains_origin.txtar` (create → `sync --hub-file` → `hub gc` on the origin → blob survives locally and on the hub, `deleted 0`, no conflicts).
+
+Follow-ups:
+- PR 2/3: `P6-HUB-01` (sync-first, grace-windowed, refuse-to-sweep `hub gc`); PR 3/3: `P6-GIT-01` (per-command-class git timeouts, terminal deadline kills).
+
 ## 2026-07-02 — Post-#33 review hardening: kid-as-hint decrypt, replay-time grant ingestion, Prime custody guard (PR-3c)
 
 Changed:

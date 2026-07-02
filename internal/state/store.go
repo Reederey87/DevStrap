@@ -1892,17 +1892,18 @@ func (s *Store) scanRefs(ctx context.Context, query string) ([]string, error) {
 // DraftSnapshotRef is the metadata needed to re-emit a superseding
 // draft.snapshot.created event when a draft blob is rewrapped (P5-SEC-01).
 type DraftSnapshotRef struct {
-	Path      string
-	ByteSize  int64
-	FileCount int64
+	NamespaceID string
+	Path        string
+	ByteSize    int64
+	FileCount   int64
 }
 
-// DraftSnapshotsForBlobRef returns the (path, size, count) of every active
-// draft snapshot referencing ref (P5-SEC-01), so a rewrap can emit a superseding
-// event carrying the new ref before the old hub blob is deleted.
+// DraftSnapshotsForBlobRef returns the (namespace, path, size, count) of every
+// active draft snapshot referencing ref (P5-SEC-01), so a rewrap can emit a
+// superseding event carrying the new ref before the old hub blob is deleted.
 func (s *Store) DraftSnapshotsForBlobRef(ctx context.Context, ref string) ([]DraftSnapshotRef, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT n.path, ds.byte_size, ds.file_count
+SELECT ds.namespace_id, n.path, ds.byte_size, ds.file_count
 FROM draft_snapshots ds
 JOIN namespace_entries n ON n.id = ds.namespace_id
 WHERE ds.blob_ref = ?;
@@ -1914,7 +1915,7 @@ WHERE ds.blob_ref = ?;
 	var out []DraftSnapshotRef
 	for rows.Next() {
 		var r DraftSnapshotRef
-		if err := rows.Scan(&r.Path, &r.ByteSize, &r.FileCount); err != nil {
+		if err := rows.Scan(&r.NamespaceID, &r.Path, &r.ByteSize, &r.FileCount); err != nil {
 			return nil, fmt.Errorf("scan draft snapshot ref: %w", err)
 		}
 		out = append(out, r)
@@ -2274,6 +2275,20 @@ VALUES (?, ?, 'unknown', 'unknown', 'pending', ?, ?);
 }
 
 func (s *Store) InsertLocalEvent(ctx context.Context, event Event) (Event, error) {
+	var stamped Event
+	err := s.WithTx(ctx, func(tx *Tx) error {
+		var err error
+		stamped, err = s.InsertLocalEventTx(ctx, tx, event)
+		return err
+	})
+	if err != nil {
+		return Event{}, err
+	}
+	return stamped, nil
+}
+
+// InsertLocalEventTx stamps, signs, and inserts a local event in tx.
+func (s *Store) InsertLocalEventTx(ctx context.Context, tx *Tx, event Event) (Event, error) {
 	if event.ID == "" {
 		var err error
 		event.ID, err = id.New("evt")
@@ -2287,42 +2302,36 @@ func (s *Store) InsertLocalEvent(ctx context.Context, event Event) (Event, error
 	if event.ContentHash == "" {
 		event.ContentHash = ContentHash(event.PayloadJSON)
 	}
-	err := s.WithTx(ctx, func(tx *Tx) error {
-		device, err := currentDevice(ctx, tx.tx)
-		if err != nil {
-			return err
-		}
-		hlc, seq, err := tx.nextLocalEventStamp(ctx, device.ID)
-		if err != nil {
-			return err
-		}
-		event.DeviceID = device.ID
-		event.WorkspaceID = tx.workspaceID
-		event.HLC = hlc
-		event.Seq = seq
-		if event.PrevEventHash == "" {
-			prevHash, ok, err := previousEventContentHash(ctx, tx.tx, event)
-			if err != nil {
-				return err
-			}
-			if ok {
-				event.PrevEventHash = prevHash
-			}
-		}
-		if err := tx.ensureLocalEventSignature(ctx, s.keyDir, &event); err != nil {
-			return err
-		}
-		inserted, err := tx.InsertEvent(ctx, event)
-		if err != nil {
-			return err
-		}
-		if !inserted {
-			return fmt.Errorf("%w: %s", ErrDivergentEvent, event.ID)
-		}
-		return nil
-	})
+	device, err := currentDevice(ctx, tx.tx)
 	if err != nil {
 		return Event{}, err
+	}
+	hlc, seq, err := tx.nextLocalEventStamp(ctx, device.ID)
+	if err != nil {
+		return Event{}, err
+	}
+	event.DeviceID = device.ID
+	event.WorkspaceID = tx.workspaceID
+	event.HLC = hlc
+	event.Seq = seq
+	if event.PrevEventHash == "" {
+		prevHash, ok, err := previousEventContentHash(ctx, tx.tx, event)
+		if err != nil {
+			return Event{}, err
+		}
+		if ok {
+			event.PrevEventHash = prevHash
+		}
+	}
+	if err := tx.ensureLocalEventSignature(ctx, s.keyDir, &event); err != nil {
+		return Event{}, err
+	}
+	inserted, err := tx.InsertEvent(ctx, event)
+	if err != nil {
+		return Event{}, err
+	}
+	if !inserted {
+		return Event{}, fmt.Errorf("%w: %s", ErrDivergentEvent, event.ID)
 	}
 	return event, nil
 }

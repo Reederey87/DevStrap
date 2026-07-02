@@ -8,6 +8,7 @@ import (
 
 	"github.com/Reederey87/DevStrap/internal/draftbundle"
 	"github.com/Reederey87/DevStrap/internal/ignore"
+	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
 	"github.com/spf13/cobra"
 )
@@ -89,7 +90,17 @@ func newDraftSnapshotCreateCommand(stdout io.Writer, opts *options) *cobra.Comma
 			if err != nil {
 				return err
 			}
-			if _, err := store.InsertLocalEvent(cmd.Context(), dssync.NewDraftSnapshotEvent(dssync.EventDraftSnapshotCreated, string(raw))); err != nil {
+			// P6-DATA-01: the origin must keep its own draft_snapshots row in
+			// the same transaction as the local event, or local/hub GC can
+			// reclaim the only ciphertext before the origin ever replays it.
+			err = store.WithTx(cmd.Context(), func(tx *state.Tx) error {
+				ev, err := store.InsertLocalEventTx(cmd.Context(), tx, dssync.NewDraftSnapshotEvent(dssync.EventDraftSnapshotCreated, string(raw)))
+				if err != nil {
+					return err
+				}
+				return tx.RecordDraftSnapshotTx(cmd.Context(), project.ID, snap.BlobRef, snap.ByteSize, snap.FileCount, ev)
+			})
+			if err != nil {
 				return err
 			}
 			_, err = fmt.Fprintf(stdout, "Created draft snapshot for %s: %s (%d files, %d bytes) for %d recipient device(s)\n",

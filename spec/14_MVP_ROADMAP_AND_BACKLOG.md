@@ -541,11 +541,11 @@ Workstreams added by the cloud-sync architecture pass (`docs/audits/AUDIT_RECOMM
 
 The sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`; index in `docs/audits/README.md`) verified the shipped system against trunk `8c739b8`. Five **P1 must-fix** findings form the near-term wave; land them before broadening the product surface further:
 
-- **P6-SEC-01** — Verify grant-carrier signatures and refuse WCK overwrite before writing to the keychain. Status: grant-carrier pre-ingest verification is shipped (`P6-SEC-01(a)`); held-epoch overwrite refusal and verified-chain epoch bounding remain open for the follow-up keyring/wire-format work.
+- **P6-SEC-01** — Verify grant-carrier signatures and refuse WCK overwrite before writing to the keychain. Status: **shipped** — pre-ingest verification (`P6-SEC-01(a)`, PR #31) plus `(epoch, kid)`-addressed custody with overwrite refusal and grant-preferred key selection (`P6-SEC-01(b/c)`, PR #33/#34).
 - **P6-SYNC-01** — Quarantine verification/trust failures per-event instead of aborting the whole pull batch. Status: apply-path quarantine and approval replay are shipped; synced `device.revoked` trust propagation remains open.
 - **P6-HUB-01** — Make `hub gc` sync-first and grace-windowed; refuse to sweep on a truncated mark set (live draft blobs are currently deletable).
 - **P6-GIT-01** — Split the git subprocess timeout by command class and stop classifying self-imposed deadline kills as retryable (the 2-minute cap breaks eager materialization of large repos).
-- **P6-DATA-01** — Record the origin device's own `draft_snapshots` row at snapshot-create time, in one transaction with the event.
+- **P6-DATA-01** — Record the origin device's own `draft_snapshots` row at snapshot-create time, in one transaction with the event. Status: **shipped 2026-07-02** (`fix/p6-data-01` — `Store.InsertLocalEventTx` + `tx.RecordDraftSnapshotTx` in one `WithTx` on both the create and revoke-rewrap paths; pinned by the `draft_snapshot_gc_retains_origin` e2e script).
 
 P6-DOC-02's audit-ledger reconciliation was applied this cycle (the `docs/audits/` status ledger and cross-references were brought back in line with shipped state).
 

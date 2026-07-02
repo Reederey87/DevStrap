@@ -533,6 +533,81 @@ func TestInsertLocalEventSignsAndRejectsTampering(t *testing.T) {
 	}
 }
 
+func TestInsertLocalEventTxMatchesInsertLocalEvent(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name   string
+		insert func(context.Context, *Store, Event) (Event, error)
+	}{
+		{
+			name: "store wrapper",
+			insert: func(ctx context.Context, st *Store, event Event) (Event, error) {
+				return st.InsertLocalEvent(ctx, event)
+			},
+		},
+		{
+			name: "transaction helper",
+			insert: func(ctx context.Context, st *Store, event Event) (Event, error) {
+				var stamped Event
+				err := st.WithTx(ctx, func(tx *Tx) error {
+					var err error
+					stamped, err = st.InsertLocalEventTx(ctx, tx, event)
+					return err
+				})
+				return stamped, err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			if err := st.Migrate(); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.EnsureWorkspace(ctx, "test", "/tmp/Code"); err != nil {
+				t.Fatal(err)
+			}
+			device, err := st.EnsureDevice(ctx, "device-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			first, err := tt.insert(ctx, st, Event{ID: "evt_p6_data_01", Type: "project.added", PayloadJSON: `{"path":"work/a"}`})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first.ID != "evt_p6_data_01" || first.DeviceID != device.ID || first.WorkspaceID == "" || first.Seq != 1 || first.HLC == 0 {
+				t.Fatalf("first event = %+v, want stamped local event", first)
+			}
+			if first.CreatedAt == "" || first.ContentHash != ContentHash(first.PayloadJSON) || first.DeviceSig == "" {
+				t.Fatalf("first event = %+v, want defaults, content hash, and signature", first)
+			}
+
+			second, err := tt.insert(ctx, st, Event{Type: "project.updated", PayloadJSON: `{"path":"work/b"}`})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if second.Seq != 2 || second.HLC <= first.HLC {
+				t.Fatalf("second event = %+v, want seq/HLC advance after %+v", second, first)
+			}
+			if second.PrevEventHash != first.ContentHash {
+				t.Fatalf("second prev hash = %q, want %q", second.PrevEventHash, first.ContentHash)
+			}
+
+			_, err = tt.insert(ctx, st, Event{ID: first.ID, Type: "project.added", PayloadJSON: `{"path":"work/divergent"}`})
+			if !errors.Is(err, ErrDivergentEvent) {
+				t.Fatalf("duplicate err = %v, want ErrDivergentEvent", err)
+			}
+		})
+	}
+}
+
 func TestInsertEventVerificationFailuresWrapSentinel(t *testing.T) {
 	ctx := context.Background()
 
