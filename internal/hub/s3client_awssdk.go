@@ -156,12 +156,12 @@ func (a *S3Adapter) DeleteObject(ctx context.Context, key string) error {
 	return mapped
 }
 
-// ListObjectsV2 returns object keys under prefix, lexicographically after
+// ListObjectsV2 returns objects under prefix, lexicographically after
 // startAfter, up to maxKeys. When truncated, it returns the last key of the page
 // as nextStartAfter (the memS3 start-after contract — NOT the S3 continuation
 // token) so R2Hub.Pull/ListBlobs page with the same semantics as the in-memory
 // conformance double (HUB-06).
-func (a *S3Adapter) ListObjectsV2(ctx context.Context, prefix, startAfter string, maxKeys int) ([]string, string, error) {
+func (a *S3Adapter) ListObjectsV2(ctx context.Context, prefix, startAfter string, maxKeys int) ([]dssync.BlobInfo, string, error) {
 	if maxKeys < 1 {
 		maxKeys = 1
 	}
@@ -184,20 +184,24 @@ func (a *S3Adapter) ListObjectsV2(ctx context.Context, prefix, startAfter string
 	if err != nil {
 		return nil, "", mapS3Error(err)
 	}
-	keys := make([]string, 0, len(out.Contents))
+	objs := make([]dssync.BlobInfo, 0, len(out.Contents))
 	for _, obj := range out.Contents {
 		if obj.Key != nil {
-			keys = append(keys, *obj.Key)
+			info := dssync.BlobInfo{Key: *obj.Key}
+			if obj.LastModified != nil {
+				info.LastModified = *obj.LastModified
+			}
+			objs = append(objs, info)
 		}
 	}
 	next := ""
-	if out.IsTruncated != nil && *out.IsTruncated && len(keys) > 0 {
+	if out.IsTruncated != nil && *out.IsTruncated && len(objs) > 0 {
 		// Resume start-after the last returned key (memS3 contract), not via the
 		// continuation token, so the production adapter pages identically to the
 		// in-memory conformance double.
-		next = keys[len(keys)-1]
+		next = objs[len(objs)-1].Key
 	}
-	return keys, next, nil
+	return objs, next, nil
 }
 
 // mapS3Error is the pure, load-bearing translation from aws-sdk-go-v2 errors

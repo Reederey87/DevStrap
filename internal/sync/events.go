@@ -34,7 +34,20 @@ const (
 	ConflictPendingDelete           = "pending_delete_conflict"
 	ConflictRenameTargetExists      = "rename_target_exists"
 	ConflictEventVerification       = "event_verification_failure"
+	ConflictUntrustworthyTime       = "untrustworthy_remote_time"
+	ConflictEventHashChain          = "event_hash_chain_break"
 )
+
+// QuarantineConflictTypes are the conflict types that mean a pulled event was
+// NOT applied (skew quarantine, hash-chain break, verification failure). While
+// any such conflict is open, the local replica's derived state may be missing
+// references other devices still rely on, so mark-and-sweep consumers
+// (hub gc, P6-HUB-01) must refuse to sweep.
+var QuarantineConflictTypes = []string{
+	ConflictUntrustworthyTime,
+	ConflictEventHashChain,
+	ConflictEventVerification,
+}
 
 // defaultReceiveMaxSkew bounds how far ahead of local physical time a remote
 // event's HLC may be before it is quarantined instead of applied.
@@ -260,6 +273,27 @@ func CreateConflictResolvedEvent(ctx context.Context, st *state.Store, payload C
 // divergent duplicate event IDs are recorded as conflicts and do NOT hold the
 // cursor, since re-delivery would fail identically forever and would wedge sync.
 func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) (int64, error) {
+	safe, _, err := ApplyEventsWithStats(ctx, st, events)
+	return safe, err
+}
+
+// ApplyStats reports what a single ApplyEvents batch did NOT apply. A non-zero
+// Quarantined or a true CursorHeld means the local replica's derived state may
+// be missing references other devices still rely on, so mark-and-sweep
+// consumers (hub gc, P6-HUB-01) must refuse to sweep this cycle.
+type ApplyStats struct {
+	// Quarantined counts events recorded as conflicts instead of applied
+	// (skew quarantine, hash-chain break, verification/divergence failure).
+	Quarantined int
+	// CursorHeld is true when a transiently-skipped event held the safe
+	// cursor below the batch maximum (the event will be re-delivered).
+	CursorHeld bool
+}
+
+// ApplyEventsWithStats is ApplyEvents plus an ApplyStats report; see
+// ApplyEvents for the cursor semantics.
+func ApplyEventsWithStats(ctx context.Context, st *state.Store, events []state.Event) (int64, ApplyStats, error) {
+	var stats ApplyStats
 	sort.Slice(events, func(i, j int) bool {
 		if events[i].HLC == events[j].HLC {
 			if events[i].DeviceID == events[j].DeviceID {
@@ -281,8 +315,9 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) (in
 		physical := event.HLC >> hlcLogicalBits
 		if event.HLC <= 0 || physical < epochFloorMS {
 			if err := quarantineSkewedEvent(ctx, st, event, physical-now); err != nil {
-				return 0, err
+				return 0, stats, err
 			}
+			stats.Quarantined++
 			continue
 		}
 		// SYNC-3: quarantine remote events whose physical timestamp is beyond
@@ -292,8 +327,9 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) (in
 		// (SYNC-01) until local time catches up and the event is re-delivered.
 		if offset := physical - now; offset > maxSkewMS {
 			if err := quarantineSkewedEvent(ctx, st, event, offset); err != nil {
-				return 0, err
+				return 0, stats, err
 			}
+			stats.Quarantined++
 			if event.HLC < lowestUnapplied {
 				lowestUnapplied = event.HLC
 			}
@@ -325,12 +361,31 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) (in
 			if err := tx.ReceiveRemoteHLC(ctx, event.HLC); err != nil {
 				return err
 			}
-			return applyEventTx(ctx, tx, event)
+			if err := applyEventTx(ctx, tx, event); err != nil {
+				return err
+			}
+			// P6-HUB-01 review: a skew-quarantined delivery of this event left
+			// an open untrustworthy_remote_time conflict that nothing else
+			// clears; now that the event has actually applied, the quarantine
+			// reason is gone — resolve it so it cannot block `hub gc` forever.
+			// The details fingerprint is stable (CODE-02) and the resolve is
+			// idempotent/no-op when no such conflict exists.
+			skewDetails, mErr := json.Marshal(skewConflictDetails{
+				EventID:  event.ID,
+				DeviceID: event.DeviceID,
+				HLC:      event.HLC,
+			})
+			if mErr != nil {
+				return mErr
+			}
+			return tx.ResolveConflictByFingerprint(ctx, ConflictUntrustworthyTime, string(skewDetails),
+				`{"action":"auto","reason":"event applied after skew quarantine"}`)
 		}); err != nil {
 			if errors.Is(err, state.ErrEventHashChain) {
 				if conflictErr := insertEventHashChainConflict(ctx, st, event, err); conflictErr != nil {
-					return 0, errors.Join(err, conflictErr)
+					return 0, stats, errors.Join(err, conflictErr)
 				}
+				stats.Quarantined++
 				// SYNC-05/CODE-01: record the conflict and continue so the
 				// rest of the batch (and other devices' events) still apply,
 				// mirroring the skew-quarantine path. The broken event is
@@ -345,8 +400,9 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) (in
 			}
 			if errors.Is(err, state.ErrEventVerification) || errors.Is(err, state.ErrDivergentEvent) {
 				if conflictErr := insertEventVerificationConflict(ctx, st, event, err); conflictErr != nil {
-					return 0, errors.Join(err, conflictErr)
+					return 0, stats, errors.Join(err, conflictErr)
 				}
+				stats.Quarantined++
 				// Permanent verification/divergence failures are quarantined
 				// and counted as consumed for the cursor: re-delivery would
 				// fail identically forever (the full event is preserved in the
@@ -358,7 +414,7 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) (in
 				}
 				continue
 			}
-			return 0, err
+			return 0, stats, err
 		}
 		if inserted && event.HLC > maxAppliedHLC {
 			maxAppliedHLC = event.HLC
@@ -372,10 +428,11 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) (in
 		safe = lowestUnapplied - 1
 	}
 	if lowestUnapplied != math.MaxInt64 {
+		stats.CursorHeld = true
 		logging.Logger(ctx).Warn("sync cursor held back by unapplied event",
 			"lowest_unapplied_hlc", lowestUnapplied, "safe_advance_hlc", safe, "max_applied_hlc", maxAppliedHLC)
 	}
-	return safe, nil
+	return safe, stats, nil
 }
 
 func quarantineSkewedEvent(ctx context.Context, st *state.Store, event state.Event, offsetMS int64) error {
@@ -392,7 +449,7 @@ func quarantineSkewedEvent(ctx context.Context, st *state.Store, event state.Eve
 	if err != nil {
 		return err
 	}
-	return st.InsertConflict(ctx, "", "untrustworthy_remote_time", string(raw))
+	return st.InsertConflict(ctx, "", ConflictUntrustworthyTime, string(raw))
 }
 
 func insertEventHashChainConflict(ctx context.Context, st *state.Store, event state.Event, cause error) error {
@@ -407,7 +464,7 @@ func insertEventHashChainConflict(ctx context.Context, st *state.Store, event st
 	if err != nil {
 		return err
 	}
-	return st.InsertConflict(ctx, "", "event_hash_chain_break", string(raw))
+	return st.InsertConflict(ctx, "", ConflictEventHashChain, string(raw))
 }
 
 func insertEventVerificationConflict(ctx context.Context, st *state.Store, event state.Event, cause error) error {

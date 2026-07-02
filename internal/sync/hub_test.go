@@ -34,6 +34,16 @@ func TestFileHubBlobPutGetDelete(t *testing.T) {
 	if !bytes.Equal(got, data) {
 		t.Fatalf("GetBlob = %q, want %q", got, data)
 	}
+	listed, err := hub.ListBlobs(ctx)
+	if err != nil {
+		t.Fatalf("ListBlobs: %v", err)
+	}
+	if len(listed) != 1 || listed[0].Key != hash {
+		t.Fatalf("ListBlobs = %+v, want key %s", listed, hash)
+	}
+	if listed[0].LastModified.IsZero() {
+		t.Fatal("ListBlobs returned zero LastModified")
+	}
 
 	if err := hub.DeleteBlob(ctx, hash); err != nil {
 		t.Fatalf("DeleteBlob: %v", err)

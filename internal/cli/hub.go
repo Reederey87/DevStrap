@@ -8,7 +8,9 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/Reederey87/DevStrap/internal/config"
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/hub"
 	"github.com/Reederey87/DevStrap/internal/platform"
@@ -205,20 +207,34 @@ func newHubGCCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var hubFile string
 	var dryRun bool
 	var keep int
+	var graceWindow time.Duration
 	cmd := &cobra.Command{
 		Use:   "gc",
 		Short: "Reclaim hub blobs no longer referenced by any binding or draft snapshot (P5-HUB-02)",
+		Long: `Reclaim hub blobs no longer referenced by any binding or draft snapshot.
+
+gc first pulls and applies the hub event log (fetching referenced blobs, like
+sync) so the mark set includes every device's latest snapshots, and refuses to
+sweep while any pulled event was deferred, skipped, or quarantined (P6-HUB-01)
+— a truncated view of the log must never drive deletion. Blobs younger than
+--grace-window are kept even when unreferenced, bounding the race with a
+device that has pushed a blob whose referencing event is not on the hub yet:
+a device offline longer than the window is not protected (it re-pushes on its
+next successful sync).
+
+Run gc from one designated device; concurrent sweeps from several devices
+are not coordinated.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
 			defer closeStore(store)
-			hub, _, err := hubFromOptions(cmd.Context(), opts, store, hubFile)
+			hub, hubID, err := hubFromOptions(cmd.Context(), opts, store, hubFile)
 			if err != nil {
 				return appError{code: exitInvalidConfig, err: err}
 			}
-			pruned, removed, err := hubGC(cmd.Context(), cmd.ErrOrStderr(), store, hub, keep, dryRun)
+			pruned, removed, err := hubGC(cmd.Context(), cmd.ErrOrStderr(), store, hub, hubID, opts.paths(), keep, graceWindow, dryRun)
 			if err != nil {
 				return err
 			}
@@ -233,17 +249,81 @@ func newHubGCCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&hubFile, "hub-file", "", "file-backed test hub path")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "list what would be deleted without deleting")
 	cmd.Flags().IntVar(&keep, "keep", 1, "draft snapshots to retain per project (>=1; the current snapshot is always kept)")
+	cmd.Flags().DurationVar(&graceWindow, "grace-window", 24*time.Hour, "keep unreferenced blobs younger than this, so an in-flight push from another device is never swept")
 	return cmd
 }
 
-// hubGC reclaims superseded blobs (P5-HUB-02). It first prunes superseded draft
-// snapshot rows (keeping the latest `keep` per project) so their blobs become
-// unreferenced, then lists every blob on the hub and deletes those no retained
-// secret binding or draft snapshot references. It is the hub-side counterpart to
+// errGCRefused wraps the P6-HUB-01 refuse-to-sweep condition so tests can
+// assert on it and callers exit non-zero without deleting anything.
+var errGCRefused = errors.New("hub gc: refusing to sweep")
+
+// hubGC reclaims superseded blobs (P5-HUB-02). It first syncs the namespace
+// map (pull + apply) so the mark set reflects every device's latest events,
+// refuses to sweep when that view is incomplete (P6-HUB-01), then prunes
+// superseded draft snapshot rows (keeping the latest `keep` per project) so
+// their blobs become unreferenced, lists every blob on the hub, and deletes
+// those no retained secret binding or draft snapshot references — except blobs
+// younger than grace, which are kept even when unreferenced (a device pushes
+// its blob BEFORE its referencing event, so a fresh blob may be legitimately
+// reference-less for one push cycle). It is the hub-side counterpart to
 // gcUnreferencedBlobs (which only reclaims the LOCAL cache). A dry run prunes
 // nothing but uses RetainedBlobRefs so the preview reflects post-prune state and
 // matches what a real run would delete (P5 review).
-func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync.Hub, keep int, dryRun bool) (pruned, removed int, err error) {
+func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync.Hub, hubID string, paths config.Paths, keep int, grace time.Duration, dryRun bool) (pruned, removed int, err error) {
+	// P6-HUB-01 gate 1: sweep only from a fully-synced replica. The pull also
+	// applies other devices' draft.snapshot.created events so their blobs
+	// enter RetainedBlobRefs below.
+	pull, err := pullAndApplyEvents(ctx, store, hub, hubID)
+	if err != nil {
+		if errors.Is(err, dssync.ErrSnapshotRequired) {
+			return 0, 0, appError{code: exitNetwork, err: fmt.Errorf("pre-gc sync: %w", err)}
+		}
+		return 0, 0, fmt.Errorf("pre-gc sync: %w", err)
+	}
+	// Cache the referenced blobs the pre-pull consumed, exactly as sync does —
+	// the cursor has advanced past these events, so a later sync will never
+	// see them again and this is the only chance to fetch their blobs.
+	if missing, bErr := pullReferencedBlobs(ctx, hub, pull.events, paths); bErr != nil {
+		return 0, 0, appError{code: exitNetwork, err: fmt.Errorf("pre-gc sync: pull blobs: %w", bErr)}
+	} else if missing > 0 {
+		_, _ = fmt.Fprintf(stderr, "warning: %d referenced blob(s) missing from hub; materialization may be incomplete\n", missing)
+	}
+	// P6-HUB-01 gate 2: refuse to sweep on any signal that this device's view
+	// of the event log is incomplete — a truncated/skipped pull (grant not yet
+	// held, undecryptable events), a quarantined or cursor-holding apply, or
+	// any still-open quarantine conflict from an earlier cycle. Sweeping from
+	// a partial mark set deletes other devices' live blobs.
+	if eh, ok := hub.(dssync.EncryptedHub); ok && eh.Stats != nil {
+		if eh.Stats.Truncated > 0 || eh.Stats.Skipped > 0 {
+			return 0, 0, appError{code: exitInvalidConfig, err: fmt.Errorf(
+				"%w: pull deferred %d and skipped %d event(s); this device cannot see the full event log (awaiting a key grant or holding undecryptable events) — resolve that and re-run",
+				errGCRefused, eh.Stats.Truncated, eh.Stats.Skipped)}
+		}
+	}
+	if pull.stats.CursorHeld {
+		// A transiently-held event (clock skew or hash-chain break) is
+		// re-delivered on a later pull; `conflicts resolve` cannot clear the
+		// hold, so point at the actual remedy.
+		return 0, 0, appError{code: exitInvalidConfig, err: fmt.Errorf(
+			"%w: a pulled event is transiently held (clock skew or hash-chain break) and will be re-delivered; re-run gc after a later sync applies it",
+			errGCRefused)}
+	}
+	if pull.stats.Quarantined > 0 {
+		return 0, 0, appError{code: exitInvalidConfig, err: fmt.Errorf(
+			"%w: %d pulled event(s) were quarantined this cycle; run `devstrap conflicts list` and resolve before sweeping",
+			errGCRefused, pull.stats.Quarantined)}
+	}
+	for _, typ := range dssync.QuarantineConflictTypes {
+		open, cErr := store.OpenConflictsByType(ctx, typ)
+		if cErr != nil {
+			return 0, 0, cErr
+		}
+		if len(open) > 0 {
+			return 0, 0, appError{code: exitInvalidConfig, err: fmt.Errorf(
+				"%w: %d open %s conflict(s) mean unapplied events may reference blobs; run `devstrap conflicts list` and resolve before sweeping",
+				errGCRefused, len(open), typ)}
+		}
+	}
 	if !dryRun {
 		pruned, err = store.PruneDraftSnapshots(ctx, keep)
 		if err != nil {
@@ -268,8 +348,16 @@ func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync
 			referenced[hash] = true
 		}
 	}
-	for _, key := range hubBlobs {
+	now := time.Now()
+	for _, info := range hubBlobs {
+		key := info.Key
 		if referenced[key] {
+			continue
+		}
+		// P6-HUB-01 gate 3: age grace window. A zero LastModified means the
+		// backend could not report an age — treat it as young (keep) rather
+		// than guess.
+		if grace > 0 && (info.LastModified.IsZero() || now.Sub(info.LastModified) < grace) {
 			continue
 		}
 		if dryRun {

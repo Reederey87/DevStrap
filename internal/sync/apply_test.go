@@ -328,12 +328,17 @@ func TestApplyEventsQuarantinesVerificationFailureAndAdvancesCursor(t *testing.T
 	revokedB1 := signedProjectEvent(t, bSigning, "device-b", 1, 20<<hlcLogicalBits, "work/acme/b1", "github.com/acme/b1")
 	validC2 := signedProjectEvent(t, cSigning, "device-c", 2, 30<<hlcLogicalBits, "work/acme/c2", "github.com/acme/c2")
 
-	safeCursor, err := ApplyEvents(ctx, st, []state.Event{validC1, revokedB1, validC2})
+	safeCursor, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{validC1, revokedB1, validC2})
 	if err != nil {
 		t.Fatalf("ApplyEvents should quarantine verification failure and continue: %v", err)
 	}
 	if safeCursor != 30<<hlcLogicalBits {
 		t.Fatalf("safeCursor = %d, want %d", safeCursor, 30<<hlcLogicalBits)
+	}
+	// P6-HUB-01: the quarantine must be visible to callers (gc gate). The
+	// verification quarantine is permanent, so it does not hold the cursor.
+	if stats.Quarantined != 1 || stats.CursorHeld {
+		t.Fatalf("stats = %+v, want Quarantined=1 CursorHeld=false", stats)
 	}
 	projection := projectionOf(t, st)
 	if _, ok := projection["work/acme/c1"]; !ok {
@@ -678,9 +683,13 @@ func TestApplyEventsLowWaterMarkCursorHoldsBelowSkippedEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	safeCursor, err := ApplyEvents(ctx, st, []state.Event{broken, valid})
+	safeCursor, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{broken, valid})
 	if err != nil {
 		t.Fatalf("ApplyEvents should not abort on a hash-chain break: %v", err)
+	}
+	// P6-HUB-01: a transiently-held cursor must be visible to callers (gc gate).
+	if stats.Quarantined != 1 || !stats.CursorHeld {
+		t.Fatalf("stats = %+v, want Quarantined=1 CursorHeld=true", stats)
 	}
 	// The valid (higher-HLC) event was still applied — the batch converged.
 	projects, err := st.ListProjects(ctx)
@@ -822,5 +831,41 @@ func TestApplyConflictResolvedEventMarksRowResolved(t *testing.T) {
 	}
 	if got, _ := st.ConflictByID(ctx, localID); got.Status != "resolved" {
 		t.Fatalf("conflict status after duplicate = %q, want resolved", got.Status)
+	}
+}
+
+// P6-HUB-01 review: once a previously skew-quarantined event actually applies
+// (local time caught up and it was re-delivered), its untrustworthy_remote_time
+// conflict auto-resolves — otherwise a single transient clock-skew incident
+// would block `hub gc` fleet-wide until a human ran `conflicts resolve`.
+func TestApplyResolvesSkewConflictOnLateApply(t *testing.T) {
+	ctx := context.Background()
+	st, device := newSyncStore(t)
+
+	event, err := NewProjectEvent(device.ID, EventProjectAdded, time.Now().UnixMilli()<<hlcLogicalBits, ProjectPayload{
+		Path: "work/acme/late", Type: "git_repo", RemoteKey: "github.com/acme/late",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The quarantine a previous delivery would have recorded (same stable
+	// fingerprint quarantineSkewedEvent writes).
+	details, err := json.Marshal(skewConflictDetails{EventID: event.ID, DeviceID: event.DeviceID, HLC: event.HLC})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertConflict(ctx, "", ConflictUntrustworthyTime, string(details)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ApplyEvents(ctx, st, []state.Event{event}); err != nil {
+		t.Fatalf("ApplyEvents: %v", err)
+	}
+	conflicts, err := st.OpenConflicts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasConflictType(conflicts, ConflictUntrustworthyTime) {
+		t.Fatalf("conflicts = %+v, want the skew quarantine auto-resolved after the event applied", conflicts)
 	}
 }

@@ -27,6 +27,25 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-02 — P6-HUB-01: hub gc is sync-first, grace-windowed, and refuses to sweep when blind (PR 2/3 of the P1 wave)
+
+Changed:
+- **Pre-GC sync gate:** `hubGC` now runs the pull half of a sync cycle first, via the new `pullAndApplyEvents` helper factored out of `runSyncCycle` (`internal/cli/sync.go`) — cursor-based pull, `ApplyEventsWithStats`, low-water-mark cursor advance — so every device's `draft.snapshot.created` events enter the mark set before any deletion.
+- **Refuse-to-sweep when blind:** `EncryptedHub.PullStats` gains `Truncated` (events deferred at an epoch/kid truncate) and `Skipped` (malformed/undecryptable/anti-downgrade drops) counters, reset per pull; `ApplyEventsWithStats` (new; `ApplyEvents` delegates to it, no call-site churn) reports `Quarantined` and `CursorHeld`. `hubGC` aborts with a non-zero exit and remedy text if any of those fire this cycle or if any quarantine-class conflict is still open (`dssync.QuarantineConflictTypes`; the skew/hash-chain literals are now exported constants).
+- **Age grace window:** `hub gc --grace-window` (default 24h) keeps unreferenced blobs younger than the window — a device pushes its blob BEFORE its referencing event, so a fresh blob may be legitimately reference-less for one push cycle. Backed by the `Hub.ListBlobs` → `[]BlobInfo{Key, LastModified}` interface change threaded through `S3Client.ListObjectsV2`/`S3Adapter` (from `out.Contents[i].LastModified`), `FileHub` (blob mtime), `EncryptedHub`, memS3, and `recordingHub`; a zero `LastModified` is treated as young (kept). `hub gc` help documents single-designated-device operation; the S3 conditional-write sweep lock and signed retention marker stay open (`P4-HUB-12`/`P6-HUB-04`).
+- The PR-1 e2e script now passes `--grace-window=0` so its retention assertion stays pinned to the `draft_snapshots` reference, not the window.
+- Specs: 03 (P6-HUB-01 section → shipped), 13 (`hub gc` flags + sync-first/refusal/grace semantics), 14 (P1-wave status), 16 (test inventory), 18 (this entry); ledger `docs/audits/README.md` (P6-HUB-01 → *Recently shipped*; remaining P1 is `P6-GIT-01`).
+- Model policy note (CLAUDE.md): the mechanical `LastModified` interface threading was delegated to gpt-5.5 (Codex) against a written spec and reviewed line-by-line; the gate design/implementation, test scenarios, and docs were authored directly.
+
+Validated:
+- `gofmt -w cmd internal`, `golangci-lint run`, `go run ./cmd/spec-drift --base origin/main --head HEAD`, `GOCACHE=/tmp/devstrap-gocache go test -race ./...`.
+- New/extended tests: `PullStats` assertions in the missing-epoch/unheld-kid/unknown-version hub tests; `ApplyEventsWithStats` assertions in the revoked-quarantine (Quarantined=1, cursor advances) and hash-chain (CursorHeld) tests; `TestHubGCRefusesOnOpenQuarantineConflict` (refusal, nothing deleted); `TestHubGCGraceWindowKeepsFreshBlobs` (fresh kept, aged reclaimed); e2e `hub_gc_stale_marks.txtar` (founder A runs `hub gc --grace-window=0` while stale; the pre-GC pull applies joiner B's snapshot event and B's blob survives).
+
+- Dual-review hardening (independent fable-5 + Codex review passes on the PR) fixed four findings: (1) the pre-GC pull consumed events without caching their referenced blobs — the cursor had advanced, so a draft first seen by gc could never materialize; `hubGC` now runs `pullReferencedBlobs` exactly like `sync` (the e2e script asserts the gc device extracts the other device's draft content afterwards); (2) a skew-quarantined event that later applies now auto-resolves its `untrustworthy_remote_time` conflict in the same transaction (`ResolveConflictByFingerprint`; pinned by `TestApplyResolvesSkewConflictOnLateApply`) — previously one transient clock hiccup blocked gc fleet-wide until a manual `conflicts resolve`; (3) `ErrSnapshotRequired` from the pre-GC pull now maps to the network exit code, matching `sync`; (4) a cursor-held refusal gets its own message ("re-run after a later sync applies it") since `conflicts resolve` cannot clear a hold. Docs honesty: the grace window **bounds** the blob-before-event race to the window rather than closing it (offline-past-window devices re-push on recovery; a dedup'd `PutBlob` does not refresh `LastModified` — both tracked with `P4-HUB-12`), and `--dry-run` is documented as not read-only (it runs the converging pull).
+
+Follow-ups:
+- PR 3/3: `P6-GIT-01` (per-command-class git timeouts, terminal deadline kills). Then `P6-HUB-04` (signed retention marker) and the sweep lock + dedup-`PutBlob` timestamp refresh (`P4-HUB-12`).
+
 ## 2026-07-02 — P6-DATA-01: origin records its own draft_snapshots row atomically at create time (PR 1/3 of the P1 wave)
 
 Changed:

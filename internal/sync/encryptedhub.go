@@ -81,11 +81,23 @@ type EncryptedHub struct {
 }
 
 // PullStats reports what a single EncryptedHub.Pull observed. Fields are set
-// only when EncryptedHub.Stats is non-nil.
+// only when EncryptedHub.Stats is non-nil, and reset at the start of every
+// Pull so a caller always reads the latest cycle.
 type PullStats struct {
 	// RawSeen is the count of objects the backend returned for this pull,
 	// before decryption, grant ingestion, skipping, or truncation.
 	RawSeen int
+	// Truncated is the count of raw events deferred by an epoch/kid truncate
+	// (grant not yet held): the tail of the batch this device could not read
+	// yet. Non-zero means this device's view of the log is INCOMPLETE, so
+	// consumers deriving a mark set from local state (hub gc, P6-HUB-01) must
+	// refuse to sweep.
+	Truncated int
+	// Skipped is the count of events dropped in the decrypt pass (malformed
+	// envelope, undecryptable on every held key, anti-downgrade plaintext).
+	// Like Truncated, non-zero means the local replica may be missing
+	// references other devices still rely on.
+	Skipped int
 }
 
 // Push envelope-encrypts every non-grant event under the current epoch's WCK
@@ -151,7 +163,7 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 		return nil, err
 	}
 	if h.Stats != nil {
-		h.Stats.RawSeen = len(raw)
+		*h.Stats = PullStats{RawSeen: len(raw)}
 	}
 	if err := h.Keyring.Prime(ctx); err != nil {
 		return nil, fmt.Errorf("encrypted hub pull: prime keyring: %w", err)
@@ -187,7 +199,7 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 	// Second pass: decrypt enc.v1, passthrough grants, skip anything this device
 	// cannot apply, and truncate at the first not-yet-granted epoch.
 	out := make([]state.Event, 0, len(raw))
-	for _, event := range raw {
+	for i, event := range raw {
 		switch event.Type {
 		case EventDeviceKeyGranted:
 			out = append(out, event)
@@ -199,6 +211,9 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 				// cannot read. Refuse it, but skip rather than wedge.
 				logging.Logger(ctx).Warn("encrypted hub pull: skipping undecodable event",
 					"event_id", event.ID, "err", err.Error())
+				if h.Stats != nil {
+					h.Stats.Skipped++
+				}
 				continue
 			}
 			// The envelope kid is an unauthenticated routing hint (outside the
@@ -223,6 +238,9 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 				// from this event once granted.
 				logging.Logger(ctx).Info("encrypted hub pull: awaiting workspace key grant; deferring remaining events",
 					"epoch", env.Epoch, "kid", env.KID, "event_id", event.ID)
+				if h.Stats != nil {
+					h.Stats.Truncated = len(raw) - i
+				}
 				return out, nil
 			}
 			var restored state.Event
@@ -244,6 +262,9 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 					// once granted instead of being permanently jumped.
 					logging.Logger(ctx).Info("encrypted hub pull: awaiting workspace key grant; deferring remaining events",
 						"epoch", env.Epoch, "kid", env.KID, "event_id", event.ID)
+					if h.Stats != nil {
+						h.Stats.Truncated = len(raw) - i
+					}
 					return out, nil
 				}
 				// The envelope names a key we hold (or is a legacy kid-less
@@ -253,6 +274,9 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 				// and continue.
 				logging.Logger(ctx).Warn("encrypted hub pull: skipping undecryptable event",
 					"epoch", env.Epoch, "kid", env.KID, "event_id", event.ID, "err", decErr.Error())
+				if h.Stats != nil {
+					h.Stats.Skipped++
+				}
 				continue
 			}
 			out = append(out, restored)
@@ -263,6 +287,9 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 			// cannot wedge sync.
 			logging.Logger(ctx).Warn("encrypted hub pull: skipping non-encrypted event (anti-downgrade)",
 				"event_id", event.ID, "type", event.Type)
+			if h.Stats != nil {
+				h.Stats.Skipped++
+			}
 			continue
 		}
 	}
@@ -285,7 +312,7 @@ func (h EncryptedHub) DeleteBlob(ctx context.Context, sha256Hex string) error {
 	return h.Hub.DeleteBlob(ctx, sha256Hex)
 }
 
-func (h EncryptedHub) ListBlobs(ctx context.Context) ([]string, error) {
+func (h EncryptedHub) ListBlobs(ctx context.Context) ([]BlobInfo, error) {
 	return h.Hub.ListBlobs(ctx)
 }
 

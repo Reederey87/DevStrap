@@ -420,22 +420,11 @@ The near-term hub-hardening imperative is that these `HUB` items land alongside 
 
 **DIRECTION — multi-device hardening freeze before new planes (`AD-2`).** The shipped multi-device plane has confirmed criticals (`P6-SEC-01` confidentiality break, `P6-SYNC-01` whole-batch wedge, `P6-HUB-01` live-data-loss GC, `P5-SYNC-01` cursor drops). The intended sequencing is a **hardening freeze**: close the P5/P6 sync + crypto criticals before building new capability planes (the HTTP/SSE relay, the daemon, StrapFS, hosting/SaaS docs). See `spec/14` for the roadmap ordering.
 
-### P6-HUB-01 — `hub gc` sweeps a stale local replica with no pre-GC sync, no grace window, and a truncated mark set
+### P6-HUB-01 — `hub gc` sweeps a stale local replica with no pre-GC sync, no grace window, and a truncated mark set — **shipped (2026-07-02)**
 
-**Problem.** `hubGC` (`internal/cli/hub.go:238-278`) deletes any hub blob absent from the purely-local `store.RetainedBlobRefs` without pulling first; remote draft blobs only enter that set on `draft.snapshot.created` apply (`internal/sync/events.go:475-491`), and `EncryptedHub.Pull` silently truncates at the first ungranted epoch, so a stale or awaiting-grant device deletes other devices' live blobs.
+**Was.** `hubGC` deleted any hub blob absent from the purely-local `store.RetainedBlobRefs` without pulling first; remote draft blobs only enter that set on `draft.snapshot.created` apply, and `EncryptedHub.Pull` silently truncated at the first ungranted epoch, so a stale or awaiting-grant device deleted other devices' live blobs.
 
-**Actionable steps.**
-1. Run a full pull+apply inside `hubGC` before computing refs, and refuse to sweep if `Pull` deferred/skipped any events or `ApplyEvents` quarantined anything (thread those signals out).
-2. Extend the list interface with `LastModified` and skip blobs younger than a ~24h grace window.
-3. Test: device B creates+syncs a draft; an unsynced device A `hub gc` must not delete B's blob.
-
-```go
-type ObjectInfo struct {
-    Key          string
-    LastModified time.Time // S3: out.Contents[i].LastModified; memS3/FileHub record on put
-}
-// hub gc: skip when time.Since(info.LastModified) < 24*time.Hour
-```
+**Shipped fix.** Three gates in `hubGC` (`internal/cli/hub.go`): (1) a pre-GC pull+apply (the `pullAndApplyEvents` helper shared with `runSyncCycle`) so every device's latest events enter the mark set; (2) refuse-to-sweep when the view is incomplete — `EncryptedHub.PullStats.Truncated`/`Skipped` counters, `ApplyEventsWithStats` quarantine/cursor-held signals, or any open quarantine-class conflict (`dssync.QuarantineConflictTypes`) abort with a non-zero exit and a remedy hint; (3) an age grace window — `Hub.ListBlobs` now returns `BlobInfo{Key, LastModified}` (S3: `out.Contents[i].LastModified`; FileHub: blob mtime; a zero time is treated as young/kept) and unreferenced blobs younger than `--grace-window` (default 24h) survive, **bounding** the blob-pushed-before-event race to the window (a device offline longer than the window is not protected; it re-pushes on its next successful sync because its push cursor never advanced). The pre-GC pull also caches referenced blobs exactly as `sync` does — the cursor advances past those events, so gc is the only chance to fetch them. A late-applying skew-quarantined event now auto-resolves its `untrustworthy_remote_time` conflict so one transient clock hiccup cannot block gc forever. Known residuals, tracked with the follow-ups: a dedup'd `PutBlob` re-upload does not refresh `LastModified`, so gc racing a >window-late recovery sync within seconds can still delete the blob (needs a timestamp-refreshing re-put or conditional delete — fold into `P4-HUB-12`); an undecryptable event parked at the log tail keeps `Skipped` non-zero until any newer event advances the cursor (`P6-SEC-03`'s class). `hub gc` documents that it runs from one designated device; the S3 conditional-write sweep lock and the signed retention manifest remain follow-ups (`P6-HUB-04`, `P4-HUB-12`).
 
 ### P6-HUB-02 — hub S3 credentials are plaintext env/config only; the promised keychain/`op://` resolution is unbuilt
 

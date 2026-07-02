@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Reederey87/DevStrap/internal/config"
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
@@ -266,7 +268,7 @@ func TestHubGCDeletesUnreferencedBlobs(t *testing.T) {
 		t.Fatalf("RecordDraftSnapshot: %v", err)
 	}
 
-	pruned, removed, err := hubGC(ctx, io.Discard, st, hub, 1, false)
+	pruned, removed, err := hubGC(ctx, io.Discard, st, hub, "test-hub", testGCPaths(t), 1, 0, false)
 	if err != nil {
 		t.Fatalf("hubGC: %v", err)
 	}
@@ -283,4 +285,76 @@ func TestHubGCDeletesUnreferencedBlobs(t *testing.T) {
 	if _, err := hub.GetBlob(ctx, hex64b); err == nil {
 		t.Fatal("unreferenced blob hex64b should have been deleted")
 	}
+}
+
+// P6-HUB-01: hub gc must refuse to sweep while any quarantine-class conflict is
+// open — an unapplied event may reference blobs the local mark set is missing.
+func TestHubGCRefusesOnOpenQuarantineConflict(t *testing.T) {
+	ctx := context.Background()
+	st := newRewrapTestStore(t)
+	hub := dssync.FileHub{Path: filepath.Join(t.TempDir(), "hub.json")}
+	if err := hub.PutBlob(ctx, hex64b, strings.NewReader("ciphertext")); err != nil {
+		t.Fatalf("PutBlob: %v", err)
+	}
+	if err := st.InsertConflict(ctx, "", dssync.ConflictEventVerification, `{"event_id":"evt_q"}`); err != nil {
+		t.Fatalf("InsertConflict: %v", err)
+	}
+
+	_, _, err := hubGC(ctx, io.Discard, st, hub, "test-hub", testGCPaths(t), 1, 0, false)
+	if !errors.Is(err, errGCRefused) {
+		t.Fatalf("hubGC err = %v, want errGCRefused", err)
+	}
+	// Nothing was deleted.
+	if _, err := hub.GetBlob(ctx, hex64b); err != nil {
+		t.Fatalf("blob deleted despite refusal: %v", err)
+	}
+}
+
+// P6-HUB-01: an unreferenced blob younger than the grace window survives the
+// sweep (a device pushes its blob BEFORE its referencing event); once older
+// than the window it is reclaimed.
+func TestHubGCGraceWindowKeepsFreshBlobs(t *testing.T) {
+	ctx := context.Background()
+	st := newRewrapTestStore(t)
+	hubPath := filepath.Join(t.TempDir(), "hub.json")
+	hub := dssync.FileHub{Path: hubPath}
+	if err := hub.PutBlob(ctx, hex64b, strings.NewReader("ciphertext")); err != nil {
+		t.Fatalf("PutBlob: %v", err)
+	}
+
+	// Fresh and unreferenced: kept by the 24h grace window.
+	_, removed, err := hubGC(ctx, io.Discard, st, hub, "test-hub", testGCPaths(t), 1, 24*time.Hour, false)
+	if err != nil {
+		t.Fatalf("hubGC: %v", err)
+	}
+	if removed != 0 {
+		t.Fatalf("removed = %d, want 0 (blob younger than grace window)", removed)
+	}
+	if _, err := hub.GetBlob(ctx, hex64b); err != nil {
+		t.Fatalf("fresh blob deleted despite grace window: %v", err)
+	}
+
+	// Age the blob file past the window: now reclaimable.
+	blobFile := filepath.Join(filepath.Dir(hubPath), "hub-blobs", hex64b+".blob")
+	old := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(blobFile, old, old); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+	_, removed, err = hubGC(ctx, io.Discard, st, hub, "test-hub", testGCPaths(t), 1, 24*time.Hour, false)
+	if err != nil {
+		t.Fatalf("hubGC after aging: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1 (blob aged past grace window)", removed)
+	}
+	if _, err := hub.GetBlob(ctx, hex64b); err == nil {
+		t.Fatal("aged unreferenced blob should have been deleted")
+	}
+}
+
+// testGCPaths is a throwaway blob-cache location for direct hubGC calls (the
+// pre-GC pull caches referenced blobs like sync does).
+func testGCPaths(t *testing.T) config.Paths {
+	t.Helper()
+	return config.Paths{Home: t.TempDir(), Root: t.TempDir()}
 }

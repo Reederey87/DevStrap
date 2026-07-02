@@ -42,7 +42,6 @@ import (
 const r2PullConcurrency = 8
 
 // S3Client is the minimal S3-compatible operation set the R2 backend needs
-// S3Client is the minimal S3-compatible operation set the R2 backend needs
 // (HUB-02). It is abstracted so the keying scheme and Hub contract are
 // testable with an in-memory double. A production implementation wraps the
 // AWS SDK v2 S3 client pointed at an R2 endpoint.
@@ -60,10 +59,11 @@ type S3Client interface {
 	// (idempotent delete) so blob/event GC (HUB-12) and revoke cleanup (SEC-01)
 	// can call it unconditionally for superseded ciphertext.
 	DeleteObject(ctx context.Context, key string) error
-	// ListObjectsV2 returns object keys under prefix, lexicographically after
-	// startAfter, up to maxKeys. When truncated, it returns the next key to
-	// continue from.
-	ListObjectsV2(ctx context.Context, prefix, startAfter string, maxKeys int) (keys []string, nextStartAfter string, err error)
+	// ListObjectsV2 returns objects under prefix, lexicographically after
+	// startAfter, up to maxKeys. BlobInfo is reused as a generic key+time pair;
+	// for event objects, Key is the full trimmed key as before. When truncated,
+	// it returns the next key to continue from.
+	ListObjectsV2(ctx context.Context, prefix, startAfter string, maxKeys int) (objs []dssync.BlobInfo, nextStartAfter string, err error)
 }
 
 // R2Hub is the Cloudflare R2 zero-knowledge Hub backend (HUB-02). It implements
@@ -159,7 +159,7 @@ func (h R2Hub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, error) 
 	var keys []string
 	for {
 		// HUB-10: retry list on throttling/transient S3 errors with backoff.
-		var page []string
+		var page []dssync.BlobInfo
 		var next string
 		if err := h.retry().do(ctx, func() error {
 			var lerr error
@@ -168,7 +168,9 @@ func (h R2Hub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, error) 
 		}); err != nil {
 			return nil, fmt.Errorf("list events: %w", err)
 		}
-		keys = append(keys, page...)
+		for _, obj := range page {
+			keys = append(keys, obj.Key)
+		}
 		if next == "" {
 			break
 		}
@@ -221,24 +223,24 @@ func (h R2Hub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, error) 
 	return out, nil
 }
 
-// ListBlobs returns the sha256 hex keys of every blob in this workspace's blob
-// prefix (P5-HUB-02), the enumeration primitive for mark-and-sweep hub GC.
-func (h R2Hub) ListBlobs(ctx context.Context) ([]string, error) {
+// ListBlobs returns metadata for every blob in this workspace's blob prefix
+// (P5-HUB-02), the enumeration primitive for mark-and-sweep hub GC.
+func (h R2Hub) ListBlobs(ctx context.Context) ([]dssync.BlobInfo, error) {
 	prefix := fmt.Sprintf("workspaces/%s/blobs/", h.WorkspaceID)
-	var out []string
+	var out []dssync.BlobInfo
 	startAfter := ""
 	for {
-		var keys []string
+		var objs []dssync.BlobInfo
 		var next string
 		if err := h.retry().do(ctx, func() error {
 			var lerr error
-			keys, next, lerr = h.S3.ListObjectsV2(ctx, prefix, startAfter, 1000)
+			objs, next, lerr = h.S3.ListObjectsV2(ctx, prefix, startAfter, 1000)
 			return lerr
 		}); err != nil {
 			return nil, fmt.Errorf("list blobs: %w", err)
 		}
-		for _, k := range keys {
-			out = append(out, strings.TrimPrefix(k, prefix))
+		for _, obj := range objs {
+			out = append(out, dssync.BlobInfo{Key: strings.TrimPrefix(obj.Key, prefix), LastModified: obj.LastModified})
 		}
 		if next == "" {
 			break

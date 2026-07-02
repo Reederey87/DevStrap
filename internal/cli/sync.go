@@ -73,30 +73,14 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 	// a joiner's Push to either error on the missing epoch or seal events under
 	// a key nobody else holds — the SEC-02 data loss.
 	// EAGER-02: cursor-based incremental pull.
-	cursor, err := store.HubCursor(ctx, hubID)
-	if err != nil {
-		return err
-	}
-	remoteEvents, err := hub.Pull(ctx, cursor)
+	pull, err := pullAndApplyEvents(ctx, store, hub, hubID)
 	if err != nil {
 		if errors.Is(err, dssync.ErrSnapshotRequired) {
 			return appError{code: exitNetwork, err: err}
 		}
 		return err
 	}
-	// SYNC-01: ApplyEvents returns a low-water-mark safe cursor — the highest
-	// HLC safe to advance to, never past a transiently-skipped (quarantined or
-	// hash-chain-broken) event in this batch. Advancing past such an event
-	// would permanently strand it, since Pull only returns HLC > cursor.
-	safeCursor, err := dssync.ApplyEvents(ctx, store, remoteEvents)
-	if err != nil {
-		return err
-	}
-	if safeCursor > cursor {
-		if err := store.AdvanceHubCursor(ctx, hubID, safeCursor); err != nil {
-			return err
-		}
-	}
+	remoteEvents := pull.events
 	// DRAFT-02: pull referenced blobs from the hub and cache them locally.
 	missingBlobs, err := pullReferencedBlobs(ctx, hub, remoteEvents, opts.paths())
 	if err != nil {
@@ -141,6 +125,42 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 	_, err = fmt.Fprintf(stdout, "Synced events: pushed %d, pulled %d; materialized %d/%d projects (%d skipped)\n",
 		pushed, len(remoteEvents), results.succeeded, results.total, results.skipped)
 	return err
+}
+
+// pullApplyOutcome reports one pull+apply pass: the decrypted events and the
+// apply-side quarantine stats.
+type pullApplyOutcome struct {
+	events []state.Event
+	stats  dssync.ApplyStats
+}
+
+// pullAndApplyEvents runs the pull half of a sync cycle: cursor-based
+// incremental pull, apply, and low-water-mark cursor advance. It is shared by
+// runSyncCycle and hub gc's pre-GC sync gate (P6-HUB-01).
+//
+// SYNC-01: ApplyEvents returns a low-water-mark safe cursor — the highest HLC
+// safe to advance to, never past a transiently-skipped (quarantined or
+// hash-chain-broken) event in this batch. Advancing past such an event would
+// permanently strand it, since Pull only returns HLC > cursor.
+func pullAndApplyEvents(ctx context.Context, store *state.Store, hub dssync.Hub, hubID string) (pullApplyOutcome, error) {
+	cursor, err := store.HubCursor(ctx, hubID)
+	if err != nil {
+		return pullApplyOutcome{}, err
+	}
+	remoteEvents, err := hub.Pull(ctx, cursor)
+	if err != nil {
+		return pullApplyOutcome{}, err
+	}
+	safeCursor, stats, err := dssync.ApplyEventsWithStats(ctx, store, remoteEvents)
+	if err != nil {
+		return pullApplyOutcome{}, err
+	}
+	if safeCursor > cursor {
+		if err := store.AdvanceHubCursor(ctx, hubID, safeCursor); err != nil {
+			return pullApplyOutcome{}, err
+		}
+	}
+	return pullApplyOutcome{events: remoteEvents, stats: stats}, nil
 }
 
 // pushLocalEventsGated runs the push side of a sync cycle behind the P6-SEC-02
