@@ -16,19 +16,31 @@ import (
 // keyring, keeping keychain/platform/state dependencies out of internal/sync.
 // The concrete implementation lives in internal/workspacekeys.
 type WorkspaceKeyring interface {
-	// CurrentEpoch returns the active epoch new events encrypt under, or 0 if
-	// none has been bootstrapped.
-	CurrentEpoch(ctx context.Context) (int64, error)
-	// Prime loads every held epoch's WCK into memory so WCK lookups during a
+	// PushKey returns the key new outgoing events encrypt under: the active
+	// epoch, its kid (KIDForWCK), and the WCK bytes. epoch == 0 with a nil
+	// error means this device holds no workspace key yet (a joiner awaiting
+	// its grant). When several keys coexist at the active epoch (P6-SEC-02
+	// collision coexistence), the fleet key — grant origin — is preferred over
+	// a local self-mint so a legacy joiner converges onto the founder's key.
+	// Call Prime first.
+	PushKey(ctx context.Context) (epoch int64, kid string, wck []byte, err error)
+	// Prime loads every held key's WCK into memory so WCK lookups during a
 	// Pull are pure and context-free. EncryptedHub.Pull calls Prime before
 	// ingesting in-batch grants and decrypting.
 	Prime(ctx context.Context) error
-	// WCK returns the WCK for an epoch from the in-memory cache, or ok=false if
-	// this device does not hold it. Call Prime (and ingest in-batch grants)
-	// first.
-	WCK(epoch int64) ([]byte, bool)
+	// WCKCandidates returns the candidate WCKs for decrypting an envelope
+	// addressed to (epoch, kid), from the in-memory cache. kid != "" selects
+	// the exact key (zero or one candidates); kid == "" (a legacy pre-kid
+	// envelope) returns every held key at the epoch, which the caller tries in
+	// order — the AEAD authenticates, so a wrong candidate just fails. An
+	// empty result means no candidate is held (the grant has not arrived).
+	// Call Prime (and ingest in-batch grants) first.
+	WCKCandidates(epoch int64, kid string) [][]byte
 	// IngestGrant unwraps a device.key.grant addressed to the local device and
-	// persists the WCK for its epoch. Grants for other recipients are a no-op.
+	// persists the WCK under its (epoch, kid). Grants for other recipients are
+	// a no-op. A grant whose carried kid does not match its unwrapped bytes is
+	// rejected, and an already-held (epoch, kid) is never overwritten
+	// (P6-SEC-01b/c).
 	IngestGrant(ctx context.Context, grant DeviceKeyGrant) error
 }
 
@@ -81,21 +93,17 @@ type PullStats struct {
 // unchanged. The carrier preserves ID/DeviceID/Seq/HLC/DeviceSig so hub
 // ordering, dedup, and signature verification are byte-for-byte unchanged.
 func (h EncryptedHub) Push(ctx context.Context, events []state.Event) error {
-	epoch, err := h.Keyring.CurrentEpoch(ctx)
-	if err != nil {
-		return fmt.Errorf("encrypted hub push: current epoch: %w", err)
-	}
-	if epoch == 0 {
-		return fmt.Errorf("%w: awaiting workspace key grant (approve this device from an existing device, or sync against an empty hub to found the workspace)", ErrMissingWorkspaceKey)
-	}
-	// Prime the cache so the WCK for the current epoch is in memory. Prime is
-	// idempotent and only loads held epochs that are not yet cached.
+	// Prime the cache so PushKey can select from every held key. Prime is
+	// idempotent and only loads held keys that are not yet cached.
 	if err := h.Keyring.Prime(ctx); err != nil {
 		return fmt.Errorf("encrypted hub push: prime keyring: %w", err)
 	}
-	wck, ok := h.Keyring.WCK(epoch)
-	if !ok {
-		return fmt.Errorf("%w: epoch %d not held locally", ErrMissingWorkspaceKey, epoch)
+	epoch, _, wck, err := h.Keyring.PushKey(ctx)
+	if err != nil {
+		return fmt.Errorf("encrypted hub push: select push key: %w", err)
+	}
+	if epoch == 0 {
+		return fmt.Errorf("%w: awaiting workspace key grant (approve this device from an existing device, or sync against an empty hub to found the workspace)", ErrMissingWorkspaceKey)
 	}
 	out := make([]state.Event, 0, len(events))
 	for _, event := range events {
@@ -120,10 +128,12 @@ func (h EncryptedHub) Push(ctx context.Context, events []state.Event) error {
 // never be able to wedge sync. Pull therefore degrades instead of aborting the
 // whole batch:
 //
-//   - Missing epoch key: the grant for this event's epoch has not propagated
-//     yet. Pull TRUNCATES the batch here — it returns the decryptable prefix so
-//     it applies and the caller advances the cursor up to (but not past) this
-//     event, then retries from here on the next sync once the grant arrives.
+//   - Missing (epoch, kid) key: the grant for this event's key has not
+//     propagated yet (a missing epoch, or a kid at a held epoch that this
+//     device does not hold — the P6-SEC-02 collision case). Pull TRUNCATES the
+//     batch here — it returns the decryptable prefix so it applies and the
+//     caller advances the cursor up to (but not past) this event, then retries
+//     from here on the next sync once the grant arrives.
 //     Truncating (not skipping) is required so a legitimately-decryptable-later
 //     event is never permanently stranded by the cursor jumping over it.
 //   - Held-epoch decrypt failure (corruption, forgery, or a cross-device
@@ -191,23 +201,35 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 					"event_id", event.ID, "err", err.Error())
 				continue
 			}
-			wck, ok := h.Keyring.WCK(env.Epoch)
-			if !ok {
-				// The grant for this epoch has not arrived. Truncate: return the
-				// decryptable prefix and stop, so the cursor advances only up to
-				// here and the next sync retries from this event once granted.
+			candidates := h.Keyring.WCKCandidates(env.Epoch, env.KID)
+			if len(candidates) == 0 {
+				// The grant for this event's (epoch, kid) has not arrived —
+				// including a kid we don't hold at an epoch where we hold a
+				// different key (a joiner's self-mint vs. the fleet key,
+				// P6-SEC-02). Truncate: return the decryptable prefix and stop,
+				// so the cursor advances only up to here and the next sync
+				// retries from this event once granted.
 				logging.Logger(ctx).Info("encrypted hub pull: awaiting workspace key grant; deferring remaining events",
-					"epoch", env.Epoch, "event_id", event.ID)
+					"epoch", env.Epoch, "kid", env.KID, "event_id", event.ID)
 				return out, nil
 			}
-			restored, err := DecryptEvent(event, wck)
-			if err != nil {
-				// We hold the epoch key but authentication failed: corruption,
-				// forgery, or a cross-device epoch-key collision (P4-SEC-07
-				// pairing). The event can never be decrypted by this device, so
-				// skip it — never apply unauthenticated data — and continue.
+			var restored state.Event
+			decErr := error(nil)
+			decrypted := false
+			for _, wck := range candidates {
+				restored, decErr = DecryptEvent(event, wck)
+				if decErr == nil {
+					decrypted = true
+					break
+				}
+			}
+			if !decrypted {
+				// We hold candidate key(s) but authentication failed on all of
+				// them: corruption or forgery. The event can never be decrypted
+				// by this device, so skip it — never apply unauthenticated
+				// data — and continue.
 				logging.Logger(ctx).Warn("encrypted hub pull: skipping undecryptable event",
-					"epoch", env.Epoch, "event_id", event.ID, "err", err.Error())
+					"epoch", env.Epoch, "kid", env.KID, "event_id", event.ID, "err", decErr.Error())
 				continue
 			}
 			out = append(out, restored)

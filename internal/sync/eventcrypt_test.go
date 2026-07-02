@@ -197,3 +197,52 @@ func indexOf(haystack, needle string) int {
 	}
 	return -1
 }
+
+// TestKIDForWCK pins the key-identity derivation (P6-SEC-02): deterministic,
+// the full 64-lowercase-hex-char digest, and distinct for distinct keys.
+func TestKIDForWCK(t *testing.T) {
+	wck, err := NewWCK()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid := KIDForWCK(wck)
+	if len(kid) != 64 {
+		t.Fatalf("kid length = %d, want 64", len(kid))
+	}
+	for _, c := range kid {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			t.Fatalf("kid %q contains non-lowercase-hex character %q", kid, c)
+		}
+	}
+	if KIDForWCK(wck) != kid {
+		t.Fatal("KIDForWCK is not deterministic")
+	}
+	other, err := NewWCK()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if KIDForWCK(other) == kid {
+		t.Fatal("distinct WCKs produced the same kid")
+	}
+}
+
+// TestEnvelopeCarriesKID proves EncryptEvent names its key in the envelope so
+// receivers holding several keys at an epoch select the right one without
+// trial decryption.
+func TestEnvelopeCarriesKID(t *testing.T) {
+	wck, err := NewWCK()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc, err := EncryptEvent(state.Event{ID: "evt_kid", Type: EventProjectAdded, PayloadJSON: `{}`, ContentHash: state.ContentHash(`{}`)}, wck, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := ParseEncryptedEnvelope(enc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env.KID != KIDForWCK(wck) {
+		t.Fatalf("envelope kid = %q, want %q", env.KID, KIDForWCK(wck))
+	}
+}

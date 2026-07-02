@@ -3,8 +3,10 @@ package sync
 import (
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,10 +50,19 @@ var ErrPlaintextEventFromHub = errors.New("plaintext event from hub (anti-downgr
 const wckSize = chacha20poly1305.KeySize
 
 // encryptedEnvelope is the PayloadJSON of an enc.v1 event: the AEAD ciphertext
-// (base64(nonce || ciphertext+tag)) plus the epoch that selects the WCK.
+// (base64(nonce || ciphertext+tag)) plus the (epoch, kid) that selects the WCK.
+// KID is the key identity (KIDForWCK) so two colliding keys at the same epoch —
+// e.g. a legacy self-mint and the founder's fleet key (P6-SEC-02) — are
+// distinguishable without trial decryption. It is omitted on legacy enc.v1
+// events written before kid addressing; readers fall back to trying every held
+// key at the epoch (the AEAD authenticates, so a wrong candidate just fails).
+// KID stays outside the AAD for wire compatibility with pre-kid clients
+// (enc.v2 AAD binding is P6-SYNC-04); a stripped or forged kid can only cause
+// a decrypt miss or an auth failure, never a wrong-key acceptance.
 type encryptedEnvelope struct {
 	Version int    `json:"v"`
 	Epoch   int64  `json:"epoch"`
+	KID     string `json:"kid,omitempty"`
 	CT      string `json:"ct"`
 }
 
@@ -75,13 +86,30 @@ func NewWCK() ([]byte, error) {
 	return key, nil
 }
 
+// KIDForWCK derives the key identity for a WCK: hex(sha256(wck)), the full
+// digest as 64 lowercase hex characters (P6-SEC-02). The full digest (not a
+// short prefix) makes crafting a second key with a colliding kid a sha256
+// collision, so a forged grant can never alias — let alone displace — an
+// existing key's custody slot. The kid names a specific key so two
+// keys minted independently at the same epoch (a joiner's legacy self-mint and
+// the founder's fleet key) coexist in the keyring instead of clobbering, and a
+// grant whose carried kid does not match its unwrapped bytes is rejected. The
+// kid is derived from the secret key but reveals only a one-way hash — it
+// identifies, it does not leak.
+func KIDForWCK(wck []byte) string {
+	sum := sha256.Sum256(wck)
+	return hex.EncodeToString(sum[:])
+}
+
 // EncryptEvent seals event's content tuple under the WCK for the given epoch,
 // returning an enc.v1 carrier event. The carrier preserves ID, WorkspaceID,
 // DeviceID, Seq, HLC, and DeviceSig (so hub ordering and signature verification
 // are unchanged) and clears ContentHash, PrevEventHash, and CreatedAt (re-stamped
 // on the receiver after DecryptEvent). The AEAD additional data binds event.ID
 // and epoch, so mutating either field in transit is detected as an
-// authentication failure.
+// authentication failure. The envelope also names the key by kid
+// (KIDForWCK(wck)) so receivers select the exact key when several coexist at
+// the same epoch.
 func EncryptEvent(event state.Event, wck []byte, epoch int64) (state.Event, error) {
 	if len(wck) != wckSize {
 		return state.Event{}, fmt.Errorf("encrypt event %s: wck length = %d, want %d", event.ID, len(wck), wckSize)
@@ -105,7 +133,7 @@ func EncryptEvent(event state.Event, wck []byte, epoch int64) (state.Event, erro
 	}
 	ct := aead.Seal(nil, nonce, plaintext, envelopeAAD(event.ID, epoch))
 	raw := append(nonce, ct...)
-	envelope := encryptedEnvelope{Version: envelopeVersion, Epoch: epoch, CT: base64.StdEncoding.EncodeToString(raw)}
+	envelope := encryptedEnvelope{Version: envelopeVersion, Epoch: epoch, KID: KIDForWCK(wck), CT: base64.StdEncoding.EncodeToString(raw)}
 	payload, err := json.Marshal(envelope)
 	if err != nil {
 		return state.Event{}, fmt.Errorf("encrypt event %s: marshal envelope: %w", event.ID, err)

@@ -195,10 +195,11 @@ func TestHybridStoreWCKRoundTrip(t *testing.T) {
 	wck := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
 	const epoch = int64(1)
 
-	if err := store.StoreWCK(t.Context(), "ws_test", epoch, wck); err != nil {
+	// Legacy kid == "" still round-trips through the old account form.
+	if err := store.StoreWCK(t.Context(), "ws_test", epoch, "", wck); err != nil {
 		t.Fatalf("StoreWCK: %v", err)
 	}
-	got, err := store.LoadWCK(t.Context(), "ws_test", epoch)
+	got, err := store.LoadWCK(t.Context(), "ws_test", epoch, "")
 	if err != nil {
 		t.Fatalf("LoadWCK: %v", err)
 	}
@@ -207,9 +208,33 @@ func TestHybridStoreWCKRoundTrip(t *testing.T) {
 	}
 }
 
+func TestHybridStoreWCKRoundTripWithKID(t *testing.T) {
+	dir := t.TempDir()
+	backend := &memorySecretBackend{}
+	store := NewHybridStore(dir, backend)
+	wck := []byte("0123456789abcdef0123456789abcdef") // 32 bytes
+	const epoch = int64(1)
+	const kid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	if err := store.StoreWCK(t.Context(), "ws_test", epoch, kid, wck); err != nil {
+		t.Fatalf("StoreWCK: %v", err)
+	}
+	got, err := store.LoadWCK(t.Context(), "ws_test", epoch, kid)
+	if err != nil {
+		t.Fatalf("LoadWCK: %v", err)
+	}
+	if string(got) != string(wck) {
+		t.Fatalf("LoadWCK = %x, want %x", got, wck)
+	}
+	// A different kid at the same epoch is a distinct key.
+	if _, err := store.LoadWCK(t.Context(), "ws_test", epoch, "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("LoadWCK other kid: got %v, want os.ErrNotExist", err)
+	}
+}
+
 func TestHybridStoreLoadWCKMissing(t *testing.T) {
 	store := NewHybridStore(t.TempDir(), &memorySecretBackend{})
-	if _, err := store.LoadWCK(t.Context(), "ws_test", 9); !errors.Is(err, os.ErrNotExist) {
+	if _, err := store.LoadWCK(t.Context(), "ws_test", 9, ""); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("LoadWCK missing: got %v, want os.ErrNotExist", err)
 	}
 }
@@ -221,22 +246,45 @@ func TestFileStoreWCKRoundTripAndPerms(t *testing.T) {
 	for i := range wck {
 		wck[i] = byte(i)
 	}
-	if err := store.WriteWCK("ws_test", 2, wck); err != nil {
+	if err := store.WriteWCK("ws_test", 2, "", wck); err != nil {
 		t.Fatalf("WriteWCK: %v", err)
 	}
-	got, err := store.ReadWCK("ws_test", 2)
+	got, err := store.ReadWCK("ws_test", 2, "")
 	if err != nil {
 		t.Fatalf("ReadWCK: %v", err)
 	}
 	if string(got) != string(wck) {
 		t.Fatalf("ReadWCK = %x, want %x", got, wck)
 	}
-	info, err := os.Stat(store.wckPath("ws_test", 2))
+	info, err := os.Stat(store.wckPath("ws_test", 2, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("wck file permissions = %s, want 0600", got)
+	}
+}
+
+func TestFileStoreWCKRoundTripWithKID(t *testing.T) {
+	store := NewFileStore(t.TempDir())
+	wck := make([]byte, 32)
+	for i := range wck {
+		wck[i] = byte(i)
+	}
+	const kid = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+	if err := store.WriteWCK("ws_test", 2, kid, wck); err != nil {
+		t.Fatalf("WriteWCK: %v", err)
+	}
+	got, err := store.ReadWCK("ws_test", 2, kid)
+	if err != nil {
+		t.Fatalf("ReadWCK: %v", err)
+	}
+	if string(got) != string(wck) {
+		t.Fatalf("ReadWCK = %x, want %x", got, wck)
+	}
+	// A kid-scoped write must not collide with the legacy bare-epoch path.
+	if _, err := store.ReadWCK("ws_test", 2, ""); !os.IsNotExist(err) {
+		t.Fatalf("ReadWCK legacy path: got %v, want os.IsNotExist", err)
 	}
 }
 
@@ -246,10 +294,27 @@ func TestHybridStoreWCKFallsBackToFile(t *testing.T) {
 	backend := &memorySecretBackend{err: errors.New("keyring: unsupported platform")}
 	store := NewHybridStore(t.TempDir(), backend)
 	wck := []byte("0123456789abcdef0123456789abcdef")
-	if err := store.StoreWCK(t.Context(), "ws_test", 3, wck); err != nil {
+	if err := store.StoreWCK(t.Context(), "ws_test", 3, "", wck); err != nil {
 		t.Fatalf("StoreWCK file fallback: %v", err)
 	}
-	got, err := store.LoadWCK(t.Context(), "ws_test", 3)
+	got, err := store.LoadWCK(t.Context(), "ws_test", 3, "")
+	if err != nil {
+		t.Fatalf("LoadWCK file fallback: %v", err)
+	}
+	if string(got) != string(wck) {
+		t.Fatalf("LoadWCK = %x, want %x", got, wck)
+	}
+}
+
+func TestHybridStoreWCKFallsBackToFileWithKID(t *testing.T) {
+	backend := &memorySecretBackend{err: errors.New("keyring: unsupported platform")}
+	store := NewHybridStore(t.TempDir(), backend)
+	wck := []byte("0123456789abcdef0123456789abcdef")
+	const kid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	if err := store.StoreWCK(t.Context(), "ws_test", 3, kid, wck); err != nil {
+		t.Fatalf("StoreWCK file fallback: %v", err)
+	}
+	got, err := store.LoadWCK(t.Context(), "ws_test", 3, kid)
 	if err != nil {
 		t.Fatalf("LoadWCK file fallback: %v", err)
 	}
@@ -260,7 +325,37 @@ func TestHybridStoreWCKFallsBackToFile(t *testing.T) {
 
 func TestStoreWCKRejectsInvalidWorkspaceID(t *testing.T) {
 	store := NewHybridStore(t.TempDir(), &memorySecretBackend{})
-	if err := store.StoreWCK(t.Context(), "ws/../escape", 1, make([]byte, 32)); err == nil {
+	if err := store.StoreWCK(t.Context(), "ws/../escape", 1, "", make([]byte, 32)); err == nil {
 		t.Fatal("StoreWCK with path-traversal workspace id unexpectedly succeeded")
+	}
+}
+
+func TestWCKEntryPointsRejectInvalidKID(t *testing.T) {
+	invalidKIDs := []string{
+		"../x",
+		strings.Repeat("ABCDEF0123456789", 4), // uppercase
+		"deadbeef",                            // too short
+		strings.Repeat("deadbeef", 2),         // 64-bit prefix: too short (>=128-bit required, full digest used)
+	}
+	wck := make([]byte, 32)
+
+	for _, kid := range invalidKIDs {
+		t.Run(kid, func(t *testing.T) {
+			hybrid := NewHybridStore(t.TempDir(), &memorySecretBackend{})
+			if err := hybrid.StoreWCK(t.Context(), "ws_test", 1, kid, wck); err == nil {
+				t.Errorf("StoreWCK(%q) unexpectedly succeeded", kid)
+			}
+			if _, err := hybrid.LoadWCK(t.Context(), "ws_test", 1, kid); err == nil {
+				t.Errorf("LoadWCK(%q) unexpectedly succeeded", kid)
+			}
+
+			file := NewFileStore(t.TempDir())
+			if err := file.WriteWCK("ws_test", 1, kid, wck); err == nil {
+				t.Errorf("WriteWCK(%q) unexpectedly succeeded", kid)
+			}
+			if _, err := file.ReadWCK("ws_test", 1, kid); err == nil {
+				t.Errorf("ReadWCK(%q) unexpectedly succeeded", kid)
+			}
+		})
 	}
 }

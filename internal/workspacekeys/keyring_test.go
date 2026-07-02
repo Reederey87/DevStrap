@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
@@ -213,8 +214,8 @@ func TestRotateMintsNextEpochAndExcludesRevoked(t *testing.T) {
 		t.Fatal("WCK(2) missing after rotate")
 	}
 	// Forward secrecy: WCK(2) differs from WCK(1).
-	w2, _ := kr.cached(2)
-	w1, _ := kr.cached(1)
+	w2, _ := kr.WCK(2)
+	w1, _ := kr.WCK(1)
 	if string(w2) == string(w1) {
 		t.Fatal("rotated WCK equals previous epoch WCK")
 	}
@@ -234,7 +235,7 @@ func TestRotateMintsNextEpochAndExcludesRevoked(t *testing.T) {
 	if err := fresh.IngestGrant(ctx, localGrant); err != nil {
 		t.Fatalf("re-ingest rotated grant: %v", err)
 	}
-	fw2, _ := fresh.cached(2)
+	fw2, _ := fresh.WCK(2)
 	if string(fw2) != string(w2) {
 		t.Fatal("re-ingested rotated WCK differs")
 	}
@@ -352,4 +353,194 @@ func indexOf(haystack, needle string) int {
 		}
 	}
 	return -1
+}
+
+// TestSameEpochKeysCoexistAndPushPrefersGrant pins the P6-SEC-02 / P6-SEC-01(b)
+// collision model: a locally self-minted key and a fleet key granted at the
+// SAME epoch coexist in the keyring — ingesting the grant never overwrites the
+// self-mint — and PushKey selects the fleet (grant-origin) key so the device
+// converges onto what the rest of the fleet encrypts under.
+func TestSameEpochKeysCoexistAndPushPrefersGrant(t *testing.T) {
+	ctx := context.Background()
+	_, kr, idA := setupKeyring(t, "a")
+	// Legacy joiner behavior: the device self-minted epoch 1.
+	if _, err := kr.EnsureBootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	selfWCK, ok := kr.WCK(1)
+	if !ok {
+		t.Fatal("self-minted WCK missing")
+	}
+	// The founder's fleet key arrives as a grant at the same epoch.
+	fleetWCK, err := dssync.NewWCK()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapped, err := wrapWCK(fleetWCK, idA.Recipient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fleetKID := dssync.KIDForWCK(fleetWCK)
+	grant := dssync.DeviceKeyGrant{Epoch: 1, KID: fleetKID, Recipient: idA.Recipient, WrappedKey: wrapped}
+	if err := kr.IngestGrant(ctx, grant); err != nil {
+		t.Fatalf("IngestGrant fleet key: %v", err)
+	}
+	// Both keys are held: decrypt candidates for each kid resolve.
+	selfKID := dssync.KIDForWCK(selfWCK)
+	if got := kr.WCKCandidates(1, selfKID); len(got) != 1 || string(got[0]) != string(selfWCK) {
+		t.Fatal("self-minted key lost after fleet grant (overwrite!)")
+	}
+	if got := kr.WCKCandidates(1, fleetKID); len(got) != 1 || string(got[0]) != string(fleetWCK) {
+		t.Fatal("fleet key not held after grant")
+	}
+	// PushKey prefers the fleet key.
+	epoch, kid, wck, err := kr.PushKey(ctx)
+	if err != nil {
+		t.Fatalf("PushKey: %v", err)
+	}
+	if epoch != 1 || kid != fleetKID || string(wck) != string(fleetWCK) {
+		t.Fatalf("PushKey = (%d, %s), want the fleet key (1, %s)", epoch, kid, fleetKID)
+	}
+	// A cold keyring (fresh cache) reaches the same selection from persisted state.
+	cold := &Keyring{Store: kr.Store, KeyStore: kr.KeyStore}
+	epoch, kid, wck, err = cold.PushKey(ctx)
+	if err != nil {
+		t.Fatalf("cold PushKey: %v", err)
+	}
+	if epoch != 1 || kid != fleetKID || string(wck) != string(fleetWCK) {
+		t.Fatalf("cold PushKey = (%d, %s), want the fleet key (1, %s)", epoch, kid, fleetKID)
+	}
+}
+
+// TestIngestGrantRejectsKidMismatch proves a grant whose carried kid disagrees
+// with its unwrapped bytes is refused (forged or corrupted grant, P6-SEC-02).
+func TestIngestGrantRejectsKidMismatch(t *testing.T) {
+	ctx := context.Background()
+	_, kr, idA := setupKeyring(t, "a")
+	wck, err := dssync.NewWCK()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapped, err := wrapWCK(wck, idA.Recipient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forgedKID := strings.Repeat("0123456789abcdef", 4) // well-formed but wrong
+	grant := dssync.DeviceKeyGrant{Epoch: 1, KID: forgedKID, Recipient: idA.Recipient, WrappedKey: wrapped}
+	if grant.KID == dssync.KIDForWCK(wck) {
+		t.Fatal("test setup: forged kid accidentally matches")
+	}
+	if err := kr.IngestGrant(ctx, grant); err == nil {
+		t.Fatal("IngestGrant with mismatched kid unexpectedly succeeded")
+	}
+	if _, ok := kr.WCK(1); ok {
+		t.Fatal("mismatched-kid grant still installed a key")
+	}
+}
+
+// TestPushKeyEmptyKeyringReturnsZero pins the joiner posture: no held keys
+// means PushKey reports epoch 0 with no error, and EncryptedHub.Push turns
+// that into ErrMissingWorkspaceKey.
+func TestPushKeyEmptyKeyringReturnsZero(t *testing.T) {
+	ctx := context.Background()
+	_, kr, _ := setupKeyring(t, "a")
+	epoch, kid, wck, err := kr.PushKey(ctx)
+	if err != nil {
+		t.Fatalf("PushKey: %v", err)
+	}
+	if epoch != 0 || kid != "" || wck != nil {
+		t.Fatalf("PushKey on empty keyring = (%d, %q, %v), want (0, \"\", nil)", epoch, kid, wck)
+	}
+}
+
+// TestPrimeUpgradesLegacyKidlessKey proves the migration-00014 lazy backfill:
+// a pre-kid key recorded with kid=” (legacy custody slot, legacy metadata row)
+// is upgraded on Prime — kid computed from the bytes, key re-stored under the
+// kid-aware slot, metadata row rewritten — and both kid-addressed and legacy
+// kid-less envelopes then decrypt.
+func TestPrimeUpgradesLegacyKidlessKey(t *testing.T) {
+	ctx := context.Background()
+	st, kr, _ := setupKeyring(t, "a")
+	if err := kr.resolve(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a pre-kid install: key in the legacy custody slot, metadata row
+	// with kid='' and origin 'legacy' (what migration 00014 backfills).
+	legacyWCK, err := dssync.NewWCK()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kr.KeyStore.StoreWCK(ctx, kr.workspaceID, 1, "", legacyWCK); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordKeyEpoch(ctx, 1, "", "legacy"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := kr.Prime(ctx); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	kid := dssync.KIDForWCK(legacyWCK)
+	held, err := st.HeldKeys(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(held) != 1 || held[0].KID != kid || held[0].Origin != "legacy" {
+		t.Fatalf("held keys after Prime = %+v, want kid %s origin legacy", held, kid)
+	}
+	if got := kr.WCKCandidates(1, kid); len(got) != 1 || string(got[0]) != string(legacyWCK) {
+		t.Fatal("kid-addressed lookup missing after legacy upgrade")
+	}
+	if got := kr.WCKCandidates(1, ""); len(got) != 1 || string(got[0]) != string(legacyWCK) {
+		t.Fatal("legacy kid-less lookup missing after upgrade")
+	}
+	// The upgraded key round-trips through the kid-aware custody slot on a cold
+	// keyring.
+	cold := &Keyring{Store: kr.Store, KeyStore: kr.KeyStore}
+	if err := cold.Prime(ctx); err != nil {
+		t.Fatalf("cold Prime after upgrade: %v", err)
+	}
+	if got, ok := cold.WCK(1); !ok || string(got) != string(legacyWCK) {
+		t.Fatal("cold keyring did not load the upgraded key")
+	}
+}
+
+// TestConcurrentSameEpochRotateNoClobber simulates two devices rotating to the
+// same epoch independently (the concurrent-revoke race): both keys coexist
+// under their own kids once the second device's grant is ingested, instead of
+// one clobbering the other.
+func TestConcurrentSameEpochRotateNoClobber(t *testing.T) {
+	ctx := context.Background()
+	_, krA, idA := setupKeyring(t, "a")
+	if _, err := krA.EnsureBootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// A rotates to epoch 2.
+	if next, _, err := krA.Rotate(ctx); err != nil || next != 2 {
+		t.Fatalf("Rotate = %d/%v, want 2/nil", next, err)
+	}
+	aWCK2, ok := krA.WCK(2)
+	if !ok {
+		t.Fatal("A missing its rotated key")
+	}
+	// A concurrent rotate on another device minted a DIFFERENT epoch-2 key and
+	// granted it to A.
+	otherWCK2, err := dssync.NewWCK()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapped, err := wrapWCK(otherWCK2, idA.Recipient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grant := dssync.DeviceKeyGrant{Epoch: 2, KID: dssync.KIDForWCK(otherWCK2), Recipient: idA.Recipient, WrappedKey: wrapped}
+	if err := krA.IngestGrant(ctx, grant); err != nil {
+		t.Fatalf("IngestGrant concurrent rotate: %v", err)
+	}
+	if got := krA.WCKCandidates(2, dssync.KIDForWCK(aWCK2)); len(got) != 1 {
+		t.Fatal("A's own rotated key was clobbered by the concurrent grant")
+	}
+	if got := krA.WCKCandidates(2, dssync.KIDForWCK(otherWCK2)); len(got) != 1 {
+		t.Fatal("the concurrently-rotated fleet key was not ingested alongside")
+	}
 }

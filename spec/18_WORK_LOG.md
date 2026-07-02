@@ -27,6 +27,25 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-02 — P6-SEC-01(b/c) + P6-SEC-02: (epoch, kid)-addressed workspace keys (PR-3b, completes the hub-trust workstream)
+
+Changed:
+- Migration `00014_workspace_key_kids.sql`: `workspace_keys` re-keyed to PK `(workspace_id, epoch, kid)` with a new `origin` column (`self`/`grant`/`legacy`, CHECK-constrained); pre-kid rows backfill as `kid=''`/`origin='legacy'`; `workspace_key_grants` gains a nullable audit `kid`. Down is lossy (documented in the header). Schema version is now 14; the planned gitstate mirror migration renumbers to 00015.
+- `kid = hex(sha256(wck))` — the **full digest** (64 lowercase hex), per the spec/07 AD-3 direction, not the audit's 8-byte prefix (a short prefix would leave a 2^64 preimage-prefix aliasing vector on the custody slot). `KIDForWCK` lives in `internal/sync`; the kid rides `DeviceKeyGrant` and the `enc.v1` envelope as optional JSON fields (outside the AAD for wire compat — moving it into the AAD is the `enc.v2` break, P6-SYNC-04). A stripped/forged kid can only cause a decrypt miss or auth failure, never wrong-key acceptance.
+- `internal/workspacekeys.Keyring`: cache keyed by `(epoch, kid)` with origin tracking. `IngestGrant` computes the kid from the unwrapped bytes, rejects a carried-kid mismatch, byte-compares before any same-slot custody rewrite, and **never overwrites** — a colliding key lands in its own slot (P6-SEC-01b). New `PushKey` selects the highest epoch preferring `grant` > `self` > `legacy` origin, so a legacy self-minted joiner converges onto the founder's fleet key (P6-SEC-01c via the `origin` write-path record); `GrantAllEpochs` forwards the same preferred key per epoch. `Prime` lazily upgrades legacy kid-less keys (computes kid, re-stores custody kid-aware, rewrites the metadata row via `UpdateKeyKid`).
+- `internal/sync.WorkspaceKeyring` interface: `PushKey(ctx) (epoch, kid, wck, err)` replaces the push-side `CurrentEpoch`+`WCK(epoch)` pair; `WCKCandidates(epoch, kid)` replaces `WCK(epoch)` (kid `""` = try every held key at the epoch — legacy envelope fallback). `EncryptedHub.Pull` now **truncates (defers) on an unheld kid at a held epoch** — the fleet-key-vs-self-mint collision — instead of skipping, so fleet events are never permanently jumped by a legacy device; a decrypt failure on held candidates still skips.
+- `internal/devicekeys`: kid-aware WCK custody — `wck.<ws>.<epoch>.<kid>` keychain accounts and `wck-<ws>-<epoch>-<kid>.key` file slots, legacy kid-less forms preserved; kid validated (64 lowercase hex or empty) at every entry point before touching an account name or path.
+- `internal/state`: `RecordKeyEpoch(epoch, kid, origin)`, new `HeldKeys`/`UpdateKeyKid`, `HeldKeyEpochs` now DISTINCT, kid threaded through `RecordKeyGrant`/`RecordKeyGrantTx`.
+- Tests: keyring same-epoch coexistence + grant-preferred `PushKey` (warm and cold), kid-mismatch rejection, empty-keyring `PushKey` → epoch 0, legacy backfill upgrade, concurrent same-epoch rotate no-clobber; `KIDForWCK` + envelope-kid pins; hub poison tests split into forged-kid/legacy-kid-less skips vs. the new `TestEncryptedHubUnheldKidTruncates` defer pin; devicekeys kid round-trips + invalid-kid rejection; state migration/backfill/idempotency tests; forged-grant CLI test hardened to glob both custody filename forms.
+- Model policy note (CLAUDE.md): the mechanical layer (migration/store/devicekeys) was delegated per policy, but the delegate implemented it directly as a Claude agent instead of routing through Codex/gpt-5.5; output was reviewed line-by-line against the written spec and accepted (judge the output, not the price tag).
+- Specs: 07 (Pull kid semantics, AD-3 items marked shipped, P6-SEC-02 kid section rewritten as shipped), 09 (kid-aware WCK custody keying), 12 (00014 schema + version 14), 15 (SEC-01 steps b/c marked shipped; coordinated-break list updated), 16 (test inventory), 18 (this entry).
+
+Validated:
+- `gofmt -w cmd internal`, `golangci-lint run`, `go run ./cmd/spec-drift --base origin/main --head HEAD`, `GOCACHE=/tmp/devstrap-gocache go test -race ./...`.
+
+Follow-ups:
+- `enc.v2` AAD binding (`ID || DeviceID || Seq || HLC || epoch || kid`, P6-SYNC-04), skip-forward on never-granted epochs (P6-SEC-03), composite cursor/skipped-event replay (P6-SYNC-02) — all have their seams in place.
+
 ## 2026-07-02 — P6-SEC-02: founder/join split (PR 3/3 of the hub-trust workstream)
 
 Changed:
