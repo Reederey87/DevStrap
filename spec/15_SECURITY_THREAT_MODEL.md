@@ -360,7 +360,7 @@ break** rather than a string of compatible patches:
 - `enc.v2` full-carrier AEAD AAD binding `ID || DeviceID || Seq || HLC || epoch` (`P6-SYNC-04`);
 - a WCK keyring keyed by `(epoch, kid)` where `kid = sha256(wck)` prefixed to ≥128 bits, and a
   verified grant chain gating `CurrentKeyEpoch` (`P6-SEC-01`/`P6-SEC-02`);
-- founder-vs-`--join` `init` so a joining device never self-bootstraps epoch 1 (`P6-SEC-02`);
+- **[SHIPPED]** founder-vs-`--join` `init` so a joining device never self-bootstraps epoch 1 (`P6-SEC-02`): `init` no longer mints a WCK, founding is deferred to the first `sync` against an empty hub, and a keyless device seeing a non-empty hub defers its push until granted — closing the pre-approval data loss (e2e `sync_join_flow.txtar`). The residual `(epoch,kid)` overwrite/collision hardening lands with the coordinated break;
 - a signed hub-side retention marker so GC floors are authenticated (`P6-HUB-04`).
 
 Declare `enc.v1` and bare-integer epochs **dead**, not supported legacy — there is no

@@ -1,0 +1,62 @@
+# P6-SEC-02: a device that JOINS an existing workspace must never self-mint a
+# workspace key nobody else holds, and must never seal its pre-approval events
+# under a never-granted WCK (the SEC-02 data loss). A joining device that adds a
+# project and syncs BEFORE it is approved defers the push (events stay queued),
+# and once approved its pre-approval project materializes fleet-wide.
+
+env DEVSTRAP_NO_KEYCHAIN=1
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+# Two bare remotes, one per project.
+exec git init --bare -b main $WORK/remoteA.git
+exec git clone $WORK/remoteA.git $WORK/srcA
+exec sh -c 'echo hello-a > $WORK/srcA/README.md'
+exec sh -c 'cd $WORK/srcA && git add README.md && git commit -m init && git branch -M main && git push origin main'
+exec git init --bare -b main $WORK/remoteB.git
+exec git clone $WORK/remoteB.git $WORK/srcB
+exec sh -c 'echo hello-b > $WORK/srcB/README.md'
+exec sh -c 'cd $WORK/srcB && git add README.md && git commit -m init && git branch -M main && git push origin main'
+
+# Device A (founder): init, add a project, sync. The first sync to the empty hub
+# founds the workspace (mints epoch 1) and pushes A's project.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA init
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/a-proj $WORK/remoteA.git
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+stdout 'pushed 1'
+
+# Device B (joiner): init --join, add a project, then sync BEFORE being approved.
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB init --join
+stdout 'Joining an existing workspace'
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB add --path work/b-proj $WORK/remoteB.git
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
+# The joiner defers the push — no key yet. Its event is queued, not lost.
+stdout 'Awaiting workspace key grant: 1 local event'
+stdout 'pushed 0'
+
+# The joiner must NOT have pushed b-proj to the hub (in any form) yet.
+! grep 'b-proj' $WORK/hub.json
+
+# Enroll + approve B on A under B's REAL device id (so A can verify B's signed
+# events, not just decrypt the grant addressed to B's recipient).
+exec sh -c 'B_ID=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices list | awk "NR==1{print \$1}"); REC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); SIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll "$B_ID" --name b --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve'
+stdout 'enrolled as approved'
+
+# A syncs to publish the grant events.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+
+# B syncs: pulls + ingests its grant (now holds epoch 1), then pushes the
+# previously-queued b-proj event under the fleet key.
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
+stdout 'pushed 1'
+
+# The hub still stores only ciphertext — b-proj never leaks in plaintext.
+! grep 'b-proj' $WORK/hub.json
+
+# A syncs: pulls B's pre-approval project and materializes it. The SEC-02 data
+# loss is closed — B's pre-approval work reached the fleet.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+stdout 'materialized'
+exec sh -c 'test -d $WORK/CodeA/work/b-proj/.git'
