@@ -2564,6 +2564,22 @@ func EventSignaturePayload(event Event) []byte {
 	return raw
 }
 
+// VerifyRemoteEvent runs the SAME permanent-verification checks insertEvent
+// enforces — content-hash self-consistency then signature/trust — WITHOUT
+// inserting. It is the EncryptedHub grant-ingestion seam (P6-SEC-01) so a WCK is
+// never written from a carrier the apply path would reject: the pre-ingest gate
+// rejects exactly the set of events that would land in the event_verification_
+// failure quarantine, so the keyring can never advance from an event that never
+// enters the log. Returns nil during the pre-enrollment bootstrap window for
+// non-destructive events (the documented P4-SEC-04 residual); fails closed once
+// any device is approved.
+func (s *Store) VerifyRemoteEvent(ctx context.Context, event Event) error {
+	if expected := ContentHash(event.PayloadJSON); event.ContentHash != expected {
+		return fmt.Errorf("event %s content hash mismatch: got %s want %s: %w", event.ID, event.ContentHash, expected, ErrEventVerification)
+	}
+	return verifyEventSignature(ctx, s.db, event)
+}
+
 func verifyEventSignature(ctx context.Context, exec sqlExecutor, event Event) error {
 	var signingPublicKey string
 	var trustState string

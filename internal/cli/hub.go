@@ -42,7 +42,7 @@ func hubFromOptions(ctx context.Context, opts *options, store *state.Store, hubF
 	if err != nil {
 		return nil, "", err
 	}
-	return dssync.EncryptedHub{Hub: backend, Keyring: buildKeyring(opts, store)}, hubID, nil
+	return dssync.EncryptedHub{Hub: backend, Keyring: buildKeyring(opts, store), Verify: store.VerifyRemoteEvent}, hubID, nil
 }
 
 // buildKeyring constructs the WCK epoch keyring (P4-SEC-07) from the state store

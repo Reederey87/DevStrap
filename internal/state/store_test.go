@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/zalando/go-keyring"
 )
 
@@ -712,6 +713,196 @@ func TestVerifyEventSignatureDBErrorDoesNotWrapSentinel(t *testing.T) {
 	if !strings.Contains(err.Error(), "read device signing public key") {
 		t.Fatalf("error = %v, want read device signing public key", err)
 	}
+}
+
+func TestVerifyRemoteEventMatchesInsertEventRegime(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name     string
+		enrolled bool
+		setup    func(t *testing.T, st *Store, local Device) Event
+	}{
+		{
+			name: "local device",
+			setup: func(t *testing.T, st *Store, local Device) Event {
+				t.Helper()
+				signing, err := devicekeys.NewSigningIdentity()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := st.SetDeviceSigningPublicKey(ctx, local.ID, signing.Public); err != nil {
+					t.Fatal(err)
+				}
+				return signedGrantEvent(t, local.ID, signing.Private, "evt_local")
+			},
+		},
+		{
+			name: "approved device valid signature",
+			setup: func(t *testing.T, st *Store, local Device) Event {
+				t.Helper()
+				signing, err := devicekeys.NewSigningIdentity()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := st.UpsertDevice(ctx, Device{
+					ID: "dev_approved", Name: "approved", OS: "linux", Arch: "arm64",
+					SigningPublicKey: signing.Public, TrustState: "approved",
+				}); err != nil {
+					t.Fatal(err)
+				}
+				return signedGrantEvent(t, "dev_approved", signing.Private, "evt_approved_valid")
+			},
+		},
+		{
+			name: "approved device forged signature",
+			setup: func(t *testing.T, st *Store, local Device) Event {
+				t.Helper()
+				signing, err := devicekeys.NewSigningIdentity()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := st.UpsertDevice(ctx, Device{
+					ID: "dev_approved", Name: "approved", OS: "linux", Arch: "arm64",
+					SigningPublicKey: signing.Public, TrustState: "approved",
+				}); err != nil {
+					t.Fatal(err)
+				}
+				event := signedGrantEvent(t, "dev_approved", signing.Private, "evt_approved_forged")
+				event.PayloadJSON = `{"epoch":1,"recipient":"age1tampered","wrapped_key":"wrapped"}`
+				event.ContentHash = ContentHash(event.PayloadJSON)
+				return event
+			},
+		},
+		{
+			name: "revoked device",
+			setup: func(t *testing.T, st *Store, local Device) Event {
+				t.Helper()
+				signing, err := devicekeys.NewSigningIdentity()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := st.UpsertDevice(ctx, Device{
+					ID: "dev_revoked", Name: "revoked", OS: "linux", Arch: "arm64",
+					SigningPublicKey: signing.Public, TrustState: "revoked",
+				}); err != nil {
+					t.Fatal(err)
+				}
+				return signedGrantEvent(t, "dev_revoked", signing.Private, "evt_revoked")
+			},
+		},
+		{
+			name: "unknown device",
+			setup: func(t *testing.T, st *Store, local Device) Event {
+				t.Helper()
+				return Event{
+					ID: "evt_unknown", DeviceID: "dev_unknown", HLC: 1,
+					Type:        "device.key.granted",
+					PayloadJSON: `{"epoch":1,"recipient":"age1example","wrapped_key":"wrapped"}`,
+					ContentHash: ContentHash(`{"epoch":1,"recipient":"age1example","wrapped_key":"wrapped"}`),
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		for _, enrolled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/enrolled=%t", tt.name, enrolled), func(t *testing.T) {
+				st, local := newVerifyRemoteEventTestStore(t, ctx)
+				if enrolled {
+					addApprovedDeviceForVerifierTest(t, ctx, st, "dev_enrolled")
+				}
+				event := tt.setup(t, st, local)
+
+				got := st.VerifyRemoteEvent(ctx, event)
+				want := verifyEventSignature(ctx, st.db, event)
+				if (got == nil) != (want == nil) {
+					t.Fatalf("VerifyRemoteEvent error = %v, verifyEventSignature error = %v", got, want)
+				}
+				if got != nil && errors.Is(got, ErrEventVerification) != errors.Is(want, ErrEventVerification) {
+					t.Fatalf("VerifyRemoteEvent error = %v, verifyEventSignature error = %v", got, want)
+				}
+			})
+		}
+	}
+}
+
+// VerifyRemoteEvent must reject a content-hash mismatch (like insertEvent),
+// even for an otherwise-valid approved-device signature, so the pre-ingest gate
+// never lets the keyring advance from a carrier ApplyEvents would quarantine.
+func TestVerifyRemoteEventRejectsContentHashMismatch(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newVerifyRemoteEventTestStore(t, ctx)
+	signing, err := devicekeys.NewSigningIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertDevice(ctx, Device{
+		ID: "dev_approved", Name: "approved", OS: "linux", Arch: "arm64",
+		SigningPublicKey: signing.Public, TrustState: "approved",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	event := signedGrantEvent(t, "dev_approved", signing.Private, "evt_hash_mismatch")
+	event.ContentHash = "sha256:deadbeef" // inconsistent with PayloadJSON
+	err = st.VerifyRemoteEvent(ctx, event)
+	if err == nil || !errors.Is(err, ErrEventVerification) {
+		t.Fatalf("VerifyRemoteEvent err = %v, want ErrEventVerification for content-hash mismatch", err)
+	}
+}
+
+func newVerifyRemoteEventTestStore(t *testing.T, ctx context.Context) (*Store, Device) {
+	t.Helper()
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureWorkspace(ctx, "test", "/tmp/Code"); err != nil {
+		t.Fatal(err)
+	}
+	local, err := st.EnsureDevice(ctx, "device-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st, local
+}
+
+func addApprovedDeviceForVerifierTest(t *testing.T, ctx context.Context, st *Store, deviceID string) {
+	t.Helper()
+	signing, err := devicekeys.NewSigningIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertDevice(ctx, Device{
+		ID: deviceID, Name: deviceID, OS: "linux", Arch: "arm64",
+		SigningPublicKey: signing.Public, TrustState: "approved",
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func signedGrantEvent(t *testing.T, deviceID, privateSigningKey, eventID string) Event {
+	t.Helper()
+	event := Event{
+		ID: eventID, DeviceID: deviceID, HLC: 1,
+		Type:        "device.key.granted",
+		PayloadJSON: `{"epoch":1,"recipient":"age1example","wrapped_key":"wrapped"}`,
+		ContentHash: ContentHash(`{"epoch":1,"recipient":"age1example","wrapped_key":"wrapped"}`),
+	}
+	sig, err := devicekeys.Sign(privateSigningKey, eventSignatureDomain, EventSignaturePayload(event))
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.DeviceSig = sig
+	return event
 }
 
 func newSignedEventTestStore(t *testing.T, ctx context.Context) (*Store, Event, Device) {
