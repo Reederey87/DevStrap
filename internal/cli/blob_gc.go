@@ -172,6 +172,10 @@ func rewrapDraftBlob(ctx context.Context, store *state.Store, opts *options, hub
 // emitSupersedingDraftSnapshot emits a fresh draft.snapshot.created event
 // carrying newRef so peers reconstruct it instead of a deleted old ref
 // (P5-SEC-01). Returns the stamped event so the caller can push it.
+// After the caller's UpdateBlobRef repoint, the origin intentionally holds two
+// rows for newRef (the repointed original and this superseding row); the
+// duplicate is harmless — keep-N pruning reaps the older one — and it keeps
+// LatestDraftSnapshot pointing at the superseding event.
 func emitSupersedingDraftSnapshot(ctx context.Context, store *state.Store, namespaceID, path, newRef string, byteSize, fileCount int64) (state.Event, error) {
 	payload := dssync.DraftSnapshotPayload{Path: path, BlobRef: newRef, ByteSize: byteSize, FileCount: fileCount}
 	raw, err := json.Marshal(payload)
