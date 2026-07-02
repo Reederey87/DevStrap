@@ -1155,14 +1155,16 @@ UPDATE draft_projects SET current_snapshot_id = ?, updated_at = ? WHERE namespac
 // (workspace_id, epoch, recipient) so a re-delivered grant is a no-op. This is
 // the membership audit trail only; the age-wrapped WCK rides the event payload
 // and the secret WCK lives in the keychain (ingested by the decorator on the
-// recipient device). Runs on every device that applies the grant event.
-func (tx *Tx) RecordKeyGrantTx(ctx context.Context, epoch int64, recipient string, event Event) error {
+// recipient device). Runs on every device that applies the grant event. kid
+// is the non-secret fingerprint of the granted WCK (P6-SEC-02) and is audit
+// metadata only; it may be empty for legacy grants.
+func (tx *Tx) RecordKeyGrantTx(ctx context.Context, epoch int64, kid string, recipient string, event Event) error {
 	now := timestampNow()
 	if _, err := tx.tx.ExecContext(ctx, `
 INSERT OR IGNORE INTO workspace_key_grants
-  (workspace_id, epoch, recipient, source_event_id, source_event_hlc, source_event_device_id, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?);
-`, tx.workspaceID, epoch, recipient, event.ID, nullZero(event.HLC), nullEmpty(event.DeviceID), now); err != nil {
+  (workspace_id, epoch, recipient, source_event_id, source_event_hlc, source_event_device_id, created_at, kid)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+`, tx.workspaceID, epoch, recipient, event.ID, nullZero(event.HLC), nullEmpty(event.DeviceID), now, nullEmpty(kid)); err != nil {
 		return fmt.Errorf("record key grant: %w", err)
 	}
 	return nil
@@ -2831,34 +2833,73 @@ SELECT COALESCE(MAX(epoch), 0) FROM workspace_keys WHERE workspace_id = ?;
 	return epoch, nil
 }
 
-// RecordKeyEpoch records that this device holds the WCK for epoch (idempotent)
-// (P4-SEC-07). The secret key itself is stored in the keychain via
-// devicekeys.HybridStore.StoreWCK; this row is the non-secret local metadata.
-func (s *Store) RecordKeyEpoch(ctx context.Context, epoch int64) error {
+// RecordKeyEpoch records that this device holds a WCK for (epoch, kid)
+// (idempotent) (P4-SEC-07 / P6-SEC-02). The secret key itself is stored in
+// the keychain via devicekeys.HybridStore.StoreWCK; this row is the
+// non-secret local metadata. kid is the 64-lowercase-hex-char fingerprint
+// hex(sha256(wck)); origin must be "self" (founder bootstrap or rotate),
+// "grant" (a verified device.key.granted event), or "legacy" (migration
+// backfill) — those are the only three paths permitted to write a row here
+// (P6-SEC-01c).
+func (s *Store) RecordKeyEpoch(ctx context.Context, epoch int64, kid, origin string) error {
 	workspaceID, err := s.WorkspaceID(ctx)
 	if err != nil {
 		return err
 	}
 	now := timestampNow()
 	_, err = s.db.ExecContext(ctx, `
-INSERT OR IGNORE INTO workspace_keys (workspace_id, epoch, created_at) VALUES (?, ?, ?);
-`, workspaceID, epoch, now)
+INSERT OR IGNORE INTO workspace_keys (workspace_id, epoch, kid, origin, created_at) VALUES (?, ?, ?, ?, ?);
+`, workspaceID, epoch, kid, origin, now)
 	if err != nil {
 		return fmt.Errorf("record key epoch: %w", err)
 	}
 	return nil
 }
 
-// HeldKeyEpochs returns every epoch this device holds a WCK for, ascending
-// (P4-SEC-07). Used by devices approve to wrap every held epoch's WCK to a
-// newly-approved device so it can decrypt the entire history.
+// HeldKey is one WCK this device holds metadata for: an (epoch, kid) pair
+// plus how the key was obtained (P6-SEC-02).
+type HeldKey struct {
+	Epoch  int64
+	KID    string
+	Origin string
+}
+
+// HeldKeys returns every (epoch, kid) this device holds a WCK for, ordered by
+// epoch then kid (P6-SEC-02).
+func (s *Store) HeldKeys(ctx context.Context) ([]HeldKey, error) {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT epoch, kid, origin FROM workspace_keys WHERE workspace_id = ? ORDER BY epoch ASC, kid ASC;
+`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("list held keys: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var keys []HeldKey
+	for rows.Next() {
+		var key HeldKey
+		if err := rows.Scan(&key.Epoch, &key.KID, &key.Origin); err != nil {
+			return nil, fmt.Errorf("scan held key: %w", err)
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
+}
+
+// HeldKeyEpochs returns every distinct epoch this device holds at least one
+// WCK for, ascending (P4-SEC-07). Used by devices approve to wrap every held
+// epoch's WCK to a newly-approved device so it can decrypt the entire
+// history.
 func (s *Store) HeldKeyEpochs(ctx context.Context) ([]int64, error) {
 	workspaceID, err := s.WorkspaceID(ctx)
 	if err != nil {
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT epoch FROM workspace_keys WHERE workspace_id = ? ORDER BY epoch ASC;
+SELECT DISTINCT epoch FROM workspace_keys WHERE workspace_id = ? ORDER BY epoch ASC;
 `, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("list held key epochs: %w", err)
@@ -2875,11 +2916,53 @@ SELECT epoch FROM workspace_keys WHERE workspace_id = ? ORDER BY epoch ASC;
 	return epochs, rows.Err()
 }
 
+// UpdateKeyKid transactionally upgrades a legacy kid="" row at epoch to the
+// given kid, preserving its origin and created_at (P6-SEC-02). Used once a
+// caller computes the fingerprint for a key that was recorded before kids
+// existed. A no-op (beyond deleting the legacy row) if a row for (epoch, kid)
+// already exists.
+func (s *Store) UpdateKeyKid(ctx context.Context, epoch int64, kid string) error {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin update key kid: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var origin, createdAt string
+	err = tx.QueryRowContext(ctx, `
+SELECT origin, created_at FROM workspace_keys WHERE workspace_id = ? AND epoch = ? AND kid = '';
+`, workspaceID, epoch).Scan(&origin, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read legacy key row: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO workspace_keys (workspace_id, epoch, kid, origin, created_at) VALUES (?, ?, ?, ?, ?);
+`, workspaceID, epoch, kid, origin, createdAt); err != nil {
+		return fmt.Errorf("insert upgraded key kid: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM workspace_keys WHERE workspace_id = ? AND epoch = ? AND kid = '';
+`, workspaceID, epoch); err != nil {
+		return fmt.Errorf("delete legacy key row: %w", err)
+	}
+	return tx.Commit()
+}
+
 // RecordKeyGrant records a workspace key grant: a WCK epoch was age-wrapped to
 // recipient by a device.key.granted event (P4-SEC-07). Idempotent on
 // (workspace_id, epoch, recipient) so a re-delivered grant is a no-op. This is
-// a membership audit trail only; the wrapped key rides the event log.
-func (s *Store) RecordKeyGrant(ctx context.Context, epoch int64, recipient, sourceEventID string, sourceEventHLC int64, sourceEventDeviceID string) error {
+// a membership audit trail only; the wrapped key rides the event log. kid is
+// the non-secret fingerprint of the granted WCK (P6-SEC-02) and may be empty
+// for legacy grants.
+func (s *Store) RecordKeyGrant(ctx context.Context, epoch int64, kid string, recipient, sourceEventID string, sourceEventHLC int64, sourceEventDeviceID string) error {
 	workspaceID, err := s.WorkspaceID(ctx)
 	if err != nil {
 		return err
@@ -2887,9 +2970,9 @@ func (s *Store) RecordKeyGrant(ctx context.Context, epoch int64, recipient, sour
 	now := timestampNow()
 	_, err = s.db.ExecContext(ctx, `
 INSERT OR IGNORE INTO workspace_key_grants
-  (workspace_id, epoch, recipient, source_event_id, source_event_hlc, source_event_device_id, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?);
-`, workspaceID, epoch, recipient, sourceEventID, nullZero(sourceEventHLC), nullEmpty(sourceEventDeviceID), now)
+  (workspace_id, epoch, recipient, source_event_id, source_event_hlc, source_event_device_id, created_at, kid)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+`, workspaceID, epoch, recipient, sourceEventID, nullZero(sourceEventHLC), nullEmpty(sourceEventDeviceID), now, nullEmpty(kid))
 	if err != nil {
 		return fmt.Errorf("record key grant: %w", err)
 	}

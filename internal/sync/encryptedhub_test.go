@@ -67,9 +67,9 @@ func (r *recordingHub) ListBlobs(_ context.Context) ([]string, error) {
 	return out, nil
 }
 
-// fakeKeyring is a WorkspaceKeyring double with pre-set WCKs and an onIngest
-// map that installs a WCK when a grant for that epoch is ingested (simulating a
-// successful age-unwrap on the recipient device).
+// fakeKeyring is a WorkspaceKeyring double with pre-set WCKs (one per epoch)
+// and an onIngest map that installs a WCK when a grant for that epoch is
+// ingested (simulating a successful age-unwrap on the recipient device).
 type fakeKeyring struct {
 	epoch    int64
 	keys     map[int64][]byte
@@ -77,9 +77,28 @@ type fakeKeyring struct {
 	ingested []DeviceKeyGrant
 }
 
-func (f *fakeKeyring) CurrentEpoch(context.Context) (int64, error) { return f.epoch, nil }
-func (f *fakeKeyring) Prime(context.Context) error                 { return nil }
-func (f *fakeKeyring) WCK(epoch int64) ([]byte, bool)              { k, ok := f.keys[epoch]; return k, ok }
+func (f *fakeKeyring) PushKey(context.Context) (int64, string, []byte, error) {
+	k, ok := f.keys[f.epoch]
+	if !ok {
+		return 0, "", nil, nil
+	}
+	return f.epoch, KIDForWCK(k), k, nil
+}
+func (f *fakeKeyring) Prime(context.Context) error { return nil }
+func (f *fakeKeyring) WCKCandidates(epoch int64, kid string) [][]byte {
+	k, ok := f.keys[epoch]
+	if !ok {
+		return nil
+	}
+	if kid == "" || kid == KIDForWCK(k) {
+		return [][]byte{k}
+	}
+	return nil
+}
+
+// WCK is a test-only accessor (not part of WorkspaceKeyring).
+func (f *fakeKeyring) WCK(epoch int64) ([]byte, bool) { k, ok := f.keys[epoch]; return k, ok }
+
 func (f *fakeKeyring) IngestGrant(_ context.Context, grant DeviceKeyGrant) error {
 	f.ingested = append(f.ingested, grant)
 	if wck, ok := f.onIngest[grant.Epoch]; ok {
@@ -384,28 +403,77 @@ func TestEncryptedHubUnknownVersion(t *testing.T) {
 }
 
 // TestEncryptedHubPoisonEventDoesNotWedge is the core regression for the wedge
-// bug: an event this device holds the epoch for but cannot authenticate (a
-// wrong-key/cross-device epoch collision, corruption, or forgery) is skipped
-// with the good events on either side still delivered — one bad object can no
-// longer brick a device's sync by aborting the whole batch forever.
+// bug: an event whose envelope names a key this device holds but that cannot
+// authenticate (corruption or a forged kid) is skipped with the good events on
+// either side still delivered — one bad object can no longer brick a device's
+// sync by aborting the whole batch forever.
 func TestEncryptedHubPoisonEventDoesNotWedge(t *testing.T) {
 	ctx := context.Background()
 	kr := newFakeKeyring(t, 1)
 	wck1, _ := kr.WCK(1)
 	before, _ := EncryptEvent(state.Event{ID: "before", DeviceID: "dev_a", HLC: 1, Type: EventProjectAdded, PayloadJSON: `{"path":"work/before"}`, ContentHash: state.ContentHash(`{"path":"work/before"}`)}, wck1, 1)
-	// Poison: encrypted under a DIFFERENT key at the same epoch 1 (the P4-SEC-07
-	// cross-device collision). This device's WCK(1) opens it and Open() fails.
+	// Poison: encrypted under a DIFFERENT key at the same epoch 1, with the
+	// envelope's kid forged to the held key's kid so the candidate is found and
+	// AEAD authentication fails (a wrong-key ciphertext claiming our kid).
 	otherWCK1, _ := NewWCK()
 	poison, _ := EncryptEvent(state.Event{ID: "poison", DeviceID: "dev_b", HLC: 2, Type: EventProjectAdded, PayloadJSON: `{"path":"work/poison"}`, ContentHash: state.ContentHash(`{"path":"work/poison"}`)}, otherWCK1, 1)
-	after, _ := EncryptEvent(state.Event{ID: "after", DeviceID: "dev_a", HLC: 3, Type: EventProjectAdded, PayloadJSON: `{"path":"work/after"}`, ContentHash: state.ContentHash(`{"path":"work/after"}`)}, wck1, 1)
-	back := &recordingHub{events: []state.Event{before, poison, after}}
+	poison = rewriteEnvelopeKID(t, poison, KIDForWCK(wck1))
+	// Legacy poison: same wrong-key ciphertext with the kid stripped (a pre-kid
+	// envelope), so every held key at the epoch is tried and all fail.
+	legacyPoison, _ := EncryptEvent(state.Event{ID: "legacy_poison", DeviceID: "dev_b", HLC: 3, Type: EventProjectAdded, PayloadJSON: `{"path":"work/poison2"}`, ContentHash: state.ContentHash(`{"path":"work/poison2"}`)}, otherWCK1, 1)
+	legacyPoison = rewriteEnvelopeKID(t, legacyPoison, "")
+	after, _ := EncryptEvent(state.Event{ID: "after", DeviceID: "dev_a", HLC: 4, Type: EventProjectAdded, PayloadJSON: `{"path":"work/after"}`, ContentHash: state.ContentHash(`{"path":"work/after"}`)}, wck1, 1)
+	back := &recordingHub{events: []state.Event{before, poison, legacyPoison, after}}
 	hub := EncryptedHub{Hub: back, Keyring: kr}
 	got, err := hub.Pull(ctx, 0)
 	if err != nil {
 		t.Fatalf("Pull with poison event: unexpected error %v", err)
 	}
 	if len(got) != 2 || got[0].ID != "before" || got[1].ID != "after" {
-		t.Fatalf("Pull returned %+v, want [before, after] with poison skipped", got)
+		t.Fatalf("Pull returned %+v, want [before, after] with both poisons skipped", got)
+	}
+}
+
+// rewriteEnvelopeKID rewrites an enc.v1 carrier's envelope kid in place —
+// forging a kid (or stripping it to simulate a legacy pre-kid envelope). The
+// kid is outside the AAD, so this is exactly what an attacker or an old client
+// can produce.
+func rewriteEnvelopeKID(t *testing.T, carrier state.Event, kid string) state.Event {
+	t.Helper()
+	var env encryptedEnvelope
+	if err := json.Unmarshal([]byte(carrier.PayloadJSON), &env); err != nil {
+		t.Fatalf("rewrite kid: %v", err)
+	}
+	env.KID = kid
+	raw, err := json.Marshal(env)
+	if err != nil {
+		t.Fatalf("rewrite kid: %v", err)
+	}
+	carrier.PayloadJSON = string(raw)
+	return carrier
+}
+
+// TestEncryptedHubUnheldKidTruncates pins the P6-SEC-02 durability behavior: an
+// event encrypted under a kid this device does NOT hold at an epoch it DOES
+// hold (the fleet key vs. a legacy self-mint collision) must TRUNCATE the batch
+// — defer, never skip — so the event is retried once its grant arrives instead
+// of being permanently jumped by the cursor.
+func TestEncryptedHubUnheldKidTruncates(t *testing.T) {
+	ctx := context.Background()
+	kr := newFakeKeyring(t, 1) // holds one key at epoch 1
+	wck1, _ := kr.WCK(1)
+	prefix, _ := EncryptEvent(state.Event{ID: "mine", DeviceID: "dev_a", HLC: 1, Type: EventProjectAdded, PayloadJSON: `{"path":"work/mine"}`, ContentHash: state.ContentHash(`{"path":"work/mine"}`)}, wck1, 1)
+	fleetWCK, _ := NewWCK() // the founder's key at the SAME epoch, not yet granted
+	fleet, _ := EncryptEvent(state.Event{ID: "fleet", DeviceID: "dev_b", HLC: 2, Type: EventProjectAdded, PayloadJSON: `{"path":"work/fleet"}`, ContentHash: state.ContentHash(`{"path":"work/fleet"}`)}, fleetWCK, 1)
+	trailing, _ := EncryptEvent(state.Event{ID: "trailing", DeviceID: "dev_a", HLC: 3, Type: EventProjectAdded, PayloadJSON: `{"path":"work/trailing"}`, ContentHash: state.ContentHash(`{"path":"work/trailing"}`)}, wck1, 1)
+	back := &recordingHub{events: []state.Event{prefix, fleet, trailing}}
+	hub := EncryptedHub{Hub: back, Keyring: kr}
+	got, err := hub.Pull(ctx, 0)
+	if err != nil {
+		t.Fatalf("Pull with unheld kid: unexpected error %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "mine" {
+		t.Fatalf("Pull returned %+v, want only the prefix (fleet-kid event and everything after deferred)", got)
 	}
 }
 

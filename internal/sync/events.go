@@ -95,8 +95,9 @@ type DraftSnapshotPayload struct {
 // its first pull so it can decrypt the entire namespace-map history.
 type DeviceKeyGrant struct {
 	Epoch      int64  `json:"epoch"`
-	Recipient  string `json:"recipient"`   // age X25519 recipient the WCK is wrapped to
-	WrappedKey string `json:"wrapped_key"` // base64(age.Encrypt(wck, recipient))
+	KID        string `json:"kid,omitempty"` // KIDForWCK of the wrapped key (P6-SEC-02); "" on legacy grants
+	Recipient  string `json:"recipient"`     // age X25519 recipient the WCK is wrapped to
+	WrappedKey string `json:"wrapped_key"`   // base64(age.Encrypt(wck, recipient))
 }
 
 type skewConflictDetails struct {
@@ -578,7 +579,7 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
 			return fmt.Errorf("decode event %s: %w", event.ID, err)
 		}
-		return tx.RecordKeyGrantTx(ctx, payload.Epoch, payload.Recipient, event)
+		return tx.RecordKeyGrantTx(ctx, payload.Epoch, payload.KID, payload.Recipient, event)
 	default:
 		return nil
 	}

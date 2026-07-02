@@ -133,9 +133,13 @@ func TestSyncRejectsForgedGrantBeforeWCKIngest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	forgedWCKPath := filepath.Join(paths.KeyDir(), "wck-"+workspaceID+"-"+strconv.FormatInt(forgedEpoch, 10)+".key")
-	if _, err := os.Stat(forgedWCKPath); !os.IsNotExist(err) {
-		t.Fatalf("forged WCK file stat error = %v, want not exist at %s", err, forgedWCKPath)
+	// No WCK file for the forged epoch may exist under either the legacy
+	// (wck-<ws>-<epoch>.key) or kid-aware (wck-<ws>-<epoch>-<kid>.key) name.
+	forgedWCKGlob := filepath.Join(paths.KeyDir(), "wck-"+workspaceID+"-"+strconv.FormatInt(forgedEpoch, 10)+"*.key")
+	if matches, err := filepath.Glob(forgedWCKGlob); err != nil {
+		t.Fatal(err)
+	} else if len(matches) != 0 {
+		t.Fatalf("forged WCK persisted to keystore: %v", matches)
 	}
 	conflicts, err := store.OpenConflictsByType(ctx, dssync.ConflictEventVerification)
 	if err != nil {
