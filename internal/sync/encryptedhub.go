@@ -201,14 +201,26 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 					"event_id", event.ID, "err", err.Error())
 				continue
 			}
-			candidates := h.Keyring.WCKCandidates(env.Epoch, env.KID)
-			if len(candidates) == 0 {
-				// The grant for this event's (epoch, kid) has not arrived —
-				// including a kid we don't hold at an epoch where we hold a
-				// different key (a joiner's self-mint vs. the fleet key,
-				// P6-SEC-02). Truncate: return the decryptable prefix and stop,
-				// so the cursor advances only up to here and the next sync
-				// retries from this event once granted.
+			// The envelope kid is an unauthenticated routing hint (outside the
+			// AAD until enc.v2, P6-SYNC-04), so it selects the candidate ORDER,
+			// never the candidate SET: the exact match is tried first, then
+			// every other held key at the epoch. Trusting the kid to narrow the
+			// set would let a hostile hub relabel a genuinely decryptable
+			// event's kid to an unheld value and wedge the device forever on
+			// the truncate below, even though it holds the decrypting key
+			// (post-#33 review, fable-5). The AEAD authenticates, so a wrong
+			// candidate just fails and applying a kid-relabeled real event is
+			// safe (ContentHash/DeviceSig are still verified in insertEvent).
+			var exact [][]byte
+			if env.KID != "" {
+				exact = h.Keyring.WCKCandidates(env.Epoch, env.KID)
+			}
+			allHeld := h.Keyring.WCKCandidates(env.Epoch, "")
+			if len(allHeld) == 0 {
+				// No key at this epoch at all: the grant has not arrived.
+				// Truncate: return the decryptable prefix and stop, so the
+				// cursor advances only up to here and the next sync retries
+				// from this event once granted.
 				logging.Logger(ctx).Info("encrypted hub pull: awaiting workspace key grant; deferring remaining events",
 					"epoch", env.Epoch, "kid", env.KID, "event_id", event.ID)
 				return out, nil
@@ -216,7 +228,7 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 			var restored state.Event
 			decErr := error(nil)
 			decrypted := false
-			for _, wck := range candidates {
+			for _, wck := range append(exact, allHeld...) {
 				restored, decErr = DecryptEvent(event, wck)
 				if decErr == nil {
 					decrypted = true
@@ -224,10 +236,21 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 				}
 			}
 			if !decrypted {
-				// We hold candidate key(s) but authentication failed on all of
-				// them: corruption or forgery. The event can never be decrypted
-				// by this device, so skip it — never apply unauthenticated
-				// data — and continue.
+				if env.KID != "" && len(exact) == 0 {
+					// An unheld kid at a held epoch and none of our keys open
+					// it: this is the fleet-key-vs-self-mint collision
+					// (P6-SEC-02) — the grant for that key may still arrive.
+					// Truncate (defer), never skip, so the event is retried
+					// once granted instead of being permanently jumped.
+					logging.Logger(ctx).Info("encrypted hub pull: awaiting workspace key grant; deferring remaining events",
+						"epoch", env.Epoch, "kid", env.KID, "event_id", event.ID)
+					return out, nil
+				}
+				// The envelope names a key we hold (or is a legacy kid-less
+				// envelope) and authentication failed on every held key:
+				// corruption or forgery. The event can never be decrypted by
+				// this device, so skip it — never apply unauthenticated data —
+				// and continue.
 				logging.Logger(ctx).Warn("encrypted hub pull: skipping undecryptable event",
 					"epoch", env.Epoch, "kid", env.KID, "event_id", event.ID, "err", decErr.Error())
 				continue

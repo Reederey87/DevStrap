@@ -57,8 +57,12 @@ const wckSize = chacha20poly1305.KeySize
 // events written before kid addressing; readers fall back to trying every held
 // key at the epoch (the AEAD authenticates, so a wrong candidate just fails).
 // KID stays outside the AAD for wire compatibility with pre-kid clients
-// (enc.v2 AAD binding is P6-SYNC-04); a stripped or forged kid can only cause
-// a decrypt miss or an auth failure, never a wrong-key acceptance.
+// (enc.v2 AAD binding is P6-SYNC-04). An unauthenticated kid can never cause a
+// wrong-key ACCEPTANCE (the AEAD authenticates), but it IS an availability
+// lever until enc.v2 binds it: readers must treat it as a candidate-ordering
+// hint only (see EncryptedHub.Pull), and a stripped kid on an event a device
+// cannot yet decrypt still routes to the skip path (documented residual in
+// spec/15; the fix is the enc.v2 break).
 type encryptedEnvelope struct {
 	Version int    `json:"v"`
 	Epoch   int64  `json:"epoch"`

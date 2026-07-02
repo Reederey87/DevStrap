@@ -27,6 +27,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-02 — Post-#33 review hardening: kid-as-hint decrypt, replay-time grant ingestion, Prime custody guard (PR-3c)
+
+Changed:
+- **Kid is now a candidate-ordering hint, never a candidate filter** (`EncryptedHub.Pull`; fable-5 review, Major): the envelope kid is outside the AAD until `enc.v2`, so a hostile hub could relabel a genuinely decryptable event's kid to an unheld value and wedge the device forever on the truncate path — even though it held the decrypting key. `Pull` now tries the exact-kid match first and then every held key at the epoch; it truncates (defers) only when the kid is unheld AND nothing at the epoch decrypts (preserving the P6-SEC-02 fleet-key defer), and skips only when the named key is held (or the envelope is legacy kid-less) and all candidates fail auth. Pinned by `TestEncryptedHubRelabeledKidStillDecrypts`; all prior poison/truncate pins unchanged. The remaining kid-STRIP lever (drops an event a targeted not-yet-granted joiner can't decrypt) is documented in spec/15 as the `enc.v2`/`P6-SYNC-04` residual, and the overclaiming comment in `eventcrypt.go` is corrected.
+- Split-brain double-founding (fable-5, Minor) documented in spec/07: two founder-role devices racing an empty hub both found and defer on each other until mutual approval; use `init --join` on second machines.
+- The gpt-5.5 (Codex) review of merged PR #33 returned four findings; two were real gaps fixed here, two are the already-documented residuals (`P4-SEC-04` bootstrap-window grants — now with an explicit note that they gain `'grant'` origin and push preference; `P6-SEC-03` truncate wedge — now noting the forged-kid variant), annotated in spec/15 and spec/07.
+- **Replay-time grant ingestion** (`internal/cli/devices.go`): a quarantined `device.key.granted` carrier is only WCK-ingested by `EncryptedHub.Pull`, which already advanced past it and never re-pulls; `replayQuarantinedEvents` (approve/enroll-approve) now unmarshals a replayed grant and calls `Keyring.IngestGrant`, so the granted `(epoch, kid)` is recovered instead of being permanently lost (fleet events sealed under it would otherwise defer forever). Pinned by `TestReplayIngestsQuarantinedGrant` (grant quarantined under the fail-closed regime → approve → epoch/custody/decrypt-candidates all held, conflict resolved).
+- **Prime legacy-upgrade custody guard** (`internal/workspacekeys/keyring.go`): the legacy kid-less backfill now byte-compares an existing kid-aware custody slot before `StoreWCK` and refuses a mismatch — the same P6-SEC-01b defense `IngestGrant` has; previously the upgrade was the one surviving unconditional custody write. Pinned by `TestPrimeRefusesLegacyUpgradeOverDifferentBytes`.
+
+Validated:
+- `gofmt -w cmd internal`, `golangci-lint run`, `go run ./cmd/spec-drift --base origin/main --head HEAD`, `GOCACHE=/tmp/devstrap-gocache go test -race ./...`.
+
+Follow-ups:
+- `P6-SEC-03` bounded grace window (now also covering forged kids); `P4-SEC-04` out-of-band fingerprint confirmation.
+
 ## 2026-07-02 — P6-SEC-01(b/c) + P6-SEC-02: (epoch, kid)-addressed workspace keys (PR-3b, completes the hub-trust workstream)
 
 Changed:

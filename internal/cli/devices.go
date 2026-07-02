@@ -79,7 +79,7 @@ func newDeviceEnrollCommand(stdout io.Writer, opts *options) *cobra.Command {
 				// (auto-created pending placeholder / missing signing key);
 				// approving via enroll must replay them just like
 				// `devices approve` does.
-				replayQuarantinedEvents(cmd.Context(), cmd.ErrOrStderr(), store, args[0])
+				replayQuarantinedEvents(cmd.Context(), cmd.ErrOrStderr(), opts, store, args[0])
 			}
 			_, err = fmt.Fprintf(stdout, "Device %s enrolled as %s\n", args[0], trustState)
 			return err
@@ -148,7 +148,7 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 			// publishes them to the hub.
 			if trustState == "approved" {
 				grantWorkspaceKeyToApprovedDevice(cmd.Context(), stderr, opts, store, args[0])
-				replayQuarantinedEvents(cmd.Context(), stderr, store, args[0])
+				replayQuarantinedEvents(cmd.Context(), stderr, opts, store, args[0])
 			}
 			// Revoking or losing a device means it could decrypt any env bundle
 			// it received; flag those values for source rotation (rewrapping
@@ -238,7 +238,7 @@ type quarantinedEventReplay struct {
 	event    state.Event
 }
 
-func replayQuarantinedEvents(ctx context.Context, stderr io.Writer, store *state.Store, deviceID string) {
+func replayQuarantinedEvents(ctx context.Context, stderr io.Writer, opts *options, store *state.Store, deviceID string) {
 	conflicts, err := store.OpenConflictsByType(ctx, dssync.ConflictEventVerification)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "warning: could not inspect quarantined events for device %s: %v\n", deviceID, err)
@@ -294,6 +294,20 @@ func replayQuarantinedEvents(ctx context.Context, stderr io.Writer, store *state
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "warning: could not encode replay resolution for event %s: %v\n", replay.event.ID, err)
 			continue
+		}
+		// A replayed device.key.granted only records the membership audit via
+		// ApplyEvents; the WCK itself is ingested by EncryptedHub.Pull, which
+		// already advanced past this event when it was quarantined and will
+		// never re-pull it. Ingest it here so the granted (epoch, kid) is not
+		// permanently lost to this device (post-#33 review finding): without
+		// this, every fleet event sealed under that key would defer forever.
+		if replay.event.Type == dssync.EventDeviceKeyGranted {
+			var grant dssync.DeviceKeyGrant
+			if err := json.Unmarshal([]byte(replay.event.PayloadJSON), &grant); err != nil {
+				_, _ = fmt.Fprintf(stderr, "warning: could not decode replayed grant %s: %v\n", replay.event.ID, err)
+			} else if err := buildKeyring(opts, store).IngestGrant(ctx, grant); err != nil {
+				_, _ = fmt.Fprintf(stderr, "warning: could not ingest replayed grant %s (epoch %d): %v\n", replay.event.ID, grant.Epoch, err)
+			}
 		}
 		if err := store.ResolveConflict(ctx, replay.conflict.ID, string(resolution)); err != nil {
 			_, _ = fmt.Fprintf(stderr, "warning: could not resolve quarantined event conflict %s: %v\n", replay.conflict.ID, err)

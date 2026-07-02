@@ -544,3 +544,46 @@ func TestConcurrentSameEpochRotateNoClobber(t *testing.T) {
 		t.Fatal("the concurrently-rotated fleet key was not ingested alongside")
 	}
 }
+
+// TestPrimeRefusesLegacyUpgradeOverDifferentBytes pins the post-#33 review
+// hardening: the legacy-backfill upgrade in Prime must never displace
+// different bytes already sitting in the kid-aware custody slot (that would
+// mean local corruption or tampering — overwriting would destroy a key).
+func TestPrimeRefusesLegacyUpgradeOverDifferentBytes(t *testing.T) {
+	ctx := context.Background()
+	st, kr, _ := setupKeyring(t, "a")
+	if err := kr.resolve(ctx); err != nil {
+		t.Fatal(err)
+	}
+	legacyWCK, err := dssync.NewWCK()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kr.KeyStore.StoreWCK(ctx, kr.workspaceID, 1, "", legacyWCK); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordKeyEpoch(ctx, 1, "", "legacy"); err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt the kid-aware target slot with different bytes before the upgrade.
+	other, err := dssync.NewWCK()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kid := dssync.KIDForWCK(legacyWCK)
+	if err := kr.KeyStore.StoreWCK(ctx, kr.workspaceID, 1, kid, other); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := kr.Prime(ctx); err == nil {
+		t.Fatal("Prime upgraded a legacy key over a mismatched kid-aware slot")
+	}
+	// The corrupted slot was not silently replaced.
+	got, err := kr.KeyStore.LoadWCK(ctx, kr.workspaceID, 1, kid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(other) {
+		t.Fatal("Prime overwrote the existing kid-aware slot despite refusing")
+	}
+}

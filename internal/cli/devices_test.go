@@ -11,6 +11,7 @@ import (
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
+	"github.com/spf13/viper"
 )
 
 func TestReplayQuarantinedEventsAfterDeviceApproval(t *testing.T) {
@@ -95,8 +96,11 @@ func TestReplayQuarantinedEventsAfterDeviceApproval(t *testing.T) {
 	if err := store.SetDeviceTrustState(ctx, "dev_pending", "approved"); err != nil {
 		t.Fatal(err)
 	}
+	opts := &options{v: viper.New()}
+	opts.v.Set("home", home)
+	opts.v.Set("root", root)
 	var stderr bytes.Buffer
-	replayQuarantinedEvents(ctx, &stderr, store, "dev_pending")
+	replayQuarantinedEvents(ctx, &stderr, opts, store, "dev_pending")
 	if !strings.Contains(stderr.String(), "Replayed 1 quarantined event") {
 		t.Fatalf("stderr = %q, want replay summary", stderr.String())
 	}
@@ -293,8 +297,11 @@ func TestReplaySkipsDivergentConflicts(t *testing.T) {
 		t.Fatalf("open verification conflicts = %d, want 1", len(open))
 	}
 
+	opts := &options{v: viper.New()}
+	opts.v.Set("home", home)
+	opts.v.Set("root", root)
 	var stderr bytes.Buffer
-	replayQuarantinedEvents(ctx, &stderr, store, "dev_x")
+	replayQuarantinedEvents(ctx, &stderr, opts, store, "dev_x")
 	if strings.Contains(stderr.String(), "Replayed") {
 		t.Fatalf("divergent conflict was replayed: %q", stderr.String())
 	}
