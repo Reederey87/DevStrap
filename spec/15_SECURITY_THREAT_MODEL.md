@@ -155,6 +155,10 @@ Mitigation (target, see `P6-SEC-01` below): verify the carrier event before inge
 
 Attacker = the untrusted hub. The `enc.v1` envelope AAD binds only `event.ID || epoch` and the signature covers only content/HLC/ID/payload/prev-hash/type, so the carrier `DeviceID` and `Seq` are authenticated by **nothing** end-to-end (`internal/sync/eventcrypt.go:213-222`, `internal/state/store.go:2509-2516`). A hostile hub can rewrite `Seq` (forcing an `ErrEventHashChain` soft-wedge that holds the cursor forever) or re-attribute `DeviceID` (corrupting the conflict tiebreak) without breaking AEAD or the signature. Mitigation (target, see `P6-SYNC-04` below): widen the AAD to the full carrier tuple under a new `enc.v2` and hold-or-conflict on AEAD failure.
 
+### Threat: one bad signed event wedges every device's sync (`P6-SYNC-01`, mitigated)
+
+Attacker = a revoked/lost device that keeps pushing signed events (or a hub replaying one). Previously any signature/trust failure in `ApplyEvents` aborted the whole batch before the cursor advanced, so a single poisoned event re-pulled and re-failed forever — a fleet-wide availability break requiring no key compromise. **Mitigated:** permanent verification failures (signature/trust/content-hash, wrapped in `state.ErrEventVerification`) and divergent duplicate IDs are now quarantined per-event as `event_verification_failure` conflicts (full event JSON retained for replay) while the rest of the batch applies and the cursor advances safely; `devices approve` replays a newly-approved device's quarantined events. Residual: `devices revoke` is local-only — a synced `device.revoked` trust event remains future work.
+
 **Related (owned elsewhere):** `P6-HUB-01` — hub-side blob GC data-loss (availability, owned in `spec/03`); `P6-SYNC-03` — device revoke reopens a decryption/integrity window (owned in `spec/07`).
 
 ### Threat: device lost/stolen

@@ -532,6 +532,263 @@ func TestInsertLocalEventSignsAndRejectsTampering(t *testing.T) {
 	}
 }
 
+func TestInsertEventVerificationFailuresWrapSentinel(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name    string
+		event   func(t *testing.T, st *Store, signed Event, device Device) Event
+		wantErr string
+	}{
+		{
+			name: "content hash mismatch",
+			event: func(t *testing.T, st *Store, signed Event, device Device) Event {
+				t.Helper()
+				failing := signed
+				failing.ID = "evt_content_hash_mismatch"
+				failing.ContentHash = "sha256:wrong"
+				return failing
+			},
+			wantErr: "content hash mismatch",
+		},
+		{
+			name: "unknown device",
+			event: func(t *testing.T, st *Store, signed Event, device Device) Event {
+				t.Helper()
+				failing := signed
+				failing.ID = "evt_unknown_device"
+				failing.DeviceID = "dev_unknown"
+				failing.Type = "project.deleted"
+				failing.DeviceSig = ""
+				return failing
+			},
+			wantErr: "requires a signature from a known approved device",
+		},
+		{
+			name: "no signing key",
+			event: func(t *testing.T, st *Store, signed Event, device Device) Event {
+				t.Helper()
+				if err := st.UpsertDevice(ctx, Device{
+					ID:         "dev_no_signing_key",
+					Name:       "no-signing-key",
+					OS:         "darwin",
+					Arch:       "arm64",
+					TrustState: "approved",
+				}); err != nil {
+					t.Fatal(err)
+				}
+				failing := signed
+				failing.ID = "evt_no_signing_key"
+				failing.DeviceID = "dev_no_signing_key"
+				failing.Type = "project.deleted"
+				failing.DeviceSig = ""
+				return failing
+			},
+			wantErr: "requires a signature from a device with a signing key",
+		},
+		{
+			name: "must-verify missing signature",
+			event: func(t *testing.T, st *Store, signed Event, device Device) Event {
+				t.Helper()
+				if err := st.UpsertDevice(ctx, Device{
+					ID:               "dev_missing_required_signature",
+					Name:             "missing-required-signature",
+					OS:               "darwin",
+					Arch:             "arm64",
+					SigningPublicKey: device.SigningPublicKey,
+					TrustState:       "approved",
+				}); err != nil {
+					t.Fatal(err)
+				}
+				failing := signed
+				failing.ID = "evt_missing_required_signature"
+				failing.DeviceID = "dev_missing_required_signature"
+				failing.Type = "project.deleted"
+				failing.DeviceSig = ""
+				return failing
+			},
+			wantErr: "requires a device signature",
+		},
+		{
+			name: "non-must-verify missing signature",
+			event: func(t *testing.T, st *Store, signed Event, device Device) Event {
+				t.Helper()
+				if err := st.UpsertDevice(ctx, Device{
+					ID:               "dev_missing_optional_signature",
+					Name:             "missing-optional-signature",
+					OS:               "darwin",
+					Arch:             "arm64",
+					SigningPublicKey: device.SigningPublicKey,
+					TrustState:       "approved",
+				}); err != nil {
+					t.Fatal(err)
+				}
+				failing := signed
+				failing.ID = "evt_missing_optional_signature"
+				failing.DeviceID = "dev_missing_optional_signature"
+				failing.Type = "project.added"
+				failing.DeviceSig = ""
+				return failing
+			},
+			wantErr: "missing device signature",
+		},
+		{
+			name: "not approved trust state",
+			event: func(t *testing.T, st *Store, signed Event, device Device) Event {
+				t.Helper()
+				if err := st.UpsertDevice(ctx, Device{
+					ID:               "dev_not_approved",
+					Name:             "not-approved",
+					OS:               "darwin",
+					Arch:             "arm64",
+					SigningPublicKey: device.SigningPublicKey,
+					TrustState:       "pending",
+				}); err != nil {
+					t.Fatal(err)
+				}
+				failing := signed
+				failing.ID = "evt_not_approved"
+				failing.DeviceID = "dev_not_approved"
+				failing.Type = "project.deleted"
+				failing.DeviceSig = "not-empty"
+				return failing
+			},
+			wantErr: "requires a signature from an approved device",
+		},
+		{
+			name: "invalid signature",
+			event: func(t *testing.T, st *Store, signed Event, device Device) Event {
+				t.Helper()
+				failing := signed
+				failing.ID = "evt_invalid_signature"
+				failing.PayloadJSON = `{"path":"work/tampered"}`
+				failing.ContentHash = ContentHash(failing.PayloadJSON)
+				return failing
+			},
+			wantErr: "device signature invalid",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st, signed, device := newSignedEventTestStore(t, ctx)
+			err := st.InsertEvent(ctx, tt.event(t, st, signed, device))
+			if err == nil {
+				t.Fatal("expected verification error")
+			}
+			if !errors.Is(err, ErrEventVerification) {
+				t.Fatalf("error = %v, want ErrEventVerification", err)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want message containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestVerifyEventSignatureDBErrorDoesNotWrapSentinel(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, `CREATE TABLE devices (id TEXT PRIMARY KEY, trust_state TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	err = verifyEventSignature(ctx, db, Event{
+		ID:          "evt_db_error",
+		DeviceID:    "dev_db_error",
+		Type:        "project.deleted",
+		PayloadJSON: `{"path":"work/a"}`,
+		ContentHash: ContentHash(`{"path":"work/a"}`),
+	})
+	if err == nil {
+		t.Fatal("expected db error")
+	}
+	if errors.Is(err, ErrEventVerification) {
+		t.Fatalf("error = %v, did not want ErrEventVerification", err)
+	}
+	if !strings.Contains(err.Error(), "read device signing public key") {
+		t.Fatalf("error = %v, want read device signing public key", err)
+	}
+}
+
+func newSignedEventTestStore(t *testing.T, ctx context.Context) (*Store, Event, Device) {
+	t.Helper()
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := st.Close(); err != nil {
+			t.Errorf("close store: %v", err)
+		}
+	})
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureWorkspace(ctx, "test", "/tmp/Code"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EnsureDevice(ctx, "device-a"); err != nil {
+		t.Fatal(err)
+	}
+	event, err := st.InsertLocalEvent(ctx, Event{Type: "project.added", PayloadJSON: `{"path":"work/a"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, err := st.CurrentDevice(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.DeviceSig == "" {
+		t.Fatal("local event has empty device signature")
+	}
+	if device.SigningPublicKey == "" {
+		t.Fatal("device signing public key is empty")
+	}
+	return st, event, device
+}
+
+func TestOpenConflictsByTypeFiltersOpenRows(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureWorkspace(ctx, "test", "/tmp/Code"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertConflict(ctx, "", "wanted", `{"n":1}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertConflict(ctx, "", "other", `{"n":2}`); err != nil {
+		t.Fatal(err)
+	}
+	wanted, err := st.OpenConflictsByType(ctx, "wanted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wanted) != 1 || wanted[0].Type != "wanted" {
+		t.Fatalf("wanted conflicts = %+v, want one wanted row", wanted)
+	}
+	if err := st.ResolveConflict(ctx, wanted[0].ID, `{"action":"test"}`); err != nil {
+		t.Fatal(err)
+	}
+	wanted, err = st.OpenConflictsByType(ctx, "wanted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wanted) != 0 {
+		t.Fatalf("wanted conflicts after resolve = %+v, want none", wanted)
+	}
+}
+
 func TestInsertLocalEventSeedsClockFromExistingEvents(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))

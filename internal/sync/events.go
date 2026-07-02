@@ -33,6 +33,7 @@ const (
 	ConflictSamePathDifferentRemote = "same_path_different_remote"
 	ConflictPendingDelete           = "pending_delete_conflict"
 	ConflictRenameTargetExists      = "rename_target_exists"
+	ConflictEventVerification       = "event_verification_failure"
 )
 
 // defaultReceiveMaxSkew bounds how far ahead of local physical time a remote
@@ -148,6 +149,27 @@ type eventHashChainConflictDetails struct {
 	Error         string `json:"error"`
 }
 
+// Machine-readable failure kinds for event_verification_failure conflicts.
+// "verification" failures (signature/trust/content-hash) become applicable
+// once the source device is approved, so `devices approve` replays them.
+// "divergent" failures are data-integrity conflicts with an already-stored
+// event of the same ID and must NEVER be auto-resolved by approval.
+const (
+	EventConflictKindVerification = "verification"
+	EventConflictKindDivergent    = "divergent"
+)
+
+type eventVerificationConflictDetails struct {
+	Kind      string `json:"kind"`
+	EventID   string `json:"event_id"`
+	DeviceID  string `json:"device_id"`
+	HLC       int64  `json:"hlc"`
+	Seq       int64  `json:"seq"`
+	Type      string `json:"type"`
+	Error     string `json:"error"`
+	EventJSON string `json:"event_json"`
+}
+
 func NewProjectEvent(deviceID, typ string, hlc int64, payload ProjectPayload) (state.Event, error) {
 	eventID, err := id.New("evt")
 	if err != nil {
@@ -233,9 +255,9 @@ func CreateConflictResolvedEvent(ctx context.Context, st *state.Store, payload C
 // (a remote clock a few minutes ahead; it becomes valid once local time
 // catches up) and hash-chain breaks (a re-delivery may eventually carry the
 // correct prev_event_hash). Permanently-invalid events (HLC <= 0 or below the
-// epoch floor) are recorded as conflicts and do NOT hold the cursor, since they
-// will never be re-applied and holding at a non-positive cursor would strand
-// every higher event.
+// epoch floor), verification failures (signature/trust/content-hash), and
+// divergent duplicate event IDs are recorded as conflicts and do NOT hold the
+// cursor, since re-delivery would fail identically forever and would wedge sync.
 func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) (int64, error) {
 	sort.Slice(events, func(i, j int) bool {
 		if events[i].HLC == events[j].HLC {
@@ -320,6 +342,21 @@ func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) (in
 				}
 				continue
 			}
+			if errors.Is(err, state.ErrEventVerification) || errors.Is(err, state.ErrDivergentEvent) {
+				if conflictErr := insertEventVerificationConflict(ctx, st, event, err); conflictErr != nil {
+					return 0, errors.Join(err, conflictErr)
+				}
+				// Permanent verification/divergence failures are quarantined
+				// and counted as consumed for the cursor: re-delivery would
+				// fail identically forever (the full event is preserved in the
+				// conflict for approval replay), and without advancing here a
+				// batch ENDING in a quarantined event would be re-delivered by
+				// the inclusive pull boundary on every subsequent sync.
+				if event.HLC > maxAppliedHLC {
+					maxAppliedHLC = event.HLC
+				}
+				continue
+			}
 			return 0, err
 		}
 		if inserted && event.HLC > maxAppliedHLC {
@@ -370,6 +407,45 @@ func insertEventHashChainConflict(ctx context.Context, st *state.Store, event st
 		return err
 	}
 	return st.InsertConflict(ctx, "", "event_hash_chain_break", string(raw))
+}
+
+func insertEventVerificationConflict(ctx context.Context, st *state.Store, event state.Event, cause error) error {
+	// Dedup on event ID, not exact details: the same event re-quarantined for
+	// a different reason (e.g. an approve-time replay that fails the signature
+	// check where the original failure was pending trust) must not open a
+	// second conflict row — the error string is volatile, the event is not.
+	existing, err := st.OpenConflictsByType(ctx, ConflictEventVerification)
+	if err != nil {
+		return err
+	}
+	for _, c := range existing {
+		var d eventVerificationConflictDetails
+		if json.Unmarshal([]byte(c.DetailsJSON), &d) == nil && d.EventID == event.ID {
+			return nil
+		}
+	}
+	eventRaw, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	kind := EventConflictKindVerification
+	if errors.Is(cause, state.ErrDivergentEvent) {
+		kind = EventConflictKindDivergent
+	}
+	raw, err := json.Marshal(eventVerificationConflictDetails{
+		Kind:      kind,
+		EventID:   event.ID,
+		DeviceID:  event.DeviceID,
+		HLC:       event.HLC,
+		Seq:       event.Seq,
+		Type:      event.Type,
+		Error:     cause.Error(),
+		EventJSON: string(eventRaw),
+	})
+	if err != nil {
+		return err
+	}
+	return st.InsertConflict(ctx, "", ConflictEventVerification, string(raw))
 }
 
 func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {

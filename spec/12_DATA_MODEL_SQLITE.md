@@ -310,7 +310,7 @@ CREATE TABLE events (
 
 Rows in `events` are insert-only. Mutable delivery/apply state belongs in `event_delivery`.
 
-Local event creation links the new event to the previous same-device event content hash, then signs the canonical event payload `(id, hlc, type, payload_json, content_hash, prev_event_hash)` with the local Ed25519 device signing identity. Event insertion verifies `content_hash`, verifies any non-empty `prev_event_hash` against the previous same-device event already stored locally, and verifies `device_sig` when the source device has a known `signing_public_key`; unsigned events are accepted only during the pre-enrollment bootstrap window (and always from the local device); once any approved device exists, verification fails closed (`HUB-03`) — events from unknown, keyless, or non-approved devices are rejected for every event type. Sync records an `event_hash_chain_break` conflict when incoming previous-hash validation fails.
+Local event creation links the new event to the previous same-device event content hash, then signs the canonical event payload `(id, hlc, type, payload_json, content_hash, prev_event_hash)` with the local Ed25519 device signing identity. Event insertion verifies `content_hash`, then `device_sig` (when the source device has a known `signing_public_key`), and only then any non-empty `prev_event_hash` against the previous same-device event already stored locally — signature/trust before chain, so an untrusted device's chained successor fails with the permanent verification verdict rather than a transient cursor-holding chain break; unsigned events are accepted only during the pre-enrollment bootstrap window (and always from the local device); once any approved device exists, verification fails closed (`HUB-03`) — events from unknown, keyless, or non-approved devices are rejected for every event type. Sync records an `event_hash_chain_break` conflict when incoming previous-hash validation fails, and records an `event_verification_failure` conflict when permanent signature/trust/content-hash/divergent failures reject one event while the rest of the batch continues.
 
 ### device_sync_state
 
@@ -407,6 +407,8 @@ CREATE TABLE conflicts (
   FOREIGN KEY(namespace_id) REFERENCES namespace_entries(id) ON DELETE SET NULL
 );
 ```
+
+Conflict details are stable JSON so repeated pulls dedup identical open rows. `event_verification_failure` conflicts store `kind` (`verification` — replayable after approval — or `divergent` — a data-integrity dispute that approval never auto-resolves), `event_id`, `device_id`, `hlc`, `seq`, `type`, `error`, and `event_json`; `event_json` is the full marshaled `state.Event` so a later approval replay can call `ApplyEvents` without re-pulling the event from the hub. These conflicts additionally dedup by `event_id` (not exact details) so the same event re-failing with a different error string never opens a second row. `OpenConflictsByType` filters open rows by type for this replay path. `conflicts list/show` pass details through `redact.Scrub` before display — the payload is attacker-influenced remote input.
 
 ### pending_hub_deletes (shipped)
 

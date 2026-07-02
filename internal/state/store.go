@@ -38,6 +38,7 @@ type Store struct {
 var ErrNotInitialized = errors.New("workspace is not initialized; run devstrap init")
 var ErrDivergentEvent = errors.New("event id already exists with different immutable content")
 var ErrEventHashChain = errors.New("event prev_event_hash chain break")
+var ErrEventVerification = errors.New("event verification failed")
 
 const (
 	hlcLogicalBits  = 16
@@ -2095,6 +2096,32 @@ ORDER BY type, details_json, id;
 	return conflicts, rows.Err()
 }
 
+func (s *Store) OpenConflictsByType(ctx context.Context, typ string) ([]Conflict, error) {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, COALESCE(namespace_id, ''), type, status, details_json
+FROM conflicts
+WHERE workspace_id = ? AND status = 'open' AND type = ?
+ORDER BY details_json, id;
+`, workspaceID, typ)
+	if err != nil {
+		return nil, fmt.Errorf("list open conflicts by type: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var conflicts []Conflict
+	for rows.Next() {
+		var conflict Conflict
+		if err := rows.Scan(&conflict.ID, &conflict.NamespaceID, &conflict.Type, &conflict.Status, &conflict.DetailsJSON); err != nil {
+			return nil, fmt.Errorf("scan open conflict by type: %w", err)
+		}
+		conflicts = append(conflicts, conflict)
+	}
+	return conflicts, rows.Err()
+}
+
 func (tx *Tx) InsertConflict(ctx context.Context, namespaceID, typ, detailsJSON string) error {
 	return insertConflict(ctx, tx.tx, tx.workspaceID, namespaceID, typ, detailsJSON)
 }
@@ -2418,12 +2445,19 @@ func insertEvent(ctx context.Context, exec sqlExecutor, workspaceID string, even
 	}
 	expectedHash := ContentHash(event.PayloadJSON)
 	if event.ContentHash != expectedHash {
-		return false, fmt.Errorf("event %s content hash mismatch: got %s want %s", event.ID, event.ContentHash, expectedHash)
+		return false, fmt.Errorf("event %s content hash mismatch: got %s want %s: %w", event.ID, event.ContentHash, expectedHash, ErrEventVerification)
 	}
-	if err := validatePrevEventHash(ctx, exec, event); err != nil {
+	// P6-SYNC-01: verify signature/trust BEFORE the prev-hash chain check.
+	// Signature verification has no dependency on the stored predecessor row,
+	// and the order matters: a revoked device's event N is quarantined (never
+	// inserted), so its successor N+1 would fail the prev-hash lookup first
+	// and surface as a transient ErrEventHashChain — holding the cursor
+	// forever and reintroducing the exact wedge quarantine exists to prevent.
+	// Untrusted events must fail with the permanent verification verdict.
+	if err := verifyEventSignature(ctx, exec, event); err != nil {
 		return false, err
 	}
-	if err := verifyEventSignature(ctx, exec, event); err != nil {
+	if err := validatePrevEventHash(ctx, exec, event); err != nil {
 		return false, err
 	}
 	result, err := exec.ExecContext(ctx, `
@@ -2551,7 +2585,7 @@ WHERE id = ?;
 		// Unknown device. Once enrolled, reject everything from unknown devices.
 		// Before enrollment, reject only destructive events.
 		if mustVerifyEvent(event.Type) || enrolled {
-			return fmt.Errorf("event %s of type %s requires a signature from a known approved device", event.ID, event.Type)
+			return fmt.Errorf("event %s of type %s requires a signature from a known approved device: %w", event.ID, event.Type, ErrEventVerification)
 		}
 		return nil
 	}
@@ -2565,24 +2599,24 @@ WHERE id = ?;
 		// set up yet). Before enrollment, non-destructive events from any
 		// known device are accepted.
 		if !isLocal && (mustVerifyEvent(event.Type) || enrolled) {
-			return fmt.Errorf("event %s of type %s requires a signature from a device with a signing key", event.ID, event.Type)
+			return fmt.Errorf("event %s of type %s requires a signature from a device with a signing key: %w", event.ID, event.Type, ErrEventVerification)
 		}
 		return nil
 	}
 	if event.DeviceSig == "" {
 		if mustVerifyEvent(event.Type) {
-			return fmt.Errorf("event %s of type %s requires a device signature", event.ID, event.Type)
+			return fmt.Errorf("event %s of type %s requires a device signature: %w", event.ID, event.Type, ErrEventVerification)
 		}
-		return fmt.Errorf("event %s missing device signature", event.ID)
+		return fmt.Errorf("event %s missing device signature: %w", event.ID, ErrEventVerification)
 	}
 	// HUB-03: for must-verify events, require the device to be approved (the
 	// local device is exempt). For non-must-verify events once enrolled,
 	// require non-local devices to be approved too (fail-closed).
 	if !isLocal && trustState != "approved" && (mustVerifyEvent(event.Type) || enrolled) {
-		return fmt.Errorf("event %s of type %s requires a signature from an approved device (current: %s)", event.ID, event.Type, trustState)
+		return fmt.Errorf("event %s of type %s requires a signature from an approved device (current: %s): %w", event.ID, event.Type, trustState, ErrEventVerification)
 	}
 	if err := devicekeys.Verify(signingPublicKey, event.DeviceSig, eventSignatureDomain, EventSignaturePayload(event)); err != nil {
-		return fmt.Errorf("event %s device signature invalid: %w", event.ID, err)
+		return fmt.Errorf("event %s device signature invalid: %w: %w", event.ID, err, ErrEventVerification)
 	}
 	return nil
 }

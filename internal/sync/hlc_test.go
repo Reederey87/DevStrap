@@ -3,7 +3,6 @@ package sync
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"path/filepath"
 	stdsync "sync"
 	"testing"
@@ -300,7 +299,7 @@ func TestApplyEventsSamePathDifferentRemoteUsesCanonicalWinnerAcrossPullWindows(
 	}
 }
 
-func TestApplyEventsRejectsDivergentDuplicateEventID(t *testing.T) {
+func TestApplyEventsQuarantinesDivergentDuplicateEventID(t *testing.T) {
 	ctx := context.Background()
 	st, err := state.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
@@ -333,9 +332,15 @@ func TestApplyEventsRejectsDivergentDuplicateEventID(t *testing.T) {
 	divergent := event
 	divergent.PayloadJSON = `{"path":"work/acme/other","type":"git_repo","remote_url":"git@github.com:acme/other.git","remote_key":"github.com/acme/other","default_branch":"main"}`
 	divergent.ContentHash = state.ContentHash(divergent.PayloadJSON)
-	_, err = ApplyEvents(ctx, st, []state.Event{divergent})
-	if !errors.Is(err, state.ErrDivergentEvent) {
-		t.Fatalf("ApplyEvents divergent error = %v, want ErrDivergentEvent", err)
+	if _, err := ApplyEvents(ctx, st, []state.Event{divergent}); err != nil {
+		t.Fatalf("ApplyEvents divergent duplicate should quarantine and continue: %v", err)
+	}
+	conflicts, err := st.OpenConflicts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasConflictType(conflicts, ConflictEventVerification) {
+		t.Fatalf("conflicts = %+v, want %s", conflicts, ConflictEventVerification)
 	}
 }
 

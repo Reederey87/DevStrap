@@ -27,6 +27,24 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-02 — P6-SYNC-01: per-event verification quarantine (PR 1/3 of the hub-trust workstream)
+
+Changed:
+- Added the `state.ErrEventVerification` sentinel and `%w`-wrapped it into the six permanent verification failure paths (content-hash mismatch in `insertEvent`; unknown device, missing signing key, missing signature ×2, non-approved trust state, and invalid Ed25519 signature in `verifyEventSignature`); infrastructure/DB errors deliberately stay non-matching so they still abort the batch.
+- `ApplyEvents` now quarantines `ErrEventVerification`/`ErrDivergentEvent` per-event as `event_verification_failure` conflicts (new `ConflictEventVerification` type) and continues the batch without lowering the low-water-mark cursor — one bad signed event (e.g. from a revoked device) can no longer wedge every other device's sync. Conflict details carry the full marshaled `state.Event` (`event_json`) so replay works without re-pulling; the existing stable-details dedup absorbs repeated pulls.
+- `devices approve` now replays that device's quarantined events via the new `replayQuarantinedEvents` (new store helper `OpenConflictsByType`), resolving conflicts whose events apply after approval.
+- Specs: 00 (implemented inventory), 07 (cursor semantics + P6-SYNC-01 section rewritten to shipped-status), 12 (conflict payload docs), 13 (approve replay + synced `device.revoked` future work), 14 (P1 wave status), 15 (new mitigated threat row), 16 (test inventory).
+
+- Dual-review hardening (independent Claude + Codex review passes before merge) fixed six findings: (1) quarantined events now count as consumed for the cursor so a batch *ending* in one is not re-delivered forever by the inclusive pull boundary; (2) `insertEvent` verifies signature/trust **before** the prev-hash chain check so a revoked device's chained events (seq N, N+1) fail permanent instead of surfacing as a transient cursor-holding `ErrEventHashChain` wedge; (3) conflict details carry a machine-readable `kind` and approval replay skips `divergent` rows (a replay would "succeed" only because the original event exists); (4) `devices enroll --approve` now replays like `approve` (the realistic first-contact ordering); (5) conflicts dedup by event ID, not volatile error text; (6) `conflicts list/show` scrub token-shaped values from attacker-influenced details before display.
+
+Validated:
+- `gofmt -w cmd internal`; `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` (0 issues); `GOCACHE=/tmp/devstrap-gocache go test ./...` and `go test -race ./...`; new e2e `sync_revoked_quarantine.txtar` (three devices; revoked C pushes; A syncs exit 0 with one quarantine conflict) plus unit tests for sentinel coverage, quarantine/dedup/cursor advance, trailing-quarantine cursor, chained-revoked-events no-wedge, approve/enroll replay, and divergent-skip.
+
+Follow-ups:
+- P6-SEC-01(a) verifier seam on `EncryptedHub.Pull` (PR 2/3) and P6-SEC-02 founder/join + `(epoch,kid)` keying (PR 3/3).
+- Synced `device.revoked` trust propagation (revoke is still local-only) and the P6-SYNC-03 sticky-enrollment predicate.
+- Bounded aggregation for quarantine conflicts from a still-pushing revoked device (one open row per distinct poisoned event today).
+
 ## 2026-07-01 — Sixth-pass spec revision (verification + architecture direction)
 
 Changed:
