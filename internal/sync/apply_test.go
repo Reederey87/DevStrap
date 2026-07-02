@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/id"
 	"github.com/Reederey87/DevStrap/internal/state"
 )
@@ -256,6 +257,52 @@ func hasConflictType(conflicts []state.Conflict, typ string) bool {
 	return false
 }
 
+func countConflictType(conflicts []state.Conflict, typ string) int {
+	var count int
+	for _, c := range conflicts {
+		if c.Type == typ {
+			count++
+		}
+	}
+	return count
+}
+
+func signedProjectEvent(t *testing.T, signing devicekeys.SigningIdentity, deviceID string, seq, hlc int64, nsPath, remoteKey string) state.Event {
+	t.Helper()
+	ev, err := NewProjectEvent(deviceID, EventProjectAdded, hlc, ProjectPayload{
+		Path: nsPath, Type: "git_repo", RemoteKey: remoteKey, RemoteURL: "https://example.com/" + remoteKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev.Seq = seq
+	sig, err := devicekeys.Sign(signing.Private, "devstrap:event:v1", state.EventSignaturePayload(ev))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev.DeviceSig = sig
+	return ev
+}
+
+func addRemoteDeviceForApplyTest(t *testing.T, st *state.Store, id, trustState string) devicekeys.SigningIdentity {
+	t.Helper()
+	signing, err := devicekeys.NewSigningIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertDevice(context.Background(), state.Device{
+		ID:               id,
+		Name:             id,
+		OS:               "linux",
+		Arch:             "arm64",
+		SigningPublicKey: signing.Public,
+		TrustState:       trustState,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return signing
+}
+
 // projEvent builds a project.added/updated event at the given (unshifted) HLC.
 func projEvent(t *testing.T, dev, typ string, hlc int64, nsPath, key string) state.Event {
 	t.Helper()
@@ -269,6 +316,213 @@ func projEvent(t *testing.T, dev, typ string, hlc int64, nsPath, key string) sta
 		t.Fatal(err)
 	}
 	return ev
+}
+
+func TestApplyEventsQuarantinesVerificationFailureAndAdvancesCursor(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newSyncStore(t)
+	cSigning := addRemoteDeviceForApplyTest(t, st, "device-c", "approved")
+	bSigning := addRemoteDeviceForApplyTest(t, st, "device-b", "revoked")
+
+	validC1 := signedProjectEvent(t, cSigning, "device-c", 1, 10<<hlcLogicalBits, "work/acme/c1", "github.com/acme/c1")
+	revokedB1 := signedProjectEvent(t, bSigning, "device-b", 1, 20<<hlcLogicalBits, "work/acme/b1", "github.com/acme/b1")
+	validC2 := signedProjectEvent(t, cSigning, "device-c", 2, 30<<hlcLogicalBits, "work/acme/c2", "github.com/acme/c2")
+
+	safeCursor, err := ApplyEvents(ctx, st, []state.Event{validC1, revokedB1, validC2})
+	if err != nil {
+		t.Fatalf("ApplyEvents should quarantine verification failure and continue: %v", err)
+	}
+	if safeCursor != 30<<hlcLogicalBits {
+		t.Fatalf("safeCursor = %d, want %d", safeCursor, 30<<hlcLogicalBits)
+	}
+	projection := projectionOf(t, st)
+	if _, ok := projection["work/acme/c1"]; !ok {
+		t.Fatalf("work/acme/c1 missing from projection: %+v", projection)
+	}
+	if _, ok := projection["work/acme/c2"]; !ok {
+		t.Fatalf("work/acme/c2 missing from projection: %+v", projection)
+	}
+	if _, ok := projection["work/acme/b1"]; ok {
+		t.Fatalf("revoked device event applied unexpectedly: %+v", projection)
+	}
+	conflicts, err := st.OpenConflicts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countConflictType(conflicts, ConflictEventVerification); got != 1 {
+		t.Fatalf("event verification conflicts = %d, want 1: %+v", got, conflicts)
+	}
+	var details eventVerificationConflictDetails
+	if err := json.Unmarshal([]byte(conflicts[0].DetailsJSON), &details); err != nil {
+		t.Fatal(err)
+	}
+	if details.EventID != revokedB1.ID || details.DeviceID != revokedB1.DeviceID || details.EventJSON == "" {
+		t.Fatalf("conflict details = %+v, want revoked event identity and full event json", details)
+	}
+	if details.Kind != EventConflictKindVerification {
+		t.Fatalf("details.Kind = %q, want %q", details.Kind, EventConflictKindVerification)
+	}
+	var replayEvent state.Event
+	if err := json.Unmarshal([]byte(details.EventJSON), &replayEvent); err != nil {
+		t.Fatal(err)
+	}
+	if replayEvent.ID != revokedB1.ID || replayEvent.PayloadJSON != revokedB1.PayloadJSON || replayEvent.DeviceSig != revokedB1.DeviceSig {
+		t.Fatalf("replay event = %+v, want full original event %+v", replayEvent, revokedB1)
+	}
+}
+
+// A batch ENDING in a quarantined event must still advance the cursor past it:
+// the pull boundary is inclusive, so holding at the last applied HLC would
+// re-deliver (and re-process) the poisoned suffix on every subsequent sync.
+func TestApplyEventsQuarantinedTrailingEventAdvancesCursor(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newSyncStore(t)
+	cSigning := addRemoteDeviceForApplyTest(t, st, "device-c", "approved")
+	bSigning := addRemoteDeviceForApplyTest(t, st, "device-b", "revoked")
+
+	validC1 := signedProjectEvent(t, cSigning, "device-c", 1, 10<<hlcLogicalBits, "work/acme/c1", "github.com/acme/c1")
+	revokedB1 := signedProjectEvent(t, bSigning, "device-b", 1, 20<<hlcLogicalBits, "work/acme/b1", "github.com/acme/b1")
+
+	safeCursor, err := ApplyEvents(ctx, st, []state.Event{validC1, revokedB1})
+	if err != nil {
+		t.Fatalf("ApplyEvents should quarantine trailing verification failure: %v", err)
+	}
+	if safeCursor != 20<<hlcLogicalBits {
+		t.Fatalf("safeCursor = %d, want %d (must pass the quarantined trailing event)", safeCursor, 20<<hlcLogicalBits)
+	}
+}
+
+// A revoked device that keeps pushing CHAINED events (seq N, N+1 with
+// prev_event_hash linking) must not wedge the cursor: signature/trust is
+// verified before the prev-hash chain check, so every event from the revoked
+// device fails with the permanent verification verdict instead of the
+// missing-predecessor chain break that would transiently hold the cursor
+// forever (the predecessor is quarantined, never inserted).
+func TestApplyEventsChainedRevokedEventsDoNotWedgeCursor(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newSyncStore(t)
+	cSigning := addRemoteDeviceForApplyTest(t, st, "device-c", "approved")
+	bSigning := addRemoteDeviceForApplyTest(t, st, "device-b", "revoked")
+
+	revokedB1 := signedProjectEvent(t, bSigning, "device-b", 1, 20<<hlcLogicalBits, "work/acme/b1", "github.com/acme/b1")
+	revokedB2, err := NewProjectEvent("device-b", EventProjectAdded, 25<<hlcLogicalBits, ProjectPayload{
+		Path: "work/acme/b2", Type: "git_repo", RemoteKey: "github.com/acme/b2", RemoteURL: "https://example.com/github.com/acme/b2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	revokedB2.Seq = 2
+	revokedB2.PrevEventHash = revokedB1.ContentHash
+	sig, err := devicekeys.Sign(bSigning.Private, "devstrap:event:v1", state.EventSignaturePayload(revokedB2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	revokedB2.DeviceSig = sig
+	validC1 := signedProjectEvent(t, cSigning, "device-c", 1, 30<<hlcLogicalBits, "work/acme/c1", "github.com/acme/c1")
+
+	safeCursor, err := ApplyEvents(ctx, st, []state.Event{revokedB1, revokedB2, validC1})
+	if err != nil {
+		t.Fatalf("ApplyEvents should quarantine both chained revoked events: %v", err)
+	}
+	if safeCursor != 30<<hlcLogicalBits {
+		t.Fatalf("safeCursor = %d, want %d (chained revoked events must not hold the cursor)", safeCursor, 30<<hlcLogicalBits)
+	}
+	conflicts, err := st.OpenConflicts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countConflictType(conflicts, ConflictEventVerification); got != 2 {
+		t.Fatalf("event verification conflicts = %d, want 2: %+v", got, conflicts)
+	}
+	if hasConflictType(conflicts, "event_hash_chain_break") {
+		t.Fatalf("chained revoked event misclassified as transient hash-chain break: %+v", conflicts)
+	}
+	if _, ok := projectionOf(t, st)["work/acme/c1"]; !ok {
+		t.Fatal("valid event after chained revoked events did not apply")
+	}
+}
+
+func TestApplyEventsDivergentEventQuarantines(t *testing.T) {
+	ctx := context.Background()
+	st, device := newSyncStore(t)
+	event, err := NewProjectEvent(device.ID, EventProjectAdded, 10<<hlcLogicalBits, ProjectPayload{
+		Path: "work/acme/api", Type: "git_repo", RemoteKey: "github.com/acme/api",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyEvents(ctx, st, []state.Event{event}); err != nil {
+		t.Fatal(err)
+	}
+	divergent := event
+	divergent.PayloadJSON = `{"path":"work/acme/other","type":"git_repo","remote_key":"github.com/acme/other"}`
+	divergent.ContentHash = state.ContentHash(divergent.PayloadJSON)
+
+	if _, err := ApplyEvents(ctx, st, []state.Event{divergent}); err != nil {
+		t.Fatalf("ApplyEvents should quarantine divergent duplicate and continue: %v", err)
+	}
+	conflicts, err := st.OpenConflicts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countConflictType(conflicts, ConflictEventVerification); got != 1 {
+		t.Fatalf("event verification conflicts = %d, want 1: %+v", got, conflicts)
+	}
+	var details eventVerificationConflictDetails
+	for _, c := range conflicts {
+		if c.Type == ConflictEventVerification {
+			if err := json.Unmarshal([]byte(c.DetailsJSON), &details); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if details.Kind != EventConflictKindDivergent {
+		t.Fatalf("details.Kind = %q, want %q (divergent duplicates must not be approval-replayable)", details.Kind, EventConflictKindDivergent)
+	}
+}
+
+func TestApplyEventsVerificationConflictDedups(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newSyncStore(t)
+	cSigning := addRemoteDeviceForApplyTest(t, st, "device-c", "approved")
+	bSigning := addRemoteDeviceForApplyTest(t, st, "device-b", "revoked")
+
+	validC := signedProjectEvent(t, cSigning, "device-c", 1, 10<<hlcLogicalBits, "work/acme/c", "github.com/acme/c")
+	revokedB := signedProjectEvent(t, bSigning, "device-b", 1, 20<<hlcLogicalBits, "work/acme/b", "github.com/acme/b")
+	batch := []state.Event{validC, revokedB}
+	if _, err := ApplyEvents(ctx, st, batch); err != nil {
+		t.Fatalf("first apply: %v", err)
+	}
+	if _, err := ApplyEvents(ctx, st, batch); err != nil {
+		t.Fatalf("second apply: %v", err)
+	}
+	conflicts, err := st.OpenConflicts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countConflictType(conflicts, ConflictEventVerification); got != 1 {
+		t.Fatalf("event verification conflicts = %d, want 1: %+v", got, conflicts)
+	}
+
+	// Dedup is by event ID, not exact details: the same event failing again
+	// with a DIFFERENT error (trust state changed revoked -> lost) must not
+	// open a second conflict row.
+	if err := st.UpsertDevice(ctx, state.Device{
+		ID: "device-b", Name: "device-b", OS: "linux", Arch: "arm64",
+		SigningPublicKey: bSigning.Public, TrustState: "lost",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyEvents(ctx, st, batch); err != nil {
+		t.Fatalf("third apply: %v", err)
+	}
+	conflicts, err = st.OpenConflicts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countConflictType(conflicts, ConflictEventVerification); got != 1 {
+		t.Fatalf("event verification conflicts after error-text change = %d, want 1: %+v", got, conflicts)
+	}
 }
 
 // projectionOf returns path -> remote_key for the active namespace projection.

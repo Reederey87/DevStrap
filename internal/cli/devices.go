@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/Reederey87/DevStrap/internal/state"
@@ -74,6 +75,11 @@ func newDeviceEnrollCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// history on its first pull.
 			if approve {
 				grantWorkspaceKeyToApprovedDevice(cmd.Context(), cmd.ErrOrStderr(), opts, store, args[0])
+				// Events that arrived before enrollment were quarantined
+				// (auto-created pending placeholder / missing signing key);
+				// approving via enroll must replay them just like
+				// `devices approve` does.
+				replayQuarantinedEvents(cmd.Context(), cmd.ErrOrStderr(), store, args[0])
 			}
 			_, err = fmt.Fprintf(stdout, "Device %s enrolled as %s\n", args[0], trustState)
 			return err
@@ -142,6 +148,7 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 			// publishes them to the hub.
 			if trustState == "approved" {
 				grantWorkspaceKeyToApprovedDevice(cmd.Context(), stderr, opts, store, args[0])
+				replayQuarantinedEvents(cmd.Context(), stderr, store, args[0])
 			}
 			// Revoking or losing a device means it could decrypt any env bundle
 			// it received; flag those values for source rotation (rewrapping
@@ -217,6 +224,85 @@ func newDeviceRenameCommand(stdout io.Writer, opts *options) *cobra.Command {
 			_, err = fmt.Fprintf(stdout, "Device %s renamed to %s\n", args[0], args[1])
 			return err
 		},
+	}
+}
+
+type eventVerificationConflictDetails struct {
+	Kind      string `json:"kind"`
+	DeviceID  string `json:"device_id"`
+	EventJSON string `json:"event_json"`
+}
+
+type quarantinedEventReplay struct {
+	conflict state.Conflict
+	event    state.Event
+}
+
+func replayQuarantinedEvents(ctx context.Context, stderr io.Writer, store *state.Store, deviceID string) {
+	conflicts, err := store.OpenConflictsByType(ctx, dssync.ConflictEventVerification)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "warning: could not inspect quarantined events for device %s: %v\n", deviceID, err)
+		return
+	}
+	var replays []quarantinedEventReplay
+	for _, conflict := range conflicts {
+		var details eventVerificationConflictDetails
+		if err := json.Unmarshal([]byte(conflict.DetailsJSON), &details); err != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: could not decode quarantined event conflict %s: %v\n", conflict.ID, err)
+			continue
+		}
+		if details.DeviceID != deviceID {
+			continue
+		}
+		// Divergent-duplicate conflicts are data-integrity disputes with an
+		// already-stored event of the same ID — approving the device does not
+		// make them applicable, and a replay would "succeed" only because the
+		// ORIGINAL event exists. Leave them open for manual resolution.
+		if details.Kind != dssync.EventConflictKindVerification {
+			continue
+		}
+		var event state.Event
+		if err := json.Unmarshal([]byte(details.EventJSON), &event); err != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: could not decode quarantined event for conflict %s: %v\n", conflict.ID, err)
+			continue
+		}
+		replays = append(replays, quarantinedEventReplay{conflict: conflict, event: event})
+	}
+	sort.Slice(replays, func(i, j int) bool {
+		if replays[i].event.HLC == replays[j].event.HLC {
+			if replays[i].event.Seq == replays[j].event.Seq {
+				return replays[i].event.ID < replays[j].event.ID
+			}
+			return replays[i].event.Seq < replays[j].event.Seq
+		}
+		return replays[i].event.HLC < replays[j].event.HLC
+	})
+	var replayed int
+	for _, replay := range replays {
+		if _, err := dssync.ApplyEvents(ctx, store, []state.Event{replay.event}); err != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: could not replay quarantined event %s for device %s: %v\n", replay.event.ID, deviceID, err)
+			continue
+		}
+		if _, err := store.EventByID(ctx, replay.event.ID); err != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: quarantined event %s for device %s was not applied: %v\n", replay.event.ID, deviceID, err)
+			continue
+		}
+		resolution, err := json.Marshal(map[string]string{
+			"action":   "replayed-after-device-approval",
+			"event_id": replay.event.ID,
+		})
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: could not encode replay resolution for event %s: %v\n", replay.event.ID, err)
+			continue
+		}
+		if err := store.ResolveConflict(ctx, replay.conflict.ID, string(resolution)); err != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: could not resolve quarantined event conflict %s: %v\n", replay.conflict.ID, err)
+			continue
+		}
+		replayed++
+	}
+	if replayed > 0 {
+		_, _ = fmt.Fprintf(stderr, "Replayed %d quarantined event(s) from device %s\n", replayed, deviceID)
 	}
 }
 

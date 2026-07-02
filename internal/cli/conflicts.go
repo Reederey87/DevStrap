@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/Reederey87/DevStrap/internal/redact"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
 	"github.com/spf13/cobra"
 )
@@ -60,7 +61,10 @@ func runConflictsList(cmd *cobra.Command, stdout io.Writer, opts *options) error
 		if c.NamespaceID != "" {
 			_, _ = fmt.Fprintf(stdout, "Project: %s\n", c.NamespaceID)
 		}
-		_, _ = fmt.Fprintf(stdout, "Details: %s\n\n", c.DetailsJSON)
+		// event_verification_failure details embed a full remote event payload;
+		// scrub token-shaped values before display (defense-in-depth — payloads
+		// are attacker-influenced strings from unverified devices).
+		_, _ = fmt.Fprintf(stdout, "Details: %s\n\n", redact.Scrub(c.DetailsJSON))
 	}
 	_, _ = fmt.Fprintln(stdout, "Resolve with: devstrap conflicts resolve <id> --keep-local|--keep-remote|--keep-both")
 	return nil
@@ -81,6 +85,9 @@ func newConflictsShowCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Scrub token-shaped values from attacker-influenced details before
+			// display (the stored row keeps the full payload for replay).
+			c.DetailsJSON = redact.Scrub(c.DetailsJSON)
 			if opts.v.GetBool("json") {
 				enc := json.NewEncoder(stdout)
 				enc.SetIndent("", "  ")
