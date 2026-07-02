@@ -506,3 +506,31 @@ func TestEncryptedHubPushNoEpochFails(t *testing.T) {
 		t.Fatalf("Push with no epoch: got %v, want ErrMissingWorkspaceKey", err)
 	}
 }
+
+// TestEncryptedHubRelabeledKidStillDecrypts pins the post-#33 review fix
+// (fable-5, Major): the envelope kid is an unauthenticated routing hint, so a
+// hostile hub relabeling a genuinely decryptable event's kid — to an unheld
+// value or to a different held kid — must not wedge (truncate) or lose (skip)
+// the event. All held keys at the epoch are tried; the AEAD picks the truth.
+func TestEncryptedHubRelabeledKidStillDecrypts(t *testing.T) {
+	ctx := context.Background()
+	kr := newFakeKeyring(t, 1)
+	wck1, _ := kr.WCK(1)
+	genuine, _ := EncryptEvent(state.Event{ID: "genuine", DeviceID: "dev_a", HLC: 1, Type: EventProjectAdded, PayloadJSON: `{"path":"work/genuine"}`, ContentHash: state.ContentHash(`{"path":"work/genuine"}`)}, wck1, 1)
+	// Relabel to an unheld, well-formed kid: pre-fix this truncated forever.
+	unheldKID := KIDForWCK([]byte("0123456789abcdef0123456789abcdef"))
+	relabeled := rewriteEnvelopeKID(t, genuine, unheldKID)
+	trailing, _ := EncryptEvent(state.Event{ID: "trailing", DeviceID: "dev_a", HLC: 2, Type: EventProjectAdded, PayloadJSON: `{"path":"work/trailing"}`, ContentHash: state.ContentHash(`{"path":"work/trailing"}`)}, wck1, 1)
+	back := &recordingHub{events: []state.Event{relabeled, trailing}}
+	hub := EncryptedHub{Hub: back, Keyring: kr}
+	got, err := hub.Pull(ctx, 0)
+	if err != nil {
+		t.Fatalf("Pull with relabeled kid: unexpected error %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "genuine" || got[1].ID != "trailing" {
+		t.Fatalf("Pull returned %+v, want the relabeled event decrypted and the batch intact", got)
+	}
+	if got[0].PayloadJSON != `{"path":"work/genuine"}` {
+		t.Fatalf("relabeled event not restored: %+v", got[0])
+	}
+}

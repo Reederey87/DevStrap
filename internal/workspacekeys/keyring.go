@@ -465,7 +465,9 @@ func (k *Keyring) cacheWCK(epoch int64, kid, origin string, wck []byte) {
 	if existing, ok := k.cache[id]; ok {
 		// Same (epoch, kid) is the same key bytes (kid is content-derived);
 		// only upgrade the origin rank (e.g. a self-minted key later blessed
-		// by a fleet grant).
+		// by a fleet grant). The DB row keeps its original origin (INSERT OR
+		// IGNORE) — the divergence is intentional and unobservable, since it
+		// only occurs for identical bytes, never between distinct keys.
 		if originRank(origin) > originRank(existing.origin) {
 			existing.origin = origin
 			k.cache[id] = existing
