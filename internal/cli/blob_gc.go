@@ -147,7 +147,7 @@ func rewrapDraftBlob(ctx context.Context, store *state.Store, opts *options, hub
 	// old snapshot's HLC, then repoint local references.
 	var events []state.Event
 	for _, snap := range snaps {
-		ev, eerr := emitSupersedingDraftSnapshot(ctx, store, snap.Path, newRef, snap.ByteSize, snap.FileCount)
+		ev, eerr := emitSupersedingDraftSnapshot(ctx, store, snap.NamespaceID, snap.Path, newRef, snap.ByteSize, snap.FileCount)
 		if eerr != nil {
 			return false, fmt.Errorf("emit superseding draft snapshot for %s: %w", snap.Path, eerr)
 		}
@@ -172,13 +172,31 @@ func rewrapDraftBlob(ctx context.Context, store *state.Store, opts *options, hub
 // emitSupersedingDraftSnapshot emits a fresh draft.snapshot.created event
 // carrying newRef so peers reconstruct it instead of a deleted old ref
 // (P5-SEC-01). Returns the stamped event so the caller can push it.
-func emitSupersedingDraftSnapshot(ctx context.Context, store *state.Store, path, newRef string, byteSize, fileCount int64) (state.Event, error) {
+// After the caller's UpdateBlobRef repoint, the origin intentionally holds two
+// rows for newRef (the repointed original and this superseding row); the
+// duplicate is harmless — keep-N pruning reaps the older one — and it keeps
+// LatestDraftSnapshot pointing at the superseding event.
+func emitSupersedingDraftSnapshot(ctx context.Context, store *state.Store, namespaceID, path, newRef string, byteSize, fileCount int64) (state.Event, error) {
 	payload := dssync.DraftSnapshotPayload{Path: path, BlobRef: newRef, ByteSize: byteSize, FileCount: fileCount}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return state.Event{}, err
 	}
-	return store.InsertLocalEvent(ctx, dssync.NewDraftSnapshotEvent(dssync.EventDraftSnapshotCreated, string(raw)))
+	var ev state.Event
+	// P6-DATA-01: record the origin's superseding snapshot row atomically with
+	// the event so GC sees the new ciphertext as retained before hub cleanup.
+	err = store.WithTx(ctx, func(tx *state.Tx) error {
+		var err error
+		ev, err = store.InsertLocalEventTx(ctx, tx, dssync.NewDraftSnapshotEvent(dssync.EventDraftSnapshotCreated, string(raw)))
+		if err != nil {
+			return err
+		}
+		return tx.RecordDraftSnapshotTx(ctx, namespaceID, newRef, byteSize, fileCount, ev)
+	})
+	if err != nil {
+		return state.Event{}, err
+	}
+	return ev, nil
 }
 
 // drainPendingHubDeletes deletes blobs queued by a prior local-only revoke

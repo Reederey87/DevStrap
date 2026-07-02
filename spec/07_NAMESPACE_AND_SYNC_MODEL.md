@@ -538,6 +538,9 @@ Draft project snapshot (`draft.snapshot.created`, workstream `DRAFT-*`):
 5. content-address the ciphertext as age_blob:<sha256>
 6. PUT the blob to the hub blob store (idempotent; identical content dedups)
 7. emit draft.snapshot.created carrying {path_key, age_blob:<sha256>, size, file_count}
+   AND record the origin's own draft_snapshots row in the same SQLite transaction
+   (P6-DATA-01) — the event never re-applies locally, so without the row the
+   origin's GC would see its own live bundle as unreferenced
 ```
 
 Restore (pulled during sync materialization for `local_git` / `draft_project`):

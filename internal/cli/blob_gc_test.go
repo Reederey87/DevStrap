@@ -5,11 +5,18 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/Reederey87/DevStrap/internal/config"
+	"github.com/Reederey87/DevStrap/internal/devicekeys"
+	"github.com/Reederey87/DevStrap/internal/envbundle"
+	"github.com/Reederey87/DevStrap/internal/envfile"
+	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
+	"github.com/spf13/viper"
 )
 
 // faultHub wraps a Hub, counting PutBlob/DeleteBlob and optionally failing
@@ -127,6 +134,83 @@ func TestPruneDraftSnapshots(t *testing.T) {
 	}
 	if latest.BlobRef != "age_blob:"+hex64c {
 		t.Fatalf("retained snapshot = %s, want the highest-HLC age_blob:%s", latest.BlobRef, hex64c)
+	}
+}
+
+func TestRewrapDraftBlobRecordsOriginSupersedingSnapshot(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	root := filepath.Join(t.TempDir(), "Code")
+	paths := config.Paths{Home: home, Root: root}
+	st, err := state.Open(ctx, paths.StateDB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureWorkspace(ctx, "test", root); err != nil {
+		t.Fatal(err)
+	}
+	device, err := st.EnsureDevice(ctx, "device-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, _, err := devicekeys.NewHybridStore(paths.KeyDir(), platform.Detect().Keychain).Ensure(ctx, device.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetDevicePublicKey(ctx, device.ID, identity.Recipient); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertProject(ctx, state.UpsertProjectParams{Path: "work/draft", Type: "draft_project"}); err != nil {
+		t.Fatalf("UpsertProject: %v", err)
+	}
+	proj, err := st.ProjectByPath(ctx, "work/draft")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, oldRef, err := envbundle.Encrypt([]envfile.Binding{{Name: "DRAFT", Value: "one", Line: 1}}, []string{identity.Recipient})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeEnvBlob(paths, oldRef, ciphertext); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordDraftSnapshot(ctx, proj.ID, oldRef, 42, 2, state.Event{ID: "evt_old", HLC: 1, DeviceID: device.ID}); err != nil {
+		t.Fatalf("RecordDraftSnapshot: %v", err)
+	}
+	opts := &options{v: viper.New()}
+	opts.v.Set("home", home)
+	opts.v.Set("root", root)
+
+	ok, err := rewrapDraftBlob(ctx, st, opts, nil, identity.Private, []string{identity.Recipient}, oldRef)
+	if err != nil {
+		t.Fatalf("rewrapDraftBlob: %v", err)
+	}
+	if !ok {
+		t.Fatal("rewrapDraftBlob returned false")
+	}
+	latest, err := st.LatestDraftSnapshot(ctx, proj.ID)
+	if err != nil {
+		t.Fatalf("LatestDraftSnapshot: %v", err)
+	}
+	if latest == nil {
+		t.Fatal("LatestDraftSnapshot is nil after rewrap")
+	}
+	if latest.SourceEventID == "evt_old" || latest.SourceEventHLC == 0 {
+		t.Fatalf("latest snapshot = %+v, want superseding event row", latest)
+	}
+	if latest.BlobRef == oldRef {
+		t.Fatalf("latest blob ref = old ref %s, want rewrapped ref", oldRef)
+	}
+	refs, err := st.DraftBlobRefs(ctx)
+	if err != nil {
+		t.Fatalf("DraftBlobRefs: %v", err)
+	}
+	if !slices.Contains(refs, latest.BlobRef) {
+		t.Fatalf("DraftBlobRefs = %v, want rewrapped ref %s", refs, latest.BlobRef)
 	}
 }
 

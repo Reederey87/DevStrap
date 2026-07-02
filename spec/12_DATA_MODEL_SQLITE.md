@@ -148,7 +148,7 @@ CREATE TABLE draft_snapshots (
 );
 ```
 
-`draft_snapshots` (migration 00009) records each `draft.snapshot.created` bundle for a `draft_project`/`local_git` entry; `draft_projects.current_snapshot_id` points at the newest row, and the packed `age_blob:<sha256>` bundle it references is the live blob the GC must retain. Migration 00012 adds a partial `UNIQUE` index on `(namespace_id, source_event_id)` so idempotent re-apply is DB-enforced (`P5-DATA-02`). **Known defect (`P6-DATA-01`, open):** the creating device inserts the event but no `draft_snapshots` row, so GC can delete the only bundle copy — see the P6-DATA-01 section below.
+`draft_snapshots` (migration 00009) records each `draft.snapshot.created` bundle for a `draft_project`/`local_git` entry; `draft_projects.current_snapshot_id` points at the newest row, and the packed `age_blob:<sha256>` bundle it references is the live blob the GC must retain. Migration 00012 adds a partial `UNIQUE` index on `(namespace_id, source_event_id)` so idempotent re-apply is DB-enforced (`P5-DATA-02`). The creating device records its own `draft_snapshots` row in the same transaction as the `draft.snapshot.created` event (`Store.InsertLocalEventTx` + `tx.RecordDraftSnapshotTx` inside one `WithTx`, in both `draft snapshot create` and the revoke-rewrap superseding path), so the origin's bundle blob is always retained by GC (`P6-DATA-01`, shipped).
 
 ### device_project_state
 
@@ -622,21 +622,11 @@ The chosen (`HUB-*`) production backend is **Cloudflare R2** (S3-compatible API,
 
 From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
 
-### P6-DATA-01 — Origin never records its own draft snapshot row, so GC deletes the live bundle
+### P6-DATA-01 — Origin never records its own draft snapshot row, so GC deletes the live bundle — **shipped (2026-07-02)**
 
-**Problem.** `draft.go:92` inserts the `draft.snapshot.created` event but writes no `draft_snapshots` row; the only writer is the sync apply path, which `ApplyEvents` skips for already-present events (`events.go:299`). So on the creating device the blob is referenced by nothing (`LatestDraftSnapshot` nil, `RetainedBlobRefs` omit it), and `sync` local GC plus `hub gc` delete the only copies — permanent data loss on a single device.
+**Was.** `draft.go:92` inserted the `draft.snapshot.created` event but wrote no `draft_snapshots` row; the only writer was the sync apply path, which `ApplyEvents` skips for already-present events (`events.go:299`). So on the creating device the blob was referenced by nothing, and `sync` local GC plus `hub gc` deleted the only copies.
 
-**Actionable steps.**
-1. Record the `draft_snapshots` row atomically at create time in one transaction with the event insert (`tx.InsertEvent` + `tx.RecordDraftSnapshotTx`).
-2. Audit `emitSupersedingDraftSnapshot` (`blob_gc.go:181`) for the same missing-row assumption, including the revoke-rewrap loop that walks `DraftBlobRefs`.
-3. Test: create snapshot on A → `sync` + `hub gc` on A → assert `LatestDraftSnapshot` non-nil and the blob survives locally and on the hub.
-
-```go
-store.WithTx(ctx, func(tx *state.Tx) error {
-    if err := tx.InsertEvent(ev); err != nil { return err }
-    return tx.RecordDraftSnapshotTx(ev.NamespaceID, ev.ID, blobRef)
-})
-```
+**Shipped fix.** `Store.InsertLocalEvent`'s stamping body is extracted into `Store.InsertLocalEventTx(ctx, tx, event)`; `draft snapshot create` and the revoke-rewrap `emitSupersedingDraftSnapshot` now run `InsertLocalEventTx` + `tx.RecordDraftSnapshotTx` inside one `WithTx`, so event and row commit atomically. `DraftSnapshotRef` carries `NamespaceID` so the rewrap path can record the superseding row. Pinned by `TestInsertLocalEventTxMatchesInsertLocalEvent`, `TestDraftSnapshotCreateRecordsOriginSnapshotRow`, `TestRewrapDraftBlobRecordsOriginSupersedingSnapshot`, and the e2e `draft_snapshot_gc_retains_origin.txtar` (create → sync → `hub gc` on the origin → blob survives locally and on the hub).
 
 ### P6-DATA-02 — `ClearRotationForProject` filters on a non-existent `env_profiles.namespace_id` column
 

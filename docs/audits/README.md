@@ -27,7 +27,7 @@ This directory holds DevStrap's chronological design & implementation audits. **
 
 Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely implemented or superseded (see `spec/18_WORK_LOG.md` for the shipped history); the open backlog is concentrated in passes 4, 5, and 6.
 
-> **2026-07-01 — Pass 6 landed.** The sixth pass ([`AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`](AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md)) audited trunk `8c739b8` (PR #25) via a verification-driven nine-dimension workflow: 43 findings (P1=5, P2=25, P3=13), each adversarially verified against the code and checked for novelty against this backlog. Headlines: `P6-SEC-01`/`P6-SYNC-01` (the envelope layer still trusts the hub — unverified grant ingestion + whole-batch abort on one bad event), `P6-HUB-01`/`P6-DATA-01` (the now-live hub GC deletes live draft blobs), and `P6-GIT-01` (a universal 2-minute git timeout silently breaks eager materialization of large repos). This pass also **reconciled the ledger** below per convention #3: `P4-SEC-02` moved to *Recently shipped*, `P4-SEC-05` corrected to *partial* (its own finding is `P6-DOC-02`).
+> **2026-07-01 — Pass 6 landed.** The sixth pass ([`AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`](AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md)) audited trunk `8c739b8` (PR #25) via a verification-driven nine-dimension workflow: 43 findings (P1=5, P2=25, P3=13), each adversarially verified against the code and checked for novelty against this backlog. Headlines: `P6-SEC-01`/`P6-SYNC-01` (the envelope layer still trusts the hub — unverified grant ingestion + whole-batch abort on one bad event), `P6-HUB-01`/`P6-DATA-01` (the now-live hub GC deletes live draft blobs), and `P6-GIT-01` (a universal 2-minute git timeout silently breaks eager materialization of large repos). This pass also **reconciled the ledger** below per convention #3: `P4-SEC-02` moved to *Recently shipped*, `P4-SEC-05` corrected to *partial* (its own finding is `P6-DOC-02`). **2026-07-02 update:** the hub-trust workstream (`P6-SYNC-01`, `P6-SEC-01`, `P6-SEC-02`; PRs #30–#34) and `P6-DATA-01` are shipped and moved to *Recently shipped*; the remaining P1s are `P6-HUB-01` and `P6-GIT-01`.
 
 <!-- MD028 separator between adjacent dated blockquotes -->
 
@@ -39,18 +39,19 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 |---|---|---|---|
 | P4-SEC-02 | P1 | PR #25 (`8c739b8`) | Namespace-map event log is envelope-encrypted at rest on the hub (`internal/sync/eventcrypt.go`, `encryptedhub.go`). Fully shipped — no longer open. |
 | P4-SEC-07 | P2 | PR #25 (`8c739b8`), foundation | WCK epoch keyring (`internal/workspacekeys`) + age-wrapped grants + `Rotate` on revoke. Foundation only; **open remainder** tracked below. |
+| P6-SYNC-01 | P1 | PR #30 | Per-event `event_verification_failure` quarantine + approve-time replay; one bad signed event no longer wedges the batch. Open residual: synced `device.revoked` trust propagation (revoke is still local-only). |
+| P6-SEC-01 | P1 | PRs #31/#33/#34 | (a) grant carriers verified before WCK ingestion; (b/c) `(epoch, kid)`-addressed custody, overwrite refusal, grant-preferred `PushKey`, replay-time grant ingestion. Fully shipped. |
+| P6-SEC-02 | P2 | PRs #32/#33 | Founder/join split (`init --join`, pull-before-push, founder gate) + `(epoch, kid)` keying; a joiner never self-mints or loses pre-approval events. Open residuals: `P6-SEC-03` truncate wedge, `P4-SEC-04` fingerprint confirmation. |
+| P6-DATA-01 | P1 | `fix/p6-data-01` (2026-07-02) | Origin records its own `draft_snapshots` row in one transaction with the `draft.snapshot.created` event (`InsertLocalEventTx` + `RecordDraftSnapshotTx`), on both the create and revoke-rewrap paths; e2e-pinned by `draft_snapshot_gc_retains_origin.txtar`. |
 
-### Pass 6 (2026-07-01) — 40 open; the 3 pure-doc fixes (`P6-DOC-01`/`03`/`04`) were applied in the audit PR
+### Pass 6 (2026-07-01) — 36 open of 43; P1 wave remaining: `P6-HUB-01`, `P6-GIT-01`
 
-> The `P6-DOC-*` findings are documentation/gate accuracy fixes; their doc portions were applied in the same PR that landed this audit (spec/00, spec/13, spec/07/09/15 `tracks_code`, and this ledger). The remaining 40 findings are open backlog for future implementation PRs.
+> The `P6-DOC-*` findings are documentation/gate accuracy fixes; their doc portions were applied in the same PR that landed this audit (spec/00, spec/13, spec/07/09/15 `tracks_code`, and this ledger). `P6-SYNC-01`, `P6-SEC-01`, `P6-SEC-02` (PRs #30–#34) and `P6-DATA-01` moved to *Recently shipped* above per convention #3.
 
 | ID | Sev | Effort | Finding |
 |---|---|---|---|
-| P6-DATA-01 | P1 | S | Record the origin's own `draft_snapshots` row at create time (one txn with the event) |
 | P6-GIT-01 | P1 | M | Split the git timeout by command class; stop retrying self-imposed deadline kills |
 | P6-HUB-01 | P1 | M | Make `hub gc` sync-first, grace-windowed, and refuse to sweep on a truncated mark set |
-| P6-SEC-01 | P1 | M | Verify grant carrier signatures + refuse WCK overwrite before writing to the keychain |
-| P6-SYNC-01 | P1 | M | Quarantine verification/trust failures per-event instead of aborting the whole batch |
 | P6-CLI-01 | P2 | S | Detect a root change on re-`init`; rewrite config.yaml or refuse |
 | P6-CLI-02 | P2 | S | Gate `scan --adopt` on the scanned root matching the workspace root |
 | P6-DATA-02 | P2 | S | Fix `ClearRotationForProject` to join through `namespace_entries` (`env rotate` always fails today) |
@@ -66,7 +67,6 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P6-QUAL-01 | P2 | S | Exclude catch-all specs (`**`) from the mapped-spec drift check |
 | P6-QUAL-02 | P2 | S | Add a `verify` job gating release on tests + vuln + main-ancestry |
 | P6-QUAL-03 | P2 | S | Run the MinIO hub conformance test in a CI job |
-| P6-SEC-02 | P2 | M | Founder/join split: joiners don't self-bootstrap epoch 1; key WCKs by (epoch,kid) |
 | P6-SEC-03 | P2 | L | Separate transient- from permanently-missing epoch; don't truncate-forever |
 | P6-SYNC-02 | P2 | M | Split skip classes by recoverability; quarantine + surface skipped events |
 | P6-SYNC-03 | P2 | S | Make the fail-closed window sticky once enrollment has ever happened |
