@@ -313,3 +313,46 @@ func TestReplaySkipsDivergentConflicts(t *testing.T) {
 		t.Fatalf("stored event payload changed: %s", stored.PayloadJSON)
 	}
 }
+
+// P6-SEC-02: a --join device that approves another device before it has been
+// granted the fleet workspace key must NOT self-mint one (which would let it
+// push events under a key nobody else holds — the data loss the split closes).
+func TestJoinerApprovingAnotherDeviceDoesNotSelfMint(t *testing.T) {
+	ctx := context.Background()
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init", "--join"); err != nil {
+		t.Fatalf("init --join stderr = %q err = %v", stderr, err)
+	}
+
+	remoteAge, err := devicekeys.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteSigning, err := devicekeys.NewSigningIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, stderr, err := executeForTest("--home", home, "--root", root,
+		"devices", "enroll", "dev_c", "--name", "c", "--os", "linux", "--arch", "arm64",
+		"--age-recipient", remoteAge.Recipient, "--signing-public-key", remoteSigning.Public, "--approve")
+	if err != nil {
+		t.Fatalf("enroll --approve stderr = %q err = %v", stderr, err)
+	}
+	if !strings.Contains(stderr, "holds no workspace key yet") {
+		t.Fatalf("stderr = %q, want joiner-cannot-grant warning", stderr)
+	}
+
+	store, err := state.Open(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(store)
+	epoch, err := store.CurrentKeyEpoch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if epoch != 0 {
+		t.Fatalf("CurrentKeyEpoch = %d, want 0 (joiner must not self-mint on approve)", epoch)
+	}
+}

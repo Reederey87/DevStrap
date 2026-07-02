@@ -58,6 +58,22 @@ type EncryptedHub struct {
 	// (*state.Store).VerifyRemoteEvent so the trust regime is identical to the
 	// apply path.
 	Verify func(ctx context.Context, ev state.Event) error
+	// Stats, when non-nil, is populated by Pull with observability about the
+	// raw batch (P6-SEC-02). RawSeen is the number of objects the backend
+	// returned before any decrypt/skip/truncate — the founder/join gate uses
+	// it to distinguish a genuinely empty hub (found here) from a populated
+	// hub whose events this device cannot yet decrypt (a joiner awaiting its
+	// grant, which must NOT self-found). It is also the seam later cursor and
+	// GC work (P6-HUB-01/SEC-03/SYNC-02) will read.
+	Stats *PullStats
+}
+
+// PullStats reports what a single EncryptedHub.Pull observed. Fields are set
+// only when EncryptedHub.Stats is non-nil.
+type PullStats struct {
+	// RawSeen is the count of objects the backend returned for this pull,
+	// before decryption, grant ingestion, skipping, or truncation.
+	RawSeen int
 }
 
 // Push envelope-encrypts every non-grant event under the current epoch's WCK
@@ -70,7 +86,7 @@ func (h EncryptedHub) Push(ctx context.Context, events []state.Event) error {
 		return fmt.Errorf("encrypted hub push: current epoch: %w", err)
 	}
 	if epoch == 0 {
-		return fmt.Errorf("%w: no workspace key epoch bootstrapped (run devstrap init)", ErrMissingWorkspaceKey)
+		return fmt.Errorf("%w: awaiting workspace key grant (approve this device from an existing device, or sync against an empty hub to found the workspace)", ErrMissingWorkspaceKey)
 	}
 	// Prime the cache so the WCK for the current epoch is in memory. Prime is
 	// idempotent and only loads held epochs that are not yet cached.
@@ -123,6 +139,9 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 	raw, err := h.Hub.Pull(ctx, afterHLC)
 	if err != nil {
 		return nil, err
+	}
+	if h.Stats != nil {
+		h.Stats.RawSeen = len(raw)
 	}
 	if err := h.Keyring.Prime(ctx); err != nil {
 		return nil, fmt.Errorf("encrypted hub pull: prime keyring: %w", err)

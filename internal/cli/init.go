@@ -20,6 +20,7 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var workspaceName string
 	var dryRun bool
 	var scanAdopt bool
+	var join bool
 
 	cmd := &cobra.Command{
 		Use:   "init [root]",
@@ -61,7 +62,11 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := os.MkdirAll(paths.LogDir(), 0o700); err != nil {
 				return fmt.Errorf("create log dir: %w", err)
 			}
-			if err := writeDefaultConfig(paths, workspaceName); err != nil {
+			role := "founder"
+			if join {
+				role = "joiner"
+			}
+			if err := writeDefaultConfig(paths, workspaceName, role); err != nil {
 				return err
 			}
 
@@ -84,18 +89,17 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := ensureLocalDeviceIdentity(cmd.Context(), paths, store, device); err != nil {
 				return err
 			}
-			// P4-SEC-02/SEC-07: bootstrap the WCK epoch keyring so the event
-			// log is envelope-encrypted from the first sync. EnsureBootstrap
-			// mints epoch 1 and stores the WCK in the local keychain. No
-			// self-grant is emitted: a self-grant would collide with an
-			// inbound grant from another device at the same epoch on a joining
-			// device's first pull (overwriting the correct WCK). The WCK
-			// propagates to other devices via `devices approve` (GrantAllEpochs),
-			// and the local device already holds it in its keychain.
-			kr := buildKeyring(opts, store)
-			if _, err := kr.EnsureBootstrap(cmd.Context()); err != nil {
-				return fmt.Errorf("bootstrap workspace key: %w", err)
-			}
+			// P6-SEC-02: init no longer mints the WCK epoch-1 key. Founding is
+			// deferred to the first `devstrap sync` and happens only when the
+			// hub is confirmed empty (see runSyncCycle's founder/join gate), so
+			// a device JOINING an existing workspace never self-mints a key
+			// nobody else holds and never seals its pre-approval events under a
+			// never-granted WCK (the SEC-02 data-loss). A joining device
+			// receives the fleet WCK via `devices approve` (GrantAllEpochs) on
+			// an existing device; a founding device mints epoch 1 on its first
+			// sync to the empty hub. A FOUNDER approving another device before
+			// ever syncing still founds defensively; a joiner never does
+			// (grantWorkspaceKeyToApprovedDevice is founder-gated).
 
 			// PROD-03: an optional --scan adopts existing repos in the root on
 			// the very first command, delivering the "my tree just appeared"
@@ -122,9 +126,21 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 				}
 			}
 			// PROD-03: always print a short next-steps hint (clig.dev: suggest
-			// the next command and surface state after every action).
-			if _, err := fmt.Fprintf(stdout, "Next: devstrap status • devstrap scan --adopt • devstrap sync --hub-file <path>\n"); err != nil {
-				return err
+			// the next command and surface state after every action). The hint
+			// is role-aware (P6-SEC-02): a joining device must be approved from
+			// an existing device before its events can sync.
+			if join {
+				if _, err := fmt.Fprintf(stdout, "Joining an existing workspace. Next:\n"+
+					"  1. devstrap devices recipient            # copy this device's age recipient\n"+
+					"  2. devstrap devices recipient --signing  # and its signing key\n"+
+					"  3. on an approved device: devstrap devices enroll <id> --age-recipient <rec> --signing-public-key <sig> --approve\n"+
+					"  4. devstrap sync --hub-file <path>        # ingests the grant, then pushes your projects\n"); err != nil {
+					return err
+				}
+			} else {
+				if _, err := fmt.Fprintf(stdout, "Next: devstrap status • devstrap scan --adopt • devstrap sync --hub-file <path>\n"); err != nil {
+					return err
+				}
 			}
 			return nil
 		},
@@ -133,6 +149,7 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&workspaceName, "workspace-name", "", "workspace name")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show planned changes without writing")
 	cmd.Flags().BoolVar(&scanAdopt, "scan", false, "scan the root and adopt existing repos on init")
+	cmd.Flags().BoolVar(&join, "join", false, "join an existing workspace: do not found a new one; wait to be approved from an existing device (P6-SEC-02)")
 	return cmd
 }
 
@@ -177,14 +194,16 @@ func cleanAbsPath(path string) (string, error) {
 	return filepath.Abs(filepath.Clean(path))
 }
 
-func writeDefaultConfig(paths config.Paths, workspaceName string) error {
+func writeDefaultConfig(paths config.Paths, workspaceName, role string) error {
 	path := filepath.Join(paths.Home, "config.yaml")
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("stat config: %w", err)
 	}
-	content := fmt.Sprintf("home: %q\nroot: %q\nworkspace_name: %q\n", paths.Home, paths.Root, workspaceName)
+	// role (P6-SEC-02): "founder" (default) or "joiner". A joiner never founds
+	// a workspace on first sync; it waits to be granted the fleet WCK.
+	content := fmt.Sprintf("home: %q\nroot: %q\nworkspace_name: %q\nrole: %q\n", paths.Home, paths.Root, workspaceName, role)
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}

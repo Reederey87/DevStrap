@@ -42,7 +42,15 @@ func hubFromOptions(ctx context.Context, opts *options, store *state.Store, hubF
 	if err != nil {
 		return nil, "", err
 	}
-	return dssync.EncryptedHub{Hub: backend, Keyring: buildKeyring(opts, store), Verify: store.VerifyRemoteEvent}, hubID, nil
+	return dssync.EncryptedHub{
+		Hub:     backend,
+		Keyring: buildKeyring(opts, store),
+		Verify:  store.VerifyRemoteEvent,
+		// P6-SEC-02: the founder/join gate in runSyncCycle reads RawSeen to
+		// tell an empty hub (found) from a populated hub a joiner cannot yet
+		// decrypt (wait for grant).
+		Stats: &dssync.PullStats{},
+	}, hubID, nil
 }
 
 // buildKeyring constructs the WCK epoch keyring (P4-SEC-07) from the state store

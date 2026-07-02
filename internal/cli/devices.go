@@ -375,6 +375,16 @@ func grantWorkspaceKeyToApprovedDevice(ctx context.Context, stderr io.Writer, op
 	}
 	kr := buildKeyring(opts, store)
 	if epoch, _ := kr.CurrentEpoch(ctx); epoch == 0 {
+		// P6-SEC-02: found defensively ONLY for a founder. A joining device that
+		// has not yet been granted the fleet WCK must never self-mint one here —
+		// doing so would let it push events under a key nobody else holds (the
+		// same data loss the founder/join split closes), reachable via a joiner
+		// approving another device before it is itself granted. A keyless joiner
+		// simply has nothing to grant yet.
+		if isJoiner(opts) {
+			_, _ = fmt.Fprintf(stderr, "warning: this device holds no workspace key yet (joining); cannot grant to %s until it is approved and granted the fleet key\n", deviceID)
+			return
+		}
 		if _, berr := kr.EnsureBootstrap(ctx); berr != nil {
 			_, _ = fmt.Fprintf(stderr, "warning: workspace key bootstrap failed: %v\n", berr)
 			return
