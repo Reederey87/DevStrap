@@ -127,9 +127,14 @@ func assertHubRoundTrip(t *testing.T, ctx context.Context, h R2Hub) {
 	if err != nil {
 		t.Fatalf("ListBlobs: %v", err)
 	}
-	sort.Strings(listed)
-	if len(listed) != 2 || listed[0] != keyA || listed[1] != keyB {
+	sort.Slice(listed, func(i, j int) bool { return listed[i].Key < listed[j].Key })
+	if len(listed) != 2 || listed[0].Key != keyA || listed[1].Key != keyB {
 		t.Errorf("ListBlobs = %v, want [%s %s]", listed, keyA, keyB)
+	}
+	for _, blob := range listed {
+		if blob.LastModified.IsZero() {
+			t.Errorf("ListBlobs returned zero LastModified for %s", blob.Key)
+		}
 	}
 
 	// SEC-01/HUB-12: DeleteBlob removes a blob and is idempotent on a missing blob
@@ -253,12 +258,12 @@ func TestR2Pagination(t *testing.T) {
 	}
 	// Force small page size by directly using the S3 client.
 	prefix := h.eventsPrefix()
-	keys, _, err := h.S3.ListObjectsV2(ctx, prefix, "", 3)
+	objs, _, err := h.S3.ListObjectsV2(ctx, prefix, "", 3)
 	if err != nil {
 		t.Fatalf("ListObjectsV2: %v", err)
 	}
-	if len(keys) != 3 {
-		t.Errorf("page size = %d, want 3", len(keys))
+	if len(objs) != 3 {
+		t.Errorf("page size = %d, want 3", len(objs))
 	}
 }
 

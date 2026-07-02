@@ -268,7 +268,8 @@ func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync
 			referenced[hash] = true
 		}
 	}
-	for _, key := range hubBlobs {
+	for _, info := range hubBlobs {
+		key := info.Key
 		if referenced[key] {
 			continue
 		}

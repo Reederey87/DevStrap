@@ -59,10 +59,10 @@ func (r *recordingHub) DeleteBlob(_ context.Context, sha string) error {
 	return nil
 }
 
-func (r *recordingHub) ListBlobs(_ context.Context) ([]string, error) {
-	out := make([]string, 0, len(r.blobs))
+func (r *recordingHub) ListBlobs(_ context.Context) ([]BlobInfo, error) {
+	out := make([]BlobInfo, 0, len(r.blobs))
 	for k := range r.blobs {
-		out = append(out, k)
+		out = append(out, BlobInfo{Key: k})
 	}
 	return out, nil
 }

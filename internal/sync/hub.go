@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Reederey87/DevStrap/internal/state"
 )
@@ -27,6 +28,14 @@ var ErrBlobNotFound = errors.New("blob not found")
 
 // ErrInvalidBlobKey signals that a blob key (sha256 hex digest) is malformed.
 var ErrInvalidBlobKey = errors.New("invalid blob key")
+
+// BlobInfo describes one blob on the hub: its sha256 hex key and the
+// hub-reported creation/modification time (zero when the backend cannot
+// provide one). P6-HUB-01: GC uses LastModified for an age grace window.
+type BlobInfo struct {
+	Key          string
+	LastModified time.Time
+}
 
 // Hub is the two-plane zero-knowledge sync backend (HUB-01): (a) the signed
 // HLC-ordered namespace-map event log and (b) the content-addressed encrypted
@@ -69,10 +78,10 @@ type Hub interface {
 	PutBlob(ctx context.Context, sha256Hex string, r io.Reader) error
 	GetBlob(ctx context.Context, sha256Hex string) (io.ReadCloser, error)
 	DeleteBlob(ctx context.Context, sha256Hex string) error
-	// ListBlobs returns the sha256 hex keys of every blob currently on the hub
+	// ListBlobs returns metadata for every blob currently on the hub
 	// (P5-HUB-02). It is the enumeration primitive for mark-and-sweep hub GC:
 	// list everything, delete what no current binding/snapshot references.
-	ListBlobs(ctx context.Context) ([]string, error)
+	ListBlobs(ctx context.Context) ([]BlobInfo, error)
 }
 
 // FileHub is a file-backed test Hub (HUB-01). The event log is a single JSON
@@ -199,9 +208,9 @@ func (h FileHub) DeleteBlob(_ context.Context, sha256Hex string) error {
 	return nil
 }
 
-// ListBlobs returns the sha256 hex keys of every blob in the hub's blob
-// directory (P5-HUB-02).
-func (h FileHub) ListBlobs(_ context.Context) ([]string, error) {
+// ListBlobs returns metadata for every blob in the hub's blob directory
+// (P5-HUB-02).
+func (h FileHub) ListBlobs(_ context.Context) ([]BlobInfo, error) {
 	entries, err := os.ReadDir(h.blobDir())
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -209,7 +218,7 @@ func (h FileHub) ListBlobs(_ context.Context) ([]string, error) {
 		}
 		return nil, fmt.Errorf("list hub blobs: %w", err)
 	}
-	var out []string
+	var out []BlobInfo
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -220,7 +229,11 @@ func (h FileHub) ListBlobs(_ context.Context) ([]string, error) {
 		}
 		key := strings.TrimSuffix(name, ".blob")
 		if validateBlobKey(key) == nil {
-			out = append(out, key)
+			info, err := e.Info()
+			if err != nil {
+				return nil, fmt.Errorf("stat hub blob %s: %w", key, err)
+			}
+			out = append(out, BlobInfo{Key: key, LastModified: info.ModTime()})
 		}
 	}
 	return out, nil

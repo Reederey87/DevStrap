@@ -285,7 +285,7 @@ func (h EncryptedHub) DeleteBlob(ctx context.Context, sha256Hex string) error {
 	return h.Hub.DeleteBlob(ctx, sha256Hex)
 }
 
-func (h EncryptedHub) ListBlobs(ctx context.Context) ([]string, error) {
+func (h EncryptedHub) ListBlobs(ctx context.Context) ([]BlobInfo, error) {
 	return h.Hub.ListBlobs(ctx)
 }
 
