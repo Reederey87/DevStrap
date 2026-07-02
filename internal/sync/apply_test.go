@@ -328,12 +328,17 @@ func TestApplyEventsQuarantinesVerificationFailureAndAdvancesCursor(t *testing.T
 	revokedB1 := signedProjectEvent(t, bSigning, "device-b", 1, 20<<hlcLogicalBits, "work/acme/b1", "github.com/acme/b1")
 	validC2 := signedProjectEvent(t, cSigning, "device-c", 2, 30<<hlcLogicalBits, "work/acme/c2", "github.com/acme/c2")
 
-	safeCursor, err := ApplyEvents(ctx, st, []state.Event{validC1, revokedB1, validC2})
+	safeCursor, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{validC1, revokedB1, validC2})
 	if err != nil {
 		t.Fatalf("ApplyEvents should quarantine verification failure and continue: %v", err)
 	}
 	if safeCursor != 30<<hlcLogicalBits {
 		t.Fatalf("safeCursor = %d, want %d", safeCursor, 30<<hlcLogicalBits)
+	}
+	// P6-HUB-01: the quarantine must be visible to callers (gc gate). The
+	// verification quarantine is permanent, so it does not hold the cursor.
+	if stats.Quarantined != 1 || stats.CursorHeld {
+		t.Fatalf("stats = %+v, want Quarantined=1 CursorHeld=false", stats)
 	}
 	projection := projectionOf(t, st)
 	if _, ok := projection["work/acme/c1"]; !ok {
@@ -678,9 +683,13 @@ func TestApplyEventsLowWaterMarkCursorHoldsBelowSkippedEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	safeCursor, err := ApplyEvents(ctx, st, []state.Event{broken, valid})
+	safeCursor, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{broken, valid})
 	if err != nil {
 		t.Fatalf("ApplyEvents should not abort on a hash-chain break: %v", err)
+	}
+	// P6-HUB-01: a transiently-held cursor must be visible to callers (gc gate).
+	if stats.Quarantined != 1 || !stats.CursorHeld {
+		t.Fatalf("stats = %+v, want Quarantined=1 CursorHeld=true", stats)
 	}
 	// The valid (higher-HLC) event was still applied — the batch converged.
 	projects, err := st.ListProjects(ctx)

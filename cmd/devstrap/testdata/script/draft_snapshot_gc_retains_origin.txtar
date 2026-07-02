@@ -24,7 +24,9 @@ exec devstrap --home=$WORK/home --root=$WORK/Code sync --hub-file=$WORK/hub.json
 exec sh -c 'HASH=$(sed -n "s/.*age_blob:\\([0-9a-f][0-9a-f]*\\).*/\\1/p" $WORK/create.out); test -f $WORK/home/blobs/$HASH.age'
 exec sh -c 'HASH=$(sed -n "s/.*age_blob:\\([0-9a-f][0-9a-f]*\\).*/\\1/p" $WORK/create.out); test -f $WORK/hub-blobs/$HASH.blob'
 
-exec devstrap --home=$WORK/home --root=$WORK/Code hub gc --hub-file=$WORK/hub.json
+# --grace-window=0 so retention is proven by the draft_snapshots reference
+# (P6-DATA-01), not by the blob merely being younger than the default window.
+exec devstrap --home=$WORK/home --root=$WORK/Code hub gc --hub-file=$WORK/hub.json --grace-window=0
 stdout 'deleted 0 unreferenced hub blob'
 exec sh -c 'HASH=$(sed -n "s/.*age_blob:\\([0-9a-f][0-9a-f]*\\).*/\\1/p" $WORK/create.out); test -f $WORK/home/blobs/$HASH.age'
 exec sh -c 'HASH=$(sed -n "s/.*age_blob:\\([0-9a-f][0-9a-f]*\\).*/\\1/p" $WORK/create.out); test -f $WORK/hub-blobs/$HASH.blob'

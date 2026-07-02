@@ -179,10 +179,10 @@ Shipped (`EAGER-*`/`HUB-*`, audit `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.
 ### hub
 
 ```bash
-devstrap hub gc --hub-file <path> [--dry-run] [--keep N]
+devstrap hub gc --hub-file <path> [--dry-run] [--keep N] [--grace-window 24h]
 ```
 
-`hub gc` (`P5-HUB-02`) is the hub-side reclamation counterpart to the per-sync local-cache GC (`gcUnreferencedBlobs`). It prunes superseded `draft_snapshots` rows (keeping the latest `--keep` per project, default 1, so the current snapshot is always retained), then lists every blob on the hub (`Hub.ListBlobs`) and deletes those no current secret binding or draft snapshot references. `--dry-run` prunes nothing and reports what would be deleted. Progress/warnings go to stderr; the summary to stdout.
+`hub gc` (`P5-HUB-02`, hardened by `P6-HUB-01`) is the hub-side reclamation counterpart to the per-sync local-cache GC (`gcUnreferencedBlobs`). It first pulls and applies the hub event log (the same pull half `sync` runs) so the mark set includes every device's latest snapshots, and **refuses to sweep** — non-zero exit, nothing deleted — when its view is incomplete: the pull deferred (awaiting a key grant) or skipped events, the apply quarantined events or held the cursor back, or any quarantine-class conflict is still open. It then prunes superseded `draft_snapshots` rows (keeping the latest `--keep` per project, default 1, so the current snapshot is always retained), lists every blob on the hub (`Hub.ListBlobs`, which reports each blob's `LastModified`), and deletes those no current secret binding or draft snapshot references — except blobs younger than `--grace-window` (default 24h), which are kept even when unreferenced because a device pushes its blob before its referencing event. `--dry-run` prunes nothing and reports what would be deleted (it still runs the pull, which is the same converging apply `sync` performs). Run `gc` from one designated device; concurrent sweeps are not coordinated (the S3 conditional-write lock is a `P6-HUB-04`-adjacent follow-up). Progress/warnings go to stderr; the summary to stdout.
 
 ### open
 

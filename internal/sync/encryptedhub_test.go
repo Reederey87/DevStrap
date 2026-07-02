@@ -367,13 +367,17 @@ func TestEncryptedHubMissingEpoch(t *testing.T) {
 	wck5, _ := NewWCK()
 	future, _ := EncryptEvent(state.Event{ID: "e5", DeviceID: "dev_a", HLC: 2, Type: EventProjectAdded, PayloadJSON: `{}`, ContentHash: state.ContentHash(`{}`)}, wck5, 5)
 	back := &recordingHub{events: []state.Event{prefix, future}}
-	hub := EncryptedHub{Hub: back, Keyring: kr}
+	hub := EncryptedHub{Hub: back, Keyring: kr, Stats: &PullStats{}}
 	got, err := hub.Pull(ctx, 0)
 	if err != nil {
 		t.Fatalf("Pull missing epoch: unexpected error %v", err)
 	}
 	if len(got) != 1 || got[0].ID != "e1" {
 		t.Fatalf("Pull returned %+v, want the epoch-1 prefix only (epoch-5 event deferred)", got)
+	}
+	// P6-HUB-01: the deferred tail must be visible to callers (gc gate).
+	if hub.Stats.Truncated != 1 || hub.Stats.Skipped != 0 {
+		t.Fatalf("Stats = %+v, want Truncated=1 Skipped=0", *hub.Stats)
 	}
 }
 
@@ -392,13 +396,17 @@ func TestEncryptedHubUnknownVersion(t *testing.T) {
 	raw, _ := json.Marshal(env)
 	enc.PayloadJSON = string(raw)
 	back := &recordingHub{events: []state.Event{enc}}
-	hub := EncryptedHub{Hub: back, Keyring: kr}
+	hub := EncryptedHub{Hub: back, Keyring: kr, Stats: &PullStats{}}
 	got, err := hub.Pull(ctx, 0)
 	if err != nil {
 		t.Fatalf("Pull unknown version: unexpected error %v", err)
 	}
 	if len(got) != 0 {
 		t.Fatalf("Pull returned %+v, want the unknown-version event skipped", got)
+	}
+	// P6-HUB-01: the skip must be visible to callers (gc gate).
+	if hub.Stats.Skipped != 1 || hub.Stats.Truncated != 0 {
+		t.Fatalf("Stats = %+v, want Skipped=1 Truncated=0", *hub.Stats)
 	}
 }
 
@@ -467,13 +475,17 @@ func TestEncryptedHubUnheldKidTruncates(t *testing.T) {
 	fleet, _ := EncryptEvent(state.Event{ID: "fleet", DeviceID: "dev_b", HLC: 2, Type: EventProjectAdded, PayloadJSON: `{"path":"work/fleet"}`, ContentHash: state.ContentHash(`{"path":"work/fleet"}`)}, fleetWCK, 1)
 	trailing, _ := EncryptEvent(state.Event{ID: "trailing", DeviceID: "dev_a", HLC: 3, Type: EventProjectAdded, PayloadJSON: `{"path":"work/trailing"}`, ContentHash: state.ContentHash(`{"path":"work/trailing"}`)}, wck1, 1)
 	back := &recordingHub{events: []state.Event{prefix, fleet, trailing}}
-	hub := EncryptedHub{Hub: back, Keyring: kr}
+	hub := EncryptedHub{Hub: back, Keyring: kr, Stats: &PullStats{}}
 	got, err := hub.Pull(ctx, 0)
 	if err != nil {
 		t.Fatalf("Pull with unheld kid: unexpected error %v", err)
 	}
 	if len(got) != 1 || got[0].ID != "mine" {
 		t.Fatalf("Pull returned %+v, want only the prefix (fleet-kid event and everything after deferred)", got)
+	}
+	// P6-HUB-01: both deferred events (fleet + trailing) count as truncated.
+	if hub.Stats.Truncated != 2 || hub.Stats.Skipped != 0 {
+		t.Fatalf("Stats = %+v, want Truncated=2 Skipped=0", *hub.Stats)
 	}
 }
 
