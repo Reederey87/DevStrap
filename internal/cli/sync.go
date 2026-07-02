@@ -150,7 +150,8 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 //
 // Behavior:
 //   - This device already holds a workspace key (epoch > 0): push normally.
-//   - Epoch 0 and the hub is genuinely empty (rawSeen == 0, never synced) and
+//   - Epoch 0 and the hub is genuinely empty (rawSeen == 0 AND both the pull
+//     and push cursors are 0 — this device has never observed hub content) and
 //     this device did not `init --join`: FOUND the workspace — mint epoch 1 —
 //     then push. This is the founding device's first sync.
 //   - Epoch 0 otherwise (a joiner, or the hub already has content): DEFER. The
@@ -170,7 +171,17 @@ func pushLocalEventsGated(ctx context.Context, stdout io.Writer, opts *options, 
 		if cerr != nil {
 			return 0, false, cerr
 		}
-		neverSynced := pushCursor == 0 && rawSeen == 0
+		// The pull cursor must be 0 too: rawSeen only counts objects returned
+		// AFTER the current pull cursor, so on its own it proves "nothing new",
+		// not "hub empty". A keyless device that previously advanced its pull
+		// cursor (e.g. past events that all quarantined as permanent
+		// verification failures) would otherwise see rawSeen == 0 on a
+		// populated hub and wrongly found a divergent epoch-1 key.
+		pullCursor, cerr := store.HubCursor(ctx, hubID)
+		if cerr != nil {
+			return 0, false, cerr
+		}
+		neverSynced := pushCursor == 0 && pullCursor == 0 && rawSeen == 0
 		if neverSynced && !isJoiner(opts) {
 			// Founder's first sync to an empty hub: mint epoch 1, then push.
 			if _, berr := kr.EnsureBootstrap(ctx); berr != nil {
