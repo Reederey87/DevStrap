@@ -833,3 +833,39 @@ func TestApplyConflictResolvedEventMarksRowResolved(t *testing.T) {
 		t.Fatalf("conflict status after duplicate = %q, want resolved", got.Status)
 	}
 }
+
+// P6-HUB-01 review: once a previously skew-quarantined event actually applies
+// (local time caught up and it was re-delivered), its untrustworthy_remote_time
+// conflict auto-resolves — otherwise a single transient clock-skew incident
+// would block `hub gc` fleet-wide until a human ran `conflicts resolve`.
+func TestApplyResolvesSkewConflictOnLateApply(t *testing.T) {
+	ctx := context.Background()
+	st, device := newSyncStore(t)
+
+	event, err := NewProjectEvent(device.ID, EventProjectAdded, time.Now().UnixMilli()<<hlcLogicalBits, ProjectPayload{
+		Path: "work/acme/late", Type: "git_repo", RemoteKey: "github.com/acme/late",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The quarantine a previous delivery would have recorded (same stable
+	// fingerprint quarantineSkewedEvent writes).
+	details, err := json.Marshal(skewConflictDetails{EventID: event.ID, DeviceID: event.DeviceID, HLC: event.HLC})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.InsertConflict(ctx, "", ConflictUntrustworthyTime, string(details)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ApplyEvents(ctx, st, []state.Event{event}); err != nil {
+		t.Fatalf("ApplyEvents: %v", err)
+	}
+	conflicts, err := st.OpenConflicts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasConflictType(conflicts, ConflictUntrustworthyTime) {
+		t.Fatalf("conflicts = %+v, want the skew quarantine auto-resolved after the event applied", conflicts)
+	}
+}

@@ -361,7 +361,25 @@ func ApplyEventsWithStats(ctx context.Context, st *state.Store, events []state.E
 			if err := tx.ReceiveRemoteHLC(ctx, event.HLC); err != nil {
 				return err
 			}
-			return applyEventTx(ctx, tx, event)
+			if err := applyEventTx(ctx, tx, event); err != nil {
+				return err
+			}
+			// P6-HUB-01 review: a skew-quarantined delivery of this event left
+			// an open untrustworthy_remote_time conflict that nothing else
+			// clears; now that the event has actually applied, the quarantine
+			// reason is gone — resolve it so it cannot block `hub gc` forever.
+			// The details fingerprint is stable (CODE-02) and the resolve is
+			// idempotent/no-op when no such conflict exists.
+			skewDetails, mErr := json.Marshal(skewConflictDetails{
+				EventID:  event.ID,
+				DeviceID: event.DeviceID,
+				HLC:      event.HLC,
+			})
+			if mErr != nil {
+				return mErr
+			}
+			return tx.ResolveConflictByFingerprint(ctx, ConflictUntrustworthyTime, string(skewDetails),
+				`{"action":"auto","reason":"event applied after skew quarantine"}`)
 		}); err != nil {
 			if errors.Is(err, state.ErrEventHashChain) {
 				if conflictErr := insertEventHashChainConflict(ctx, st, event, err); conflictErr != nil {

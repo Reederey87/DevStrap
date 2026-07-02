@@ -268,7 +268,7 @@ func TestHubGCDeletesUnreferencedBlobs(t *testing.T) {
 		t.Fatalf("RecordDraftSnapshot: %v", err)
 	}
 
-	pruned, removed, err := hubGC(ctx, io.Discard, st, hub, "test-hub", 1, 0, false)
+	pruned, removed, err := hubGC(ctx, io.Discard, st, hub, "test-hub", testGCPaths(t), 1, 0, false)
 	if err != nil {
 		t.Fatalf("hubGC: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestHubGCRefusesOnOpenQuarantineConflict(t *testing.T) {
 		t.Fatalf("InsertConflict: %v", err)
 	}
 
-	_, _, err := hubGC(ctx, io.Discard, st, hub, "test-hub", 1, 0, false)
+	_, _, err := hubGC(ctx, io.Discard, st, hub, "test-hub", testGCPaths(t), 1, 0, false)
 	if !errors.Is(err, errGCRefused) {
 		t.Fatalf("hubGC err = %v, want errGCRefused", err)
 	}
@@ -323,7 +323,7 @@ func TestHubGCGraceWindowKeepsFreshBlobs(t *testing.T) {
 	}
 
 	// Fresh and unreferenced: kept by the 24h grace window.
-	_, removed, err := hubGC(ctx, io.Discard, st, hub, "test-hub", 1, 24*time.Hour, false)
+	_, removed, err := hubGC(ctx, io.Discard, st, hub, "test-hub", testGCPaths(t), 1, 24*time.Hour, false)
 	if err != nil {
 		t.Fatalf("hubGC: %v", err)
 	}
@@ -340,7 +340,7 @@ func TestHubGCGraceWindowKeepsFreshBlobs(t *testing.T) {
 	if err := os.Chtimes(blobFile, old, old); err != nil {
 		t.Fatalf("Chtimes: %v", err)
 	}
-	_, removed, err = hubGC(ctx, io.Discard, st, hub, "test-hub", 1, 24*time.Hour, false)
+	_, removed, err = hubGC(ctx, io.Discard, st, hub, "test-hub", testGCPaths(t), 1, 24*time.Hour, false)
 	if err != nil {
 		t.Fatalf("hubGC after aging: %v", err)
 	}
@@ -350,4 +350,11 @@ func TestHubGCGraceWindowKeepsFreshBlobs(t *testing.T) {
 	if _, err := hub.GetBlob(ctx, hex64b); err == nil {
 		t.Fatal("aged unreferenced blob should have been deleted")
 	}
+}
+
+// testGCPaths is a throwaway blob-cache location for direct hubGC calls (the
+// pre-GC pull caches referenced blobs like sync does).
+func testGCPaths(t *testing.T) config.Paths {
+	t.Helper()
+	return config.Paths{Home: t.TempDir(), Root: t.TempDir()}
 }
