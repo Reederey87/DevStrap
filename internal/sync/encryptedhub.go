@@ -46,10 +46,18 @@ type WorkspaceKeyring interface {
 // Pull because their payload is itself age-wrapped (the hub cannot decrypt the
 // WCK without the recipient's private key). On Pull, grants are ingested into
 // the keyring in HLC order before the rest of the batch is decrypted, so a
-// newly-approved device obtains its WCKs before decrypting history.
+// newly-approved device obtains its WCKs before decrypting history. If Verify
+// is set, Pull verifies each grant's carrier event before ingesting its WCK so
+// an untrusted hub cannot inject attacker-known workspace keys.
 type EncryptedHub struct {
 	Hub     Hub
 	Keyring WorkspaceKeyring
+	// Verify checks a grant carrier event's signature/trust before its WCK is
+	// ingested (P6-SEC-01). nil disables the check (used by unit tests that
+	// exercise decryption only). hubFromOptions wires it to
+	// (*state.Store).VerifyRemoteEvent so the trust regime is identical to the
+	// apply path.
+	Verify func(ctx context.Context, ev state.Event) error
 }
 
 // Push envelope-encrypts every non-grant event under the current epoch's WCK
@@ -88,8 +96,9 @@ func (h EncryptedHub) Push(ctx context.Context, events []state.Event) error {
 	return h.Hub.Push(ctx, out)
 }
 
-// Pull fetches events from the backend, primes the keyring, ingests in-batch
-// grants in HLC order, then decrypts enc.v1 envelopes back to plaintext.
+// Pull fetches events from the backend, primes the keyring, verifies grant
+// carrier events when a verifier is configured, ingests verified in-batch grants
+// in HLC order, then decrypts enc.v1 envelopes back to plaintext.
 //
 // The hub is untrusted (zero-knowledge), so a single non-conforming object must
 // never be able to wedge sync. Pull therefore degrades instead of aborting the
@@ -132,6 +141,13 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 			logging.Logger(ctx).Warn("encrypted hub pull: skipping undecodable grant event",
 				"event_id", event.ID, "err", err.Error())
 			continue
+		}
+		if h.Verify != nil {
+			if err := h.Verify(ctx, event); err != nil {
+				logging.Logger(ctx).Warn("encrypted hub pull: refusing unverified grant carrier",
+					"event_id", event.ID, "device_id", event.DeviceID, "err", err.Error())
+				continue
+			}
 		}
 		if err := h.Keyring.IngestGrant(ctx, grant); err != nil {
 			logging.Logger(ctx).Warn("encrypted hub pull: skipping ungrantable key event",

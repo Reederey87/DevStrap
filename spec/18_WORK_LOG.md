@@ -27,6 +27,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-02 — P6-SEC-01(a): verify grant carriers before WCK ingestion (PR 2/3 of the hub-trust workstream)
+
+Changed:
+- Added a `Verify func(ctx, state.Event) error` seam to `EncryptedHub`; `Pull` now verifies each `device.key.granted` carrier **before** calling `IngestGrant`, skipping (never ingesting) on failure. `hubFromOptions` wires it to the new exported `(*state.Store).VerifyRemoteEvent`, which delegates to `verifyEventSignature` — so a grant forged by an unknown/unapproved/bad-signature device is refused once any device is enrolled, and the refused carrier still flows to `ApplyEvents` and lands in the PR-1 `event_verification_failure` quarantine. Trust regime is identical to the apply path; the pre-enrollment bootstrap window (`P4-SEC-04`) is the only residual open-ingest path. `Verify == nil` preserves prior behavior for decryption-only unit tests.
+- Closes P6-SEC-01 step (a). Steps (b) held-epoch overwrite refusal and (c) verified-epoch gating of `CurrentKeyEpoch` are structurally delivered by PR 3/3's `(epoch,kid)` keying + founder/join split (a legacy self-minted epoch-1 must stay displaceable until then).
+- Dual-review hardening: `VerifyRemoteEvent` now runs the content-hash self-consistency check in addition to `verifyEventSignature`, so the pre-ingest gate rejects exactly the apply-path permanent-failure set — the keyring can never advance from a carrier `ApplyEvents` would quarantine. (Reviewers also noted the pre-enrollment bootstrap window still open-ingests grants; that is the intended, documented `P4-SEC-04` residual — closing it now would break legitimate joining before PR-3's founder/join split, so it is left as-is and called out in spec/07/15.)
+- Specs: 00 (implemented inventory), 07 (Pull now documents pre-ingest verification), 12 (non-inserting verifier seam), 14 (P6 backlog status), 15 (P6-SEC-01 threat + finding sections marked step-a-shipped with the acceptance test), 16 (test inventory).
+
+Validated:
+- `gofmt -w cmd internal`; `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` (0 issues); `go run ./cmd/spec-drift`; `GOCACHE=/tmp/devstrap-gocache go test ./...` and `go test -race ./...`.
+- New tests: `EncryptedHub.Pull` refuses/ingests/nil-verifier back-compat; `TestVerifyRemoteEventMatchesInsertEventRegime` ({local, approved+valid, forged sig, revoked, unknown} × {enrolled, not}); `TestVerifyRemoteEventRejectsContentHashMismatch`; malicious-hub acceptance `TestSyncRejectsForgedGrantBeforeWCKIngest` (forged grant at epoch 2^40 wrapped to the victim's own recipient → `CurrentKeyEpoch` unchanged, no WCK file written, one quarantine conflict).
+
+Follow-ups:
+- PR 3/3: P6-SEC-02 founder/join split + `(epoch,kid)` keying (completes SEC-01 b/c and closes the pre-enrollment open-ingest window).
+
 ## 2026-07-02 — P6-SYNC-01: per-event verification quarantine (PR 1/3 of the hub-trust workstream)
 
 Changed:

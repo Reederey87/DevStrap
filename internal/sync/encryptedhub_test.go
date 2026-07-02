@@ -174,6 +174,101 @@ func TestEncryptedHubGrantPassthrough(t *testing.T) {
 	}
 }
 
+func TestPullRefusesUnverifiedGrant(t *testing.T) {
+	ctx := context.Background()
+	kr := newFakeKeyring(t, 1)
+	wck1, _ := kr.WCK(1)
+	good, err := EncryptEvent(state.Event{
+		ID: "evt_good", DeviceID: "dev_a", HLC: 20,
+		Type:        EventProjectAdded,
+		PayloadJSON: `{"path":"work/ok"}`,
+		ContentHash: state.ContentHash(`{"path":"work/ok"}`),
+	}, wck1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grantPayload, _ := json.Marshal(DeviceKeyGrant{Epoch: 2, Recipient: "age1self", WrappedKey: "wrapped2"})
+	grant := state.Event{
+		ID: "evt_grant", DeviceID: "dev_attacker", HLC: 10,
+		Type:        EventDeviceKeyGranted,
+		PayloadJSON: string(grantPayload),
+		ContentHash: state.ContentHash(string(grantPayload)),
+	}
+	back := &recordingHub{events: []state.Event{good, grant}}
+	hub := EncryptedHub{
+		Hub:     back,
+		Keyring: kr,
+		Verify: func(context.Context, state.Event) error {
+			return errors.New("bad carrier")
+		},
+	}
+
+	got, err := hub.Pull(ctx, 0)
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	if len(kr.ingested) != 0 {
+		t.Fatalf("ingested grants = %+v, want none", kr.ingested)
+	}
+	if len(got) != 2 || got[0].ID != "evt_grant" || got[1].ID != "evt_good" {
+		t.Fatalf("Pull returned %+v, want grant passthrough plus other events", got)
+	}
+}
+
+func TestPullIngestsVerifiedGrant(t *testing.T) {
+	ctx := context.Background()
+	kr := newFakeKeyring(t, 1)
+	grantPayload, _ := json.Marshal(DeviceKeyGrant{Epoch: 2, Recipient: "age1self", WrappedKey: "wrapped2"})
+	grant := state.Event{
+		ID: "evt_grant", DeviceID: "dev_a", HLC: 10,
+		Type:        EventDeviceKeyGranted,
+		PayloadJSON: string(grantPayload),
+		ContentHash: state.ContentHash(string(grantPayload)),
+	}
+	hub := EncryptedHub{
+		Hub:     &recordingHub{events: []state.Event{grant}},
+		Keyring: kr,
+		Verify: func(context.Context, state.Event) error {
+			return nil
+		},
+	}
+
+	got, err := hub.Pull(ctx, 0)
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "evt_grant" {
+		t.Fatalf("Pull returned %+v, want grant", got)
+	}
+	if len(kr.ingested) != 1 || kr.ingested[0].Epoch != 2 {
+		t.Fatalf("ingested grants = %+v, want epoch 2", kr.ingested)
+	}
+}
+
+func TestPullNilVerifierBackcompat(t *testing.T) {
+	ctx := context.Background()
+	kr := newFakeKeyring(t, 1)
+	grantPayload, _ := json.Marshal(DeviceKeyGrant{Epoch: 2, Recipient: "age1self", WrappedKey: "wrapped2"})
+	grant := state.Event{
+		ID: "evt_grant", DeviceID: "dev_a", HLC: 10,
+		Type:        EventDeviceKeyGranted,
+		PayloadJSON: string(grantPayload),
+		ContentHash: state.ContentHash(string(grantPayload)),
+	}
+	hub := EncryptedHub{Hub: &recordingHub{events: []state.Event{grant}}, Keyring: kr}
+
+	got, err := hub.Pull(ctx, 0)
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "evt_grant" {
+		t.Fatalf("Pull returned %+v, want grant", got)
+	}
+	if len(kr.ingested) != 1 || kr.ingested[0].Epoch != 2 {
+		t.Fatalf("ingested grants = %+v, want epoch 2", kr.ingested)
+	}
+}
+
 // TestEncryptedHubIngestThenDecrypt proves the two-pass Pull ordering: a grant
 // for an epoch the device does not yet hold is ingested before events encrypted
 // under that epoch are decrypted, within the same batch.

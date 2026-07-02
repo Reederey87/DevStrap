@@ -145,11 +145,11 @@ Reality (`SECU-03`/`SECU-05`/`HUB-03`): event signature verification **fails clo
 
 Multi-tenant isolation (future SaaS direction, `SCALE-*`): when the hub serves more than one owner, **confidentiality** is by construction — every blob and event is client-side age-encrypted before upload and namespaced by `workspace_id`, so a zero-knowledge hub cannot decrypt across tenants even if its access controls fail. Integrity and availability are not automatic: a leaked bucket-wide key can still delete, overwrite, withhold, or reorder ciphertext. Hosted mode therefore requires prefix-scoped temporary credentials, signed hash chains, fail-closed verification, snapshots/backups, retention discipline, rate limits, and cell/tenant scoping.
 
-### Threat: hub key-substitution defeats envelope confidentiality (`P6-SEC-01`)
+### Threat: hub key-substitution defeats envelope confidentiality (`P6-SEC-01`, partially mitigated)
 
-Attacker = the untrusted/zero-knowledge hub (or a MITM/revoked device). Because age encryption to a public X25519 recipient needs no secret and every device's recipient string rides the hub as plaintext, a hostile hub can forge a `device.key.granted` grant that wraps an **attacker-chosen** Workspace Content Key to the victim's own recipient. `EncryptedHub.Pull` ingests grants from the **raw, unverified** batch (`internal/sync/encryptedhub.go:126-141`) before any signature/trust check, and `IngestGrant` (`internal/workspacekeys/keyring.go:229-251`) performs no Ed25519 verification and unconditionally persists the key. A forged high epoch then becomes the active `Push` epoch (`CurrentKeyEpoch = MAX(epoch)`, `internal/state/store.go:2776`), so the victim envelope-encrypts all new namespace events under a key the attacker knows — a full break of `P4-SEC-02`. A low-epoch variant overwrites the legitimate WCK and silently DoSes decryption.
+Attacker = the untrusted/zero-knowledge hub (or a MITM/revoked device). Because age encryption to a public X25519 recipient needs no secret and every device's recipient string rides the hub as plaintext, a hostile hub can forge a `device.key.granted` grant that wraps an **attacker-chosen** Workspace Content Key to the victim's own recipient. Before `P6-SEC-01(a)`, `EncryptedHub.Pull` ingested grants from the raw hub batch before any signature/trust check, so a forged high epoch could become the active `Push` epoch and a low-epoch variant could overwrite the legitimate WCK.
 
-Mitigation (target, see `P6-SEC-01` below): verify the carrier event before ingesting any grant once devices are enrolled; refuse to overwrite an already-held epoch's key; and bound `CurrentKeyEpoch` to epochs reached via a verified grant chain.
+Mitigation status: **step (a) shipped** — `EncryptedHub.Pull` now runs a `Verify` seam (`internal/sync/encryptedhub.go`, wired by `hubFromOptions` to `(*state.Store).VerifyRemoteEvent`) on every grant carrier *before* `IngestGrant`, so once any device is approved a grant from an unknown/unapproved/bad-signature device is refused and never reaches the keyring; the refused carrier still flows to `ApplyEvents` and lands in the `event_verification_failure` quarantine (one visible conflict, not silent). This shares the apply-path trust regime exactly, so no new trust policy is introduced and the pre-enrollment bootstrap window (`P4-SEC-04`) is the only residual open-ingest path. **Remaining (PR-3):** refuse to overwrite an already-held epoch's key and bound `CurrentKeyEpoch` to epochs reached via a verified grant chain — structurally delivered by the `(epoch, kid)` keying + founder/join split, which must land before overwrite-refusal is safe (a legacy self-minted epoch-1 must still be displaceable by the founder grant until then).
 
 ### Threat: hub tampers with unauthenticated `enc.v1` carrier fields (`P6-SYNC-04`)
 
@@ -327,21 +327,13 @@ From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.m
 
 ### P6-SEC-01 — Unauthenticated grant ingestion lets the hub substitute a device's WCK
 
-**Problem.** `EncryptedHub.Pull` calls `IngestGrant` for every `device.key.granted` event in the raw, unverified hub batch before any signature/trust check (`internal/sync/encryptedhub.go:126-141`; `internal/workspacekeys/keyring.go:229-251`), so a hostile hub can forge a grant wrapping an attacker-chosen WCK to the victim's own recipient — breaking `P4-SEC-02` confidentiality or DoSing decryption.
+**Problem.** Before `P6-SEC-01(a)`, `EncryptedHub.Pull` called `IngestGrant` for every `device.key.granted` event in the raw, unverified hub batch before any signature/trust check, so a hostile hub could forge a grant wrapping an attacker-chosen WCK to the victim's own recipient — breaking `P4-SEC-02` confidentiality or DoSing decryption. The carrier-verification part is now shipped; the overwrite and verified-chain epoch controls remain open.
 
 **Actionable steps.**
-1. Thread the carrier `Event` into `IngestGrant` and add a `Verify`/`VerifyGrant` call gated on `hasEnrolledDevices`. **Verification must complete before any keyring mutation:** an unverified grant must never reach `StoreWCK`, `RecordKeyEpoch`, or the WCK cache — not even transiently — so a poisoned grant leaves the keystore, cache, and `CurrentKeyEpoch` untouched. Reject-and-skip (do not ingest) once any device is enrolled.
-2. In `IngestGrant`, refuse to change an already-held epoch's key (check store/keychain, not just cache).
-3. Constrain `CurrentKeyEpoch` (`internal/state/store.go:2776`) to epochs reached via a verified grant chain.
-4. Test: a well-formed forged grant to the victim's own recipient is rejected and changes neither the keystore nor `CurrentKeyEpoch`.
-
-**Example.**
-```go
-// IngestGrant: refuse conflicting WCK for an epoch we already hold.
-if cur, ok := k.cached(grant.Epoch); ok && !bytes.Equal(cur, wck) {
-    return fmt.Errorf("refusing conflicting WCK for held epoch %d", grant.Epoch)
-}
-```
+1. **[SHIPPED — step (a)]** `EncryptedHub` carries a `Verify func(ctx, state.Event) error` seam; `Pull` calls it on each grant carrier *before* `IngestGrant` and skips (never ingests) on failure, so an unverified grant never reaches `StoreWCK`, `RecordKeyEpoch`, or the WCK cache — the keystore, cache, and `CurrentKeyEpoch` are untouched. `hubFromOptions` wires it to `(*state.Store).VerifyRemoteEvent`, which delegates to `verifyEventSignature`, so the trust regime (fail-closed once enrolled, `P4-SEC-04` bootstrap window otherwise) is identical to the apply path. The refused carrier still flows to `ApplyEvents` → `event_verification_failure` quarantine.
+2. **[PR-3]** In `IngestGrant`, refuse to change an already-held epoch's key — delivered structurally by `(epoch, kid)` keying (distinct keys land in distinct slots; no overwrite path remains) rather than a cache-equality check, which is only safe after the founder/join split lands.
+3. **[PR-3]** Constrain `CurrentKeyEpoch` (`internal/state/store.go`) to epochs reached via a verified grant chain — with step (a) shipped, key rows only enter `workspace_keys` via a verified-grant `IngestGrant`, founder bootstrap, or `Rotate`, so a forged epoch can no longer become the push epoch once enrolled.
+4. **[SHIPPED]** `TestSyncRejectsForgedGrantBeforeWCKIngest` (`internal/cli/sync_grant_injection_test.go`): a well-formed forged grant (epoch 2^40, attacker WCK age-wrapped to the victim's own recipient, unknown device) is refused — `CurrentKeyEpoch` unchanged, no WCK file written for the forged epoch, exactly one `event_verification_failure` conflict.
 
 ### P6-SYNC-04 — `enc.v1` carrier fields are bound by neither AAD nor signature
 

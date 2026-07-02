@@ -361,7 +361,7 @@ Deliverables:
 - cursor-based event push/pull with snapshot-required recovery — **shipped**;
 - Cloudflare R2/S3 direct backend with immutable event objects, conditional puts, paged cursor pulls, and content-addressed encrypted blob upload/download — **shipped** (`P5-HUB-01`: the `aws-sdk-go-v2` `S3Adapter` behind `hub: r2://<bucket>`);
 - event payload validation before apply, fail-closed verification after enrollment, and device heartbeat/trust metadata.
-- envelope encryption of the event log at the hub boundary (`EncryptedHub`, XChaCha20-Poly1305 under a per-epoch WCK, `P4-SEC-02`/`SEC-07` foundation) — **shipped** (`fix/p4-sec-02-envelope-encryption`): `init` bootstraps epoch 1, `devices approve` grants all epochs, `devices revoke`/`lost` rotates, `Pull` ingests grants in HLC order then decrypts; the hub stores only `enc.v1` ciphertext carriers.
+- envelope encryption of the event log at the hub boundary (`EncryptedHub`, XChaCha20-Poly1305 under a per-epoch WCK, `P4-SEC-02`/`SEC-07` foundation) — **shipped** (`fix/p4-sec-02-envelope-encryption`): `init` bootstraps epoch 1, `devices approve` grants all epochs, `devices revoke`/`lost` rotates, `Pull` verifies grant carriers before WCK ingest (`P6-SEC-01(a)`), ingests verified grants in HLC order, then decrypts; the hub stores only `enc.v1` ciphertext carriers.
 
 Tasks:
 
@@ -541,7 +541,7 @@ Workstreams added by the cloud-sync architecture pass (`docs/audits/AUDIT_RECOMM
 
 The sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`; index in `docs/audits/README.md`) verified the shipped system against trunk `8c739b8`. Five **P1 must-fix** findings form the near-term wave; land them before broadening the product surface further:
 
-- **P6-SEC-01** — Verify grant-carrier signatures and refuse WCK overwrite before writing to the keychain.
+- **P6-SEC-01** — Verify grant-carrier signatures and refuse WCK overwrite before writing to the keychain. Status: grant-carrier pre-ingest verification is shipped (`P6-SEC-01(a)`); held-epoch overwrite refusal and verified-chain epoch bounding remain open for the follow-up keyring/wire-format work.
 - **P6-SYNC-01** — Quarantine verification/trust failures per-event instead of aborting the whole pull batch. Status: apply-path quarantine and approval replay are shipped; synced `device.revoked` trust propagation remains open.
 - **P6-HUB-01** — Make `hub gc` sync-first and grace-windowed; refuse to sweep on a truncated mark set (live draft blobs are currently deletable).
 - **P6-GIT-01** — Split the git subprocess timeout by command class and stop classifying self-imposed deadline kills as retryable (the 2-minute cap breaks eager materialization of large repos).
