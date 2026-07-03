@@ -27,6 +27,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — P6-CLI-05: document the shipped r2:// hub path (R2 go-live wave)
+
+Changed:
+- README: dropped the "(landing)" / "wired but not switched on" framing for the R2/S3 hub (Features bullet, project-status blockquote, Architecture components line), reworded the "Not yet implemented" hosted-hub bullet to the genuinely-remaining items (production remote device enrollment, out-of-band fingerprint confirmation), rewrote quickstart step 6 to show `hub: r2://<bucket>` in `~/.devstrap/config.yaml` + `DEVSTRAP_HUB_S3_*` credential env vars (with `devstrap hub login` / 1Password `op://` and a `spec/19` pointer, keeping `--hub-file` as the local-test path), taught the command-reference `sync` row about the config hub, re-pointed the roadmap near-term priorities off the now-done "wire the R2 backend" onto event-log compaction/snapshot exchange + retention marker + HTTP/SSE relay + daemon, and bumped the latest-audit reference from the fifth to the sixth pass.
+- `internal/cli/init.go`: the default and `--join` next-steps hints now teach configuring `hub: r2://<bucket>` in `~/.devstrap/config.yaml` then plain `devstrap sync`, instead of hardcoding `devstrap sync --hub-file <path>`.
+- `internal/cli/sync.go`: `--dry-run` now prints the resolved hub ID (`hubID`, always non-empty: `file:<path>` / `r2:<ws…>`) instead of the raw `--hub-file` flag, which was empty when the hub came from config.
+- `internal/cli/root_test.go`: extended the sync dry-run assertion to require the resolved `file:<path>` hub ID in the output.
+- Specs: `spec/13` P6-CLI-05 block marked RESOLVED and its init/sync descriptions updated; `spec/02` success-metrics AD-1 note points at the now-documented R2 quickstart; `docs/audits/README.md` ledger row moved to Recently shipped and the Pass 6 open count decremented.
+
+Validated:
+- `gofmt -w cmd internal`; `golangci-lint run`; `GOCACHE=/tmp/devstrap-gocache go test -race ./internal/cli/ ./internal/specdrift/`.
+
+Follow-ups:
+- None. Explicit non-goal: no `devstrap init --hub <uri>` flag — the hub stays configured in `config.yaml` as one source of truth.
 ## 2026-07-03 — P6-HUB-02: keychain/op:// hub S3 credential custody + auth error hint (R2 go-live wave)
 
 Changed:

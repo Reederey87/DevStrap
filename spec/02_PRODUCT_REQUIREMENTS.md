@@ -252,7 +252,7 @@ failed       last job failed
 For personal/MVP use:
 
 - new machine from zero to visible `~/Code` tree in under 5 minutes;
-- **Direction (`AD-1`, planned):** first run on a new machine succeeds with zero cloud provisioning — a zero-infrastructure Hub backend (a private git repo or a local/cloud-drive folder, both safe because the hub only holds ciphertext + signed events) becomes the quickstart default so no R2 bucket is required to get the tree; `r2://` stays the scale/power option (today a first run still needs `--hub-file` or a provisioned R2 bucket);
+- **Direction (`AD-1`, planned):** first run on a new machine succeeds with zero cloud provisioning — a zero-infrastructure Hub backend (a private git repo or a local/cloud-drive folder, both safe because the hub only holds ciphertext + signed events) becomes the quickstart default so no R2 bucket is required to get the tree; `r2://` stays the scale/power option (today a first run still needs `--hub-file` or a provisioned R2 bucket — the provisioned-R2 quickstart is now documented in the README and `spec/19`, `P6-CLI-05`);
 - materialize average repo in under 2 minutes, excluding dependency install;
 - after `devstrap sync` completes, the full `~/Code` namespace tree is present on the device with every clonable repo eagerly materialized via blobless clone — no skeleton placeholders left behind (eager-clone target, workstream `EAGER-*`);
 - the same namespace tree appears automatically on every enrolled device in the fleet, with no manual file copying;

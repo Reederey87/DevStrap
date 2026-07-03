@@ -63,7 +63,9 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 		return err
 	}
 	if dryRun {
-		_, err = fmt.Fprintf(stdout, "Would push %d local events to %s and pull namespace events\n", len(localEvents), hubFile)
+		// P6-CLI-05: print the resolved hub ID (file:<path> / r2:<ws…>), never
+		// the raw --hub-file flag, which is empty when the hub comes from config.
+		_, err = fmt.Fprintf(stdout, "Would push %d local events to %s and pull namespace events\n", len(localEvents), hubID)
 		return err
 	}
 	// P6-SEC-02: pull BEFORE push. A joining device must ingest its grant (and

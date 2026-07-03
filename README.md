@@ -95,11 +95,11 @@ Materialization is **eager**: after `devstrap sync`, the whole `~/Code` tree is 
 - 🔐 **Secrets mapping** — repo‑specific env profiles, age‑encrypted at rest or referenced from 1Password; subprocesses get a sanitized, no‑secret‑leak environment.
 - 🤖 **Agent worktrees** — every agent task runs in an isolated worktree off the fetched remote default branch, with a wrapper‑level command/file policy and forge‑aware PR/MR creation (`gh`/`glab`/`tea`).
 - 🧰 **Mac‑first, Linux‑compatible** — one portable Go binary; platform behavior sits behind adapters.
-- 🛰️ **Zero‑knowledge sync hub** *(landing)* — a two‑plane hub (signed event log + content‑addressed encrypted blob store) on Cloudflare R2, behind one pluggable `Hub` interface.
+- 🛰️ **Zero‑knowledge sync hub** — a two‑plane hub (signed event log + content‑addressed encrypted blob store) on Cloudflare R2/S3, behind one pluggable `Hub` interface.
 
 ## Project status
 
-> **Alpha.** The local engine and the agent loop are shipped and tested; the cloud‑sync layer has just landed and the hosted R2 backend is wired but not yet switched on.
+> **Alpha.** The local engine and the agent loop are shipped and tested; the cloud‑sync layer has landed and the R2/S3 hub backend is shipped — point `hub: r2://<bucket>` at a bucket, supply `DEVSTRAP_HUB_S3_*` credentials, and `devstrap sync` talks to it.
 
 **Shipped**
 
@@ -111,10 +111,10 @@ Materialization is **eager**: after `devstrap sync`, the whole `~/Code` tree is 
 **Not yet implemented**
 
 - The local daemon, FSEvents‑specific Mac watcher, and native LaunchAgent/systemd installers.
-- The **active** hosted hub: production device enrollment, out‑of‑band fingerprint confirmation, and turning the R2 backend on.
+- The **hosted** control plane: production remote device enrollment and out‑of‑band fingerprint confirmation (the R2/S3 hub backend itself is shipped).
 - OS‑enforced agent sandboxing (today's command/file policy is wrapper‑level).
 
-A standing design/implementation audit drives the backlog. All passes are archived under [`docs/audits/`](docs/audits/) — see the [index & open backlog](docs/audits/README.md). The latest is the fifth pass, [`AUDIT_RECOMMENDATIONS_2026-06-29_PASS5.md`](docs/audits/AUDIT_RECOMMENDATIONS_2026-06-29_PASS5.md) (36 findings, building on the 44-finding fourth pass).
+A standing design/implementation audit drives the backlog. All passes are archived under [`docs/audits/`](docs/audits/) — see the [index & open backlog](docs/audits/README.md). The latest is the sixth pass, [`AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`](docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md) (43 findings, building on the 36-finding fifth pass).
 
 ## Requirements
 
@@ -174,8 +174,19 @@ devstrap worktree new work/acme/api --fresh-upstream --name fix-tests
 devstrap agent run work/acme/api --engine generic --task "run tests" -- npm test
 devstrap agent pr <run-id> --dry-run
 
-# 6. Sync the namespace map (file-backed hub spike today; R2 hub landing)
-devstrap sync --hub-file /tmp/devstrap-hub/events.json
+# 6. Point at a hub, then sync the namespace map + materialize the tree.
+#    Configure the hub once in ~/.devstrap/config.yaml:
+#      hub: r2://<bucket>
+#    and supply S3/R2 credentials via the environment:
+#      export DEVSTRAP_HUB_S3_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+#      export DEVSTRAP_HUB_S3_ACCESS_KEY_ID=…   # falls back to AWS_ACCESS_KEY_ID
+#      export DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY=…  # falls back to AWS_SECRET_ACCESS_KEY
+#    (credentials can also be stored via `devstrap hub login` or a 1Password `op://` ref).
+#    See spec/19_CLOUD_PROVISIONING_GUIDE.md for the full R2 setup.
+devstrap sync
+
+# For local testing without a bucket, a file-backed hub still works:
+#   devstrap sync --hub-file /tmp/devstrap-hub/events.json
 ```
 
 Prefer not to install? Every command also works via `go run ./cmd/devstrap <cmd> …`.
@@ -193,7 +204,7 @@ Prefer not to install? Every command also works via `go run ./cmd/devstrap <cmd>
 | `devstrap hydrate` | Clone a skeleton Git repository |
 | `devstrap open` | Hydrate and open a namespace path in an editor (`--cursor`/`--code`) |
 | `devstrap materialize` | Eagerly materialize skeleton projects (clone repos, hydrate env) |
-| `devstrap sync` | Push/pull namespace events and materialize the tree (`--hub-file`) |
+| `devstrap sync` | Push/pull namespace events and materialize the tree (hub from config, e.g. `hub: r2://<bucket>`; `--hub-file <path>` overrides for local tests) |
 | `devstrap run-loop` | Run scan + sync + materialize on an interval (portable, no daemon) |
 | `devstrap worktree` | Manage isolated worktrees (`new`/`status`/`finalize`/`list`/`remove`/`cleanup`/`unlock`) |
 | `devstrap agent` | Run agents in isolated fresh worktrees (`run`/`list`/`show`/`pr`) |
@@ -225,7 +236,7 @@ Components:
 
 - **`devstrap`** — the CLI for workspace setup, status, hydration, worktrees, env, sync, and agents (shipped).
 - **`devstrapd`** — a local daemon for reconciliation, watchers, and a local API (planned).
-- **DevStrap Hub** — a two‑plane zero‑knowledge sync service: a signed HLC namespace‑map event log plus a content‑addressed encrypted blob store, on Cloudflare R2 behind one pluggable `Hub` interface (landing).
+- **DevStrap Hub** — a two‑plane zero‑knowledge sync service: a signed HLC namespace‑map event log plus a content‑addressed encrypted blob store, on Cloudflare R2/S3 behind one pluggable `Hub` interface (shipped; a hosted control plane for device enrollment is still planned).
 
 The full design corpus lives under [`spec/`](spec/) — start with [`spec/00_START_HERE.md`](spec/00_START_HERE.md).
 
@@ -239,7 +250,7 @@ Capability layers (see [`spec/14_MVP_ROADMAP_AND_BACKLOG.md`](spec/14_MVP_ROADMA
 4. **Mac daemon** — LaunchAgent, FSEvents watcher, shell/editor integration. ⏳
 5. **Optional StrapFS** — File Provider / FUSE evaluation. ⏳ (deliberately deferred)
 
-The near‑term priorities — wire the R2/S3 hub backend behind the shipped `hubFromOptions` seam, harden the hub's zero‑knowledge guarantees, and bound sync‑log growth **before** the R2 backend is switched on, then grow the product surface (`doctor --remote`, a `service install` daemon) — are detailed across the [audit archive](docs/audits/) (latest: the fifth pass).
+The near‑term priorities — now that the R2/S3 hub backend is shipped behind the `hubFromOptions` seam — are to bound sync‑log growth (event‑log compaction + full‑state snapshot exchange and a retention marker), harden the hub's zero‑knowledge guarantees, and then grow the transport and product surface (an HTTP/SSE relay, production device enrollment, and a `service install` daemon). They are detailed across the [audit archive](docs/audits/) (latest: the sixth pass).
 
 ## Security
 
