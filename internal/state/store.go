@@ -2694,7 +2694,11 @@ WHERE id = ?;
 		// v1 fallback (P6-SYNC-04): historical events were signed under the
 		// v1 domain/payload (no DeviceID/Seq) and are re-pushed verbatim when
 		// a hub is re-founded. Accepting v1 keeps them verifiable; the enc.v2
-		// AAD still binds DeviceID/Seq for everything on the encrypted plane.
+		// AAD binds DeviceID/Seq for enc.v2 traffic. Residual: grant events
+		// ride the hub as plaintext (never enc.v2-wrapped), so a LEGACY
+		// v1-signed grant's Seq is bound by neither AAD nor signature
+		// (DeviceID is still caught by the signing-key lookup above); all
+		// grants this build creates are v2-signed.
 		if v1Err := devicekeys.Verify(signingPublicKey, event.DeviceSig, eventSignatureDomain, EventSignaturePayload(event)); v1Err != nil {
 			return fmt.Errorf("event %s device signature invalid: %w: %w", event.ID, err, ErrEventVerification)
 		}

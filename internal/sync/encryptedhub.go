@@ -374,6 +374,14 @@ func (h EncryptedHub) TryDecrypt(ctx context.Context, event state.Event) (state.
 // path. Genuinely corrupt carriers keep failing and their conflicts stay open
 // (visible, gc-blocking, deduped — no growth, no wedge).
 //
+// The replay is DELIBERATELY unconditional — it never skips a conflict as
+// "hopeless" based on what the envelope kid named at quarantine time. Any
+// such classification reads the same attacker-controlled field that caused
+// the misroute: a hub that relabels a not-yet-granted event's kid to a HELD
+// kid would get it marked permanently non-replayable and re-open the exact
+// loss this fix closes (post-#44 dual-review analysis). A hopeless carrier
+// just fails decryption again — cheap, bounded by open conflicts.
+//
 // The conflict is resolved BEFORE the apply: if the restored event then fails
 // signature verification, ApplyEvents records a FRESH verification conflict
 // (the open-conflict dedup would otherwise swallow it into the row being

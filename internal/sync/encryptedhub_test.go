@@ -72,53 +72,64 @@ func (r *recordingHub) ListBlobs(_ context.Context) ([]BlobInfo, error) {
 // ingested (simulating a successful age-unwrap on the recipient device).
 type fakeKeyring struct {
 	epoch    int64
-	keys     map[int64][]byte
+	keys     map[int64][][]byte // several keys may coexist at one epoch (P6-SEC-02)
 	onIngest map[int64][]byte
 	ingested []DeviceKeyGrant
 }
 
 func (f *fakeKeyring) PushKey(context.Context) (int64, string, []byte, error) {
-	k, ok := f.keys[f.epoch]
-	if !ok {
+	ks := f.keys[f.epoch]
+	if len(ks) == 0 {
 		return 0, "", nil, nil
 	}
-	return f.epoch, KIDForWCK(k), k, nil
+	return f.epoch, KIDForWCK(ks[0]), ks[0], nil
 }
 func (f *fakeKeyring) Prime(context.Context) error { return nil }
 func (f *fakeKeyring) WCKCandidates(epoch int64, kid string) [][]byte {
-	k, ok := f.keys[epoch]
-	if !ok {
-		return nil
+	if kid == "" {
+		return f.keys[epoch]
 	}
-	if kid == "" || kid == KIDForWCK(k) {
-		return [][]byte{k}
+	for _, k := range f.keys[epoch] {
+		if kid == KIDForWCK(k) {
+			return [][]byte{k}
+		}
 	}
 	return nil
 }
 
 // WCK is a test-only accessor (not part of WorkspaceKeyring).
-func (f *fakeKeyring) WCK(epoch int64) ([]byte, bool) { k, ok := f.keys[epoch]; return k, ok }
+func (f *fakeKeyring) WCK(epoch int64) ([]byte, bool) {
+	ks := f.keys[epoch]
+	if len(ks) == 0 {
+		return nil, false
+	}
+	return ks[0], true
+}
+
+// addKey installs an additional key at an epoch (simulating a later grant).
+func (f *fakeKeyring) addKey(epoch int64, wck []byte) {
+	if f.keys == nil {
+		f.keys = map[int64][][]byte{}
+	}
+	f.keys[epoch] = append(f.keys[epoch], wck)
+}
 
 func (f *fakeKeyring) IngestGrant(_ context.Context, grant DeviceKeyGrant) error {
 	f.ingested = append(f.ingested, grant)
 	if wck, ok := f.onIngest[grant.Epoch]; ok {
-		if f.keys == nil {
-			f.keys = map[int64][]byte{}
-		}
-		f.keys[grant.Epoch] = wck
+		f.addKey(grant.Epoch, wck)
 	}
 	return nil
 }
 
 func newFakeKeyring(t *testing.T, epochs ...int64) *fakeKeyring {
 	t.Helper()
-	wck1, _ := NewWCK()
-	keys := map[int64][]byte{epochs[0]: wck1}
-	for _, e := range epochs[1:] {
+	kr := &fakeKeyring{epoch: epochs[len(epochs)-1]}
+	for _, e := range epochs {
 		k, _ := NewWCK()
-		keys[e] = k
+		kr.addKey(e, k)
 	}
-	return &fakeKeyring{epoch: epochs[len(epochs)-1], keys: keys}
+	return kr
 }
 
 func TestEncryptedHubRoundTrip(t *testing.T) {
@@ -297,7 +308,7 @@ func TestEncryptedHubIngestThenDecrypt(t *testing.T) {
 	wck2, _ := NewWCK()
 	// New device holds epoch 1 but not epoch 2; onIngest installs WCK(2) when
 	// the epoch-2 grant arrives.
-	kr := &fakeKeyring{epoch: 2, keys: map[int64][]byte{1: wck1}, onIngest: map[int64][]byte{2: wck2}}
+	kr := &fakeKeyring{epoch: 2, keys: map[int64][][]byte{1: {wck1}}, onIngest: map[int64][]byte{2: wck2}}
 
 	// Build a hub batch: epoch-1 event, epoch-2 grant, epoch-2 event (in HLC order).
 	enc1, _ := EncryptEvent(state.Event{ID: "e1", DeviceID: "dev_a", HLC: 10, Type: EventProjectAdded, PayloadJSON: `{"path":"work/a"}`, ContentHash: state.ContentHash(`{"path":"work/a"}`)}, wck1, 1)
@@ -547,7 +558,7 @@ func TestEncryptedHubBlobPassthrough(t *testing.T) {
 
 func TestEncryptedHubPushNoEpochFails(t *testing.T) {
 	ctx := context.Background()
-	kr := &fakeKeyring{epoch: 0, keys: map[int64][]byte{}}
+	kr := &fakeKeyring{epoch: 0, keys: map[int64][][]byte{}}
 	hub := EncryptedHub{Hub: &recordingHub{}, Keyring: kr}
 	err := hub.Push(ctx, []state.Event{{ID: "e", Type: EventProjectAdded, PayloadJSON: `{}`, ContentHash: state.ContentHash(`{}`)}})
 	if !errors.Is(err, ErrMissingWorkspaceKey) {
@@ -636,7 +647,7 @@ func TestReplayRecoversKidStrippedEventAfterGrant(t *testing.T) {
 	}
 
 	// The grant arrives (simulated: the keyring now holds the fleet key).
-	kr.keys[1] = fleetWCK
+	kr.addKey(1, fleetWCK)
 
 	replayed, err := ReplayUndecryptableConflicts(ctx, st, hub)
 	if err != nil || replayed != 1 {
@@ -651,5 +662,80 @@ func TestReplayRecoversKidStrippedEventAfterGrant(t *testing.T) {
 	}
 	if ev, err := st.EventByID(ctx, "evt_stripped"); err != nil || ev.Type != EventProjectAdded {
 		t.Fatalf("recovered event not in log as plaintext: %+v err=%v", ev, err)
+	}
+}
+
+// TestReplayRecoveryUnblocksHashChainSuccessor (review refinement, opus-4.8):
+// the kid-stripped event E is quarantined; its origin-device successor E2
+// (whose prev_event_hash names E) hits ErrEventHashChain — a TRANSIENT
+// quarantine that holds the cursor, so E2 is re-delivered. Once E's grant
+// arrives, the replay recovers E, and the re-delivered E2 then chains onto it
+// cleanly: the whole origin-device tail converges instead of wedging.
+func TestReplayRecoveryUnblocksHashChainSuccessor(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newSyncStore(t)
+	kr := newFakeKeyring(t, 1)
+	heldWCK, _ := kr.WCK(1)
+	fleetWCK, _ := NewWCK() // not yet granted
+
+	const dev = "dev_remote_chain"
+	e1Payload := `{"path":"work/chain-a","type":"git_repo","remote_key":"github.com/org/chain-a"}`
+	e1 := state.Event{
+		ID: "evt_chain_1", DeviceID: dev, Seq: 1, HLC: 20 << hlcLogicalBits,
+		Type: EventProjectAdded, PayloadJSON: e1Payload, ContentHash: state.ContentHash(e1Payload),
+	}
+	e2Payload := `{"path":"work/chain-b","type":"git_repo","remote_key":"github.com/org/chain-b"}`
+	e2 := state.Event{
+		ID: "evt_chain_2", DeviceID: dev, Seq: 2, HLC: 30 << hlcLogicalBits,
+		Type: EventProjectAdded, PayloadJSON: e2Payload, ContentHash: state.ContentHash(e2Payload),
+		PrevEventHash: e1.ContentHash,
+	}
+	sealed1, err := EncryptEvent(e1, fleetWCK, 1) // sealed under the ungranted key
+	if err != nil {
+		t.Fatal(err)
+	}
+	stripped1 := rewriteEnvelopeKID(t, sealed1, "") // hostile hub strips the hint
+	sealed2, err := EncryptEvent(e2, heldWCK, 1)    // successor decrypts fine
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	back := &recordingHub{events: []state.Event{stripped1, sealed2}}
+	hub := EncryptedHub{Hub: back, Keyring: kr, Stats: &PullStats{}}
+
+	pulled, err := hub.Pull(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	safe, stats, err := ApplyEventsWithStats(ctx, st, pulled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// E1 is quarantined (permanent class), E2 is hash-chain-held (transient):
+	// the cursor stays below E2 so it will be re-delivered.
+	if stats.Quarantined != 2 || !stats.CursorHeld {
+		t.Fatalf("stats = %+v, want Quarantined=2 CursorHeld=true", stats)
+	}
+	if safe >= e2.HLC {
+		t.Fatalf("safe cursor %d advanced past the held successor %d", safe, e2.HLC)
+	}
+
+	// The grant arrives; the replay recovers E1.
+	kr.addKey(1, fleetWCK)
+	if n, err := ReplayUndecryptableConflicts(ctx, st, hub); err != nil || n != 1 {
+		t.Fatalf("replay = (%d, %v), want (1, nil)", n, err)
+	}
+	// The next pull re-delivers E2 (cursor was held below it); it now chains
+	// onto the recovered E1 and applies.
+	pulled, err = hub.Pull(ctx, safe+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ApplyEventsWithStats(ctx, st, pulled); err != nil {
+		t.Fatal(err)
+	}
+	projection := projectionOf(t, st)
+	if projection["work/chain-a"] != "github.com/org/chain-a" || projection["work/chain-b"] != "github.com/org/chain-b" {
+		t.Fatalf("origin-device tail did not converge: %+v", projection)
 	}
 }
