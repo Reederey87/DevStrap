@@ -3,7 +3,9 @@ package hub
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"sort"
 	"strings"
@@ -22,11 +24,20 @@ func newTestR2Hub(t *testing.T) R2Hub {
 
 func TestR2EventKeyImmutable(t *testing.T) {
 	h := newTestR2Hub(t)
-	e := makeEvent("evt_001", "dev_a", 123456, 1, "project.added", `{"path":"x"}`)
+	e := makeEvent("evt_001", "dev_a", 123456, 7, "project.added", `{"path":"x"}`)
 	key := h.eventKey(e)
-	want := "workspaces/ws_test/events/00000000000000123456/dev_a/1/evt_001.json"
+	want := "workspaces/ws_test/eventlog/dev_a/00000000000000000007_evt_001.json"
 	if key != want {
 		t.Errorf("eventKey = %q, want %q", key, want)
+	}
+}
+
+func TestR2PushRefusesNonPositiveSeq(t *testing.T) {
+	ctx := context.Background()
+	h := newTestR2Hub(t)
+	e := makeEvent("evt_001", "dev_a", 100, 0, "project.added", `{"path":"x"}`)
+	if err := h.Push(ctx, []state.Event{e}); err == nil {
+		t.Fatal("Push accepted a Seq<=0 event; the seq-keyed layout cannot represent it")
 	}
 }
 
@@ -50,7 +61,7 @@ func assertHubRoundTrip(t *testing.T, ctx context.Context, h R2Hub) {
 	if err := h.Push(ctx, events); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
-	pulled, err := h.Pull(ctx, 0)
+	pulled, err := h.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
@@ -61,37 +72,52 @@ func assertHubRoundTrip(t *testing.T, ctx context.Context, h R2Hub) {
 		t.Errorf("Pull order: HLCs = %d %d %d, want 100 150 200", pulled[0].HLC, pulled[1].HLC, pulled[2].HLC)
 	}
 
-	// EAGER-02 cursor-based pull + HUB-13 inclusive boundary: Pull(afterHLC)
-	// returns events with HLC >= afterHLC, so a same-HLC late arrival is not dropped.
-	pulled, err = h.Pull(ctx, 150)
+	// EAGER-02/P5-SYNC-01 per-device Seq cursor: the boundary is exact (no
+	// HUB-13 overlap re-delivery), and each device's stream resumes
+	// independently.
+	pulled, err = h.Pull(ctx, dssync.Cursor{"dev_a": 1})
 	if err != nil {
-		t.Fatalf("Pull(150): %v", err)
+		t.Fatalf("Pull(dev_a:1): %v", err)
 	}
 	if len(pulled) != 2 {
-		t.Errorf("Pull(150) = %d events, want 2 (inclusive boundary + newer)", len(pulled))
+		t.Errorf("Pull(dev_a:1) = %d events, want 2 (dev_a seq 2 + dev_b seq 1)", len(pulled))
 	}
-	pulled, err = h.Pull(ctx, 200)
+	pulled, err = h.Pull(ctx, dssync.Cursor{"dev_a": 2})
 	if err != nil {
-		t.Fatalf("Pull(200): %v", err)
+		t.Fatalf("Pull(dev_a:2): %v", err)
 	}
 	if len(pulled) != 1 || pulled[0].ID != "evt_002" {
-		t.Errorf("Pull(200) = %v, want the boundary evt_002 (inclusive)", pulled)
+		t.Errorf("Pull(dev_a:2) = %v, want only dev_b's evt_002", pulled)
 	}
-	pulled, err = h.Pull(ctx, 201)
+	pulled, err = h.Pull(ctx, dssync.Cursor{"dev_a": 2, "dev_b": 1})
 	if err != nil {
-		t.Fatalf("Pull(201): %v", err)
+		t.Fatalf("Pull(both consumed): %v", err)
 	}
 	if len(pulled) != 0 {
-		t.Errorf("Pull(201) = %d events, want 0", len(pulled))
+		t.Errorf("Pull(both consumed) = %d events, want 0", len(pulled))
+	}
+	// P5-SYNC-01 the defect scenario at hub level: an event pushed LATE with
+	// an HLC (and seq) far below another device's already-consumed positions
+	// is still delivered — the per-device cursor cannot skip it.
+	late := makeEvent("evt_late", "dev_c", 50, 1, "project.added", `{"path":"late"}`)
+	if err := h.Push(ctx, []state.Event{late}); err != nil {
+		t.Fatalf("Push late: %v", err)
+	}
+	pulled, err = h.Pull(ctx, dssync.Cursor{"dev_a": 2, "dev_b": 1})
+	if err != nil {
+		t.Fatalf("Pull after late push: %v", err)
+	}
+	if len(pulled) != 1 || pulled[0].ID != "evt_late" {
+		t.Errorf("late-pushed old-HLC event not delivered: got %v", pulled)
 	}
 
 	// HUB-06: re-pushing the same event is a no-op (conditional put dedup).
 	if err := h.Push(ctx, []state.Event{events[0]}); err != nil {
 		t.Fatalf("re-Push (dup): %v", err)
 	}
-	pulled, _ = h.Pull(ctx, 0)
-	if len(pulled) != 3 {
-		t.Errorf("after duplicate push, got %d events, want 3", len(pulled))
+	pulled, _ = h.Pull(ctx, nil)
+	if len(pulled) != 4 {
+		t.Errorf("after duplicate push, got %d events, want 4 (3 originals + the late push)", len(pulled))
 	}
 
 	// Blob plane: content-addressed put/get is idempotent and byte-faithful.
@@ -186,7 +212,7 @@ func TestR2WorkspacePrefixIsolation(t *testing.T) {
 		t.Fatalf("founder PutBlob: %v", err)
 	}
 
-	pairedEvents, err := paired.Pull(ctx, 0)
+	pairedEvents, err := paired.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("paired Pull: %v", err)
 	}
@@ -209,7 +235,7 @@ func TestR2WorkspacePrefixIsolation(t *testing.T) {
 		t.Errorf("paired GetBlob = %q, want %q", got, blobData)
 	}
 
-	otherEvents, err := other.Pull(ctx, 0)
+	otherEvents, err := other.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("other Pull: %v", err)
 	}
@@ -236,26 +262,113 @@ func TestR2WorkspacePrefixIsolation(t *testing.T) {
 	}
 }
 
-// P5-HUB-03: a Pull whose cursor is below the retention horizon must return
-// ErrSnapshotRequired instead of a silently-incomplete (post-compaction) set.
+// P5-HUB-03 (Seq-re-based): a Pull whose per-device cursor would leave a gap
+// below that device's retention floor must return ErrSnapshotRequired instead
+// of a silently-incomplete (post-compaction) set.
 func TestR2HubPullRetentionFloor(t *testing.T) {
 	ctx := context.Background()
 	h := newTestR2Hub(t)
-	h.RetentionHLC = 100
-	if err := h.Push(ctx, []state.Event{makeEvent("evt_1", "dev_a", 150, 1, "project.added", `{"path":"a"}`)}); err != nil {
+	h.RetentionSeqs = map[string]int64{"dev_a": 5}
+	if err := h.Push(ctx, []state.Event{makeEvent("evt_1", "dev_a", 150, 6, "project.added", `{"path":"a"}`)}); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
-	// Below the floor → snapshot required.
-	if _, err := h.Pull(ctx, 50); !errors.Is(err, dssync.ErrSnapshotRequired) {
-		t.Fatalf("Pull(50) = %v, want ErrSnapshotRequired", err)
+	// Cursor below the floor (next needed seq 3 < min retained 5) → snapshot.
+	if _, err := h.Pull(ctx, dssync.Cursor{"dev_a": 2}); !errors.Is(err, dssync.ErrSnapshotRequired) {
+		t.Fatalf("Pull(dev_a:2) = %v, want ErrSnapshotRequired", err)
 	}
-	// At/above the floor → normal incremental pull.
-	pulled, err := h.Pull(ctx, 100)
+	// Cursor exactly at the floor boundary (next needed seq 5 == floor) →
+	// normal incremental pull.
+	pulled, err := h.Pull(ctx, dssync.Cursor{"dev_a": 4})
 	if err != nil {
-		t.Fatalf("Pull(100): %v", err)
+		t.Fatalf("Pull(dev_a:4): %v", err)
 	}
 	if len(pulled) != 1 {
-		t.Fatalf("Pull(100) = %d events, want 1", len(pulled))
+		t.Fatalf("Pull(dev_a:4) = %d events, want 1", len(pulled))
+	}
+}
+
+// P5-SYNC-01: the legacy HLC-keyed layout stays readable (dual-read), the
+// per-device cursor applies to parsed legacy keys, unparseable legacy keys
+// fail open toward fetching, and events present under both layouts dedup.
+func TestR2HubPullLegacyLayoutDualRead(t *testing.T) {
+	ctx := context.Background()
+	h := newTestR2Hub(t)
+	mem := h.S3.(*memS3)
+	legacy := func(e state.Event) string {
+		raw, _ := json.Marshal(e)
+		key := fmt.Sprintf("workspaces/%s/events/%020d/%s/%d/%s.json", h.WorkspaceID, e.HLC, e.DeviceID, e.Seq, e.ID)
+		if err := mem.PutObject(ctx, key, raw, true); err != nil {
+			t.Fatalf("seed legacy object: %v", err)
+		}
+		return key
+	}
+	eA1 := makeEvent("evt_a1", "dev_a", 100, 1, "project.added", `{"path":"a"}`)
+	eA2 := makeEvent("evt_a2", "dev_a", 200, 2, "project.updated", `{"path":"a"}`)
+	legacy(eA1)
+	legacy(eA2)
+	// An unparseable legacy key (missing seq segment) must still be fetched.
+	oddball := makeEvent("evt_odd", "dev_b", 150, 1, "project.added", `{"path":"b"}`)
+	rawOdd, _ := json.Marshal(oddball)
+	if err := mem.PutObject(ctx, fmt.Sprintf("workspaces/%s/events/strange-key.json", h.WorkspaceID), rawOdd, true); err != nil {
+		t.Fatalf("seed oddball: %v", err)
+	}
+	// A new-layout copy of eA2 (as a future migrate-events would create) must
+	// dedup with its legacy twin.
+	if err := h.Push(ctx, []state.Event{eA2}); err != nil {
+		t.Fatalf("Push new-layout twin: %v", err)
+	}
+
+	pulled, err := h.Pull(ctx, nil)
+	if err != nil {
+		t.Fatalf("Pull(nil): %v", err)
+	}
+	if len(pulled) != 3 {
+		t.Fatalf("Pull(nil) = %d events, want 3 (a1, odd, a2 — deduped)", len(pulled))
+	}
+	// The per-device cursor prunes parsed legacy keys: dev_a consumed through
+	// seq 1 → only a2 (and the unparseable-key event, seq-filtered after
+	// fetch by its own Seq > cursor) remain.
+	pulled, err = h.Pull(ctx, dssync.Cursor{"dev_a": 1})
+	if err != nil {
+		t.Fatalf("Pull(dev_a:1): %v", err)
+	}
+	var ids []string
+	for _, e := range pulled {
+		ids = append(ids, e.ID)
+	}
+	if len(pulled) != 2 || pulled[0].ID != "evt_odd" || pulled[1].ID != "evt_a2" {
+		t.Fatalf("Pull(dev_a:1) ids = %v, want [evt_odd evt_a2]", ids)
+	}
+	// A legacy-only late push (an old binary writing the retired layout) is
+	// still caught by the per-device cursor logic.
+	lateOld := makeEvent("evt_late_legacy", "dev_c", 10, 1, "project.added", `{"path":"c"}`)
+	legacy(lateOld)
+	pulled, err = h.Pull(ctx, dssync.Cursor{"dev_a": 2, "dev_b": 1})
+	if err != nil {
+		t.Fatalf("Pull after legacy late push: %v", err)
+	}
+	if len(pulled) != 1 || pulled[0].ID != "evt_late_legacy" {
+		t.Fatalf("legacy late push not delivered: %v", pulled)
+	}
+}
+
+// P5-SYNC-01: device-stream discovery lists the eventlog prefix with a
+// delimiter, so a brand-new device's stream is pulled with no cursor entry.
+func TestR2HubDeviceDiscovery(t *testing.T) {
+	ctx := context.Background()
+	h := newTestR2Hub(t)
+	if err := h.Push(ctx, []state.Event{
+		makeEvent("evt_a1", "dev_a", 100, 1, "t", `{}`),
+		makeEvent("evt_b1", "dev_b", 200, 1, "t", `{}`),
+	}); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	pulled, err := h.Pull(ctx, dssync.Cursor{"dev_a": 1})
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	if len(pulled) != 1 || pulled[0].ID != "evt_b1" {
+		t.Fatalf("unknown device's stream not discovered: %v", pulled)
 	}
 }
 
@@ -327,7 +440,7 @@ func TestR2Pagination(t *testing.T) {
 		}
 	}
 	// Force small page size by directly using the S3 client.
-	prefix := h.eventsPrefix()
+	prefix := h.eventlogPrefix()
 	objs, _, err := h.S3.ListObjectsV2(ctx, prefix, "", 3)
 	if err != nil {
 		t.Fatalf("ListObjectsV2: %v", err)

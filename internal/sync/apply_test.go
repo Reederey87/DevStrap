@@ -328,12 +328,12 @@ func TestApplyEventsQuarantinesVerificationFailureAndAdvancesCursor(t *testing.T
 	revokedB1 := signedProjectEvent(t, bSigning, "device-b", 1, 20<<hlcLogicalBits, "work/acme/b1", "github.com/acme/b1")
 	validC2 := signedProjectEvent(t, cSigning, "device-c", 2, 30<<hlcLogicalBits, "work/acme/c2", "github.com/acme/c2")
 
-	safeCursor, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{validC1, revokedB1, validC2})
+	safeCursor, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{validC1, revokedB1, validC2}, nil)
 	if err != nil {
 		t.Fatalf("ApplyEvents should quarantine verification failure and continue: %v", err)
 	}
-	if safeCursor != 30<<hlcLogicalBits {
-		t.Fatalf("safeCursor = %d, want %d", safeCursor, 30<<hlcLogicalBits)
+	if safeCursor.After("device-c") != 2 || safeCursor.After("device-b") != 1 {
+		t.Fatalf("safeCursor = %v, want device-c:2 device-b:1", safeCursor)
 	}
 	// P6-HUB-01: the quarantine must be visible to callers (gc gate). The
 	// verification quarantine is permanent, so it does not hold the cursor.
@@ -392,8 +392,8 @@ func TestApplyEventsQuarantinedTrailingEventAdvancesCursor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyEvents should quarantine trailing verification failure: %v", err)
 	}
-	if safeCursor != 20<<hlcLogicalBits {
-		t.Fatalf("safeCursor = %d, want %d (must pass the quarantined trailing event)", safeCursor, 20<<hlcLogicalBits)
+	if safeCursor.After("device-b") != 1 {
+		t.Fatalf("safeCursor = %v, want device-b:1 (must consume the quarantined trailing event)", safeCursor)
 	}
 }
 
@@ -429,8 +429,8 @@ func TestApplyEventsChainedRevokedEventsDoNotWedgeCursor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ApplyEvents should quarantine both chained revoked events: %v", err)
 	}
-	if safeCursor != 30<<hlcLogicalBits {
-		t.Fatalf("safeCursor = %d, want %d (chained revoked events must not hold the cursor)", safeCursor, 30<<hlcLogicalBits)
+	if safeCursor.After("device-b") != 2 || safeCursor.After("device-c") != 1 {
+		t.Fatalf("safeCursor = %v, want device-b:2 device-c:1 (chained revoked events must not hold the cursor)", safeCursor)
 	}
 	conflicts, err := st.OpenConflicts(ctx)
 	if err != nil {
@@ -471,12 +471,14 @@ func TestApplyEventsRevokedLastDeviceStaysFailClosed(t *testing.T) {
 	pendingP := signedProjectEvent(t, pSigning, "device-p", 1, 30<<hlcLogicalBits, "work/acme/p1", "github.com/acme/p1")
 	noKeyN := projEvent(t, "device-n", EventProjectAdded, 40, "work/acme/n1", "github.com/acme/n1")
 
-	safeCursor, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{revokedB, unknown, pendingP, noKeyN})
+	safeCursor, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{revokedB, unknown, pendingP, noKeyN}, nil)
 	if err != nil {
 		t.Fatalf("ApplyEvents should quarantine post-revoke events, not abort: %v", err)
 	}
-	if safeCursor != 40<<hlcLogicalBits {
-		t.Fatalf("safeCursor = %d, want %d", safeCursor, 40<<hlcLogicalBits)
+	// The signed events carry seqs and consume their slots; the unsigned
+	// Seq-0 events (unknown/no-key devices) cannot be cursored at all.
+	if safeCursor.After("device-b") != 1 || safeCursor.After("device-p") != 1 {
+		t.Fatalf("safeCursor = %v, want device-b:1 device-p:1", safeCursor)
 	}
 	if stats.Quarantined != 4 || stats.CursorHeld {
 		t.Fatalf("stats = %+v, want Quarantined=4 CursorHeld=false", stats)
@@ -719,6 +721,7 @@ func TestApplyEventsLowWaterMarkCursorHoldsBelowSkippedEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	broken.Seq = 1
 	broken.PrevEventHash = "sha256:bogus"
 
 	// device-b: valid first event at a higher HLC → applied.
@@ -728,8 +731,9 @@ func TestApplyEventsLowWaterMarkCursorHoldsBelowSkippedEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	valid.Seq = 1
 
-	safeCursor, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{broken, valid})
+	safeCursor, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{broken, valid}, nil)
 	if err != nil {
 		t.Fatalf("ApplyEvents should not abort on a hash-chain break: %v", err)
 	}
@@ -745,11 +749,14 @@ func TestApplyEventsLowWaterMarkCursorHoldsBelowSkippedEvent(t *testing.T) {
 	if len(projects) != 1 || projects[0].Path != "work/acme/valid" {
 		t.Fatalf("projects = %+v, want only the valid project applied", projects)
 	}
-	// SYNC-01: the safe cursor must be held below the broken event's HLC so it
-	// is re-delivered next pull. Without the low-water mark the cursor would
-	// advance to 20<<hlcLogicalBits and permanently strand the broken event.
-	if safeCursor >= 10<<hlcLogicalBits {
-		t.Fatalf("safeCursor = %d, want < %d (held below the skipped event)", safeCursor, 10<<hlcLogicalBits)
+	// SYNC-01/P5-SYNC-01: the hold is scoped to the offending origin device —
+	// device-x's cursor stays below its broken seq 1 (re-delivered next pull),
+	// while device-b's cursor still advances (per-device fault isolation).
+	if safeCursor.After("device-x") != 0 {
+		t.Fatalf("safeCursor = %v, want device-x held at 0 below the broken event", safeCursor)
+	}
+	if safeCursor.After("device-b") != 1 {
+		t.Fatalf("safeCursor = %v, want device-b:1 (other devices unaffected by the hold)", safeCursor)
 	}
 	// A hash-chain conflict was recorded (deduped on re-delivery).
 	conflicts, err := st.OpenConflicts(ctx)
@@ -775,6 +782,7 @@ func TestApplyEventsPermanentInvalidDoesNotHoldCursor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	poison.Seq = 1
 	// device-b: valid event at a small positive HLC → applied.
 	valid, err := NewProjectEvent("device-b", EventProjectAdded, 10<<hlcLogicalBits, ProjectPayload{
 		Path: "work/acme/valid", Type: "git_repo", RemoteKey: "github.com/acme/valid",
@@ -782,15 +790,20 @@ func TestApplyEventsPermanentInvalidDoesNotHoldCursor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	valid.Seq = 1
 
 	safeCursor, err := ApplyEvents(ctx, st, []state.Event{poison, valid})
 	if err != nil {
 		t.Fatalf("ApplyEvents should not abort on a quarantined event: %v", err)
 	}
-	// The valid event was applied and the cursor advanced to its HLC — the
-	// permanently-invalid HLC=0 event did not hold it back.
-	if safeCursor != 10<<hlcLogicalBits {
-		t.Fatalf("safeCursor = %d, want %d (cursor not held by permanent-invalid event)", safeCursor, 10<<hlcLogicalBits)
+	// The valid event was applied and its device's cursor advanced; the
+	// permanently-invalid HLC=0 event consumed its own slot instead of
+	// holding anything.
+	if safeCursor.After("device-b") != 1 {
+		t.Fatalf("safeCursor = %v, want device-b:1 (cursor not held by permanent-invalid event)", safeCursor)
+	}
+	if safeCursor.After("device-x") != 1 {
+		t.Fatalf("safeCursor = %v, want device-x:1 (permanent-invalid event consumes its slot)", safeCursor)
 	}
 }
 
@@ -941,15 +954,15 @@ func TestApplyEventsQuarantinesUndecryptableCarrier(t *testing.T) {
 	// otherWCK, so the carrier reaches ApplyEvents still encrypted.
 	good := projEvent(t, device.ID, EventProjectAdded, 30, "work/good", "github.com/org/good")
 
-	safe, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{carrier, good})
+	safe, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{carrier, good}, nil)
 	if err != nil {
 		t.Fatalf("ApplyEventsWithStats: %v", err)
 	}
 	if stats.Quarantined != 1 {
 		t.Fatalf("Quarantined = %d, want 1", stats.Quarantined)
 	}
-	if safe != 30<<hlcLogicalBits {
-		t.Fatalf("safeAdvanceHLC = %d, want %d (cursor advances past the permanent quarantine)", safe, int64(30)<<hlcLogicalBits)
+	if safe.After("dev_remote") != 1 {
+		t.Fatalf("safe = %v, want dev_remote:1 (cursor advances past the permanent quarantine)", safe)
 	}
 	if projection := projectionOf(t, st); projection["work/good"] == "" {
 		t.Fatalf("good event did not apply: %+v", projection)
@@ -983,7 +996,7 @@ func TestApplyEventsQuarantinesUndecryptableCarrier(t *testing.T) {
 		t.Fatal("undecryptable carrier was inserted into the event log")
 	}
 	// Re-delivery dedups onto the same conflict row.
-	if _, _, err := ApplyEventsWithStats(ctx, st, []state.Event{carrier}); err != nil {
+	if _, _, err := ApplyEventsWithStats(ctx, st, []state.Event{carrier}, nil); err != nil {
 		t.Fatalf("re-delivery: %v", err)
 	}
 	conflicts, err = st.OpenConflicts(ctx)
@@ -995,60 +1008,117 @@ func TestApplyEventsQuarantinesUndecryptableCarrier(t *testing.T) {
 	}
 }
 
-// TestApplyEventsImplausibleCarrierHLCDoesNotJumpCursor (CodeRabbit, PR #44):
-// the carrier HLC is hub-writable — the mutation that made a carrier
-// undecryptable may BE an HLC rewrite — so a poisoned carrier with a
-// far-future HLC must be quarantined WITHOUT advancing the cursor past real
-// events (and without holding it: it is re-delivered and re-deduped later).
-func TestApplyEventsImplausibleCarrierHLCDoesNotJumpCursor(t *testing.T) {
+// TestApplyEventsSameSeqDifferentIDQuarantinesAsDivergent (post-#59 opus
+// review, Major): a second event claiming an already-occupied (device, seq)
+// slot under a DIFFERENT event id — a byzantine or backup-restored device
+// re-minting a sequence number — must quarantine as a permanent divergence
+// (consumed slot, batch continues), never surface as a raw SQL error that
+// aborts the whole batch on every pull forever.
+func TestApplyEventsSameSeqDifferentIDQuarantinesAsDivergent(t *testing.T) {
 	ctx := context.Background()
-	st, device := newSyncStore(t)
+	st, _ := newSyncStore(t)
 
+	first, err := NewProjectEvent("device-x", EventProjectAdded, 10<<hlcLogicalBits, ProjectPayload{
+		Path: "work/acme/first", Type: "git_repo", RemoteKey: "github.com/acme/first",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Seq = 1
+	// Same (device, seq), different id and content: an equivocation.
+	equivocation, err := NewProjectEvent("device-x", EventProjectAdded, 15<<hlcLogicalBits, ProjectPayload{
+		Path: "work/acme/other", Type: "git_repo", RemoteKey: "github.com/acme/other",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	equivocation.Seq = 1
+	// A later valid event from another device: the batch must keep going.
+	valid, err := NewProjectEvent("device-b", EventProjectAdded, 20<<hlcLogicalBits, ProjectPayload{
+		Path: "work/acme/valid", Type: "git_repo", RemoteKey: "github.com/acme/valid",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid.Seq = 1
+
+	safe, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{first, equivocation, valid}, nil)
+	if err != nil {
+		t.Fatalf("ApplyEvents must quarantine the equivocation, not abort: %v", err)
+	}
+	if stats.Quarantined != 1 || stats.CursorHeld {
+		t.Fatalf("stats = %+v, want Quarantined=1 CursorHeld=false", stats)
+	}
+	// Both device cursors advance: the equivocation is a consumed permanent
+	// quarantine at an already-consumed slot.
+	if safe.After("device-x") != 1 || safe.After("device-b") != 1 {
+		t.Fatalf("safe = %v, want device-x:1 device-b:1", safe)
+	}
+	conflicts, err := st.OpenConflicts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countConflictType(conflicts, ConflictEventVerification); got != 1 {
+		t.Fatalf("verification conflicts = %d, want 1 (the divergent equivocation): %+v", got, conflicts)
+	}
+	projection := projectionOf(t, st)
+	if _, ok := projection["work/acme/first"]; !ok {
+		t.Fatalf("first occupant did not apply: %+v", projection)
+	}
+	if _, ok := projection["work/acme/other"]; ok {
+		t.Fatalf("equivocation applied: %+v", projection)
+	}
+	if _, ok := projection["work/acme/valid"]; !ok {
+		t.Fatalf("batch did not continue past the equivocation: %+v", projection)
+	}
+}
+
+// TestApplyEventsForgedCarrierCannotAdvancePastHeldSlot (P5-SYNC-01 successor
+// to the PR #44 implausible-HLC guard, which protected the retired HLC
+// cursor): EVERY carrier field of an undecryptable envelope is hub-writable —
+// Seq included, since AEAD authentication failed — so a forged, consumed
+// carrier occupying the same (device, seq) slot as a real, transiently-held
+// event must not let that device's cursor advance over the slot (held
+// dominates consumed in the per-slot outcome). Otherwise a hostile hub could
+// pair every held event with a forged twin and strand it forever.
+func TestApplyEventsForgedCarrierCannotAdvancePastHeldSlot(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newSyncStore(t)
+
+	// Real event from device-r at seq 1, transiently skew-held (far-future
+	// HLC beyond the trusted skew).
+	farFuture := (time.Now().Add(24 * time.Hour).UnixMilli()) << hlcLogicalBits
+	held, err := NewProjectEvent("device-r", EventProjectAdded, farFuture, ProjectPayload{
+		Path: "work/acme/held", Type: "git_repo", RemoteKey: "github.com/acme/held",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	held.Seq = 1
+
+	// Forged undecryptable carrier claiming the SAME (device, seq) slot.
 	otherWCK, _ := NewWCK()
 	carrier, err := EncryptEvent(state.Event{
-		ID: "evt_hlc_bomb", DeviceID: "dev_remote", Seq: 1, HLC: 20 << hlcLogicalBits,
+		ID: "evt_forge", DeviceID: "device-r", Seq: 1, HLC: 20 << hlcLogicalBits,
 		Type:        EventProjectAdded,
-		PayloadJSON: `{"path":"work/bomb"}`,
-		ContentHash: state.ContentHash(`{"path":"work/bomb"}`),
+		PayloadJSON: `{"path":"work/forge"}`,
+		ContentHash: state.ContentHash(`{"path":"work/forge"}`),
 	}, otherWCK, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The hub rewrites the carrier HLC to the far future (which is also what
-	// breaks the AEAD). ApplyEvents sees the rewritten value.
-	farFuture := (time.Now().Add(24 * time.Hour).UnixMilli()) << hlcLogicalBits
-	carrier.HLC = farFuture
 
-	good := projEvent(t, device.ID, EventProjectAdded, 30, "work/real", "github.com/org/real")
-
-	safe, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{good, carrier})
+	safe, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{held, carrier}, nil)
 	if err != nil {
 		t.Fatalf("ApplyEventsWithStats: %v", err)
 	}
-	if stats.Quarantined != 1 {
-		t.Fatalf("Quarantined = %d, want 1", stats.Quarantined)
+	if stats.Quarantined != 2 {
+		t.Fatalf("Quarantined = %d, want 2 (skew hold + undecryptable)", stats.Quarantined)
 	}
-	if stats.CursorHeld {
-		t.Fatal("implausible carrier must not hold the cursor")
+	if !stats.CursorHeld {
+		t.Fatal("contested slot must report CursorHeld")
 	}
-	if safe != 30<<hlcLogicalBits {
-		t.Fatalf("safeAdvanceHLC = %d, want %d — the poisoned carrier's HLC must not drag the cursor", safe, int64(30)<<hlcLogicalBits)
-	}
-	// A plausible carrier HLC still advances the cursor (no eternal re-delivery).
-	carrier2, err := EncryptEvent(state.Event{
-		ID: "evt_plain_poison", DeviceID: "dev_remote", Seq: 2, HLC: 40 << hlcLogicalBits,
-		Type:        EventProjectAdded,
-		PayloadJSON: `{"path":"work/poison2"}`,
-		ContentHash: state.ContentHash(`{"path":"work/poison2"}`),
-	}, otherWCK, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	safe, _, err = ApplyEventsWithStats(ctx, st, []state.Event{carrier2})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if safe != 40<<hlcLogicalBits {
-		t.Fatalf("plausible carrier safeAdvanceHLC = %d, want %d", safe, int64(40)<<hlcLogicalBits)
+	if safe.After("device-r") != 0 {
+		t.Fatalf("safe = %v — a forged consumed carrier must not advance past the held real event", safe)
 	}
 }

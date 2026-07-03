@@ -2600,6 +2600,24 @@ FROM events
 WHERE id = ?;
 `, event.ID)
 	if err := row.Scan(&existing.ID, &existing.WorkspaceID, &existing.DeviceID, &existing.Seq, &existing.HLC, &existing.Type, &existing.PayloadJSON, &existing.ContentHash, &existing.DeviceSig, &existing.PrevEventHash, &existing.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) && event.Seq > 0 {
+			// INSERT OR IGNORE swallowed a uniqueness violation that was NOT
+			// the event id — the only other unique key on events is
+			// (device_id, seq). A second event with the same seq but a
+			// different id is a same-seq equivocation (a byzantine or
+			// backup-restored device re-minting a sequence number): a
+			// PERMANENT divergence, so classify it as ErrDivergentEvent —
+			// ApplyEvents quarantines just this event and the batch continues.
+			// Returning the raw no-rows error instead would abort the whole
+			// batch on every pull forever (post-#59 opus review, Major).
+			var occupant string
+			if lookupErr := exec.QueryRowContext(ctx, `
+SELECT id FROM events WHERE device_id = ? AND seq = ?;
+`, event.DeviceID, event.Seq).Scan(&occupant); lookupErr == nil && occupant != event.ID {
+				return false, fmt.Errorf("%w: event %s claims seq %d already held by %s for device %s",
+					ErrDivergentEvent, event.ID, event.Seq, occupant, event.DeviceID)
+			}
+		}
 		return false, fmt.Errorf("read existing event %s: %w", event.ID, err)
 	}
 	if !sameImmutableEvent(existing, event) {
@@ -2991,6 +3009,156 @@ WHERE excluded.last_hlc_applied > hub_cursors.last_hlc_applied;
 		return fmt.Errorf("advance hub cursor: %w", err)
 	}
 	return nil
+}
+
+// HubDeviceCursors returns the per-origin-device transport cursor for a hub
+// (P5-SYNC-01): device_id -> highest contiguous per-device seq pulled AND
+// consumed. Devices with no row are absent (cursor 0 — pull from the
+// beginning). Push-watermark rows live under a "push:<hubID>" hub_id and are
+// not returned here.
+func (s *Store) HubDeviceCursors(ctx context.Context, hubID string) (map[string]int64, error) {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT device_id, last_seq_pulled FROM hub_device_cursors WHERE workspace_id = ? AND hub_id = ?;
+`, workspaceID, hubID)
+	if err != nil {
+		return nil, fmt.Errorf("read hub device cursors: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]int64{}
+	for rows.Next() {
+		var dev string
+		var seq int64
+		if err := rows.Scan(&dev, &seq); err != nil {
+			return nil, fmt.Errorf("scan hub device cursor: %w", err)
+		}
+		out[dev] = seq
+	}
+	return out, rows.Err()
+}
+
+// AdvanceHubDeviceCursor records that every event from deviceID up to seq has
+// been pulled and consumed from the given hub (P5-SYNC-01). Forward-only: a
+// smaller seq than the stored value is ignored so a stale re-pull cannot
+// regress the cursor.
+func (s *Store) AdvanceHubDeviceCursor(ctx context.Context, hubID, deviceID string, seq int64) error {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return err
+	}
+	now := timestampNow()
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO hub_device_cursors (workspace_id, hub_id, device_id, last_seq_pulled, updated_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(workspace_id, hub_id, device_id) DO UPDATE SET
+  last_seq_pulled = MAX(excluded.last_seq_pulled, hub_device_cursors.last_seq_pulled),
+  updated_at = excluded.updated_at
+WHERE excluded.last_seq_pulled > hub_device_cursors.last_seq_pulled;
+`, workspaceID, hubID, deviceID, seq, now)
+	if err != nil {
+		return fmt.Errorf("advance hub device cursor: %w", err)
+	}
+	return nil
+}
+
+// PushSeqCursor returns the local device's push watermark for a hub as a Seq
+// (P5-SYNC-01, replacing the SYNC-04 HLC watermark, whose `hlc >` selection
+// would silently strand events if the local HLC ever regressed relative to
+// seq order). There is deliberately NO backfill from the legacy HLC
+// watermark: inferring "already pushed" from `hlc <= watermark` would bake in
+// the exact loss mode this cursor fixes — an unpushed local event stamped
+// with a regressed HLC below the old watermark would be marked pushed forever
+// (post-#59 Codex review, P2). A fresh watermark of 0 merely re-pushes local
+// history once — idempotent per event ID (conditional-put dedup) and an
+// opportunistic re-key of this device's legacy-layout events into the
+// seq-keyed layout — never lossy.
+func (s *Store) PushSeqCursor(ctx context.Context, hubID string) (int64, error) {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return 0, err
+	}
+	device, err := s.CurrentDevice(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("read current device for push cursor: %w", err)
+	}
+	var seq int64
+	err = s.db.QueryRowContext(ctx, `
+SELECT last_seq_pulled FROM hub_device_cursors WHERE workspace_id = ? AND hub_id = ? AND device_id = ?;
+`, workspaceID, "push:"+hubID, device.ID).Scan(&seq)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read push cursor: %w", err)
+	}
+	return seq, nil
+}
+
+// AdvancePushSeqCursor advances the local device's push watermark for a hub
+// (P5-SYNC-01). Forward-only, like AdvanceHubDeviceCursor.
+func (s *Store) AdvancePushSeqCursor(ctx context.Context, hubID string, seq int64) error {
+	device, err := s.CurrentDevice(ctx)
+	if err != nil {
+		return fmt.Errorf("read current device for push cursor: %w", err)
+	}
+	return s.AdvanceHubDeviceCursor(ctx, "push:"+hubID, device.ID, seq)
+}
+
+// HasHubDeviceCursors reports whether ANY per-device cursor row (pull or push)
+// with a non-zero position exists for the given hub (P5-SYNC-01 founder gate):
+// a device that has ever consumed hub content must never self-found a
+// workspace key (P6-SEC-02).
+func (s *Store) HasHubDeviceCursors(ctx context.Context, hubID string) (bool, error) {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return false, err
+	}
+	var one int
+	err = s.db.QueryRowContext(ctx, `
+SELECT 1 FROM hub_device_cursors
+WHERE workspace_id = ? AND hub_id IN (?, ?) AND last_seq_pulled > 0
+LIMIT 1;
+`, workspaceID, hubID, "push:"+hubID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check hub device cursors: %w", err)
+	}
+	return true, nil
+}
+
+// LocalPendingEventsBySeq returns events originated by the local device with
+// Seq strictly greater than afterSeq, in Seq order (P5-SYNC-01 push side).
+// Seq is the authoritative gapless per-device key, so unlike the retired
+// `hlc >` selection this can never strand an event behind the watermark.
+func (s *Store) LocalPendingEventsBySeq(ctx context.Context, afterSeq int64) ([]Event, error) {
+	device, err := s.CurrentDevice(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read current device for local pending events: %w", err)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, workspace_id, device_id, COALESCE(seq, 0), hlc, type, payload_json, content_hash, COALESCE(device_sig, ''), COALESCE(prev_event_hash, ''), created_at
+FROM events
+WHERE device_id = ? AND seq IS NOT NULL AND seq > ?
+ORDER BY seq ASC;
+`, device.ID, afterSeq)
+	if err != nil {
+		return nil, fmt.Errorf("list local pending events: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var events []Event
+	for rows.Next() {
+		var e Event
+		if err := rows.Scan(&e.ID, &e.WorkspaceID, &e.DeviceID, &e.Seq, &e.HLC, &e.Type, &e.PayloadJSON, &e.ContentHash, &e.DeviceSig, &e.PrevEventHash, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan event: %w", err)
+		}
+		events = append(events, e)
+	}
+	return events, rows.Err()
 }
 
 // CurrentKeyEpoch returns the highest WCK epoch this device holds a key for

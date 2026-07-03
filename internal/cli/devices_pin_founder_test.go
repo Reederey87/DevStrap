@@ -145,7 +145,7 @@ func TestUnpinnedJoinerAcceptsForgedGrant(t *testing.T) {
 		Keyring: keyring,
 		Verify:  j.store.VerifyRemoteEvent,
 	}
-	pulled, err := hub.Pull(ctx, 0)
+	pulled, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
@@ -192,7 +192,7 @@ func TestPinnedJoinerRefusesForgedGrantBeforeFirstSync(t *testing.T) {
 		Keyring: keyring,
 		Verify:  j.store.VerifyRemoteEvent,
 	}
-	pulled, err := hub.Pull(ctx, 0)
+	pulled, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestPinnedJoinerIngestsFounderSignedGrant(t *testing.T) {
 		Keyring: keyring,
 		Verify:  j.store.VerifyRemoteEvent,
 	}
-	pulled, err := hub.Pull(ctx, 0)
+	pulled, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
 	}

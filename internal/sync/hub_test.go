@@ -105,47 +105,55 @@ func TestFileHubHasEvents(t *testing.T) {
 	}
 }
 
-// TestFileHubPullInclusiveBoundaryDeliversSameHLC (HUB-13): the pull boundary
-// is inclusive (>=) so a same-HLC event from another device that arrives AFTER
-// the cursor was advanced to that HLC is still delivered on the next pull. With
-// a strict > boundary it would be silently dropped — a lost namespace event.
-// Re-delivering the boundary is safe because ApplyEvents dedups by event ID.
-func TestFileHubPullInclusiveBoundaryDeliversSameHLC(t *testing.T) {
+// TestFileHubPullLateArrivalDelivered (P5-SYNC-01, retiring HUB-13): an event
+// from another device that lands on the hub AFTER this device's view has moved
+// on — same HLC, or an arbitrarily OLDER one (the "offline device forgot to
+// push" case the HLC watermark permanently stranded) — is still delivered,
+// because each origin device's stream has its own Seq cursor. The boundary is
+// exact: the consumed device's own events are NOT re-delivered (no HUB-13
+// overlap, zero re-delivery).
+func TestFileHubPullLateArrivalDelivered(t *testing.T) {
 	ctx := context.Background()
 	hub := FileHub{Path: filepath.Join(t.TempDir(), "hub.json")}
-	const hlc = int64(1000)
-	a := state.Event{ID: "evt-a", DeviceID: "dev-a", HLC: hlc, Type: "project.added", PayloadJSON: "{}", ContentHash: "sha256:a"}
-	b := state.Event{ID: "evt-b", DeviceID: "dev-b", HLC: hlc, Type: "project.added", PayloadJSON: "{}", ContentHash: "sha256:b"}
+	a := state.Event{ID: "evt-a", DeviceID: "dev-a", Seq: 1, HLC: 1000, Type: "project.added", PayloadJSON: "{}", ContentHash: "sha256:a"}
+	// B's event carries a far OLDER HLC (queued while offline) and lands late.
+	b := state.Event{ID: "evt-b", DeviceID: "dev-b", Seq: 1, HLC: 10, Type: "project.added", PayloadJSON: "{}", ContentHash: "sha256:b"}
 	if err := hub.Push(ctx, []state.Event{a}); err != nil {
 		t.Fatal(err)
 	}
-	// First pull from 0 delivers A; the cursor would advance to hlc.
-	first, err := hub.Pull(ctx, 0)
+	first, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(first) != 1 || first[0].ID != "evt-a" {
 		t.Fatalf("first pull = %+v, want only evt-a", first)
 	}
-	// B arrives at the same HLC after the cursor was set to hlc.
+	// The puller consumed dev-a through seq 1; THEN B's old event arrives.
 	if err := hub.Push(ctx, []state.Event{b}); err != nil {
 		t.Fatal(err)
 	}
-	// HUB-13: pull AT the cursor (hlc) must still deliver B (inclusive >=).
-	// A is re-delivered too (boundary overlap) and would be deduped by
-	// ApplyEvents; the critical assertion is that B is NOT dropped.
-	second, err := hub.Pull(ctx, hlc)
+	second, err := hub.Pull(ctx, Cursor{"dev-a": 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
-	for _, e := range second {
-		if e.ID == "evt-b" {
-			found = true
-		}
+	if len(second) != 1 || second[0].ID != "evt-b" {
+		t.Fatalf("second pull = %v, want exactly evt-b (late arrival delivered, boundary exact)", eventIDs(second))
 	}
-	if !found {
-		t.Fatalf("second pull at cursor = %v, want evt-b included (inclusive boundary)", eventIDs(second))
+}
+
+// TestFileHubPullRetentionFloorPerDevice (P5-HUB-03, Seq-re-based): a cursor
+// below any device's retention floor forces a snapshot exchange.
+func TestFileHubPullRetentionFloorPerDevice(t *testing.T) {
+	ctx := context.Background()
+	hub := FileHub{
+		Path:          filepath.Join(t.TempDir(), "hub.json"),
+		RetentionSeqs: map[string]int64{"dev-a": 5},
+	}
+	if _, err := hub.Pull(ctx, Cursor{"dev-a": 2}); !errors.Is(err, ErrSnapshotRequired) {
+		t.Fatalf("Pull below floor = %v, want ErrSnapshotRequired", err)
+	}
+	if _, err := hub.Pull(ctx, Cursor{"dev-a": 4}); err != nil {
+		t.Fatalf("Pull at floor boundary: %v", err)
 	}
 }
 

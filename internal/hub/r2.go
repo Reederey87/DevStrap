@@ -6,9 +6,24 @@
 // decrypt nothing and holds no private key.
 //
 // The event log is NOT one overwritten manifest object. Every event is an
-// immutable, unique, lexicographically sortable object (HUB-06):
+// immutable, unique, lexicographically sortable object (HUB-06). Since
+// P5-SYNC-01 the transport coordinate is the per-origin-device sequence
+// number, so Push writes per-device, seq-ordered keys:
+//
+//	workspaces/<workspace_id>/eventlog/<device_id>/<seq-padded>_<event_id>.json
+//
+// and Pull resumes each device's stream with a per-device Seq cursor
+// (delimiter-discovered device prefixes + StartAfter within each). The retired
+// HLC-keyed legacy layout
 //
 //	workspaces/<workspace_id>/events/<hlc-padded>/<device_id>/<seq>/<event_id>.json
+//
+// is still READ (dual-read) so pre-migration hubs keep working — Pull parses
+// (device, seq) out of legacy keys and applies the same per-device cursor;
+// unparseable legacy keys fail open toward fetching so a parse bug can never
+// silently lose events. Push never writes the legacy layout. A follow-up
+// `hub migrate-events` can re-key legacy objects and delete the old prefix;
+// the dual-read is O(1) on an empty prefix.
 //
 // Blobs are content-addressed (HUB-06):
 //
@@ -27,6 +42,7 @@ import (
 	"io"
 	"math/rand"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,6 +80,11 @@ type S3Client interface {
 	// for event objects, Key is the full trimmed key as before. When truncated,
 	// it returns the next key to continue from.
 	ListObjectsV2(ctx context.Context, prefix, startAfter string, maxKeys int) (objs []dssync.BlobInfo, nextStartAfter string, err error)
+	// ListCommonPrefixes returns the distinct sub-prefixes directly under
+	// prefix, grouped at the given delimiter (ListObjectsV2 CommonPrefixes).
+	// P5-SYNC-01 uses it to discover origin-device streams under the eventlog/
+	// prefix without listing every object.
+	ListCommonPrefixes(ctx context.Context, prefix, delimiter string) ([]string, error)
 }
 
 // R2Hub is the Cloudflare R2 zero-knowledge Hub backend (HUB-02). It implements
@@ -71,12 +92,16 @@ type S3Client interface {
 type R2Hub struct {
 	S3          S3Client
 	WorkspaceID string
-	// RetentionHLC is the hub's retention horizon (P5-HUB-03): the minimum HLC
-	// still retained on the hub. A Pull whose cursor falls below it returns
+	// RetentionSeqs is the hub's per-device retention horizon (P5-HUB-03,
+	// re-based on the P5-SYNC-01 Seq cursor): for each origin device, the
+	// minimum Seq still retained on the hub. A Pull whose cursor would leave a
+	// gap below a device's floor (after[dev]+1 < RetentionSeqs[dev]) returns
 	// dssync.ErrSnapshotRequired so the caller performs a full-state snapshot
 	// exchange instead of silently receiving a partial (post-compaction) event
-	// set and diverging. Zero means "no compaction yet" (R2 retains everything).
-	RetentionHLC int64
+	// set and diverging. Empty means "no compaction yet" (R2 retains
+	// everything). The future compaction marker must be recorded per device
+	// (e.g. eventlog/<device>/.retention).
+	RetentionSeqs map[string]int64
 	// Retry configures R2Hub-level retry, backoff, and error classification for
 	// S3 operations (HUB-10). A zero value uses a default policy: throttling
 	// (429/503 SlowDown) and transient (500/connection-reset) errors are retried
@@ -97,13 +122,14 @@ func (h R2Hub) retry() R2Retry {
 // Compile-time assertion that R2Hub satisfies dssync.Hub (HUB-01/HUB-02).
 var _ dssync.Hub = R2Hub{}
 
-// eventKey builds the immutable, lexicographically sortable object key for an
-// event (HUB-06). The HLC is zero-padded to 20 digits so lexical ordering
-// matches numeric ordering, and the device_id/seq/event_id suffix makes the key
-// unique per event.
+// eventKey builds the immutable, per-device seq-ordered object key
+// (HUB-06/P5-SYNC-01). The seq is zero-padded to 20 digits so lexical ordering
+// within a device prefix matches numeric ordering; the event_id suffix keeps
+// the key unique per event, so a divergent same-seq re-mint creates a second
+// object (both are fetched and the divergence quarantines locally) while an
+// exact duplicate re-push is a conditional-PUT dedup no-op.
 func (h R2Hub) eventKey(event state.Event) string {
-	return fmt.Sprintf("workspaces/%s/events/%020d/%s/%d/%s.json",
-		h.WorkspaceID, event.HLC, event.DeviceID, event.Seq, event.ID)
+	return fmt.Sprintf("%s%020d_%s.json", h.devicePrefix(event.DeviceID), event.Seq, event.ID)
 }
 
 // blobKey builds the content-addressed object key for an encrypted blob
@@ -112,8 +138,21 @@ func (h R2Hub) blobKey(sha256Hex string) string {
 	return fmt.Sprintf("workspaces/%s/blobs/%s", h.WorkspaceID, sha256Hex)
 }
 
-// eventsPrefix is the ListObjectsV2 prefix for all events in this workspace.
-func (h R2Hub) eventsPrefix() string {
+// eventlogPrefix is the seq-keyed event layout root (P5-SYNC-01). Device
+// streams live directly under it, one prefix per origin device.
+func (h R2Hub) eventlogPrefix() string {
+	return fmt.Sprintf("workspaces/%s/eventlog/", h.WorkspaceID)
+}
+
+// devicePrefix is one origin device's stream prefix in the seq-keyed layout.
+func (h R2Hub) devicePrefix(deviceID string) string {
+	return h.eventlogPrefix() + deviceID + "/"
+}
+
+// legacyEventsPrefix is the retired HLC-keyed layout (pre-P5-SYNC-01),
+// dual-READ only: Push never writes it; Pull parses (device, seq) out of its
+// keys so pre-migration hubs keep working under the per-device cursor.
+func (h R2Hub) legacyEventsPrefix() string {
 	return fmt.Sprintf("workspaces/%s/events/", h.WorkspaceID)
 }
 
@@ -121,6 +160,13 @@ func (h R2Hub) Push(ctx context.Context, events []state.Event) error {
 	for _, event := range events {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		// P5-SYNC-01: the seq-keyed layout is meaningless for a pre-sequence
+		// event — a Seq <= 0 key would sort as seq 0 and break the per-device
+		// cursor contract. Local stamping has assigned Seq since migration
+		// 00002, so this only fires on a programming error.
+		if event.Seq <= 0 {
+			return fmt.Errorf("refusing to push event %s with non-positive seq %d", event.ID, event.Seq)
 		}
 		key := h.eventKey(event)
 		raw, err := json.Marshal(event)
@@ -145,38 +191,63 @@ func (h R2Hub) Push(ctx context.Context, events []state.Event) error {
 	return nil
 }
 
-func (h R2Hub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, error) {
-	// P5-HUB-03: honor the retention horizon. If the cursor has fallen below the
-	// hub's compaction floor, the post-cursor log is incomplete; force a
-	// full-state snapshot exchange rather than silently returning a partial set.
-	if h.RetentionHLC > 0 && afterHLC < h.RetentionHLC {
-		return nil, dssync.ErrSnapshotRequired
+func (h R2Hub) Pull(ctx context.Context, after dssync.Cursor) ([]state.Event, error) {
+	// P5-HUB-03 (Seq-re-based): honor the per-device retention horizon. A
+	// cursor below any device's compaction floor means the incremental log has
+	// a gap only a full-state snapshot exchange can fill.
+	for dev, minRetained := range h.RetentionSeqs {
+		if minRetained > 0 && after.After(dev)+1 < minRetained {
+			return nil, dssync.ErrSnapshotRequired
+		}
 	}
-	// HUB-06: pull with bounded ListObjectsV2 pages, start-after the
-	// afterHLC-padded key so only newer events are listed. The cursor is the
-	// HLC value; we encode it as the zero-padded prefix to start after.
-	startAfter := fmt.Sprintf("%s%020d", h.eventsPrefix(), afterHLC)
+	// P5-SYNC-01: discover origin-device streams in the seq-keyed layout, then
+	// resume each with StartAfter on its padded seq boundary. The bare padded
+	// target (no "_<id>" suffix) sorts BELOW every real key at that seq, so
+	// StartAfter = <prefix><pad20(after+1)> excludes all of seq `after` and
+	// includes all of seq after+1 — an exact boundary, no overlap re-delivery.
+	var devPrefixes []string
+	if err := h.retry().do(ctx, func() error {
+		var lerr error
+		devPrefixes, lerr = h.S3.ListCommonPrefixes(ctx, h.eventlogPrefix(), "/")
+		return lerr
+	}); err != nil {
+		return nil, fmt.Errorf("list device streams: %w", err)
+	}
 	var keys []string
-	for {
-		// HUB-10: retry list on throttling/transient S3 errors with backoff.
-		var page []dssync.BlobInfo
-		var next string
-		if err := h.retry().do(ctx, func() error {
-			var lerr error
-			page, next, lerr = h.S3.ListObjectsV2(ctx, h.eventsPrefix(), startAfter, 1000)
-			return lerr
-		}); err != nil {
-			return nil, fmt.Errorf("list events: %w", err)
+	for _, dp := range devPrefixes {
+		dev := strings.TrimSuffix(strings.TrimPrefix(dp, h.eventlogPrefix()), "/")
+		startAfter := fmt.Sprintf("%s%020d", dp, after.After(dev)+1)
+		for {
+			// HUB-10: retry list on throttling/transient S3 errors with backoff.
+			var page []dssync.BlobInfo
+			var next string
+			if err := h.retry().do(ctx, func() error {
+				var lerr error
+				page, next, lerr = h.S3.ListObjectsV2(ctx, dp, startAfter, 1000)
+				return lerr
+			}); err != nil {
+				return nil, fmt.Errorf("list events for device %s: %w", dev, err)
+			}
+			for _, obj := range page {
+				keys = append(keys, obj.Key)
+			}
+			if next == "" {
+				break
+			}
+			startAfter = next
 		}
-		for _, obj := range page {
-			keys = append(keys, obj.Key)
-		}
-		if next == "" {
-			break
-		}
-		startAfter = next
 	}
-	// P5-HUB-04: fetch the post-cursor objects with bounded concurrency instead
+	// Legacy dual-read: parse (device, seq) out of retired HLC-keyed objects
+	// and apply the same per-device cursor at the KEY level, so only
+	// not-yet-consumed legacy objects cost a GET. An unparseable key fails
+	// open toward fetching — a parse bug must never silently lose events.
+	// This freezes to a cheap empty-prefix LIST once a hub is migrated.
+	legacyKeys, err := h.legacyEventKeys(ctx, after)
+	if err != nil {
+		return nil, err
+	}
+	keys = append(keys, legacyKeys...)
+	// P5-HUB-04: fetch the selected objects with bounded concurrency instead
 	// of one serial GetObject at a time, so a cold-start pull is not O(events)
 	// serial round-trips. Results are placed by index so ordering is independent
 	// of completion order; the final sort restores apply order.
@@ -205,11 +276,22 @@ func (h R2Hub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, error) 
 	if err := g.Wait(); err != nil {
 		return nil, err
 	}
+	// Client-side filter on the event's OWN Seq (defense in depth for the
+	// fail-open legacy GETs and any key/body mismatch) + event-ID dedup across
+	// the two layouts (an event can exist under both after a future
+	// migrate-events copy). Seq <= 0 events are always delivered (legacy
+	// pre-sequence objects cannot be cursored; they dedup by ID).
+	seen := make(map[string]bool, len(fetched))
 	var out []state.Event
 	for _, event := range fetched {
-		if event.HLC >= afterHLC {
-			out = append(out, event)
+		if event.Seq > 0 && event.Seq <= after.After(event.DeviceID) {
+			continue
 		}
+		if seen[event.ID] {
+			continue
+		}
+		seen[event.ID] = true
+		out = append(out, event)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].HLC == out[j].HLC {
@@ -223,20 +305,64 @@ func (h R2Hub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, error) 
 	return out, nil
 }
 
-// HasEvents reports whether this workspace has any events at all on the hub
-// (P4-SEC-07 doctor mismatch check): a single retried ListObjectsV2 call
-// against the events prefix with MaxKeys=1. It answers "is this prefix
-// populated" cheaply, without paging the whole event log.
-func (h R2Hub) HasEvents(ctx context.Context) (bool, error) {
-	var page []dssync.BlobInfo
-	if err := h.retry().do(ctx, func() error {
-		var lerr error
-		page, _, lerr = h.S3.ListObjectsV2(ctx, h.eventsPrefix(), "", 1)
-		return lerr
-	}); err != nil {
-		return false, fmt.Errorf("list events: %w", err)
+// legacyEventKeys lists the retired HLC-keyed layout and returns the keys
+// whose parsed (device, seq) are beyond the per-device cursor — plus any key
+// that does not parse (fail open toward the GET). Key shape:
+//
+//	workspaces/<ws>/events/<hlc pad20>/<device_id>/<seq>/<event_id>.json
+func (h R2Hub) legacyEventKeys(ctx context.Context, after dssync.Cursor) ([]string, error) {
+	prefix := h.legacyEventsPrefix()
+	var keys []string
+	startAfter := ""
+	for {
+		var page []dssync.BlobInfo
+		var next string
+		if err := h.retry().do(ctx, func() error {
+			var lerr error
+			page, next, lerr = h.S3.ListObjectsV2(ctx, prefix, startAfter, 1000)
+			return lerr
+		}); err != nil {
+			return nil, fmt.Errorf("list legacy events: %w", err)
+		}
+		for _, obj := range page {
+			rest := strings.TrimPrefix(obj.Key, prefix)
+			parts := strings.Split(rest, "/")
+			if len(parts) == 4 {
+				if seq, perr := strconv.ParseInt(parts[2], 10, 64); perr == nil && seq > 0 {
+					if seq <= after.After(parts[1]) {
+						continue // already consumed; skip the GET
+					}
+				}
+			}
+			keys = append(keys, obj.Key)
+		}
+		if next == "" {
+			break
+		}
+		startAfter = next
 	}
-	return len(page) > 0, nil
+	return keys, nil
+}
+
+// HasEvents reports whether this workspace has any events at all on the hub
+// (P4-SEC-07 doctor mismatch check): one retried MaxKeys=1 ListObjectsV2 call
+// per layout (seq-keyed, then legacy). It answers "is this prefix populated"
+// cheaply, without paging the whole event log.
+func (h R2Hub) HasEvents(ctx context.Context) (bool, error) {
+	for _, prefix := range []string{h.eventlogPrefix(), h.legacyEventsPrefix()} {
+		var page []dssync.BlobInfo
+		if err := h.retry().do(ctx, func() error {
+			var lerr error
+			page, _, lerr = h.S3.ListObjectsV2(ctx, prefix, "", 1)
+			return lerr
+		}); err != nil {
+			return false, fmt.Errorf("list events: %w", err)
+		}
+		if len(page) > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ListBlobs returns metadata for every blob in this workspace's blob prefix
