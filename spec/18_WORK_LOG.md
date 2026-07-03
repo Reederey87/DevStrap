@@ -27,6 +27,18 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — CLAUDE.md: commit the model-selection policy for agent sessions
+
+Changed:
+- Committed the previously-local `CLAUDE.md` model-selection policy (cost/intelligence/taste rankings, delegation rules, Codex plugin command reference) plus field notes from the Pass 6 P2 wave: `codex:codex-rescue` as the direct wrapper for ordinary delegation, line-level written specs as the reliability lever, dual-review yield on small PRs, SendMessage nudges for idle subagents, and per-job worktrees for parallel Codex runs.
+- Docs only; no behavior/code change.
+
+Validated:
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+- None.
+
 ## 2026-07-03 — AGENTS.md rewrite: concise branch/worktree/PR guidance
 
 Changed:
