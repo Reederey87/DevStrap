@@ -191,6 +191,52 @@ devstrap sync
 
 Prefer not to install? Every command also works via `go run ./cmd/devstrap <cmd> …`.
 
+### Pair a second device
+
+The R2/S3 hub keys everything under `workspaces/<workspace_id>/`, so devices converge only when
+they share **one** workspace id. The **founder** mints it at `init`; every later device
+**adopts** it — a bare `devstrap init` mints a *fresh* id and keys a disjoint prefix, so it
+never sees the founder's content. The workspace id is a non‑secret prefix selector (excluded
+from event signatures); it is exchanged out‑of‑band alongside the founder's public keys, and
+authorization comes from the key exchange, not the id.
+
+```bash
+# Founder — found the workspace and read the pairing material
+devstrap init ~/Code
+# set `hub: r2://<bucket>` in ~/.devstrap/config.yaml (+ DEVSTRAP_HUB_S3_ENDPOINT) — step 6 above
+devstrap hub login                          # store the R2/S3 secret (do this AFTER init)
+devstrap sync                               # founds the workspace, pushes the namespace map
+devstrap status                             # copy the `Workspace ID:` line
+devstrap devices recipient                  # founder age recipient (public)
+devstrap devices recipient --signing        # founder signing public key
+devstrap devices list                       # the `local` row is the founder device id
+
+# Joiner — adopt the id FIRST, then pin the founder BEFORE the first sync
+# (fleets >2 devices: pin every existing device the same way — unpinned signers'
+#  events quarantine and replay once approved)
+devstrap init ~/Code --join --workspace-id <workspace-id>   # born-correct; keychain slot keys on the id
+devstrap devices enroll <founder-device-id> \
+  --name founder --os macos --arch arm64 \
+  --age-recipient <founder-age-recipient> \
+  --signing-public-key <founder-signing-public-key> --approve
+devstrap hub login                          # AFTER the id-adopting init (the credential slot keys on the workspace id)
+# joiner needs the same `hub: r2://<bucket>` config.yaml entry as the founder
+
+# Founder — approve the joiner (shares its id/recipient/signing key back), then both sync
+devstrap devices enroll <joiner-device-id> \
+  --name laptop --os macos --arch arm64 \
+  --age-recipient <joiner-age-recipient> \
+  --signing-public-key <joiner-signing-public-key> --approve
+devstrap sync                               # pushes the key grants
+
+# Joiner — sync once more; the whole tree materializes
+devstrap sync
+```
+
+> The workspace id **cannot** be changed on an already‑initialized store — remove the DevStrap
+> home (`~/.devstrap`) and re‑run `init --join --workspace-id <id>`. This is safe: no repo
+> content lives there. See [`spec/19_CLOUD_PROVISIONING_GUIDE.md`](spec/19_CLOUD_PROVISIONING_GUIDE.md) §E for the full runbook.
+
 ## Command reference
 
 | Command | Description |

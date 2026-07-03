@@ -96,11 +96,16 @@ s3://devstrap-hub/workspaces/<workspace_id>/blobs/<sha256>
 s3://devstrap-hub/workspaces/<workspace_id>/snapshots/<hlc-padded>.json.age   # PLANNED — snapshot exchange (410->snapshot) is not built; only events/ and blobs/ exist today
 ```
 
-`<workspace_id>` is the local `ws_<uuidv7>` identity minted during `devstrap init`. Because
-every object under a prefix is already encrypted and the map signed, prefix-level
-separation is sufficient for confidentiality. Access scoping (below) is still required
-for integrity and availability: a bucket-wide key can delete or withhold ciphertext even
-though it cannot decrypt it.
+`<workspace_id>` is a `ws_<uuidv7>` identity minted on the **founder** device during
+`devstrap init`. A second device does **not** mint its own — it **adopts** the founder's id
+with `devstrap init --join --workspace-id <id>`, so both devices key under the same
+`workspaces/<workspace_id>/` prefix and see each other. A device that initializes with its
+own fresh id keys a disjoint prefix and never observes the founder's content; the fix is the
+born-correct join, not a post-hoc rewrite (see *E. Pair a second device*). Because every
+object under a prefix is already encrypted and the map signed, prefix-level separation is
+sufficient for confidentiality. Access scoping (below) is still required for integrity and
+availability: a bucket-wide key can delete or withhold ciphertext even though it cannot
+decrypt it.
 
 Event-log correctness depends on immutable object design. DevStrap must create event
 objects with unique keys and conditional put semantics (`If-None-Match: *` where the S3
@@ -520,6 +525,139 @@ object-store hub, and future per-task runner isolation.
 - `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` — the `HUB-*` (cloud zero-knowledge hub on R2) and
   `SCALE-*` (multi-user hosting on Fly.io + R2 + managed Postgres) workstreams that drive
   this guide.
+
+---
+
+## E. Pair a second device
+
+The R2/S3 hub keys every object under `workspaces/<workspace_id>/` (section A.2). Two devices
+therefore converge only when they share one workspace id: the **founder** mints it at
+`devstrap init`, and every later device **adopts** it with `devstrap init --join
+--workspace-id <id>`. A device that runs a bare `devstrap init` mints its own fresh id, keys
+a disjoint prefix, and never sees the founder's content — so joining is a first-run decision,
+not something you can retrofit (see the "Not supported" note below).
+
+The workspace id is a **non-secret prefix selector**, not a credential: it is excluded from
+event signatures by design and is re-stamped empty on apply (`15_SECURITY_THREAT_MODEL.md`).
+Confidentiality and authorization come from the **key exchange**, not the id — so you exchange
+the id out-of-band alongside the founder's public keys, Syncthing-style, and each side
+authorizes the other by pinning its verified keys. A wrong id only ever yields an empty prefix
+or quarantined ciphertext, never someone else's plaintext.
+
+### E.1 Founder — found the workspace and publish the pairing material
+
+```bash
+devstrap init ~/Code                 # mints the workspace id; does NOT self-mint a WCK yet
+# point sync at the hub: `hub: r2://<bucket>` in ~/.devstrap/config.yaml, plus
+# DEVSTRAP_HUB_S3_ENDPOINT (or `?endpoint=` on the URI) — see section A.4/B
+devstrap hub login                   # stores the R2/S3 secret in the keychain slot (see the trap in E.3)
+devstrap sync                        # founds epoch 1 against the empty hub and pushes the namespace map
+devstrap status                      # copy the `Workspace ID:` line (also `--json` → workspace_id)
+```
+
+Then read the founder's public identity so it can be shared out-of-band:
+
+```bash
+devstrap devices recipient           # founder age recipient (X25519 public key)
+devstrap devices recipient --signing # founder Ed25519 signing public key
+devstrap devices recipient --workspace-id  # prints the workspace id (same value as `status`)
+devstrap devices list                # the row whose trust state is `local` is the founder device id
+```
+
+Share four **non-secret** values with the second device over any trusted out-of-band channel
+(the same channel you would use to confirm a device fingerprint): the **workspace id**, the
+founder's **device id**, its **age recipient**, and its **signing public key**. None of these
+are secrets — the age recipient and signing key are public keys, and the workspace id is a
+prefix selector — but the channel must have integrity so a MITM cannot substitute its own keys.
+
+### E.2 Joiner — adopt the id, then pin the founder before the first sync
+
+Run the id-adopting init **first** (this is also what makes `hub login` land in the right
+keychain slot — see E.3):
+
+```bash
+devstrap init ~/Code --join --workspace-id <workspace-id>   # born-correct: adopts the founder's id
+```
+
+`--workspace-id` implies `--join`. A bare `devstrap init --join` (no id) still initializes, but
+warns that r2/s3 hubs key by workspace id — supply the id to actually converge.
+
+Pin the founder **before the first `devstrap sync`**, so fail-closed verification rejects any
+event or key grant from an unknown device during the joiner's bootstrap window (this closes the
+joiner half of the `P4-SEC-04` trust-on-first-use gap; `15_SECURITY_THREAT_MODEL.md`):
+
+```bash
+devstrap devices enroll <founder-device-id> \
+  --name founder --os macos --arch arm64 \
+  --age-recipient <founder-age-recipient> \
+  --signing-public-key <founder-signing-public-key> \
+  --approve
+```
+
+`--name`, `--os`, `--arch`, and `--age-recipient` are required; `--approve` additionally
+requires `--signing-public-key` so the founder's events can be signature-verified.
+
+> **Fleets larger than two devices:** pinning any one device flips verification fail-closed,
+> and device records are not synced — so pin **every** existing device this way, not just the
+> founder. Events signed by a device you have not pinned yet quarantine as visible
+> `event_verification_failure` conflicts and replay automatically once you enroll + approve
+> that device (`conflicts list` shows them; nothing is lost).
+
+### E.3 Joiner — log in to the hub (order matters)
+
+```bash
+# same hub config as the founder: `hub: r2://<bucket>` in ~/.devstrap/config.yaml
+# plus DEVSTRAP_HUB_S3_ENDPOINT — `hub login` stores only the credential pair
+devstrap hub login   # store the R2/S3 secret — AFTER the id-adopting init in E.2
+```
+
+> **Keychain ordering trap.** The hub S3 credential slot is keyed on the workspace id
+> (`hub-s3.<workspace_id>`). Run the id-adopting `init --join --workspace-id <id>` **first**,
+> then `hub login`. If you `hub login` before adopting the id (or re-initialize under a
+> different id afterward), the credential lands in the wrong slot and is orphaned — you must
+> `hub login` again under the adopted id.
+
+### E.4 Founder — approve the joiner, then both sync
+
+The joiner shares its own device id, age recipient, and signing public key back (same
+`devstrap devices recipient` / `devices list` reads as E.1). The founder enrolls and approves
+it — `--approve` wraps every held WCK epoch to the joiner's recipient (`GrantAllEpochs`), so
+the joiner can decrypt history:
+
+```bash
+# on the founder
+devstrap devices enroll <joiner-device-id> \
+  --name laptop --os macos --arch arm64 \
+  --age-recipient <joiner-age-recipient> \
+  --signing-public-key <joiner-signing-public-key> \
+  --approve
+devstrap sync        # pushes the device.key.granted events
+```
+
+```bash
+# on the joiner
+devstrap sync        # ingests the verified grants, decrypts the map, and materializes the tree
+```
+
+After this last `sync` the whole `~/Code` tree is really present on the joiner: every repo
+blobless-cloned from its remote, draft blobs extracted, env profiles hydrated.
+
+### E.5 Not supported — changing the workspace id on an initialized store
+
+There is **no** in-place rewrite of the workspace id. `init --join --workspace-id <id>` refuses
+if the store was already initialized under a different id (born-correct or not at all), because
+a post-hoc rewrite would strand every object already keyed under the old prefix and orphan the
+`hub login` credential slot (E.3). The only supported remedy is to discard the local store and
+re-join cleanly:
+
+```text
+remove <home> and re-run: devstrap init ~/Code --join --workspace-id <id>
+```
+
+where `<home>` is the DevStrap home (`~/.devstrap` by default). This is safe: no repo content
+lives there — repos re-clone from their remotes and env/draft blobs re-pull from the hub on the
+next `sync`. Founder-side automation of this exchange (and an in-band fingerprint UX) remains
+future work (`P4-SEC-04`).
 
 ## Pass 6 audit recommendations (2026-07-01)
 
