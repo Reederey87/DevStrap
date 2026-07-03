@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -160,5 +161,29 @@ func TestNewS3ClientValidation(t *testing.T) {
 	}
 	if ad == nil || ad.bucket != "devstrap-test" {
 		t.Fatalf("NewS3Client valid = %+v, want non-nil adapter for devstrap-test", ad)
+	}
+}
+
+// P6-HUB-02: credential failures map to ErrS3Auth with an actionable hint
+// (previously they fell through to the raw SDK error — an opaque
+// SignatureDoesNotMatch when an op:// ref was signed as the literal secret).
+func TestMapS3ErrorAuthCodes(t *testing.T) {
+	for _, c := range []string{"AccessDenied", "SignatureDoesNotMatch", "InvalidAccessKeyId"} {
+		mapped := mapS3Error(opErr("PutObject", &smithy.GenericAPIError{Code: c}))
+		if !errors.Is(mapped, ErrS3Auth) {
+			t.Fatalf("mapS3Error %s = %v, want ErrS3Auth", c, mapped)
+		}
+		if !strings.Contains(mapped.Error(), "hub login") {
+			t.Fatalf("mapS3Error %s = %q, want remediation hint", c, mapped)
+		}
+	}
+}
+
+func TestMapS3ErrorAuthStatuses(t *testing.T) {
+	for _, status := range []int{401, 403} {
+		mapped := mapS3Error(opErr("PutObject", sdkRespErr(status, nil)))
+		if !errors.Is(mapped, ErrS3Auth) {
+			t.Fatalf("mapS3Error %d = %v, want ErrS3Auth", status, mapped)
+		}
 	}
 }

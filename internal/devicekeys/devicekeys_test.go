@@ -359,3 +359,103 @@ func TestWCKEntryPointsRejectInvalidKID(t *testing.T) {
 		})
 	}
 }
+
+// TestHubS3CredentialsFileRoundTrip (P6-HUB-02): the hub S3 credential blob
+// round-trips through the file fallback (nil keychain backend — the
+// DEVSTRAP_NO_KEYCHAIN/headless custody path), lands with mode 0600, and
+// deletes idempotently.
+func TestHubS3CredentialsFileRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store := NewHybridStore(t.TempDir(), nil)
+	const ws = "ws_0123456789abcdef"
+	creds := HubS3Credentials{AccessKeyID: "AKIAROUNDTRIP", SecretAccessKey: "round-trip-secret"}
+
+	location, err := store.StoreHubS3Credentials(ctx, ws, creds)
+	if err != nil {
+		t.Fatalf("StoreHubS3Credentials: %v", err)
+	}
+	if location != "file" {
+		t.Fatalf("location = %q, want file (nil keychain backend)", location)
+	}
+	info, err := os.Stat(store.File.hubS3Path(ws))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("credential file mode = %o, want 0600", got)
+	}
+
+	got, err := store.LoadHubS3Credentials(ctx, ws)
+	if err != nil {
+		t.Fatalf("LoadHubS3Credentials: %v", err)
+	}
+	if got != creds {
+		t.Fatalf("loaded = %+v, want %+v", got, creds)
+	}
+	// Another workspace's slot is independent.
+	if _, err := store.LoadHubS3Credentials(ctx, "ws_other"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("other workspace load = %v, want os.ErrNotExist", err)
+	}
+
+	if err := store.DeleteHubS3Credentials(ctx, ws); err != nil {
+		t.Fatalf("DeleteHubS3Credentials: %v", err)
+	}
+	if _, err := store.LoadHubS3Credentials(ctx, ws); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("load after delete = %v, want os.ErrNotExist", err)
+	}
+	// Deleting again is a no-op, not an error.
+	if err := store.DeleteHubS3Credentials(ctx, ws); err != nil {
+		t.Fatalf("second delete: %v", err)
+	}
+	// A path-hostile workspace id is refused before touching the filesystem.
+	if _, err := store.StoreHubS3Credentials(ctx, "../escape", creds); err == nil {
+		t.Fatal("path-hostile workspace id accepted")
+	}
+}
+
+// hardFailBackend is a SecretBackend whose every operation fails with an
+// error keychainUnavailable() does NOT recognize — a genuine hard failure
+// (e.g. a locked or corrupted keychain), not an absent one.
+type hardFailBackend struct{}
+
+func (hardFailBackend) Store(context.Context, string, string, []byte) error {
+	return errors.New("keychain io failure: device busy")
+}
+func (hardFailBackend) Load(context.Context, string, string) ([]byte, error) {
+	return nil, errors.New("keychain io failure: device busy")
+}
+func (hardFailBackend) Delete(context.Context, string, string) error {
+	return errors.New("keychain io failure: device busy")
+}
+
+// TestHubS3CredentialsHardKeychainFailureFailsClosed (post-#45 review,
+// gpt-5.5 Minor 5): a present-but-failing keychain must ERROR, not silently
+// fall through to the file store — the SECR-04/SECU-01 fail-closed property
+// the docstrings assert, previously untested for any custody slot.
+func TestHubS3CredentialsHardKeychainFailureFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	store := NewHybridStore(t.TempDir(), hardFailBackend{})
+	const ws = "ws_hardfail"
+	creds := HubS3Credentials{AccessKeyID: "AKIAHARD", SecretAccessKey: "hard-secret"}
+
+	if _, err := store.StoreHubS3Credentials(ctx, ws, creds); err == nil {
+		t.Fatal("Store with hard-failing keychain: want error (fail closed), got file fallback")
+	}
+	if _, err := os.Stat(store.File.hubS3Path(ws)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("hard keychain failure must not write the file fallback")
+	}
+	// Load with no file copy on disk: the hard error surfaces.
+	if _, err := store.LoadHubS3Credentials(ctx, ws); err == nil {
+		t.Fatal("Load with hard-failing keychain and no file copy: want error")
+	}
+	// Documented residual (pre-existing pattern shared with WCK/identity
+	// custody): when a file copy DOES exist, Load prefers it over surfacing
+	// the hard keychain error.
+	if err := store.File.WriteHubS3Credentials(ws, creds); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.LoadHubS3Credentials(ctx, ws)
+	if err != nil || got != creds {
+		t.Fatalf("Load with file copy = (%+v, %v), want the file copy (documented residual)", got, err)
+	}
+}

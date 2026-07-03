@@ -27,6 +27,23 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — P6-HUB-02: keychain/op:// hub S3 credential custody + auth error hint (R2 go-live wave)
+
+Changed:
+- `internal/cli/hub.go`: `selectBackendHub` now resolves the hub S3/R2 credential pair through `resolveHubS3Credentials` (most-explicit-first: `DEVSTRAP_HUB_S3_*` env/config where either value may be a 1Password `op://` ref resolved via a new `resolveOpRef` helper — `op read --no-newline` under the sanitized `childenv` allowing `OP_*` — then `AWS_*` literals, then the per-workspace keychain slot). The resolved secret rides `redact.Secret` and is revealed only at the `hub.NewS3Client` call. New `devstrap hub login` (hidden-prompt/piped-stdin secret, never argv; refuses `op://` literals; reports keychain-vs-file landing) and `devstrap hub logout` commands.
+- `internal/devicekeys`: per-workspace `HubS3Credentials` custody slot (`hub-s3.<workspace_id>` keychain account, `hub-s3-<workspace_id>.json` 0600 file fallback) with Store/Load/Delete on `HybridStore`, same fail-closed keychain semantics as WCK custody.
+- `internal/hub`: new `ErrS3Auth` sentinel; `mapS3Error` maps 401/403/`AccessDenied`/`SignatureDoesNotMatch`/`InvalidAccessKeyId` to it with a remediation hint (previously the raw SDK error).
+- New dependency `golang.org/x/term` (hidden terminal prompt).
+- Specs: spec/19 custody block flipped PLANNED→shipped and documents the resolution order + `hub login`; spec/13 documents `hub login`/`logout` and the custody order; spec/15 custody paragraph updated — the three specs no longer contradict each other (age-blob custody variant explicitly not built; keychain + op:// cover the client need).
+
+Validated:
+- `gofmt`; `golangci-lint run` (0 issues); `GOCACHE=/tmp/devstrap-gocache go test -race ./...` (all green: resolution-order table incl. PATH-shim fake `op`, login/logout round-trip under `DEVSTRAP_NO_KEYCHAIN`, devicekeys file round-trip + 0600 mode + path-hostile refusal, `mapS3Error` auth rows); `go run ./cmd/spec-drift --base origin/main --head HEAD` after commit.
+
+- Dual-review fixes (gpt-5.5): (1) the op:// secret branch no longer returns early — it falls through to the keychain fill and final validation, so a `hub login`-stored access key id pairs with a rotated op:// secret and a missing key id gets the two-remedy error (pinned by `TestResolveHubS3CredentialsOpSecretWithStoredKeyID`/`...MissingKeyID`); (2) `hubS3Creds` gained String/GoString/LogValue — fmt cannot dispatch a Stringer on an unexported field, so a bare `%+v` would have dumped the raw secret (pinned by `TestHubS3CredsNeverFormatsSecret`); (3) the SECR-04 fail-closed property (hard keychain failure errors instead of falling to file) now has its first real test, `TestHubS3CredentialsHardKeychainFailureFailsClosed`, which also pins the pre-existing stale-file-preferred residual. CodeRabbit: `op read` bounded (60s + WaitDelay, pinned by `TestResolveOpRefTimesOut`), spec/13/19 wording reconciled. Second (opus-4.8) review concurred on the op:// Major; its cross-source half-mixing concern is declined by design — the stored-key-id + rotated-op://-secret combination both reviews require IS a cross-source pair, and a mismatch fails closed with the `ErrS3Auth` hint; its test-hermeticity fix (clear `AWS_*` in stored-pair tests) and `source`-comment wording are applied.
+
+Follow-ups:
+- Live two-machine R2 dogfood using `hub login` against the registered bucket (wave close-out); hosted-mode temporary prefix-scoped credentials remain `P4-SEC-08`.
+- Review-noted UX follow-ups (non-blocking): TTY paste-both-lines can strand the secret between the bufio reader and `term.ReadPassword` (real-terminal path, untestable in CI); `run-loop` preflight (`hubConfigured`) validates hub shape but not credential resolvability, so a broken credential surfaces on the first tick rather than at preflight; single-line piped `hub login` without `--access-key-id` consumes the line as the key id.
 ## 2026-07-03 — P6-QUAL-03: run the MinIO hub conformance test in CI (R2 go-live wave)
 
 Changed:

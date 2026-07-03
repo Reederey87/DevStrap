@@ -1,23 +1,30 @@
 package cli
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
+	"github.com/Reederey87/DevStrap/internal/childenv"
 	"github.com/Reederey87/DevStrap/internal/config"
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/hub"
 	"github.com/Reederey87/DevStrap/internal/platform"
+	"github.com/Reederey87/DevStrap/internal/redact"
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
 	"github.com/Reederey87/DevStrap/internal/workspacekeys"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 // hubFromOptions is the single Hub-selection seam (P5-HUB-01 / ARCH-03). Every
@@ -109,15 +116,11 @@ func selectBackendHub(ctx context.Context, opts *options, store *state.Store, hu
 		if region == "" {
 			region = "auto"
 		}
-		accessKeyID := strings.TrimSpace(opts.v.GetString("hub_s3_access_key_id"))
-		if accessKeyID == "" {
-			accessKeyID = os.Getenv("AWS_ACCESS_KEY_ID")
+		creds, err := resolveHubS3Credentials(ctx, opts, ws)
+		if err != nil {
+			return nil, "", err
 		}
-		secretAccessKey := strings.TrimSpace(opts.v.GetString("hub_s3_secret_access_key"))
-		if secretAccessKey == "" {
-			secretAccessKey = os.Getenv("AWS_SECRET_ACCESS_KEY")
-		}
-		adapter, err := hub.NewS3Client(endpoint, region, spec.bucket, accessKeyID, secretAccessKey)
+		adapter, err := hub.NewS3Client(endpoint, region, spec.bucket, creds.accessKeyID, creds.secret.Reveal())
 		if err != nil {
 			return nil, "", err
 		}
@@ -127,6 +130,141 @@ func selectBackendHub(ctx context.Context, opts *options, store *state.Store, hu
 	default:
 		return nil, "", fmt.Errorf("unrecognized hub %q (want file:<path> or r2://...)", uri)
 	}
+}
+
+// hubS3Creds is a resolved hub credential pair (P6-HUB-02). The secret is
+// wrapped in redact.Secret from the moment it is resolved; the single Reveal()
+// is the hub.NewS3Client call in selectBackendHub.
+//
+// NOTE: redact.Secret's own Stringer does NOT protect this struct — Go's
+// reflection-based fmt cannot dispatch a Stringer on an UNEXPORTED field, so
+// `%+v` of a bare hubS3Creds would dump the raw secret. The String/GoString/
+// LogValue methods below exist to close exactly that hole; never print the
+// struct through any other path (post-#45 review, gpt-5.5).
+type hubS3Creds struct {
+	accessKeyID string
+	secret      redact.Secret
+	source      string // "env/config", "op", or "keychain" — for diagnostics/tests; never the values
+}
+
+func (c hubS3Creds) String() string {
+	return fmt.Sprintf("hubS3Creds{accessKeyID:%s, secret:%s, source:%s}", c.accessKeyID, redact.Placeholder, c.source)
+}
+
+func (c hubS3Creds) GoString() string { return c.String() }
+
+func (c hubS3Creds) LogValue() slog.Value { return slog.StringValue(c.String()) }
+
+// resolveHubS3Credentials resolves the S3/R2 credential pair for the hub
+// (P6-HUB-02). Resolution order, most explicit first:
+//
+//  1. DEVSTRAP_HUB_S3_ACCESS_KEY_ID / DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY
+//     (env or config). A value with the op:// prefix is resolved through the
+//     1Password CLI (`op read`); anything else is the literal credential —
+//     the plaintext-env fallback CI depends on.
+//  2. AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (literal only).
+//  3. The per-workspace keychain/file custody slot written by
+//     `devstrap hub login` (devicekeys.HybridStore, DEVSTRAP_NO_KEYCHAIN-aware).
+//
+// The secret decides the source: an explicit secret wins even when the
+// keychain also holds a pair (12-factor override), but a keychain pair only
+// fills in whichever half is not explicitly set.
+func resolveHubS3Credentials(ctx context.Context, opts *options, workspaceID string) (hubS3Creds, error) {
+	accessKeyID := strings.TrimSpace(opts.v.GetString("hub_s3_access_key_id"))
+	if accessKeyID == "" {
+		accessKeyID = strings.TrimSpace(os.Getenv("AWS_ACCESS_KEY_ID"))
+	}
+	secret := strings.TrimSpace(opts.v.GetString("hub_s3_secret_access_key"))
+	if secret == "" {
+		secret = strings.TrimSpace(os.Getenv("AWS_SECRET_ACCESS_KEY"))
+	}
+	source := "env/config"
+	if strings.HasPrefix(accessKeyID, "op://") {
+		resolved, err := resolveOpRef(ctx, accessKeyID)
+		if err != nil {
+			return hubS3Creds{}, fmt.Errorf("resolve hub s3 access key id: %w", err)
+		}
+		accessKeyID = resolved.Reveal()
+		source = "op"
+	}
+	// The secret is carried as redact.Secret from the moment it is known; the
+	// op:// branch must NOT return early — the keychain fill for a missing
+	// access key id and the final validation below apply to every path
+	// (post-#45 review Major, gpt-5.5: the early return silently broke the
+	// keychain-access-key + op://-secret combination and skipped the
+	// two-remedy error).
+	var resolvedSecret redact.Secret
+	if strings.HasPrefix(secret, "op://") {
+		resolved, err := resolveOpRef(ctx, secret)
+		if err != nil {
+			return hubS3Creds{}, fmt.Errorf("resolve hub s3 secret access key: %w", err)
+		}
+		resolvedSecret = resolved
+		source = "op"
+	} else if secret != "" {
+		resolvedSecret = redact.New(secret)
+	}
+	if resolvedSecret.IsZero() || accessKeyID == "" {
+		stored, err := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain).
+			LoadHubS3Credentials(ctx, workspaceID)
+		switch {
+		case err == nil:
+			if accessKeyID == "" {
+				accessKeyID = stored.AccessKeyID
+			}
+			if resolvedSecret.IsZero() && stored.SecretAccessKey != "" {
+				resolvedSecret = redact.New(stored.SecretAccessKey)
+				source = "keychain"
+			}
+		case !errors.Is(err, os.ErrNotExist):
+			return hubS3Creds{}, fmt.Errorf("load stored hub s3 credentials: %w", err)
+		}
+	}
+	if resolvedSecret.IsZero() || accessKeyID == "" {
+		return hubS3Creds{}, fmt.Errorf("no hub S3 credentials: set DEVSTRAP_HUB_S3_ACCESS_KEY_ID and DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY (values may be 1Password op:// refs), or store them once with 'devstrap hub login' (see spec/19_CLOUD_PROVISIONING_GUIDE.md)")
+	}
+	return hubS3Creds{accessKeyID: accessKeyID, secret: resolvedSecret, source: source}, nil
+}
+
+// opReadTimeout bounds a single `op read` credential resolution, long enough
+// for an interactive biometric/desktop-app approval but finite so a wedged
+// prompt cannot hold a sync cycle open forever. A var so tests can shrink it.
+var opReadTimeout = 60 * time.Second
+
+// resolveOpRef resolves a single 1Password op://vault/item/field reference to
+// its secret value via `op read` (P6-HUB-02), mirroring the provider path
+// `devstrap run`/`env hydrate` use for env profiles. The subprocess runs under
+// the sanitized child environment (BasicAllowlist + OP_*), stderr is captured
+// for diagnostics, and the value is wrapped in redact.Secret immediately.
+func resolveOpRef(ctx context.Context, ref string) (redact.Secret, error) {
+	if _, err := exec.LookPath("op"); err != nil {
+		return redact.Secret{}, fmt.Errorf("op:// refs require the 1Password CLI (`op`) on PATH: %w", err)
+	}
+	env, err := childenv.FromOS(append(childenv.BasicAllowlist(), "OP_*"), nil)
+	if err != nil {
+		return redact.Secret{}, err
+	}
+	// Bound the external call (CodeRabbit, PR #45): the CLI's root context is
+	// signal-cancellable but has no deadline, and `op read` can block on an
+	// interactive unlock prompt — without a local timeout that would stall
+	// sync/run-loop indefinitely. 60s accommodates a biometric/desktop-app
+	// approval; WaitDelay force-kills a child that ignores the cancel.
+	octx, cancel := context.WithTimeout(ctx, opReadTimeout)
+	defer cancel()
+	var stdout, stderr bytes.Buffer
+	cmd := exec.CommandContext(octx, "op", "read", "--no-newline", ref) //nolint:gosec // fixed 1Password CLI command; ref is the operator-configured op:// reference and the env is sanitized.
+	cmd.Env = env
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.WaitDelay = 5 * time.Second
+	if err := cmd.Run(); err != nil {
+		return redact.Secret{}, fmt.Errorf("op read failed (is the 1Password CLI signed in?): %w: %s", err, redact.Scrub(strings.TrimSpace(stderr.String())))
+	}
+	value := strings.TrimSpace(stdout.String())
+	if value == "" {
+		return redact.Secret{}, fmt.Errorf("op read returned an empty value for the credential reference")
+	}
+	return redact.New(value), nil
 }
 
 // hubSpec is the parsed r2:// or s3:// hub URI (P5-HUB-01).
@@ -200,7 +338,127 @@ func newHubCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Short: "Operate on the sync hub (zero-knowledge event log + blob store)",
 	}
 	cmd.AddCommand(newHubGCCommand(stdout, opts))
+	cmd.AddCommand(newHubLoginCommand(stdout, opts))
+	cmd.AddCommand(newHubLogoutCommand(stdout, opts))
 	return cmd
+}
+
+func newHubLoginCommand(stdout io.Writer, opts *options) *cobra.Command {
+	var accessKeyID string
+	cmd := &cobra.Command{
+		Use:   "login",
+		Short: "Store the hub S3/R2 credentials in the OS keychain (P6-HUB-02)",
+		Long: `Store the hub S3/R2 access key id and secret access key in the OS keychain
+(0600 file fallback when no keychain is available), so sync needs no plaintext
+credential env vars. The secret is read from an interactive no-echo prompt, or
+from stdin when piped — it is never accepted as a command-line argument
+(argv leaks into process listings and shell history).
+
+Explicit DEVSTRAP_HUB_S3_*/AWS_* env values still override the stored pair,
+and either value may instead be a 1Password op:// reference resolved at sync
+time. Remove stored credentials with 'devstrap hub logout'.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := opts.openState(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer closeStore(store)
+			ws, err := store.WorkspaceID(cmd.Context())
+			if err != nil {
+				return err
+			}
+			// One buffered reader for all prompts: a second bufio.Reader over
+			// the same piped stdin would lose lines the first one buffered.
+			reader := bufio.NewReader(cmd.InOrStdin())
+			if accessKeyID == "" {
+				value, err := promptLine(cmd, reader, "Access key id: ")
+				if err != nil {
+					return err
+				}
+				accessKeyID = value
+			}
+			secret, err := promptSecret(cmd, reader, "Secret access key (hidden): ")
+			if err != nil {
+				return err
+			}
+			if accessKeyID == "" || secret.IsZero() {
+				return appError{code: exitUsage, err: fmt.Errorf("hub login: access key id and secret access key are both required")}
+			}
+			if strings.HasPrefix(secret.Reveal(), "op://") || strings.HasPrefix(accessKeyID, "op://") {
+				return appError{code: exitUsage, err: fmt.Errorf("hub login stores literal credentials; keep op:// refs in DEVSTRAP_HUB_S3_* env/config instead — they resolve at sync time")}
+			}
+			keys := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain)
+			location, err := keys.StoreHubS3Credentials(cmd.Context(), ws, devicekeys.HubS3Credentials{
+				AccessKeyID:     accessKeyID,
+				SecretAccessKey: secret.Reveal(),
+			})
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(stdout, "Stored hub S3 credentials for workspace %s in the %s store.\n", ws, location)
+			return err
+		},
+	}
+	cmd.Flags().StringVar(&accessKeyID, "access-key-id", "", "S3/R2 access key id (not secret; the secret is always prompted or piped)")
+	return cmd
+}
+
+func newHubLogoutCommand(stdout io.Writer, opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "logout",
+		Short: "Remove the stored hub S3/R2 credentials (P6-HUB-02)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := opts.openState(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer closeStore(store)
+			ws, err := store.WorkspaceID(cmd.Context())
+			if err != nil {
+				return err
+			}
+			keys := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain)
+			if err := keys.DeleteHubS3Credentials(cmd.Context(), ws); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(stdout, "Removed stored hub S3 credentials for workspace %s.\n", ws)
+			return err
+		},
+	}
+}
+
+// promptLine reads one non-secret line from the shared reader, printing the
+// prompt only when stdin is a terminal. Used for the access key id when
+// --access-key-id is not given.
+func promptLine(cmd *cobra.Command, reader *bufio.Reader, prompt string) (string, error) {
+	if f, ok := cmd.InOrStdin().(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		_, _ = fmt.Fprint(cmd.ErrOrStderr(), prompt)
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil && line == "" {
+		return "", fmt.Errorf("read input: %w", err)
+	}
+	return strings.TrimSpace(line), nil
+}
+
+// promptSecret reads the secret without echo when stdin is a terminal, and as
+// a plain line from the shared reader when piped (scripting/tests). The value
+// is wrapped in redact.Secret immediately and never accepted via argv.
+func promptSecret(cmd *cobra.Command, reader *bufio.Reader, prompt string) (redact.Secret, error) {
+	if f, ok := cmd.InOrStdin().(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		_, _ = fmt.Fprint(cmd.ErrOrStderr(), prompt)
+		raw, err := term.ReadPassword(int(f.Fd()))
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr())
+		if err != nil {
+			return redact.Secret{}, fmt.Errorf("read secret: %w", err)
+		}
+		return redact.New(strings.TrimSpace(string(raw))), nil
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil && line == "" {
+		return redact.Secret{}, fmt.Errorf("read secret from stdin: %w", err)
+	}
+	return redact.New(strings.TrimSpace(line)), nil
 }
 
 func newHubGCCommand(stdout io.Writer, opts *options) *cobra.Command {
