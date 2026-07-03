@@ -172,10 +172,16 @@ func createFreshWorktree(ctx context.Context, stdout io.Writer, opts *options, s
 		return state.Worktree{}, err
 	}
 	// P6-GIT-05: a failure after `git worktree add` must not leak a
-	// DB-invisible checkout + branch.
+	// DB-invisible checkout + branch. The cleanup context is detached from
+	// ctx (with its own bound) because the failure being cleaned up may BE a
+	// cancellation (Ctrl-C mid-LFS-pull) — running cleanup under the same
+	// cancelled ctx would no-op and leak the exact orphan this exists to
+	// remove.
 	cleanupOrphan := func() {
-		_ = r.WorktreeRemove(ctx, localPath, wtPath, true)
-		_, _ = r.Run(ctx, localPath, "branch", "-D", branch)
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer cancel()
+		_ = r.WorktreeRemove(cctx, localPath, wtPath, true)
+		_, _ = r.Run(cctx, localPath, "branch", "-D", branch)
 	}
 	if err := applyWorktreeLFSPolicy(ctx, stdout, r, project, wtPath); err != nil {
 		cleanupOrphan()

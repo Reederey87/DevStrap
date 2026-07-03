@@ -30,12 +30,18 @@ Entries are newest-first: each code-modifying cycle prepends ONE dated entry at 
 ## 2026-07-03 — P6-GIT-05: clean orphan worktrees after post-add failures (P2 quick-win wave)
 
 Changed:
-- `createFreshWorktree` now removes the just-created checkout and deletes its `agent/...` branch when LFS policy handling, current-device lookup, or SQLite worktree insertion fails after `git worktree add`.
+- `createFreshWorktree` now removes the just-created checkout and deletes its `agent/...` branch when LFS policy handling, current-device lookup, or SQLite worktree insertion fails after `git worktree add`. Dual-review hardening (opus-4.8, Minor): the cleanup runs under `context.WithoutCancel` with a 2-minute bound, because the failure being cleaned up may itself be a cancellation — the same cancelled ctx would no-op both git commands and leak the exact orphan the fix targets.
 - LFS pull failures now include the worktree path in the user-facing error.
 - `agent run` file-policy denial cleanup now deletes the just-created branch in addition to removing the worktree and marking the DB row removed.
 - Added CLI regression coverage for LFS-pull failure and SQLite insert failure paths, asserting no checkout directory and no `agent/*` branch remain.
 - Updated specs 08, 10, and 16 to document the cleanup guarantee and coverage; ledger `docs/audits/README.md` (P6-GIT-05 → *Recently shipped*).
 - Model policy note (CLAUDE.md): implementation + tests delegated to gpt-5.5 (Codex) against a written line-level spec; diff reviewed line-by-line and accepted (the failure-injection tests — fake-git PATH shim + SQLite BEFORE INSERT trigger — are hermetic and cover both post-add failure classes).
+
+Validated:
+- `gofmt -w cmd internal`, `golangci-lint run`, `go run ./cmd/spec-drift --base origin/main --head HEAD`, `GOCACHE=/tmp/devstrap-gocache go test -race ./...`.
+
+Follow-ups:
+- None for P6-GIT-05. The doctor orphan-worktree check remains deliberately out of scope for this change.
 
 ## 2026-07-03 — P6-CLI-02: gate `scan --adopt` on the workspace root (P2 quick-win wave)
 
@@ -65,7 +71,6 @@ Validated:
 - `gofmt -w cmd internal`, `golangci-lint run`, `go run ./cmd/spec-drift --base origin/main --head HEAD`, `GOCACHE=/tmp/devstrap-gocache go test -race ./...`.
 
 Follow-ups:
-<<<<<<< HEAD
 - Add a CI lint that prepares static store queries against a migrated in-memory database (the audit's stretch item; deferred to keep this PR minimal).
 
 ## 2026-07-03 — P6-SYNC-03: sticky fail-closed enrollment window (P2 quick-win wave)
@@ -82,9 +87,6 @@ Validated:
 Follow-ups:
 - Synced `device.revoked` trust propagation (revoke is still local-only) — carried from the P6-SYNC-01 residuals.
 - Rest of the P2 quick-win wave: `P6-DATA-02`, `P6-GIT-05`, `P6-CLI-02`.
-=======
-- None for P6-GIT-05. The doctor orphan-worktree check remains deliberately out of scope for this change.
->>>>>>> 6823819 (fix(git): clean up the worktree+branch on any failure after worktree add (P6-GIT-05))
 
 ## 2026-07-03 — P6-GIT-01: git timeout split by command class; deadline kills are terminal (PR 3/3 — completes the Pass 6 P1 wave)
 
