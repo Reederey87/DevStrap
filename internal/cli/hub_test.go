@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/platform"
@@ -166,6 +167,8 @@ func TestResolveHubS3CredentialsOpMissing(t *testing.T) {
 // fallback (DEVSTRAP_NO_KEYCHAIN=1, the headless/CI custody path).
 func TestResolveHubS3CredentialsStoredPair(t *testing.T) {
 	t.Setenv(platform.NoKeychainEnv, "1")
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
 	opts := newHubCredOptions(t)
 	keys := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain)
 	location, err := keys.StoreHubS3Credentials(context.Background(), "ws_test", devicekeys.HubS3Credentials{
@@ -190,6 +193,8 @@ func TestResolveHubS3CredentialsStoredPair(t *testing.T) {
 // win over a stored pair (12-factor/CI override).
 func TestResolveHubS3CredentialsEnvOverridesStored(t *testing.T) {
 	t.Setenv(platform.NoKeychainEnv, "1")
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
 	opts := newHubCredOptions(t)
 	keys := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain)
 	if _, err := keys.StoreHubS3Credentials(context.Background(), "ws_test", devicekeys.HubS3Credentials{
@@ -302,6 +307,8 @@ func TestHubLoginRefusesOpRef(t *testing.T) {
 // combination the resolver's contract promises.
 func TestResolveHubS3CredentialsOpSecretWithStoredKeyID(t *testing.T) {
 	t.Setenv(platform.NoKeychainEnv, "1")
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
 	stubOp(t, `printf 'rotated-op-secret'`)
 	opts := newHubCredOptions(t)
 	keys := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain)
@@ -360,5 +367,22 @@ func TestHubS3CredsNeverFormatsSecret(t *testing.T) {
 		if !strings.Contains(s, "AKIAFMT") {
 			t.Fatalf("formatting lost the non-secret fields: %q", s)
 		}
+	}
+}
+
+// TestResolveOpRefTimesOut (review nit): a wedged `op` prompt cannot hold a
+// sync cycle open — resolveOpRef bounds the subprocess with opReadTimeout.
+func TestResolveOpRefTimesOut(t *testing.T) {
+	stubOp(t, `exec sleep 5`)
+	old := opReadTimeout
+	opReadTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { opReadTimeout = old })
+	start := time.Now()
+	_, err := resolveOpRef(context.Background(), "op://vault/item/slow")
+	if err == nil {
+		t.Fatal("resolveOpRef with a wedged op: want timeout error")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("resolveOpRef took %v; the timeout did not bound the subprocess", elapsed)
 	}
 }

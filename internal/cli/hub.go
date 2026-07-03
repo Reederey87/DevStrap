@@ -144,7 +144,7 @@ func selectBackendHub(ctx context.Context, opts *options, store *state.Store, hu
 type hubS3Creds struct {
 	accessKeyID string
 	secret      redact.Secret
-	source      string // "env/config", "op", or "keychain" — logged, never the values
+	source      string // "env/config", "op", or "keychain" — for diagnostics/tests; never the values
 }
 
 func (c hubS3Creds) String() string {
@@ -228,8 +228,8 @@ func resolveHubS3Credentials(ctx context.Context, opts *options, workspaceID str
 
 // opReadTimeout bounds a single `op read` credential resolution, long enough
 // for an interactive biometric/desktop-app approval but finite so a wedged
-// prompt cannot hold a sync cycle open forever.
-const opReadTimeout = 60 * time.Second
+// prompt cannot hold a sync cycle open forever. A var so tests can shrink it.
+var opReadTimeout = 60 * time.Second
 
 // resolveOpRef resolves a single 1Password op://vault/item/field reference to
 // its secret value via `op read` (P6-HUB-02), mirroring the provider path
