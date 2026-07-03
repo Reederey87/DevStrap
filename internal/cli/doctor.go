@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"runtime/debug"
 	"strings"
+	"time"
 
 	"github.com/Reederey87/DevStrap/internal/config"
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
@@ -206,6 +207,7 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 			results = append(results, checkSecretsRotation(ctx, store)...)
 			results = append(results, checkDeviceKeys(ctx, paths, store)...)
 			results = append(results, checkKeyGrantWaits(ctx, store)...)
+			results = append(results, checkWorkspaceKeyAge(ctx, opts, store)...)
 			results = append(results, checkForgeCLIs(ctx, opts, store)...)
 			results = append(results, checkBloblessCaveat(ctx, store)...)
 		}
@@ -339,6 +341,36 @@ func checkBloblessCaveat(ctx context.Context, store *state.Store) []checkResult 
 // those epochs are deferring (within the grace window) or quarantining (past
 // it) — either way this device cannot read part of the fleet's event log until
 // an approved device re-grants its held epochs.
+// checkWorkspaceKeyAge grades the active WCK epoch's age against
+// keys.rotate_max_age (P4-SEC-07 periodic rotation): ok at epoch 0 (the key is
+// founded on the first sync), ok with the age while within the deadline, warn
+// past it with the rotate remedy. The grading itself is pure
+// (gradeWorkspaceKeyAge) so it can be table-tested without a store.
+func checkWorkspaceKeyAge(ctx context.Context, opts *options, store *state.Store) []checkResult {
+	epoch, created, err := store.ActiveKeyEpochAge(ctx)
+	if err != nil {
+		return nil
+	}
+	return []checkResult{gradeWorkspaceKeyAge(epoch, created, keyRotateMaxAge(opts), time.Now())}
+}
+
+func gradeWorkspaceKeyAge(epoch int64, created time.Time, maxAge time.Duration, now time.Time) checkResult {
+	if epoch == 0 {
+		return checkResult{Name: "workspace key age", Status: checkOK, Detail: "no workspace key yet (founded on first sync)"}
+	}
+	age := now.Sub(created).Truncate(time.Minute)
+	detail := fmt.Sprintf("epoch %d, age %s", epoch, age)
+	if maxAge > 0 && age > maxAge {
+		return checkResult{
+			Name:   "workspace key age",
+			Status: checkWarn,
+			Detail: fmt.Sprintf("%s exceeds keys.rotate_max_age %s", detail, maxAge),
+			Remedy: "run 'devstrap keys rotate' (or 'devstrap sync', which rotates automatically), then sync so the grants publish",
+		}
+	}
+	return checkResult{Name: "workspace key age", Status: checkOK, Detail: detail}
+}
+
 func checkKeyGrantWaits(ctx context.Context, store *state.Store) []checkResult {
 	waits, err := store.OpenKeyGrantWaits(ctx)
 	if err != nil {

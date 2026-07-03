@@ -126,7 +126,7 @@ Implemented in this repository:
 
 - Go module: `github.com/Reederey87/DevStrap`.
 - CLI entrypoint: `cmd/devstrap`.
-- Commands: `version`, `init`, `scan`, `add`, `clone`, `hydrate`, `open`, `sync --hub-file`, `hub gc/login/logout`, `materialize`, `draft snapshot create`, `run-loop`, `worktree new/status/finalize/list/remove/cleanup/unlock`, `env capture/hydrate/bind/rotate`, `run`, `agent run/list/show/pr`, `devices enroll/list/approve/revoke/lost/rename/recipient/pairing-code`, `conflicts list/show/resolve`, `status` (`--watch`), `doctor` (`--remote`), and `db migrate/status/backup/down`.
+- Commands: `version`, `init`, `scan`, `add`, `clone`, `hydrate`, `open`, `sync --hub-file`, `hub gc/login/logout`, `keys rotate`, `materialize`, `draft snapshot create`, `run-loop`, `worktree new/status/finalize/list/remove/cleanup/unlock`, `env capture/hydrate/bind/rotate`, `run`, `agent run/list/show/pr`, `devices enroll/list/approve/revoke/lost/rename/recipient/pairing-code`, `conflicts list/show/resolve`, `status` (`--watch`), `doctor` (`--remote`), and `db migrate/status/backup/down`.
 - Structured `slog` setup with CLI/env log-level control, secret-key/value redaction helpers, and no whole-context log attributes.
 - Local state package with embedded Goose SQLite migrations.
 - SQLite open path with per-connection pragmas, WAL, busy timeout, asserted foreign-key enforcement, startup `foreign_key_check`, `0600` database mode, and single-writer pool.

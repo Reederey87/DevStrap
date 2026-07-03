@@ -3085,6 +3085,38 @@ SELECT epoch, kid, first_seen_at FROM key_grant_waits WHERE workspace_id = ? ORD
 	return waits, rows.Err()
 }
 
+// ActiveKeyEpochAge returns the ACTIVE (highest) WCK epoch and when this
+// device first recorded a key at it (P4-SEC-07 periodic rotation). When
+// several kids coexist at the epoch (P6-SEC-02 collision), the EARLIEST
+// created_at wins — the conservative choice: the rotation clock starts at the
+// first key this device saw at the epoch, so coexisting kids can only make a
+// rotation earlier, never suppress one. Epoch 0 (no key yet) returns a zero
+// time and no error.
+func (s *Store) ActiveKeyEpochAge(ctx context.Context) (int64, time.Time, error) {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	var epoch int64
+	var created string
+	err = s.db.QueryRowContext(ctx, `
+SELECT epoch, MIN(created_at) FROM workspace_keys
+WHERE workspace_id = ? AND epoch = (SELECT MAX(epoch) FROM workspace_keys WHERE workspace_id = ?)
+GROUP BY epoch;
+`, workspaceID, workspaceID).Scan(&epoch, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, time.Time{}, nil
+	}
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("read active key epoch age: %w", err)
+	}
+	at, perr := time.Parse(timestampLayout, created)
+	if perr != nil {
+		return 0, time.Time{}, fmt.Errorf("parse workspace key created_at %q: %w", created, perr)
+	}
+	return epoch, at, nil
+}
+
 // HeldKey is one WCK this device holds metadata for: an (epoch, kid) pair
 // plus how the key was obtained (P6-SEC-02).
 type HeldKey struct {

@@ -54,7 +54,7 @@ devstrap wip
 Current repository status as of `2026-07-01`:
 
 ```text
-Implemented: devstrap init, version, scan, add, clone, hydrate, open, sync --hub-file, sync (hub: r2://<bucket> production R2/S3 SDK wiring), hub gc, hub login/logout, materialize, draft snapshot create, run-loop, status, doctor, conflicts list/show/resolve, db migrate/status/backup/down, env capture/hydrate/bind/rotate, run, worktree new/status/finalize/list/remove/cleanup/unlock, agent run/list/show/pr, devices enroll/list/approve/revoke/lost/rename/recipient/pairing-code
+Implemented: devstrap init, version, scan, add, clone, hydrate, open, sync --hub-file, sync (hub: r2://<bucket> production R2/S3 SDK wiring), hub gc, hub login/logout, keys rotate, materialize, draft snapshot create, run-loop, status, doctor, conflicts list/show/resolve, db migrate/status/backup/down, env capture/hydrate/bind/rotate, run, worktree new/status/finalize/list/remove/cleanup/unlock, agent run/list/show/pr, devices enroll/list/approve/revoke/lost/rename/recipient/pairing-code
 Planned: env check, OS-enforced agent sandboxing, automatic remote device enrollment/fingerprint confirmation, daemon/socket API, export, promote, gitstate, wip
 ```
 
@@ -102,7 +102,7 @@ Rules:
 - `backup` uses `VACUUM INTO`, not file copy;
 - state DB and backups are mode `0600`.
 
-`doctor` (`PROD-02`) is a severity-graded health report: each check returns `{name, status: ok|warning|error, detail, remedy}`, rendered as a graded table with a summary line and a non-zero exit code when any check is error (so it can gate CI). Checks cover git/gh/go tools (git required, gh/go optional), state home + permissions, schema version, SQLite `quick_check`/`foreign_key_check`, secrets needing rotation, local age + Ed25519 device-key health, workspace keys awaiting grants (`P6-SEC-03`: each open `key_grant_waits` row with epoch/kid/first-seen and the re-approve remedy), and held repo locks (stale = warning). `--json` emits the check array; `--fix` applies safe remediations (create the missing state home, run pending migrations, clear stale repo locks) and re-runs the checks. `--remote` (`P5-PROD-05`) additionally probes the configured sync hub (reachability, pending push, queued deletes, device trust) and always reports a `workspace id` row (a warning row when the id is unreadable) so two devices can be compared directly; `--hub-file` selects the file-backed hub for that probe. For R2/S3 hubs, `--remote` also warns `workspace id match` when the local role is `joiner`, the pull cursor is still `0`, and the raw hub backend reports no events under this device's workspace-id prefix — the signature of a joiner reading its own empty `workspaces/<workspace_id>/...` prefix instead of the founder's populated prefix. The remedy text points operators to confirm the founder's workspace id with `devstrap doctor` on the founding device and re-init the joiner with `devstrap init --join --workspace-id <founder workspace id>` (the adoption flag shipped with the P4-SEC-07 pairing wave — see the `init` section above; this change ships the detection and regression-test side).
+`doctor` (`PROD-02`) is a severity-graded health report: each check returns `{name, status: ok|warning|error, detail, remedy}`, rendered as a graded table with a summary line and a non-zero exit code when any check is error (so it can gate CI). Checks cover git/gh/go tools (git required, gh/go optional), state home + permissions, schema version, SQLite `quick_check`/`foreign_key_check`, secrets needing rotation, local age + Ed25519 device-key health, workspace keys awaiting grants (`P6-SEC-03`: each open `key_grant_waits` row with epoch/kid/first-seen and the re-approve remedy), the active workspace key's age against `keys.rotate_max_age` (`P4-SEC-07`: ok at epoch 0, warn past the deadline with the `keys rotate` remedy), and held repo locks (stale = warning). `--json` emits the check array; `--fix` applies safe remediations (create the missing state home, run pending migrations, clear stale repo locks) and re-runs the checks. `--remote` (`P5-PROD-05`) additionally probes the configured sync hub (reachability, pending push, queued deletes, device trust) and always reports a `workspace id` row (a warning row when the id is unreadable) so two devices can be compared directly; `--hub-file` selects the file-backed hub for that probe. For R2/S3 hubs, `--remote` also warns `workspace id match` when the local role is `joiner`, the pull cursor is still `0`, and the raw hub backend reports no events under this device's workspace-id prefix — the signature of a joiner reading its own empty `workspaces/<workspace_id>/...` prefix instead of the founder's populated prefix. The remedy text points operators to confirm the founder's workspace id with `devstrap doctor` on the founding device and re-init the joiner with `devstrap init --join --workspace-id <founder workspace id>` (the adoption flag shipped with the P4-SEC-07 pairing wave — see the `init` section above; this change ships the detection and regression-test side).
 
 ### scan
 
@@ -156,6 +156,14 @@ experiments/fs2                 this       draft      ready    n/a      synced
 work/acme/data                  this       skeleton   mapped   unknown  not hydrated
 ```
 
+### keys
+
+```bash
+devstrap keys rotate     # mint epoch+1, grant to all approved devices; sync publishes
+```
+
+`keys rotate` (P4-SEC-07 periodic rotation) calls `Keyring.Rotate` directly: it mints a fresh WCK at epoch+1, grants it to every approved device the local registry knows (one `device.key.granted` event per recipient), and queues the grants for the next `sync`. It is deliberately NOT the revoke path — no secret-rotation flags, no blob re-encryption, no queued hub deletes — because a periodic rotation has no excluded device; it bounds FORWARD exposure only (see `15_SECURITY_THREAT_MODEL.md`). It refuses at epoch 0 (the key is founded on the first sync). `sync` performs the same rotation automatically when the active epoch is older than `keys.rotate_max_age` (default **2160h** = 90 days; `0` disables; malformed values warn and fall back to the default), checked AFTER the pull (a freshly ingested grant resets the local age, so fleets don't rotation-storm — whichever device syncs first past the deadline rotates and everyone else stands down) and BEFORE the push (the grants and any events sealed under the new epoch ride the same cycle); `sync --key-max-age <duration>` overrides the config for one run. Any device may rotate; concurrent mints at the same epoch coexist under `(epoch, kid)` keying. Known residual (spec/07/15): the rotator grants only to approved devices it knows locally, so a fleet device unknown to it rides the `P6-SEC-03` grace→quarantine→replay path until re-approved.
+
 ### sync
 
 ```bash
@@ -173,9 +181,12 @@ hub: r2://<bucket>    # shipped: Cloudflare R2 / S3 zero-knowledge hub backend (
 --namespace-only      # opt out of eager whole-tree materialization (the shipped default)
 --fetch               # planned: fetch-only reconciliation mode, distinct from the shipped default
 --dry-run
+--key-max-age <dur>   # override keys.rotate_max_age for this run (0 disables auto-rotation)
 sync.key_grant_grace  # config: how long a not-yet-granted workspace key defers the pull tail before its
                       # events quarantine recoverably (P6-SEC-03). Default 72h; 0 = quarantine immediately.
                       # Parsed strictly: a malformed value warns and falls back to the default (never 0).
+keys.rotate_max_age   # config: age-triggered periodic WCK rotation deadline (P4-SEC-07). Default 2160h
+                      # (90d); 0 disables. Strictly parsed like sync.key_grant_grace.
 ```
 
 The file-backed test hub uses `--hub-file` (or `hub: file:<path>`); the R2/S3 production backend is selected via `hub: r2://<bucket>` (or `s3://`). Credentials resolve most-explicit-first (`P6-HUB-02`): `DEVSTRAP_HUB_S3_ACCESS_KEY_ID`/`DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY` env/config — where either value may be a 1Password `op://` reference resolved via `op read` at sync time — then `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` literals, then the per-workspace OS-keychain slot written by `devstrap hub login` (0600 file fallback under `DEVSTRAP_NO_KEYCHAIN`); `hub_s3_endpoint` and `hub_s3_region` (default `auto`) stay env/config. Plaintext env remains the CI/override fallback; the keychain/op:// path is the recommended custody on developer machines. Both backends push local events past the push cursor, pull hub events from the pull cursor, apply namespace events idempotently, and support `--namespace-only` and `--dry-run`.

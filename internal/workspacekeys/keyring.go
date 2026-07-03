@@ -333,10 +333,21 @@ func (k *Keyring) GrantAllEpochs(ctx context.Context, recipient string) ([]state
 // Rotate mints a fresh WCK at epoch+1, stores it under its (epoch, kid) with
 // origin 'self', and wraps it to every remaining approved recipient, emitting
 // one device.key.granted event per recipient (P4-SEC-07). Used by `devices
-// revoke`/`lost` for go-forward forward secrecy: the revoked device is excluded
-// because its trust_state is already revoked when Rotate runs, so
-// ApprovedRecipients no longer contains it. Returns the new epoch and the
-// emitted grant events.
+// revoke`/`lost` for go-forward forward secrecy (the revoked device is
+// excluded because its trust_state is already revoked when Rotate runs, so
+// ApprovedRecipients no longer contains it) and by periodic rotation (`keys
+// rotate` / the sync age trigger). Returns the new epoch and the emitted
+// grant events.
+//
+// Every grant is WRAPPED BEFORE any state is written (post-#56 Codex review,
+// P1): the by-far-likeliest mid-rotation failure is a malformed recipient on
+// an approved device row, and failing after StoreWCK/RecordKeyEpoch would
+// leave a half-minted active epoch — the caller's next push would seal events
+// under a key whose grants never published, and the fresh created_at would
+// keep the age trigger from retrying. With wrap-first ordering a bad
+// recipient aborts before the epoch exists at all. The residual window is a
+// DB/custody failure between RecordKeyEpoch and the last grant insert; callers
+// treat any Rotate error as fatal for their cycle so it is at least loud.
 func (k *Keyring) Rotate(ctx context.Context) (int64, []state.Event, error) {
 	if err := k.resolve(ctx); err != nil {
 		return 0, nil, err
@@ -351,18 +362,15 @@ func (k *Keyring) Rotate(ctx context.Context) (int64, []state.Event, error) {
 		return 0, nil, err
 	}
 	kid := dssync.KIDForWCK(wck)
-	if err := k.KeyStore.StoreWCK(ctx, k.workspaceID, next, kid, wck); err != nil {
-		return 0, nil, err
-	}
-	if err := k.Store.RecordKeyEpoch(ctx, next, kid, originSelf); err != nil {
-		return 0, nil, err
-	}
-	k.cacheWCK(next, kid, originSelf, wck)
 	recipients, err := k.Store.ApprovedRecipients(ctx)
 	if err != nil {
 		return 0, nil, err
 	}
-	events := make([]state.Event, 0, len(recipients))
+	type pendingGrant struct {
+		recipient string
+		payload   string
+	}
+	pending := make([]pendingGrant, 0, len(recipients))
 	for _, recipient := range recipients {
 		wrapped, err := wrapWCK(wck, recipient)
 		if err != nil {
@@ -372,11 +380,22 @@ func (k *Keyring) Rotate(ctx context.Context) (int64, []state.Event, error) {
 		if err != nil {
 			return 0, nil, fmt.Errorf("rotate: marshal payload: %w", err)
 		}
-		ev, err := k.Store.InsertLocalEvent(ctx, dssync.NewDeviceKeyGrantEvent(dssync.EventDeviceKeyGranted, string(payload)))
+		pending = append(pending, pendingGrant{recipient: recipient, payload: string(payload)})
+	}
+	if err := k.KeyStore.StoreWCK(ctx, k.workspaceID, next, kid, wck); err != nil {
+		return 0, nil, err
+	}
+	if err := k.Store.RecordKeyEpoch(ctx, next, kid, originSelf); err != nil {
+		return 0, nil, err
+	}
+	k.cacheWCK(next, kid, originSelf, wck)
+	events := make([]state.Event, 0, len(pending))
+	for _, grant := range pending {
+		ev, err := k.Store.InsertLocalEvent(ctx, dssync.NewDeviceKeyGrantEvent(dssync.EventDeviceKeyGranted, grant.payload))
 		if err != nil {
 			return 0, nil, fmt.Errorf("rotate: insert grant: %w", err)
 		}
-		if err := k.Store.RecordKeyGrant(ctx, next, kid, recipient, ev.ID, ev.HLC, ev.DeviceID); err != nil {
+		if err := k.Store.RecordKeyGrant(ctx, next, kid, grant.recipient, ev.ID, ev.HLC, ev.DeviceID); err != nil {
 			return 0, nil, fmt.Errorf("rotate: record audit: %w", err)
 		}
 		events = append(events, ev)

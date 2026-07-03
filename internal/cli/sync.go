@@ -24,16 +24,34 @@ func newSyncCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var hubFile string
 	var namespaceOnly bool
 	var dryRun bool
+	var keyMaxAge string
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Push and pull namespace events and materialize the tree",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// P4-SEC-07: --key-max-age overrides keys.rotate_max_age for this
+			// run only. Validated here so a typo is a usage error, not a
+			// silent fallback.
+			if strings.TrimSpace(keyMaxAge) != "" {
+				d, err := time.ParseDuration(strings.TrimSpace(keyMaxAge))
+				if err != nil {
+					return appError{code: exitUsage, err: fmt.Errorf("invalid --key-max-age %q: %w", keyMaxAge, err)}
+				}
+				// ParseDuration accepts negatives; reject them here so the
+				// flag's promise holds (a bad value is a usage error, never a
+				// silent fallback to the default) — post-#56 opus review.
+				if d < 0 {
+					return appError{code: exitUsage, err: fmt.Errorf("invalid --key-max-age %q: must be >= 0 (0 disables auto-rotation)", keyMaxAge)}
+				}
+				opts.v.Set("keys.rotate_max_age", strings.TrimSpace(keyMaxAge))
+			}
 			return runSyncCycle(cmd.Context(), stdout, opts, hubFile, namespaceOnly, dryRun)
 		},
 	}
 	cmd.Flags().StringVar(&hubFile, "hub-file", "", "file-backed test hub path")
 	cmd.Flags().BoolVar(&namespaceOnly, "namespace-only", false, "sync namespace metadata only; skip materialization")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show sync plan without writing")
+	cmd.Flags().StringVar(&keyMaxAge, "key-max-age", "", "override keys.rotate_max_age for this run (e.g. 720h; 0 disables auto-rotation)")
 	return cmd
 }
 
@@ -92,6 +110,22 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 	}
 	if missingBlobs > 0 {
 		_, _ = fmt.Fprintf(stdout, "warning: %d referenced blob(s) missing from hub; materialization may be incomplete\n", missingBlobs)
+	}
+
+	// P4-SEC-07: age-triggered periodic WCK rotation. Deliberately AFTER the
+	// pull — a freshly ingested grant resets the local epoch age, which
+	// suppresses fleet-wide rotation storms (whichever device syncs first past
+	// the deadline rotates; everyone else pulls the new epoch and stands down)
+	// — and BEFORE the push, so the mint's grant events ride THIS cycle.
+	if rotated, rerr := maybeRotateWorkspaceKey(ctx, stdout, opts, store); rerr != nil {
+		return rerr
+	} else if rotated {
+		// The localEvents snapshot above predates the mint; re-read so the
+		// just-minted grant events are pushed in this same cycle.
+		localEvents, err = store.LocalPendingEvents(ctx, pushCursor)
+		if err != nil {
+			return err
+		}
 	}
 
 	// P6-SEC-02 founder/join gate. After the pull (which ingested any grant for
@@ -209,6 +243,75 @@ func keyGrantGrace(opts *options) time.Duration {
 		return defaultKeyGrantGrace
 	}
 	return d
+}
+
+// defaultKeyRotateMaxAge is the periodic-rotation deadline for the workspace
+// content key (P4-SEC-07): once the active epoch is older than this, the next
+// sync on ANY device mints epoch+1 and grants it to all approved devices. 90
+// days bounds forward exposure of a silently compromised key; an explicit 0
+// disables age-triggered rotation.
+const defaultKeyRotateMaxAge = 2160 * time.Hour
+
+// keyRotateMaxAge resolves keys.rotate_max_age. Parsed here rather than via
+// viper's GetDuration because GetDuration maps a malformed value to 0 — which
+// would silently turn a typo into "rotation disabled" (the same trap as
+// sync.key_grant_grace and materialization.clone_timeout).
+func keyRotateMaxAge(opts *options) time.Duration {
+	if opts == nil || opts.v == nil {
+		return defaultKeyRotateMaxAge
+	}
+	raw := strings.TrimSpace(opts.v.GetString("keys.rotate_max_age"))
+	if raw == "" {
+		return defaultKeyRotateMaxAge
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		fmt.Fprintf(os.Stderr, "warning: invalid keys.rotate_max_age %q; using default %s\n", raw, defaultKeyRotateMaxAge)
+		return defaultKeyRotateMaxAge
+	}
+	return d
+}
+
+// maybeRotateWorkspaceKey rotates the WCK when the active epoch is older than
+// keys.rotate_max_age (P4-SEC-07 periodic rotation). At most one rotation per
+// sync cycle; epoch 0 (keyless founder-to-be or ungranted joiner) is skipped —
+// there is no key to age out, and a joiner must never self-mint (P6-SEC-02).
+// Like `keys rotate`, this is a pure Rotate: no secret-rotation flags, no blob
+// rewrap, no hub deletes — those are revoke semantics.
+//
+// Any device may rotate. The known residual (documented in spec/07/15): the
+// rotator grants only to the approved devices it knows LOCALLY (the device
+// registry is per-device), so a fleet device unknown to the rotator lands on
+// the P6-SEC-03 grace→quarantine→replay path until any device that knows it
+// re-approves it.
+func maybeRotateWorkspaceKey(ctx context.Context, stdout io.Writer, opts *options, store *state.Store) (bool, error) {
+	maxAge := keyRotateMaxAge(opts)
+	if maxAge <= 0 {
+		return false, nil
+	}
+	epoch, created, err := store.ActiveKeyEpochAge(ctx)
+	if err != nil {
+		return false, err
+	}
+	if epoch == 0 || time.Since(created) < maxAge {
+		return false, nil
+	}
+	kr := buildKeyring(opts, store)
+	newEpoch, grants, rerr := kr.Rotate(ctx)
+	if rerr != nil {
+		// FATAL for the cycle (post-#56 Codex review, P1): Rotate wraps every
+		// grant before writing any state, so a failure here is either
+		// harmless-and-early (nothing recorded; a malformed recipient row
+		// needs fixing, not retrying) or a rare DB/custody fault mid-commit —
+		// and in the latter case pushing would seal this cycle's events under
+		// a half-minted epoch whose grants never published, while the fresh
+		// created_at suppresses the retry. Aborting keeps the cycle's events
+		// queued and the failure loud.
+		return false, fmt.Errorf("periodic workspace key rotation failed (fix the cause or disable via keys.rotate_max_age=0 / --key-max-age 0): %w", rerr)
+	}
+	_, _ = fmt.Fprintf(stdout, "Rotated workspace key to epoch %d (epoch %d exceeded keys.rotate_max_age %s); %d grant event(s) ride this push\n",
+		newEpoch, epoch, maxAge, len(grants))
+	return true, nil
 }
 
 // pushLocalEventsGated runs the push side of a sync cycle behind the P6-SEC-02
