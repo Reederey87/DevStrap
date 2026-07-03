@@ -470,6 +470,8 @@ These test workstreams back the sixth-pass architecture-direction decisions. The
 
 ### One-bad-object invariant — chaos multi-device tests (AD-6)
 
+STATUS (2026-07-03): largely SHIPPED — the per-event failure discipline is uniform (per-device Seq cursor holds, undecryptable quarantine + replay, grace-bounded deferral, durable `sync_skipped_events`), and the e2e suite covers hostile-hub omission/substitution/downgrade (`sync_late_push`, `sync_never_granted_epoch_wedge`, `sync_skipped_surfacing`, `hub_gc_stale_marks`). Remaining from this direction: a real applied `device.revoked` trust-propagation path, and broader randomized chaos reordering. Original direction text follows.
+
 DIRECTION: make "one bad object never wedges or silently skips a device" a first-class, tested invariant. The target discipline is a uniform per-event quarantine — a persisted `sync_skipped_events` table surfaced in `status`/`doctor` and replayable (record-and-continue for permanent causes, bounded hold for transient), sticky enrollment (count `trust_state IN ('approved','revoked','lost')` — shipped, `P6-SYNC-03`), and a real applied `device.revoked` path. Add chaos-style multi-device tests against a hostile hub:
 
 ```text

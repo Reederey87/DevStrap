@@ -195,7 +195,9 @@ The HLC primitives remain correct, but the new envelope decorator and the shippe
 
 **References:** Replicaché formalizes the "cursor unknown/poisoned" path as an explicit clear-and-rebuild reset rather than a hard stall ([Replicache pull](https://doc.replicache.dev/reference/server-pull)).
 
-### P6-SYNC-02 — Skip-on-decrypt-failure advances the cursor past recoverable events and permanently chain-pins every later event from that device
+### P6-SYNC-02 — Skip-on-decrypt-failure advances the cursor past recoverable events and permanently chain-pins every later event from that device — SHIPPED 2026-07-03 (PR #63)
+
+> **Status/premise note (2026-07-03):** the cursor half of this finding's premise was superseded before the fix landed — the P5-SYNC-01 per-device Seq cursor (PR #59) already made a pull-dropped event HOLD its origin device's cursor at a seq gap instead of being silently passed. What PR #63 closed was the remaining residual: durable, classified records (`sync_skipped_events`) with grace-bounded unknown-version deferral, malformed-envelope quarantine forwarding, `status`/`doctor` surfacing, and a fail-closed `hub gc` refusal. No `--replay-skipped` was built (nothing to rewind under per-device cursors).
 
 **Severity / Effort / Category:** P2 / M / sync · data-loss · _new (PR #25)_
 
@@ -528,7 +530,7 @@ The schema is robust, but this pass's TOCTOU/atomicity focus surfaced a data-los
 1. Fix the subquery + add the per-project test.
 2. Add the prepare-all-queries lint.
 
-### P6-DATA-03 — Event emission and derived-state mutation are dual-written in separate transactions; a crash between them permanently diverges the origin
+### P6-DATA-03 — Event emission and derived-state mutation are dual-written in separate transactions; a crash between them permanently diverges the origin — SHIPPED 2026-07-03 (PR #61)
 
 **Severity / Effort / Category:** P2 / M / data · convergence · _new_
 
@@ -560,7 +562,7 @@ The schema is robust, but this pass's TOCTOU/atomicity focus surfaced a data-los
 
 **References:** a zero-knowledge system needs an explicit user-held recovery secret (Emergency Kit) or losing all devices loses everything — the backup must include the key material, not just the DB ([1Password white paper](https://1passwordstatic.com/files/security/1password-white-paper.pdf)).
 
-### P6-DATA-05 — No index serves `events(device_id, hlc)`; every sync push and doctor run full-scans the event log with a temp B-tree sort
+### P6-DATA-05 — No index serves `events(device_id, hlc)`; every sync push and doctor run full-scans the event log with a temp B-tree sort — SHIPPED 2026-07-03 (PR #61)
 
 **Severity / Effort / Category:** P3 / S / data · performance · _new_
 
@@ -574,7 +576,7 @@ The schema is robust, but this pass's TOCTOU/atomicity focus surfaced a data-los
 1. Add the composite index migration + spec/12 update.
 2. Verify `EXPLAIN` shows SEARCH + no temp B-tree.
 
-### P6-DATA-06 — No DB invariant enforces a single `local` device; concurrent `devstrap init` can fork the device identity
+### P6-DATA-06 — No DB invariant enforces a single `local` device; concurrent `devstrap init` can fork the device identity — SHIPPED 2026-07-03 (PR #61)
 
 **Severity / Effort / Category:** P3 / S / data · integrity · _new (asymmetry with the 00006 workspace singleton)_
 
@@ -595,7 +597,7 @@ The schema is robust, but this pass's TOCTOU/atomicity focus surfaced a data-los
 
 The drift gate, the release pipeline, and the one real-backend hub test each look like coverage but enforce nothing; two smaller CI/test-hermeticity gaps round it out.
 
-### P6-QUAL-01 — The spec-drift mapped-spec check is vacuously satisfied by the mandatory work-log entry
+### P6-QUAL-01 — The spec-drift mapped-spec check is vacuously satisfied by the mandatory work-log entry — SHIPPED 2026-07-03 (PR #60)
 
 **Severity / Effort / Category:** P2 / S / process · ci · _new (sharpens `P5-DX-02`)_
 
@@ -609,7 +611,7 @@ The drift gate, the release pipeline, and the one real-backend hub test each loo
 1. Exclude `**`-matched specs from `mapped`; add the regression test.
 2. Require a specific mapped spec when one exists.
 
-### P6-QUAL-02 — The release workflow publishes binaries from any `v*` tag with zero verification — no tests, no vuln check, no main-ancestry check
+### P6-QUAL-02 — The release workflow publishes binaries from any `v*` tag with zero verification — no tests, no vuln check, no main-ancestry check — SHIPPED 2026-07-03 (PR #60)
 
 **Severity / Effort / Category:** P2 / S / ci · supply-chain · _new (distinct from `P4-SEC-05`)_
 
@@ -774,7 +776,7 @@ If pull-only behavior is instead the deliberate choice, fix `run_loop.go`'s `Sho
 
 ---
 
-### P6-XP-04 — A keychain-`unavailable` substring heuristic mints a divergent identity on headless Linux, wedging sync for the exact service-install target
+### P6-XP-04 — A keychain-`unavailable` substring heuristic mints a divergent identity on headless Linux, wedging sync for the exact service-install target — SHIPPED 2026-07-03 (PR #62)
 
 **Severity / Effort / Category:** P2 / M / keychain · key-custody · headless-linux · _new (PASS5 twice asserted "the keychain fallback fails closed" — this shows a mixed-context case where it doesn't, and the same bug now also guards the newer WCK custody path)_
 
@@ -1075,4 +1077,4 @@ This pass's findings were checked against the still-open Pass-4/Pass-5 backlog t
 | P6-QUAL-04 | defect in shipped | P5-CLI-04 (`ssh -G` host-alias resolution) |
 | P6-XP-03 | defect in shipped | XP-* (portable `run-loop` convergence loop) |
 
-P4-SEC-02 and the P4-SEC-07 foundation are **SHIPPED** on this trunk (PR #25) even though the ledger in `docs/audits/README.md` still lists them open — reconcile that status in the next ledger update.
+_(Historical note, resolved: the P4-SEC-02 / P4-SEC-07-foundation status mismatch this appendix originally flagged was reconciled in the ledger the same week — `docs/audits/README.md` is the single source of finding status; this file is the per-finding evidence snapshot.)_
