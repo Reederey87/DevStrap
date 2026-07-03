@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/Reederey87/DevStrap/internal/logging"
 	"github.com/Reederey87/DevStrap/internal/state"
@@ -94,10 +95,17 @@ type PullStats struct {
 	// refuse to sweep.
 	Truncated int
 	// Skipped is the count of events dropped in the decrypt pass (malformed
-	// envelope, undecryptable on every held key, anti-downgrade plaintext).
-	// Like Truncated, non-zero means the local replica may be missing
-	// references other devices still rely on.
+	// envelope, retired enc.v1 traffic, anti-downgrade plaintext). Like
+	// Truncated, non-zero means the local replica may be missing references
+	// other devices still rely on.
 	Skipped int
+	// Undecryptable is the count of enc.v2 events that failed AEAD
+	// authentication on every held candidate key (corruption, forgery, or a
+	// hub-side carrier mutation — P6-SYNC-04). These are NOT dropped: the
+	// still-encrypted carrier is forwarded in the returned batch so
+	// ApplyEvents records a permanent undecryptable quarantine conflict and
+	// the cursor advances past it (no silent loss, no wedge).
+	Undecryptable int
 }
 
 // Push envelope-encrypts every non-grant event under the current epoch's WCK
@@ -134,7 +142,7 @@ func (h EncryptedHub) Push(ctx context.Context, events []state.Event) error {
 
 // Pull fetches events from the backend, primes the keyring, verifies grant
 // carrier events when a verifier is configured, ingests verified in-batch grants
-// in HLC order, then decrypts enc.v1 envelopes back to plaintext.
+// in HLC order, then decrypts enc.v2 envelopes back to plaintext.
 //
 // The hub is untrusted (zero-knowledge), so a single non-conforming object must
 // never be able to wedge sync. Pull therefore degrades instead of aborting the
@@ -148,15 +156,19 @@ func (h EncryptedHub) Push(ctx context.Context, events []state.Event) error {
 //     from here on the next sync once the grant arrives.
 //     Truncating (not skipping) is required so a legitimately-decryptable-later
 //     event is never permanently stranded by the cursor jumping over it.
-//   - Held-epoch decrypt failure (corruption, forgery, or a cross-device
-//     epoch-key collision), a malformed/unknown envelope, or a non-grant
+//   - Held-epoch AEAD failure (corruption, forgery, or a hub-side carrier
+//     mutation — P6-SYNC-04): the event can never be decrypted by this device,
+//     but silently skipping it would be silent permanent loss with no operator
+//     signal. Pull FORWARDS the still-encrypted carrier so ApplyEvents records
+//     a permanent undecryptable quarantine conflict (surfaced by `conflicts
+//     list`, blocking `hub gc`) and advances the cursor past it — visible
+//     refusal without a wedge.
+//   - A malformed/unknown envelope, retired enc.v1 traffic, or a non-grant
 //     plaintext event (a downgrade attempt or a pre-envelope legacy event):
-//     the event can never be applied by this device, so Pull SKIPS it with a
-//     loud warning and continues. The event is never applied (the security
-//     property is preserved — no unauthenticated data enters the log), but one
-//     bad object cannot brick the device. This routes bad events through the
-//     same "refuse but keep going" posture the plaintext apply path already
-//     relies on (ApplyEvents' quarantine + safe cursor).
+//     Pull SKIPS it with a loud warning and continues (P6-SYNC-02 tracks
+//     promoting these skip classes to first-class signals). The event is never
+//     applied — no unauthenticated data enters the log — but one bad object
+//     cannot brick the device.
 func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, error) {
 	raw, err := h.Hub.Pull(ctx, afterHLC)
 	if err != nil {
@@ -196,14 +208,27 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 			continue
 		}
 	}
-	// Second pass: decrypt enc.v1, passthrough grants, skip anything this device
-	// cannot apply, and truncate at the first not-yet-granted epoch.
+	// Second pass: decrypt enc.v2, passthrough grants, forward undecryptable
+	// carriers for quarantine, skip retired/malformed traffic, and truncate at
+	// the first not-yet-granted epoch.
 	out := make([]state.Event, 0, len(raw))
 	for i, event := range raw {
 		switch event.Type {
 		case EventDeviceKeyGranted:
 			out = append(out, event)
 		case EventEncryptedV1:
+			// Retired enc.v1 traffic: written before the enc.v2 wire break
+			// (P6-SYNC-04) bound the full carrier into the AAD. There is no v1
+			// decrypt path — the break was taken while every hub was a
+			// disposable spike. Refuse loudly; the remedy is re-founding the
+			// workspace on a fresh hub (or fresh bucket/prefix).
+			logging.Logger(ctx).Warn("encrypted hub pull: skipping retired enc.v1 event; this hub predates the enc.v2 wire break — re-found the workspace on a fresh hub",
+				"event_id", event.ID)
+			if h.Stats != nil {
+				h.Stats.Skipped++
+			}
+			continue
+		case EventEncryptedV2:
 			env, err := ParseEncryptedEnvelope(event)
 			if err != nil {
 				// Malformed envelope or unknown version: an untrusted hub can
@@ -216,16 +241,18 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 				}
 				continue
 			}
-			// The envelope kid is an unauthenticated routing hint (outside the
-			// AAD until enc.v2, P6-SYNC-04), so it selects the candidate ORDER,
-			// never the candidate SET: the exact match is tried first, then
-			// every other held key at the epoch. Trusting the kid to narrow the
-			// set would let a hostile hub relabel a genuinely decryptable
-			// event's kid to an unheld value and wedge the device forever on
-			// the truncate below, even though it holds the decrypting key
-			// (post-#33 review, fable-5). The AEAD authenticates, so a wrong
-			// candidate just fails and applying a kid-relabeled real event is
-			// safe (ContentHash/DeviceSig are still verified in insertEvent).
+			// The envelope kid FIELD is an unauthenticated routing hint (the
+			// sealing key's kid is bound into the AAD instead — enc.v2,
+			// P6-SYNC-04), so it selects the candidate ORDER, never the
+			// candidate SET: the exact match is tried first, then every other
+			// held key at the epoch. Trusting the field to narrow the set
+			// would let a hostile hub relabel a genuinely decryptable event's
+			// kid to an unheld value and wedge the device forever on the
+			// truncate below, even though it holds the decrypting key
+			// (post-#33 review, fable-5). The AEAD authenticates under the
+			// candidate key's own kid, so a wrong candidate just fails and
+			// applying a kid-relabeled real event is safe (ContentHash/
+			// DeviceSig are still verified in insertEvent).
 			var exact [][]byte
 			if env.KID != "" {
 				exact = h.Keyring.WCKCandidates(env.Epoch, env.KID)
@@ -267,16 +294,23 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 					}
 					return out, nil
 				}
-				// The envelope names a key we hold (or is a legacy kid-less
-				// envelope) and authentication failed on every held key:
-				// corruption or forgery. The event can never be decrypted by
-				// this device, so skip it — never apply unauthenticated data —
-				// and continue.
-				logging.Logger(ctx).Warn("encrypted hub pull: skipping undecryptable event",
+				// The envelope names a key we hold (or is a kid-less envelope)
+				// and authentication failed on every held key: corruption,
+				// forgery, or a hub-side carrier mutation (P6-SYNC-04). The
+				// event can never be decrypted by this device — but silently
+				// dropping it would be silent permanent loss. Forward the
+				// still-encrypted carrier so ApplyEvents quarantines it as a
+				// permanent undecryptable conflict: visible in `conflicts
+				// list`, blocks `hub gc`, and the cursor advances past it so
+				// one poisoned object cannot wedge sync. Unauthenticated data
+				// still never enters the log (the carrier is quarantined, not
+				// applied).
+				logging.Logger(ctx).Warn("encrypted hub pull: forwarding undecryptable event for quarantine",
 					"epoch", env.Epoch, "kid", env.KID, "event_id", event.ID, "err", decErr.Error())
 				if h.Stats != nil {
-					h.Stats.Skipped++
+					h.Stats.Undecryptable++
 				}
+				out = append(out, event)
 				continue
 			}
 			out = append(out, restored)
@@ -294,6 +328,111 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 		}
 	}
 	return out, nil
+}
+
+// TryDecrypt attempts to restore a single enc.v2 carrier with the keys held
+// NOW — the exact-kid candidate first, then every held key at the epoch (the
+// same candidate policy as Pull). It primes the keyring but never truncates,
+// skips, or touches Stats: it exists for the undecryptable-conflict replay
+// path (P6-SYNC-04 review fix), which re-attempts quarantined carriers after
+// later grants arrive.
+func (h EncryptedHub) TryDecrypt(ctx context.Context, event state.Event) (state.Event, error) {
+	if err := h.Keyring.Prime(ctx); err != nil {
+		return state.Event{}, fmt.Errorf("encrypted hub try-decrypt: prime keyring: %w", err)
+	}
+	env, err := ParseEncryptedEnvelope(event)
+	if err != nil {
+		return state.Event{}, err
+	}
+	var candidates [][]byte
+	if env.KID != "" {
+		candidates = h.Keyring.WCKCandidates(env.Epoch, env.KID)
+	}
+	candidates = append(candidates, h.Keyring.WCKCandidates(env.Epoch, "")...)
+	if len(candidates) == 0 {
+		return state.Event{}, fmt.Errorf("%w: epoch %d", ErrMissingWorkspaceKey, env.Epoch)
+	}
+	var lastErr error
+	for _, wck := range candidates {
+		restored, decErr := DecryptEvent(event, wck)
+		if decErr == nil {
+			return restored, nil
+		}
+		lastErr = decErr
+	}
+	return state.Event{}, lastErr
+}
+
+// ReplayUndecryptableConflicts re-attempts every open "undecryptable"
+// quarantine conflict with the keys held now (P6-SYNC-04 review fix, gpt-5.5
+// Major). Without this, a hostile hub could strip or relabel the untrusted
+// envelope kid on an event whose grant had not arrived yet, steering the
+// defer-vs-quarantine classification into permanent quarantine — and since
+// the cursor advances past quarantined events, a later legitimate grant could
+// never recover it. The quarantine preserves the full carrier, so each sync
+// cycle replays it: once the grant lands, the carrier decrypts, the conflict
+// auto-resolves, and the restored event applies through the normal verified
+// path. Genuinely corrupt carriers keep failing and their conflicts stay open
+// (visible, gc-blocking, deduped — no growth, no wedge).
+//
+// The replay is DELIBERATELY unconditional — it never skips a conflict as
+// "hopeless" based on what the envelope kid named at quarantine time. Any
+// such classification reads the same attacker-controlled field that caused
+// the misroute: a hub that relabels a not-yet-granted event's kid to a HELD
+// kid would get it marked permanently non-replayable and re-open the exact
+// loss this fix closes (post-#44 dual-review analysis). A hopeless carrier
+// just fails decryption again — cheap, bounded by open conflicts.
+//
+// The conflict is resolved AFTER a successful apply, so a transient failure
+// (DB error) between decrypt and apply leaves the conflict open and the next
+// cycle retries — the resolve-then-apply window would have been a narrow
+// silent-loss path (post-#44 verify, gpt-5.5). A restored event that fails
+// signature verification still records a FRESH "verification" conflict while
+// the "undecryptable" row is open, because the conflict dedup keys on
+// (event ID, kind). A restored event whose HLC is still beyond the trusted
+// receive skew is left for a later cycle (applying it would land in the
+// transient skew quarantine with no carrier left to retry).
+func ReplayUndecryptableConflicts(ctx context.Context, st *state.Store, h EncryptedHub) (int, error) {
+	conflicts, err := st.OpenConflictsByType(ctx, ConflictEventVerification)
+	if err != nil {
+		return 0, err
+	}
+	replayed := 0
+	for _, c := range conflicts {
+		var details eventVerificationConflictDetails
+		if json.Unmarshal([]byte(c.DetailsJSON), &details) != nil || details.Kind != EventConflictKindUndecryptable {
+			continue
+		}
+		var carrier state.Event
+		if err := json.Unmarshal([]byte(details.EventJSON), &carrier); err != nil {
+			logging.Logger(ctx).Warn("undecryptable replay: conflict carries unparseable event JSON",
+				"conflict_id", c.ID, "event_id", details.EventID, "err", err.Error())
+			continue
+		}
+		restored, decErr := h.TryDecrypt(ctx, carrier)
+		if decErr != nil {
+			continue // still undecryptable; leave the conflict open for the next cycle
+		}
+		// Skew guard: a restored HLC still beyond the trusted skew would be
+		// TRANSIENTLY skew-quarantined by ApplyEvents — but with the
+		// undecryptable row resolved there would be no carrier left to
+		// retry. Defer the whole replay to a later cycle instead.
+		if physical := restored.HLC >> hlcLogicalBits; physical-time.Now().UnixMilli() > defaultReceiveMaxSkew.Milliseconds() {
+			logging.Logger(ctx).Warn("undecryptable replay: restored event's clock is still beyond trusted skew; deferring",
+				"event_id", details.EventID, "hlc", restored.HLC)
+			continue
+		}
+		if _, _, err := ApplyEventsWithStats(ctx, st, []state.Event{restored}); err != nil {
+			return replayed, err // conflict stays open; retried next cycle
+		}
+		if err := st.ResolveConflict(ctx, c.ID, `{"action":"auto","reason":"carrier decrypted after a later key grant (P6-SYNC-04 replay)"}`); err != nil {
+			return replayed, err
+		}
+		logging.Logger(ctx).Info("undecryptable replay: quarantined carrier recovered after key grant",
+			"event_id", details.EventID, "device_id", details.DeviceID)
+		replayed++
+	}
+	return replayed, nil
 }
 
 // Blob operations pass through. Blobs are age-encrypted by the bundle layer

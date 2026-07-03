@@ -294,10 +294,12 @@ func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync
 	// any still-open quarantine conflict from an earlier cycle. Sweeping from
 	// a partial mark set deletes other devices' live blobs.
 	if eh, ok := hub.(dssync.EncryptedHub); ok && eh.Stats != nil {
-		if eh.Stats.Truncated > 0 || eh.Stats.Skipped > 0 {
+		// Undecryptable carriers also land in pull.stats.Quarantined below;
+		// this counter is checked too so the refusal message names the cause.
+		if eh.Stats.Truncated > 0 || eh.Stats.Skipped > 0 || eh.Stats.Undecryptable > 0 {
 			return 0, 0, appError{code: exitInvalidConfig, err: fmt.Errorf(
-				"%w: pull deferred %d and skipped %d event(s); this device cannot see the full event log (awaiting a key grant or holding undecryptable events) — resolve that and re-run",
-				errGCRefused, eh.Stats.Truncated, eh.Stats.Skipped)}
+				"%w: pull deferred %d, skipped %d, and quarantined %d undecryptable event(s); this device cannot see the full event log (awaiting a key grant or holding undecryptable events) — resolve that and re-run",
+				errGCRefused, eh.Stats.Truncated, eh.Stats.Skipped, eh.Stats.Undecryptable)}
 		}
 	}
 	if pull.stats.CursorHeld {

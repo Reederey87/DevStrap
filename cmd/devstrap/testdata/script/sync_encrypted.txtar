@@ -1,5 +1,5 @@
 # P4-SEC-02/SEC-07: end-to-end envelope encryption of the namespace-map event
-# log. The hub file must store only ciphertext (enc.v1 carriers) — no project
+# log. The hub file must store only ciphertext (enc.v2 carriers) — no project
 # paths, remote URLs, or payload content in plaintext. A second device, after
 # being enrolled and approved (which grants the WCK), decrypts the full history
 # and materializes. Revoking a device rotates the WCK for go-forward forward
@@ -23,8 +23,8 @@ exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/secret-proj 
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
 stdout 'pushed 1'
 
-# The hub file must contain the enc.v1 sentinel (envelope encryption is active).
-grep 'enc.v1' $WORK/hub.json
+# The hub file must contain the enc.v2 sentinel (envelope encryption is active).
+grep 'enc.v2' $WORK/hub.json
 
 # The hub file must NOT leak the project path or remote URL in plaintext.
 ! grep 'secret-proj' $WORK/hub.json

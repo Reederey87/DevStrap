@@ -1014,6 +1014,88 @@ func TestHasEnrolledDevicesStickyAfterRevoke(t *testing.T) {
 	assertEnrolled(true, "lost last approved")
 }
 
+// TestEventSignatureV2BindsDeviceIDAndSeq pins the P6-SYNC-04 signature-domain
+// upgrade: new local events are signed under devstrap:event:v2 (payload
+// includes DeviceID and Seq), verification accepts v2 first and falls back to
+// v1 for legacy events, and a v2-signed event with a tampered DeviceID or Seq
+// fails BOTH domains (v2 because the payload changed, v1 because the domain
+// differs) — so the re-attribution the enc.v2 AAD blocks on the encrypted
+// plane is also signature-blocked on the plaintext plane.
+func TestEventSignatureV2BindsDeviceIDAndSeq(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newVerifyRemoteEventTestStore(t, ctx)
+	signing, err := devicekeys.NewSigningIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertDevice(ctx, Device{
+		ID: "dev_v2", Name: "v2", OS: "linux", Arch: "arm64",
+		SigningPublicKey: signing.Public, TrustState: "approved",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	base := Event{
+		ID: "evt_v2", DeviceID: "dev_v2", Seq: 3, HLC: 9,
+		Type:        "device.key.granted",
+		PayloadJSON: `{"epoch":1,"recipient":"age1example","wrapped_key":"wrapped"}`,
+		ContentHash: ContentHash(`{"epoch":1,"recipient":"age1example","wrapped_key":"wrapped"}`),
+	}
+
+	// v2-signed verifies.
+	v2 := base
+	sig, err := devicekeys.Sign(signing.Private, eventSignatureDomainV2, EventSignaturePayloadV2(v2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2.DeviceSig = sig
+	if err := st.VerifyRemoteEvent(ctx, v2); err != nil {
+		t.Fatalf("v2-signed event failed verification: %v", err)
+	}
+
+	// Tampered DeviceID on a v2 signature is rejected. (The devices row for
+	// the re-attributed ID must exist with the same public key to isolate the
+	// signature check from the unknown-device branch.)
+	if err := st.UpsertDevice(ctx, Device{
+		ID: "dev_other", Name: "other", OS: "linux", Arch: "arm64",
+		SigningPublicKey: signing.Public, TrustState: "approved",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reattributed := v2
+	reattributed.DeviceID = "dev_other"
+	if err := st.VerifyRemoteEvent(ctx, reattributed); !errors.Is(err, ErrEventVerification) {
+		t.Fatalf("re-attributed v2 event: got %v, want ErrEventVerification", err)
+	}
+
+	// Tampered Seq on a v2 signature is rejected.
+	reseq := v2
+	reseq.Seq = 1
+	if err := st.VerifyRemoteEvent(ctx, reseq); !errors.Is(err, ErrEventVerification) {
+		t.Fatalf("re-sequenced v2 event: got %v, want ErrEventVerification", err)
+	}
+
+	// Legacy v1-signed event still verifies via the fallback (re-founded hubs
+	// re-push v1-signed history verbatim).
+	v1 := base
+	v1.ID = "evt_v1_legacy"
+	v1sig, err := devicekeys.Sign(signing.Private, eventSignatureDomain, EventSignaturePayload(v1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1.DeviceSig = v1sig
+	if err := st.VerifyRemoteEvent(ctx, v1); err != nil {
+		t.Fatalf("legacy v1-signed event failed verification: %v", err)
+	}
+
+	// A garbage signature still fails both domains.
+	bad := base
+	bad.ID = "evt_bad"
+	bad.DeviceSig = v2.DeviceSig[:len(v2.DeviceSig)-4] + "AAAA"
+	if err := st.VerifyRemoteEvent(ctx, bad); !errors.Is(err, ErrEventVerification) {
+		t.Fatalf("garbage signature: got %v, want ErrEventVerification", err)
+	}
+}
+
 func signedGrantEvent(t *testing.T, deviceID, privateSigningKey, eventID string) Event {
 	t.Helper()
 	event := Event{

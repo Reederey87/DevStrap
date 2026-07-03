@@ -49,12 +49,13 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P6-DATA-02 | P2 | `fix/p6-data-02` (2026-07-03) | `ClearRotationForProject` now filters via `namespace_entries.env_profile_id` instead of the non-existent `env_profiles.namespace_id`; store coverage proves per-project isolation and CLI coverage proves one-arg `env rotate <path>` succeeds. |
 | P6-CLI-02 | P2 | `fix/p6-cli-02` (2026-07-03) | `scan <dir> --adopt` is gated on the scanned root naming the same directory as the workspace root (`sameResolvedDir`: byte-exact after `EvalSymlinks`, no case-folding; refusal is `exitUsage`), so one command can no longer rewrite the fleet namespace with out-of-tree repos; adoption proceeds under the canonical root spelling and read-only scans of arbitrary directories keep working. Pinned by `TestScanAdoptRefusesNonWorkspaceRoot`/`...ExplicitWorkspaceRootSucceeds`/`...AcceptsSymlinkedWorkspaceRoot`/`...ReadOnlyAllowsNonWorkspaceRoot`. |
 | P6-GIT-05 | P2 | `fix/p6-git-05` (2026-07-03) | `createFreshWorktree` failures after `git worktree add` (LFS pull, current-device lookup, DB insert) now remove the just-created checkout and delete its `agent/...` branch under a detached bounded context (`context.WithoutCancel` + 2m cap, so a Ctrl-C that caused the failure cannot no-op the cleanup); the `agent run` file-policy-denial cleanup deletes the branch too, and the LFS error names the worktree path. Pinned by `TestCreateFreshWorktreeCleansUpAfterLFSPullFailure`/`...AfterInsertWorktreeFailure`. Doctor orphan-worktree check deliberately out of scope. |
+| P6-SYNC-04 | P2 | `fix/p6-sync-04` (2026-07-03) | Hard cut to `enc.v2`: the AEAD AAD binds the full carrier tuple (ID, DeviceID, sealing-key kid, Seq, HLC, epoch), the signature domain moves to `devstrap:event:v2` (+`device_id`/`seq`, v1 verify fallback for re-pushed history), and a held-key AEAD failure forwards the carrier to a permanent `undecryptable` quarantine conflict instead of a silent skip. v1 is dead (loud skip + re-found guidance). Pinned by `TestDecryptMutatedCarrierFails`/`TestApplyEventsQuarantinesUndecryptableCarrier`/`TestEventSignatureV2BindsDeviceIDAndSeq`. |
 | P6-DOC-02 | P2 | audit PR #28 | Ledger P4-SEC-05 contradiction + convention-#3 violation reconciled in the PR that landed the audit. Fully applied. |
 | P6-DOC-03 | P3 | audit PR #28 | spec/00 re-drift (planned-sync comment, command/test inventories) fixed in the PR that landed the audit. Fully applied. |
 
-### Pass 6 (2026-07-01) — 31 open of 43; **all five P1s shipped**; **P2 quick-win wave complete**
+### Pass 6 (2026-07-01) — 30 open of 43; **all five P1s shipped**; **P2 quick-win wave complete**
 
-> The header count equals the rows in the table below (CodeRabbit, PR #39): 43 findings − 8 shipped − 2 fully-applied doc fixes (`P6-DOC-02`/`P6-DOC-03`, now in *Recently shipped*) = 31 with `P6-CLI-02` and `P6-GIT-05` also shipped. `P6-DOC-01`/`P6-DOC-04` stay listed because their test-hardening residuals are open even though their doc portions were applied in the audit PR. `P6-SYNC-01`, `P6-SEC-01`, `P6-SEC-02` (PRs #30–#34), `P6-DATA-01` (PR #35), `P6-HUB-01` (PR #36), `P6-GIT-01` (PR #37), `P6-SYNC-03` (PR #38), `P6-DATA-02` (PR #39), `P6-CLI-02` (PR #40), and `P6-GIT-05` moved to *Recently shipped* above per convention #3.
+> The header count equals the rows in the table below (CodeRabbit, PR #39): 43 findings − 13 rows in *Recently shipped* (including the 2 fully-applied doc fixes `P6-DOC-02`/`P6-DOC-03`) = 30. `P6-DOC-01`/`P6-DOC-04` stay listed because their test-hardening residuals are open even though their doc portions were applied in the audit PR. `P6-SYNC-01`, `P6-SEC-01`, `P6-SEC-02` (PRs #30–#34), `P6-DATA-01` (PR #35), `P6-HUB-01` (PR #36), `P6-GIT-01` (PR #37), `P6-SYNC-03` (PR #38), `P6-DATA-02` (PR #39), `P6-CLI-02` (PR #40), and `P6-GIT-05` moved to *Recently shipped* above per convention #3.
 
 | ID | Sev | Effort | Finding |
 |---|---|---|---|
@@ -71,7 +72,6 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P6-QUAL-03 | P2 | S | Run the MinIO hub conformance test in a CI job |
 | P6-SEC-03 | P2 | L | Separate transient- from permanently-missing epoch; don't truncate-forever |
 | P6-SYNC-02 | P2 | M | Split skip classes by recoverability; quarantine + surface skipped events |
-| P6-SYNC-04 | P2 | S | Bind the full enc.v1 carrier tuple into the AEAD AAD (enc.v2) |
 | P6-XP-01 | P2 | S | Delete `ShouldPruneDir`'s bare-name fallback; make relSlash authoritative |
 | P6-XP-02 | P2 | M | Align the ignore compiler with real gitignore semantics |
 | P6-XP-03 | P2 | M | Implement `run-loop`'s advertised scan stage (or fix the docs) |

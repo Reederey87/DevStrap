@@ -27,6 +27,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — P6-SYNC-04: enc.v2 — bind the full carrier tuple into the AEAD AAD (R2 go-live wave)
+
+Changed:
+- `internal/sync/eventcrypt.go`: hard wire-format cut to `enc.v2` (`envelopeVersion = 2`, Type sentinel `enc.v2`; v1 is dead — no decrypt path). The AAD now binds the full carrier tuple `u32len(ID)||ID || u32len(DeviceID)||DeviceID || u32len(kid)||kid || u64(Seq) || u64(HLC) || u64(epoch)` (big-endian, length-prefixed), with the kid derived from the sealing key (`KIDForWCK`) on both seal and open — the envelope's kid field stays an unauthenticated routing hint, so a hub-side relabel cannot wedge a decryptable event, while any carrier-field mutation (the `Seq=1` keyless soft-wedge, DeviceID re-attribution, HLC reordering) is now an AEAD authentication failure at decrypt time.
+- `internal/state/store.go`: new `devstrap:event:v2` signature domain whose payload adds `device_id` + `seq`; local events sign v2 only, verification accepts v2 then falls back to v1 (re-founded hubs re-push v1-signed history verbatim; residual documented in spec/15).
+- `internal/sync/encryptedhub.go` + `events.go`: a held-key AEAD failure no longer silently skips — Pull forwards the still-encrypted carrier (new `PullStats.Undecryptable`) and `ApplyEvents` quarantines it as a permanent `event_verification_failure` conflict of new kind `undecryptable` (never inserted, never `devices approve`-replayed, cursor advances past it, `hub gc` refuses while open). Retired `enc.v1` traffic is skipped with a loud "re-found the workspace on a fresh hub" warning. Remaining silent-skip classes (malformed envelope, anti-downgrade plaintext) stay scoped to open `P6-SYNC-02`.
+- `internal/cli/hub.go`: the gc gate message now names the undecryptable count.
+- Review fix (gpt-5.5 Major, dual review): the defer-vs-quarantine classification reads the untrusted kid hint, so a hostile hub could steer a not-yet-granted event into permanent quarantine by stripping/relabeling it. `ReplayUndecryptableConflicts` (+ `EncryptedHub.TryDecrypt`) now runs on every pull (`pullAndApplyEvents` — sync, run-loop, hub gc pre-sync): open undecryptable conflicts are re-attempted with the keys held then; on success the carrier applies through the normal verified path and the conflict auto-resolves (applied BEFORE the resolve so a transient DB failure leaves the conflict open for retry — the conflict dedup keys on (event ID, kind) so a post-decrypt signature failure still records a fresh verification row; a restored HLC still beyond trusted skew defers to a later cycle). Kid tampering can delay a not-yet-granted event, never destroy it. The replay is deliberately unconditional — any "hopeless, skip it" classification would read the same attacker-controlled kid field and reintroduce the loss (second reviewer's skip-exact-key refinement declined for this reason). Pinned by `TestReplayRecoversKidStrippedEventAfterGrant` + `TestReplayRecoveryUnblocksHashChainSuccessor` (the recovered event's hash-chain-held successors converge too). Second review Minor: the grant plane rides plaintext, so a legacy v1-signed grant's Seq is bound by neither AAD nor signature — residual now named precisely in spec/15 and the store.go comment.
+- Specs: `spec/07` (envelope section + AD-3 break marked partially shipped), `spec/15` (threat + finding blocks marked mitigated/shipped; v1-signature residual documented); `sync_encrypted.txtar` pins the `enc.v2` sentinel on the hub file.
+
+Validated:
+- `gofmt -w cmd internal`; `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12 run` (0 issues); `GOCACHE=/tmp/devstrap-gocache go test -race ./...` (all green, incl. new `TestDecryptMutatedCarrierFails`, `TestEncryptedHubPoisonEventDoesNotWedge` rework, `TestEncryptedHubRetiredV1Skipped`, `TestApplyEventsQuarantinesUndecryptableCarrier`, `TestEventSignatureV2BindsDeviceIDAndSeq`); `go run ./cmd/spec-drift --base origin/main --head HEAD` after commit.
+
+Follow-ups:
+- `P6-SYNC-02` (promote the remaining skip classes to first-class signals) and `P6-SEC-03` (transient-vs-permanent missing-epoch grace) stay open; `P4-SYNC-05` (folded hash chain) should build on the v2 signature domain.
+
 ## 2026-07-03 — CLAUDE.md: commit the model-selection policy for agent sessions
 
 Changed:
