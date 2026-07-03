@@ -27,9 +27,16 @@ exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/a-proj $WORK
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
 stdout 'pushed 1'
 
-# Device B (joiner): init --join, add a project, then sync BEFORE being approved.
-exec devstrap --home=$WORK/homeB --root=$WORK/CodeB init --join
+# Device B (joiner): init --join --workspace-id <founder id>, add a project,
+# then sync BEFORE being approved. The id is copied from the founder
+# (P4-SEC-07 pairing: r2/s3 hubs key by workspace id; on the flat file hub the
+# flag is inert, which this flow proves by staying green end-to-end).
+exec sh -c 'WS=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --workspace-id); devstrap --home=$WORK/homeB --root=$WORK/CodeB init --join --workspace-id "$WS"'
+stdout 'Adopted workspace id ws_'
 stdout 'Joining an existing workspace'
+
+# Both stores now report the same workspace id.
+exec sh -c 'test "$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --workspace-id)" = "$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --workspace-id)"'
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB add --path work/b-proj $WORK/remoteB.git
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
 # The joiner defers the push — no key yet. Its event is queued, not lost.

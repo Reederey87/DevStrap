@@ -83,7 +83,10 @@ func renderStatus(ctx context.Context, stdout io.Writer, opts *options) error {
 		return enc.Encode(summary)
 	}
 
-	if _, err := fmt.Fprintf(stdout, "Workspace: %s\nRoot: %s\nProjects: %d\n", summary.WorkspaceName, summary.RootPath, summary.ProjectCount); err != nil {
+	// P4-SEC-07 pairing: surface the workspace id so a founder can copy it for
+	// `init --join --workspace-id <id>` on a joining device, and so two devices
+	// can eyeball-compare that they share one hub prefix.
+	if _, err := fmt.Fprintf(stdout, "Workspace: %s\nWorkspace ID: %s\nRoot: %s\nProjects: %d\n", summary.WorkspaceName, summary.WorkspaceID, summary.RootPath, summary.ProjectCount); err != nil {
 		return err
 	}
 	// PROD-02: surface open conflict count in status.

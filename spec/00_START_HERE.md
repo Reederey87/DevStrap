@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-01
+last_reviewed: 2026-07-03
 tracks_code: [cmd/**, internal/**, .github/**, AGENTS.md, README.md, go.mod, go.sum, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md]
 ---
 # DevStrap — Start Here
@@ -120,7 +120,7 @@ Why Go: one portable binary, good process management, solid cross-platform files
 
 ## Current repository state
 
-Last validated: `2026-06-30`.
+Last validated: `2026-07-03`.
 
 Implemented in this repository:
 
@@ -130,7 +130,7 @@ Implemented in this repository:
 - Structured `slog` setup with CLI/env log-level control, secret-key/value redaction helpers, and no whole-context log attributes.
 - Local state package with embedded Goose SQLite migrations.
 - SQLite open path with per-connection pragmas, WAL, busy timeout, asserted foreign-key enforcement, startup `foreign_key_check`, `0600` database mode, and single-writer pool.
-- Generated stable local `ws_<uuidv7>` workspace identity persisted during `init`, with a database-enforced singleton workspace invariant for the Phase 0 MVP.
+- Generated stable local `ws_<uuidv7>` workspace identity persisted during `init`, with a database-enforced singleton workspace invariant for the Phase 0 MVP; a joining device adopts the founder's id via `init --join --workspace-id <id>` (P4-SEC-07 pairing — the id is surfaced by `status` / `devices recipient --workspace-id`, validated before anything is written, and a store initialized under a different id is refused rather than rewritten).
 - Event-ordering schema for HLC, sync cursors, event delivery, hashes/signatures, tombstones, and namespace source-event metadata.
 - Generated stable local `dev_<uuidv7>` device identity persisted during `init`, plus age X25519 and Ed25519 signing identities whose public keys are stored in SQLite and whose private identities are kept out of SQLite/config in the OS keychain/Secret Service when available, falling back to `~/.devstrap/keys` with mode `0600` when the system keyring is unavailable.
 - Namespace path normalization with NFC display normalization, case-folded `path_key`, and unsafe path rejection.
@@ -149,7 +149,7 @@ Implemented in this repository:
 - Authoritative default-branch resolution for fresh worktrees (`ls-remote --symref` with `set-head --auto` repair and a non-authoritative warning), `worktree cleanup --force`, `worktree unlock <path>`, and `doctor` repo-lock reporting.
 - Sync apply-path clock-skew quarantine, local-clock advance on receive, `project.renamed` handling, delete-vs-dirty conflicts, event verification-failure conflicts with full replay payloads, and tombstone GC; plus `secret_bindings.needs_rotation` flagging on device revoke/lost surfaced in `doctor`.
 - A `DEVSTRAP_NO_KEYCHAIN` gate forcing the file-backed key store for headless/CI runs.
-- Focused tests for every internal package except `internal/id` (which is a trivial ID generator), plus a `rogpeppe/go-internal` testscript end-to-end harness exercising `cmd/devstrap` through the real binary.
+- Focused tests for every internal package (including `internal/id`, whose canonical-shape validator backs `--workspace-id`), plus a `rogpeppe/go-internal` testscript end-to-end harness exercising `cmd/devstrap` through the real binary.
 - Spec frontmatter and a Go-based `cmd/spec-drift` CI gate that maps changed code/config paths to tracked spec files and requires the work log on code/spec/doc changes, plus a command-doc drift test that keeps the spec command list in sync with the binary, and a product-naming ADR at `spec/adr/0001-product-naming.md`.
 - README, MIT license, `.gitignore`, GitHub Actions CI with separate spec-drift, test, and golangci-lint jobs, `CONTRIBUTING.md`, `SECURITY.md`, `CODEOWNERS`, Dependabot, issue/PR templates, and concise `AGENTS.md`.
 
