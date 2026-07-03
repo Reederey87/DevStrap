@@ -576,7 +576,14 @@ func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync
 	// a record from an EARLIER cycle (unknown envelope version awaiting an
 	// upgrade, retired v1, anti-downgrade plaintext) still means this device's
 	// view is incomplete even when the current pull happened to see nothing.
-	if skipped, sErr := store.OpenSkippedEvents(ctx); sErr == nil && len(skipped) > 0 {
+	skipped, sErr := store.OpenSkippedEvents(ctx)
+	if sErr != nil {
+		// Fail CLOSED: this gate exists to stop a sweep from an incomplete
+		// view, so an unreadable skip table must abort like the quarantine
+		// gate below, never silently proceed (CodeRabbit, PR #63).
+		return 0, 0, fmt.Errorf("read skipped events before sweep: %w", sErr)
+	}
+	if len(skipped) > 0 {
 		return 0, 0, appError{code: exitInvalidConfig, err: fmt.Errorf(
 			"%w: %d event(s) remain skipped (see `devstrap doctor`); the hub is serving objects this device cannot consume yet — upgrade devstrap or investigate, then re-run",
 			errGCRefused, len(skipped))}
