@@ -27,6 +27,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — doctor: workspace-id mismatch detection + hub prefix-isolation regression test
+
+Changed:
+- `internal/hub/r2.go`: added `R2Hub.HasEvents`, a retried one-object `ListObjectsV2` probe over the workspace event prefix for cheap populated-prefix detection.
+- `internal/sync/hub.go`: added `FileHub.HasEvents` with the same any-event semantics for the file-backed hub.
+- `internal/cli/doctor.go`: `doctor --remote` now reports the local `workspace id` row and warns joiners on R2/S3 hubs when the pull cursor is still 0 and the raw backend has no events under this device's workspace-id prefix.
+- Tests: added R2 workspace-prefix isolation coverage, FileHub/R2 `HasEvents` coverage, the pure mismatch-heuristic table test, and a Go-level doctor hub-health test for the workspace-id row plus file-hub warning gate.
+- Specs/docs: updated `spec/13_CLI_DAEMON_API.md` for the new doctor rows and `docs/audits/README.md` for the still-open `P4-SEC-07` remainder.
+
+Validated:
+- `gofmt -w cmd internal`; `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run`; `GOCACHE=/tmp/devstrap-gocache go test -race ./...`.
+
+Follow-ups:
+- The `devstrap init --join --workspace-id` adoption flag shipped in PR A of this same pairing wave (merged ahead of this change); the remaining `P4-SEC-07` remainder is periodic (not just revoke-triggered) WCK rotation (`P6-SEC-03`).
+
 ## 2026-07-03 — P4-SEC-04 (joiner half): founder-pinning ceremony before first sync (pairing wave)
 
 Changed:

@@ -166,6 +166,76 @@ func TestR2ConformanceMemS3(t *testing.T) {
 	assertHubRoundTrip(t, context.Background(), newTestR2Hub(t))
 }
 
+func TestR2WorkspacePrefixIsolation(t *testing.T) {
+	ctx := context.Background()
+	shared := newMemS3()
+	founder := R2Hub{S3: shared, WorkspaceID: "ws_founder"}
+	paired := R2Hub{S3: shared, WorkspaceID: "ws_founder"}
+	other := R2Hub{S3: shared, WorkspaceID: "ws_other"}
+
+	events := []state.Event{
+		makeEvent("evt_001", "dev_a", 100, 1, "project.added", `{"path":"a"}`),
+		makeEvent("evt_002", "dev_a", 200, 2, "project.updated", `{"path":"a"}`),
+	}
+	if err := founder.Push(ctx, events); err != nil {
+		t.Fatalf("founder Push: %v", err)
+	}
+	blobKey := strings.Repeat("c", 64)
+	blobData := []byte("encrypted-blob-content")
+	if err := founder.PutBlob(ctx, blobKey, bytes.NewReader(blobData)); err != nil {
+		t.Fatalf("founder PutBlob: %v", err)
+	}
+
+	pairedEvents, err := paired.Pull(ctx, 0)
+	if err != nil {
+		t.Fatalf("paired Pull: %v", err)
+	}
+	if len(pairedEvents) != len(events) {
+		t.Errorf("paired Pull returned %d events, want %d", len(pairedEvents), len(events))
+	} else {
+		for i := range events {
+			if pairedEvents[i].ID != events[i].ID {
+				t.Errorf("paired Pull event[%d] = %s, want %s", i, pairedEvents[i].ID, events[i].ID)
+			}
+		}
+	}
+	rc, err := paired.GetBlob(ctx, blobKey)
+	if err != nil {
+		t.Fatalf("paired GetBlob: %v", err)
+	}
+	got, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	if !bytes.Equal(got, blobData) {
+		t.Errorf("paired GetBlob = %q, want %q", got, blobData)
+	}
+
+	otherEvents, err := other.Pull(ctx, 0)
+	if err != nil {
+		t.Fatalf("other Pull: %v", err)
+	}
+	if len(otherEvents) != 0 {
+		t.Errorf("other Pull returned %d events, want 0", len(otherEvents))
+	}
+	if _, err := other.GetBlob(ctx, blobKey); !errors.Is(err, dssync.ErrBlobNotFound) {
+		t.Errorf("other GetBlob = %v, want ErrBlobNotFound", err)
+	}
+
+	hasEvents, err := paired.HasEvents(ctx)
+	if err != nil {
+		t.Fatalf("paired HasEvents: %v", err)
+	}
+	if !hasEvents {
+		t.Error("paired HasEvents = false, want true")
+	}
+	hasEvents, err = other.HasEvents(ctx)
+	if err != nil {
+		t.Fatalf("other HasEvents: %v", err)
+	}
+	if hasEvents {
+		t.Error("other HasEvents = true, want false")
+	}
+}
+
 // P5-HUB-03: a Pull whose cursor is below the retention horizon must return
 // ErrSnapshotRequired instead of a silently-incomplete (post-compaction) set.
 func TestR2HubPullRetentionFloor(t *testing.T) {

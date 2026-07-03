@@ -223,6 +223,22 @@ func (h R2Hub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, error) 
 	return out, nil
 }
 
+// HasEvents reports whether this workspace has any events at all on the hub
+// (P4-SEC-07 doctor mismatch check): a single retried ListObjectsV2 call
+// against the events prefix with MaxKeys=1. It answers "is this prefix
+// populated" cheaply, without paging the whole event log.
+func (h R2Hub) HasEvents(ctx context.Context) (bool, error) {
+	var page []dssync.BlobInfo
+	if err := h.retry().do(ctx, func() error {
+		var lerr error
+		page, _, lerr = h.S3.ListObjectsV2(ctx, h.eventsPrefix(), "", 1)
+		return lerr
+	}); err != nil {
+		return false, fmt.Errorf("list events: %w", err)
+	}
+	return len(page) > 0, nil
+}
+
 // ListBlobs returns metadata for every blob in this workspace's blob prefix
 // (P5-HUB-02), the enumeration primitive for mark-and-sweep hub GC.
 func (h R2Hub) ListBlobs(ctx context.Context) ([]dssync.BlobInfo, error) {
