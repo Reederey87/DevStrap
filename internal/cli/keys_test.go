@@ -258,6 +258,14 @@ func TestSyncRejectsMalformedKeyMaxAgeFlag(t *testing.T) {
 	if !strings.Contains(stderr, "invalid --key-max-age") {
 		t.Fatalf("stderr = %q, want the flag validation error", stderr)
 	}
+	// ParseDuration accepts negatives; the flag must not (post-#56 review).
+	_, stderr, err = executeForTest("--home", home, "--root", root, "sync", "--hub-file", filepath.Join(t.TempDir(), "h2.json"), "--key-max-age", "-5h")
+	if err == nil {
+		t.Fatal("negative --key-max-age accepted, want usage error")
+	}
+	if !strings.Contains(stderr, "must be >= 0") {
+		t.Fatalf("stderr = %q, want the negative-value refusal", stderr)
+	}
 }
 
 func TestGradeWorkspaceKeyAge(t *testing.T) {

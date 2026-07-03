@@ -33,8 +33,15 @@ func newSyncCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// run only. Validated here so a typo is a usage error, not a
 			// silent fallback.
 			if strings.TrimSpace(keyMaxAge) != "" {
-				if _, err := time.ParseDuration(strings.TrimSpace(keyMaxAge)); err != nil {
+				d, err := time.ParseDuration(strings.TrimSpace(keyMaxAge))
+				if err != nil {
 					return appError{code: exitUsage, err: fmt.Errorf("invalid --key-max-age %q: %w", keyMaxAge, err)}
+				}
+				// ParseDuration accepts negatives; reject them here so the
+				// flag's promise holds (a bad value is a usage error, never a
+				// silent fallback to the default) — post-#56 opus review.
+				if d < 0 {
+					return appError{code: exitUsage, err: fmt.Errorf("invalid --key-max-age %q: must be >= 0 (0 disables auto-rotation)", keyMaxAge)}
 				}
 				opts.v.Set("keys.rotate_max_age", strings.TrimSpace(keyMaxAge))
 			}
