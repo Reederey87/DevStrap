@@ -531,19 +531,36 @@ object-store hub, and future per-task runner isolation.
 
 ## E. Pair a second device
 
-The R2/S3 hub keys every object under `workspaces/<workspace_id>/` (section A.2). Two devices
-therefore converge only when they share one workspace id: the **founder** mints it at
-`devstrap init`, and every later device **adopts** it with `devstrap init --join
---workspace-id <id>`. A device that runs a bare `devstrap init` mints its own fresh id, keys
-a disjoint prefix, and never sees the founder's content — so joining is a first-run decision,
-not something you can retrofit (see the "Not supported" note below).
+This is the end-to-end two-device pairing runbook: a **two-paste ceremony** (founder code →
+joiner, joiner code → founder) plus one out-of-band fingerprint read in each direction. It
+closes the local pairing plane of `P4-SEC-04` (founder-pinning + full-256-bit fingerprint
+confirmation) and `P4-SEC-07` (workspace-id adoption); founder-side *automation* and an
+in-band fingerprint UX remain future work.
+
+The R2/S3 hub keys every object under `workspaces/<workspace_id>/` (section A.2), so two
+devices converge only when they share one workspace id. The **founder** mints it at
+`devstrap init`; every later device **adopts** it — in the ceremony below, from the founder's
+one-paste `devstrap-pair1:` code (`devstrap init --join --code <code>`). A device that runs a
+bare `devstrap init` mints its own fresh id, keys a disjoint prefix, and never sees the
+founder's content — joining is a first-run decision, not something you can retrofit (see *E.7
+Not supported*).
 
 The workspace id is a **non-secret prefix selector**, not a credential: it is excluded from
-event signatures by design and is re-stamped empty on apply (`15_SECURITY_THREAT_MODEL.md`).
-Confidentiality and authorization come from the **key exchange**, not the id — so you exchange
+event signatures by design and re-stamped empty on apply (`15_SECURITY_THREAT_MODEL.md`).
+Confidentiality and authorization come from the **key exchange**, not the id — you exchange
 the id out-of-band alongside the founder's public keys, Syncthing-style, and each side
 authorizes the other by pinning its verified keys. A wrong id only ever yields an empty prefix
 or quarantined ciphertext, never someone else's plaintext.
+
+> **Blobs are unauthenticated by design.** The `devstrap-pair1:` code carries the workspace
+> id, device id, display name, OS, arch, age recipient, and signing public key — no
+> fingerprint, no MAC, no signature. Integrity comes entirely from the **fingerprint
+> ceremony**: the receiver derives a fingerprint from the two carried KEYS and compares it
+> out-of-band before approving, so tampering with either key changes the derived fingerprint
+> and fails the ceremony. The non-key fields are *not* fingerprint-bound — tampering with them
+> cannot forge trust, but it can break convergence **visibly** (quarantined events, or a
+> `doctor`-detected wrong hub prefix) until you re-run the ceremony with a fresh code. Any
+> non-key tamper is therefore self-announcing breakage, never silent compromise.
 
 ### E.1 Founder — found the workspace and publish the pairing material
 
@@ -551,52 +568,44 @@ or quarantined ciphertext, never someone else's plaintext.
 devstrap init ~/Code                 # mints the workspace id; does NOT self-mint a WCK yet
 # point sync at the hub: `hub: r2://<bucket>` in ~/.devstrap/config.yaml, plus
 # DEVSTRAP_HUB_S3_ENDPOINT (or `?endpoint=` on the URI) — see section A.4/B
-devstrap hub login                   # stores the R2/S3 secret in the keychain slot (see the trap in E.3)
+devstrap hub login                   # store the R2/S3 secret in the keychain slot
 devstrap sync                        # founds epoch 1 against the empty hub and pushes the namespace map
-devstrap status                      # copy the `Workspace ID:` line (also `--json` → workspace_id)
+devstrap status                      # the `Workspace ID:` line (also `--json` → workspace_id)
+
+devstrap devices pairing-code        # stdout: devstrap-pair1:...  stderr: founder fingerprint + next steps
 ```
 
-Then print the founder's one-paste pairing code and read the fingerprint aloud:
+Share the **non-secret** `devstrap-pair1:` blob (stdout) with the second device by any channel,
+and read the founder **fingerprint** (stderr) aloud over a trusted channel — the joiner must
+confirm it character-for-character. `devstrap devices recipient --fingerprint` prints the same
+fingerprint if you need it again for a script or a check.
 
-```bash
-devstrap devices pairing-code        # stdout: devstrap-pair1:...; stderr: founder fingerprint + instructions
-devstrap devices recipient --fingerprint   # same founder fingerprint, useful for scripts/checks
-```
+### E.2 Joiner — adopt the id and pin the founder in one step
 
-Share the **non-secret** `devstrap-pair1:` blob with the second device, and read the
-fingerprint over a trusted channel. THE BLOB IS UNAUTHENTICATED BY DESIGN: it carries the
-workspace id, device id, display name, OS, arch, age recipient, and signing public key, but
-it carries no fingerprint and has no MAC/signature. Integrity of the KEYS comes from the
-fingerprint ceremony: the receiver derives the fingerprint from the carried keys and must
-compare it out-of-band before approval — tampering with either key changes the derived
-fingerprint and fails the ceremony. The non-key fields (workspace id, device id, name, os,
-arch) are NOT fingerprint-bound: tampering with them cannot forge trust, but it can break
-convergence visibly (quarantined events / a doctor-detected wrong hub prefix) until the
-ceremony is re-run — `init --join --code` prints every carried field at the confirmation
-prompt; cross-check the workspace id against `devstrap status` on the founder.
-
-### E.2 Joiner — adopt the id, then pin the founder before the first sync
-
-Run the code-adopting init **first** (this is also what makes `hub login` land in the right
-keychain slot — see E.3). Pass the founder fingerprint you confirmed out-of-band:
+Run the code-adopting init **first** — before `hub login` (E.3) — passing the founder
+fingerprint you confirmed out-of-band:
 
 ```bash
 devstrap init ~/Code --join --code '<founder-code>' --fingerprint <founder-fingerprint>
 ```
 
-`--code` implies `--join`, adopts the founder's workspace id, and enrolls the founder row. With
-`--fingerprint`, a mismatch fails before any filesystem write. If you omit `--fingerprint` in an
-interactive terminal, DevStrap prints the derived fingerprint and asks for `yes`; without a TTY it
-keeps init scriptable by storing the founder as pending and printing the exact follow-up
-`devstrap devices approve <founder-device-id> --fingerprint <derived-fp>` command. Run that
-follow-up before the first `devstrap sync`.
+`--code` implies `--join`, adopts the founder's workspace id, and enrolls + pins the founder
+row in one command. With `--fingerprint`, a mismatch fails **before any filesystem write**. Two
+fallbacks keep it usable without the flag:
 
-Manual fallback (still supported for docs/tests and recovery): use
-`devstrap init ~/Code --join --workspace-id <workspace-id>`, then pin the founder with
-`devstrap devices enroll <founder-device-id> --name <n> --os <os> --arch <arch>
---age-recipient <rec> --signing-public-key <sig> --approve --fingerprint <fp>`.
-`--workspace-id` implies `--join`. A bare `devstrap init --join` (no id) still initializes, but
-warns that r2/s3 hubs key by workspace id — supply the id (or a pairing code) to actually converge.
+- **Interactive (TTY):** omit `--fingerprint` and DevStrap prints the derived fingerprint and
+  asks you to type `yes` after you confirm it out-of-band.
+- **Non-interactive (no TTY):** init stays scriptable — it stores the founder as **pending** and
+  prints the exact `devstrap devices approve <founder-device-id> --fingerprint <derived-fp>`
+  follow-up. Run that follow-up (after confirming the fingerprint) **before** the first
+  `devstrap sync`.
+
+The manual, code-free fallback (`devstrap init ~/Code --join --workspace-id <id>` then a full
+`devstrap devices enroll <founder-device-id> … --approve --fingerprint <fp>`) is still supported
+for recovery and tests; its flags are documented in `13_CLI_DAEMON_API.md` (`init`, `devices
+enroll`). A bare `devstrap init --join` with neither `--code` nor `--workspace-id` still
+initializes but warns that r2/s3 hubs key by workspace id and will not converge until you adopt
+one.
 
 <!-- MD028 separator between adjacent blockquotes -->
 
@@ -612,33 +621,28 @@ warns that r2/s3 hubs key by workspace id — supply the id (or a pairing code) 
 # same hub config as the founder: `hub: r2://<bucket>` in ~/.devstrap/config.yaml
 # plus DEVSTRAP_HUB_S3_ENDPOINT — `hub login` stores only the credential pair
 devstrap hub login   # store the R2/S3 secret — AFTER the id-adopting init in E.2
+
+devstrap devices pairing-code   # the joiner's own code + fingerprint, to send back to the founder
 ```
 
 > **Keychain ordering trap.** The hub S3 credential slot is keyed on the workspace id
-> (`hub-s3.<workspace_id>`). Run the id-adopting `init --join --workspace-id <id>` **first**,
-> then `hub login`. If you `hub login` before adopting the id (or re-initialize under a
-> different id afterward), the credential lands in the wrong slot and is orphaned — you must
+> (`hub-s3.<workspace_id>`). Run the id-adopting `init --join --code …` (or `--workspace-id …`)
+> **first**, then `hub login`. If you `hub login` before adopting the id (or re-initialize under
+> a different id afterward), the credential lands in the wrong slot and is orphaned — just
 > `hub login` again under the adopted id.
+
+Send the joiner's `devstrap-pair1:` code to the founder and read its fingerprint aloud.
 
 ### E.4 Founder — approve the joiner, then both sync
 
-The joiner shares its own one-paste code back, and reads its fingerprint aloud:
-
-```bash
-# on the joiner
-devstrap devices pairing-code
-```
-
-The founder enrolls and approves it in one command — `--approve` wraps every held WCK epoch
-to the joiner's recipient (`GrantAllEpochs`), so the joiner can decrypt history:
+The founder enrolls and approves the joiner in one command — `--approve` wraps every held WCK
+epoch to the joiner's recipient (`GrantAllEpochs`), so the joiner can decrypt the full history:
 
 ```bash
 # on the founder
 devstrap devices enroll --code '<joiner-code>' --approve --fingerprint <joiner-fingerprint>
 devstrap sync        # pushes the device.key.granted events
-```
 
-```bash
 # on the joiner
 devstrap sync        # ingests the verified grants, decrypts the map, and materializes the tree
 ```
@@ -646,22 +650,79 @@ devstrap sync        # ingests the verified grants, decrypts the map, and materi
 After this last `sync` the whole `~/Code` tree is really present on the joiner: every repo
 blobless-cloned from its remote, draft blobs extracted, env profiles hydrated.
 
-### E.5 Not supported — changing the workspace id on an initialized store
+### E.5 Rotation cadence — keep the workspace key fresh
 
-There is **no** in-place rewrite of the workspace id. `init --join --workspace-id <id>` refuses
-if the store was already initialized under a different id (born-correct or not at all), because
-a post-hoc rewrite would strand every object already keyed under the old prefix and orphan the
-`hub login` credential slot (E.3). The only supported remedy is to discard the local store and
-re-join cleanly:
+The **workspace content key (WCK)** that seals the namespace-map event log rotates on a
+periodic cadence, independent of pairing:
+
+- **Automatic during `sync`.** Any device whose active WCK epoch is older than
+  `keys.rotate_max_age` (**default 90 days**; `0` disables) mints the next epoch during a sync,
+  grants it to every approved device it knows, and publishes it. The check runs *after* the
+  pull, so a freshly-ingested grant resets the local age and at most one device in a fleet
+  rotates per deadline instead of everyone storming it. Override for one run with
+  `devstrap sync --key-max-age 720h` (or `0` to skip).
+- **Manual.** `devstrap keys rotate` mints and grants a fresh epoch on demand.
+- **Forward-exposure only.** Rotation is a pure key-roll: it bounds how long a *silently*
+  compromised key keeps reading new traffic, and deliberately does **none** of revoke's
+  containment — no secret-rotation flags, no blob re-encryption, no hub deletes. Everything
+  already sealed under the old epoch stays readable to whoever holds it.
+- **For a known compromise, revoke.** `devstrap devices revoke <id>` rotates the WCK *and*
+  re-encrypts affected blobs to the reduced recipient set and flags exposed secrets for
+  value rotation (`09_SECRETS_AND_ENVIRONMENT.md`). Rotation is the routine hygiene; revoke is
+  the incident response.
+
+Doctor rows to watch: **`workspace key age`** (warns once the active epoch is past
+`keys.rotate_max_age`, with the `keys rotate` remedy) and **`awaiting key grants`** (lists any
+epoch/kid this device has seen ciphertext for but never been granted — see *E.6*).
+
+### E.6 Wedge recovery — a device stuck "awaiting key grants"
+
+**Symptom.** After a rotation happened while a device was *unknown to the rotator* (the device
+registry is per-device, so a rotator only grants the approved devices it knows locally), that
+device can see `doctor`'s **`awaiting key grants`** warning and undecryptable rows in
+`conflicts list`. Its sync does not wedge — the missing-key defer is grace-bounded
+(`sync.key_grant_grace`, default 72h) and past the window the still-encrypted carriers
+quarantine as replay-recoverable `undecryptable` conflicts while the cursor advances — but the
+affected events stay quarantined until the grant arrives.
+
+**Recovery.** Re-grant from a device that holds **all** epochs:
+
+```bash
+# on a complete device (one that already holds every WCK epoch)
+devstrap devices approve <stuck-device-id> --fingerprint <stuck-device-fingerprint>
+devstrap sync        # pushes the catch-up device.key.granted events
+
+# on the stuck device
+devstrap sync        # ingests the grants; quarantined events replay and resolve automatically
+```
+
+Approving re-runs `GrantAllEpochs`, so the stuck device receives every epoch it was missing;
+the per-pull replay (`ReplayUndecryptableConflicts`) then decrypts and applies the quarantined
+carriers through the normal verified path and clears the conflicts — nothing is lost.
+
+**`--allow-epoch-gap` override.** `devices approve` / `enroll --approve` refuse *before* any
+trust write when the **approver's own** keyring is incomplete (a gap in held epochs `1..max`,
+or an open `awaiting key grants` row), because the grant set would inherit the gap and strand
+the approved device. `--allow-epoch-gap` forces the approval anyway; the approved device then
+quarantines events at the missing epochs until it is re-approved from a complete device. While
+that gap lasts, the gap device's open quarantine conflicts also keep **`devstrap hub gc`
+refused** on it — run GC from a complete device, or close the gap first.
+
+### E.7 Not supported — changing the workspace id on an initialized store
+
+There is **no** in-place rewrite of the workspace id. `init --join --code/--workspace-id`
+refuses if the store was already initialized under a different id (born-correct or not at all),
+because a post-hoc rewrite would strand every object already keyed under the old prefix and
+orphan the `hub login` credential slot (E.3). The only supported remedy is to discard the local
+store and re-join cleanly:
 
 ```text
-remove <home> and re-run: devstrap init ~/Code --join --workspace-id <id>
+remove <home> and re-run: devstrap init ~/Code --join --code '<founder-code>' --fingerprint <fp>
 ```
 
 where `<home>` is the DevStrap home (`~/.devstrap` by default). This is safe: no repo content
 lives there — repos re-clone from their remotes and env/draft blobs re-pull from the hub on the
-next `sync`. Founder-side automation of this exchange (and an in-band fingerprint UX) remains
-future work (`P4-SEC-04`).
+next `sync`.
 
 ## Pass 6 audit recommendations (2026-07-01)
 
