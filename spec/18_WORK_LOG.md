@@ -35,6 +35,7 @@ Changed:
 - Added CLI coverage for one-arg `devstrap env rotate <path>` succeeding and printing the per-project cleared-binding count (`TestEnvRotateProjectClearsRotationFlag`).
 - Updated the P6-DATA-02 spec notes in `spec/09_SECRETS_AND_ENVIRONMENT.md` and `spec/12_DATA_MODEL_SQLITE.md` from open defect to shipped fix, and moved the audit-ledger row out of the open backlog.
 - Model policy note (CLAUDE.md): implementation + tests delegated to gpt-5.5 (Codex) against a written line-level spec; the diff (including the unrequested-but-convention-consistent spec/ledger updates) was reviewed line-by-line in the main loop and accepted.
+- Ledger arithmetic reconciliation (CodeRabbit on PR #39): the Pass 6 header count and the open-table rows used different semantics (fully-applied `P6-DOC-02`/`P6-DOC-03` still sat in the open table while the header excluded them). The fully-applied doc rows moved to *Recently shipped*, and the header now equals the row count by construction (33 open of 43 = 43 − 8 shipped − 2 fully-applied doc fixes; `P6-DOC-01`/`P6-DOC-04` stay open for their test-hardening residuals).
 
 Validated:
 - `gofmt -w cmd internal`, `golangci-lint run`, `go run ./cmd/spec-drift --base origin/main --head HEAD`, `GOCACHE=/tmp/devstrap-gocache go test -race ./...`.
