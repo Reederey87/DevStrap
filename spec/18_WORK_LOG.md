@@ -36,6 +36,8 @@ Changed:
 - spec/00 current-state bullet refreshed (per-device Seq cursors + durable pull-drop records).
 - spec/16 AD-6: status flipped to largely-shipped with the honest remainder (applied `device.revoked` propagation; randomized chaos reordering).
 
+- Post-review (opus): spec/03's AD-2 block flipped to COMPLETE too (it still framed the freeze as pending with `P5-SYNC-01` open); the passes-index Pass-5 row updated to 33 shipped / 3 open (it contradicted its own detail section); the Pass-6 header-note parenthetical now names all six non-P6 *Recently shipped* rows.
+
 Validated:
 - Docs only. `go run ./cmd/spec-drift --base origin/main --head HEAD`; `TestEveryCommandIsDocumented` + `TestMigrationsDocumented`; ledger header count re-derived from the table (19 == 19).
 

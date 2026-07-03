@@ -416,9 +416,9 @@ The daemon, FSEvents-specific Mac watcher, and service installers are still desi
 
 From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
 
-The near-term hub-hardening imperative is that these `HUB` items land alongside the zero-knowledge namespace-map encryption gap (`P6-SEC-01`, `spec/15`) and the transport-vs-logical-clock cursor gap (`P6-SYNC-01`, `spec/07`), which bound the correctness of every hub push/pull/GC path described above.
+The hub-hardening imperative that these `HUB` items land alongside the zero-knowledge namespace-map encryption gap (`P6-SEC-01`, `spec/15`) and the transport-vs-logical-clock cursor gap (`P6-SYNC-01`/`P5-SYNC-01`, `spec/07`) is now satisfied — all are shipped.
 
-**DIRECTION — multi-device hardening freeze before new planes (`AD-2`).** The shipped multi-device plane has confirmed criticals (`P6-SEC-01` confidentiality break, `P6-SYNC-01` whole-batch wedge, `P6-HUB-01` live-data-loss GC, `P5-SYNC-01` cursor drops). The intended sequencing is a **hardening freeze**: close the P5/P6 sync + crypto criticals before building new capability planes (the HTTP/SSE relay, the daemon, StrapFS, hosting/SaaS docs). See `spec/14` for the roadmap ordering.
+**DIRECTION — multi-device hardening freeze before new planes (`AD-2`): COMPLETE 2026-07-03.** All four confirmed criticals are shipped (`P6-SEC-01` confidentiality break, `P6-SYNC-01` whole-batch wedge, `P6-HUB-01` live-data-loss GC, and `P5-SYNC-01` cursor drops — per-origin-device Seq transport cursors, PR #59). New capability planes (the HTTP/SSE relay, the daemon, StrapFS, hosting/SaaS docs) are unblocked from the freeze's perspective; see `spec/14` for the roadmap ordering and the next core-engine candidate (compaction + snapshot exchange, `P4-SYNC-02`/`P4-HUB-11`).
 
 ### P6-HUB-01 — `hub gc` sweeps a stale local replica with no pre-GC sync, no grace window, and a truncated mark set — **shipped (2026-07-02)**
 
