@@ -55,7 +55,7 @@ exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.js
 exec devstrap --home=$WORK/homeC --root=$WORK/CodeC sync --hub-file=$WORK/hub.json
 exec devstrap --home=$WORK/homeC --root=$WORK/CodeC add --path work/c-proj $WORK/remoteC.git
 exec devstrap --home=$WORK/homeC --root=$WORK/CodeC sync --hub-file=$WORK/hub.json
-stdout 'pushed'
+stdout 'pushed 1'
 
 # A applies C's newer event: A's view is now PAST t_B. Under the HLC-watermark
 # cursor this is the poisoned step — the next pull would start above t_B and
@@ -69,7 +69,7 @@ exec sh -c 'BCODE=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices pairi
 stdout 'enrolled as approved'
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
-stdout 'pushed'
+stdout 'pushed 1'
 
 # THE ASSERTION: A's next sync must deliver and materialize B's late-pushed,
 # old-HLC project. Fails on the HLC-watermark cursor; passes with per-device
