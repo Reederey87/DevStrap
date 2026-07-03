@@ -1008,6 +1008,71 @@ func TestApplyEventsQuarantinesUndecryptableCarrier(t *testing.T) {
 	}
 }
 
+// TestApplyEventsSameSeqDifferentIDQuarantinesAsDivergent (post-#59 opus
+// review, Major): a second event claiming an already-occupied (device, seq)
+// slot under a DIFFERENT event id — a byzantine or backup-restored device
+// re-minting a sequence number — must quarantine as a permanent divergence
+// (consumed slot, batch continues), never surface as a raw SQL error that
+// aborts the whole batch on every pull forever.
+func TestApplyEventsSameSeqDifferentIDQuarantinesAsDivergent(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newSyncStore(t)
+
+	first, err := NewProjectEvent("device-x", EventProjectAdded, 10<<hlcLogicalBits, ProjectPayload{
+		Path: "work/acme/first", Type: "git_repo", RemoteKey: "github.com/acme/first",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Seq = 1
+	// Same (device, seq), different id and content: an equivocation.
+	equivocation, err := NewProjectEvent("device-x", EventProjectAdded, 15<<hlcLogicalBits, ProjectPayload{
+		Path: "work/acme/other", Type: "git_repo", RemoteKey: "github.com/acme/other",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	equivocation.Seq = 1
+	// A later valid event from another device: the batch must keep going.
+	valid, err := NewProjectEvent("device-b", EventProjectAdded, 20<<hlcLogicalBits, ProjectPayload{
+		Path: "work/acme/valid", Type: "git_repo", RemoteKey: "github.com/acme/valid",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid.Seq = 1
+
+	safe, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{first, equivocation, valid}, nil)
+	if err != nil {
+		t.Fatalf("ApplyEvents must quarantine the equivocation, not abort: %v", err)
+	}
+	if stats.Quarantined != 1 || stats.CursorHeld {
+		t.Fatalf("stats = %+v, want Quarantined=1 CursorHeld=false", stats)
+	}
+	// Both device cursors advance: the equivocation is a consumed permanent
+	// quarantine at an already-consumed slot.
+	if safe.After("device-x") != 1 || safe.After("device-b") != 1 {
+		t.Fatalf("safe = %v, want device-x:1 device-b:1", safe)
+	}
+	conflicts, err := st.OpenConflicts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countConflictType(conflicts, ConflictEventVerification); got != 1 {
+		t.Fatalf("verification conflicts = %d, want 1 (the divergent equivocation): %+v", got, conflicts)
+	}
+	projection := projectionOf(t, st)
+	if _, ok := projection["work/acme/first"]; !ok {
+		t.Fatalf("first occupant did not apply: %+v", projection)
+	}
+	if _, ok := projection["work/acme/other"]; ok {
+		t.Fatalf("equivocation applied: %+v", projection)
+	}
+	if _, ok := projection["work/acme/valid"]; !ok {
+		t.Fatalf("batch did not continue past the equivocation: %+v", projection)
+	}
+}
+
 // TestApplyEventsForgedCarrierCannotAdvancePastHeldSlot (P5-SYNC-01 successor
 // to the PR #44 implausible-HLC guard, which protected the retired HLC
 // cursor): EVERY carrier field of an undecryptable envelope is hub-writable —

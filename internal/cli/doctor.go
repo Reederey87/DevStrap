@@ -140,10 +140,12 @@ func checkHubHealth(ctx context.Context, opts *options, hubFile string) []checkR
 				// probe that SUCCEEDED against a genuinely empty prefix) must
 				// also hold, matching the pushCursor convention above.
 				// P5-SYNC-01: "has this device ever pulled" is now answered by
-				// the per-device cursor table, with the frozen legacy HLC row
-				// still honored for pre-migration stores.
+				// the per-device PULL cursor rows (push watermarks deliberately
+				// excluded — HubDeviceCursors omits "push:" rows, so a device
+				// that pushed but never pulled still warns), with the frozen
+				// legacy HLC row honored for pre-migration stores.
 				var pullCursor int64
-				if hasCursors, cerr := store.HasHubDeviceCursors(ctx, hubID); cerr == nil && hasCursors {
+				if cursors, cerr := store.HubDeviceCursors(ctx, hubID); cerr == nil && len(cursors) > 0 {
 					pullCursor = 1
 				} else if legacy, lerr := store.HubCursor(ctx, hubID); lerr == nil {
 					pullCursor = legacy

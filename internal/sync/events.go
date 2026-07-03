@@ -330,7 +330,16 @@ type ApplyStats struct {
 // held dominates consumed: a hub can serve a forged duplicate carrier at a
 // real event's slot (the carrier fields of an undecryptable envelope are
 // unauthenticated), and a consumed forgery must never advance the cursor past
-// the real, transiently-held occupant of the same slot.
+// the real, transiently-held occupant of the same slot — but that guard only
+// covers slots whose real occupant is IN the batch. A byzantine hub that
+// WITHHOLDS the real event at a slot and serves only a forged held-epoch
+// carrier there gets the slot consumed (quarantined), advancing the cursor
+// past the withheld event permanently — a documented residual of the
+// untrusted-hub availability model (spec/15): it is loud (a durable
+// undecryptable conflict plus the successor's hash-chain hold), integrity
+// still holds, and the alternative — holding on every sole-occupant
+// undecryptable slot — would let one genuinely corrupt object wedge its
+// device forever, the exact failure this cursor exists to remove.
 type seqOutcome struct {
 	held     bool
 	consumed bool
@@ -393,12 +402,11 @@ func ApplyEventsWithStats(ctx context.Context, st *state.Store, events []state.E
 			// The carrier's Seq slot counts as consumed: the quarantine is a
 			// durable, replayable record (ReplayUndecryptableConflicts), so
 			// re-delivery would change nothing. Every carrier field, Seq
-			// included, is hub-writable (AEAD failed, nothing authenticated) —
-			// but a forged Seq cannot advance the cursor past a real event,
-			// because held dominates consumed at a contested slot and a slot
-			// whose real occupant the hub withheld entirely stops the
-			// contiguous run at the successor's hash-chain hold instead
-			// (see seqOutcome).
+			// included, is hub-writable (AEAD failed, nothing authenticated);
+			// a forged Seq cannot advance past a real event that is in the
+			// batch (held dominates consumed at a contested slot — see
+			// seqOutcome, including the documented withheld-occupant
+			// residual).
 			record(event, true)
 			continue
 		}

@@ -2600,6 +2600,24 @@ FROM events
 WHERE id = ?;
 `, event.ID)
 	if err := row.Scan(&existing.ID, &existing.WorkspaceID, &existing.DeviceID, &existing.Seq, &existing.HLC, &existing.Type, &existing.PayloadJSON, &existing.ContentHash, &existing.DeviceSig, &existing.PrevEventHash, &existing.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) && event.Seq > 0 {
+			// INSERT OR IGNORE swallowed a uniqueness violation that was NOT
+			// the event id — the only other unique key on events is
+			// (device_id, seq). A second event with the same seq but a
+			// different id is a same-seq equivocation (a byzantine or
+			// backup-restored device re-minting a sequence number): a
+			// PERMANENT divergence, so classify it as ErrDivergentEvent —
+			// ApplyEvents quarantines just this event and the batch continues.
+			// Returning the raw no-rows error instead would abort the whole
+			// batch on every pull forever (post-#59 opus review, Major).
+			var occupant string
+			if lookupErr := exec.QueryRowContext(ctx, `
+SELECT id FROM events WHERE device_id = ? AND seq = ?;
+`, event.DeviceID, event.Seq).Scan(&occupant); lookupErr == nil && occupant != event.ID {
+				return false, fmt.Errorf("%w: event %s claims seq %d already held by %s for device %s",
+					ErrDivergentEvent, event.ID, event.Seq, occupant, event.DeviceID)
+			}
+		}
 		return false, fmt.Errorf("read existing event %s: %w", event.ID, err)
 	}
 	if !sameImmutableEvent(existing, event) {
@@ -3049,11 +3067,14 @@ WHERE excluded.last_seq_pulled > hub_device_cursors.last_seq_pulled;
 // PushSeqCursor returns the local device's push watermark for a hub as a Seq
 // (P5-SYNC-01, replacing the SYNC-04 HLC watermark, whose `hlc >` selection
 // would silently strand events if the local HLC ever regressed relative to
-// seq order). On first read after the migration it backfills once from the
-// legacy hub_cursors "push:<hubID>" HLC row: the watermark becomes MAX(seq)
-// of local events with hlc <= the legacy watermark — exact when the local HLC
-// never regressed, and a too-low value is merely wasteful (re-push is a
-// conditional-put dedup on the hub), never lossy.
+// seq order). There is deliberately NO backfill from the legacy HLC
+// watermark: inferring "already pushed" from `hlc <= watermark` would bake in
+// the exact loss mode this cursor fixes — an unpushed local event stamped
+// with a regressed HLC below the old watermark would be marked pushed forever
+// (post-#59 Codex review, P2). A fresh watermark of 0 merely re-pushes local
+// history once — idempotent per event ID (conditional-put dedup) and an
+// opportunistic re-key of this device's legacy-layout events into the
+// seq-keyed layout — never lossy.
 func (s *Store) PushSeqCursor(ctx context.Context, hubID string) (int64, error) {
 	workspaceID, err := s.WorkspaceID(ctx)
 	if err != nil {
@@ -3067,31 +3088,13 @@ func (s *Store) PushSeqCursor(ctx context.Context, hubID string) (int64, error) 
 	err = s.db.QueryRowContext(ctx, `
 SELECT last_seq_pulled FROM hub_device_cursors WHERE workspace_id = ? AND hub_id = ? AND device_id = ?;
 `, workspaceID, "push:"+hubID, device.ID).Scan(&seq)
-	if err == nil {
-		return seq, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return 0, fmt.Errorf("read push cursor: %w", err)
-	}
-	legacyHLC, err := s.HubCursor(ctx, "push:"+hubID)
-	if err != nil {
-		return 0, err
-	}
-	if legacyHLC <= 0 {
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
-	var backfill int64
-	if err := s.db.QueryRowContext(ctx, `
-SELECT COALESCE(MAX(seq), 0) FROM events WHERE device_id = ? AND seq IS NOT NULL AND hlc <= ?;
-`, device.ID, legacyHLC).Scan(&backfill); err != nil {
-		return 0, fmt.Errorf("backfill push cursor from legacy watermark: %w", err)
+	if err != nil {
+		return 0, fmt.Errorf("read push cursor: %w", err)
 	}
-	if backfill > 0 {
-		if err := s.AdvanceHubDeviceCursor(ctx, "push:"+hubID, device.ID, backfill); err != nil {
-			return 0, err
-		}
-	}
-	return backfill, nil
+	return seq, nil
 }
 
 // AdvancePushSeqCursor advances the local device's push watermark for a hub

@@ -205,37 +205,35 @@ func (a *S3Adapter) ListObjectsV2(ctx context.Context, prefix, startAfter string
 }
 
 // ListCommonPrefixes returns the distinct sub-prefixes directly under prefix,
-// grouped at delimiter (P5-SYNC-01 device-stream discovery). It pages through
-// ListObjectsV2 CommonPrefixes with the same start-after resume contract as
-// ListObjectsV2 above.
+// grouped at delimiter (P5-SYNC-01 device-stream discovery). Pagination uses
+// the S3 continuation token, NOT the start-after-last-prefix trick: resuming
+// after a common prefix would re-list that prefix's own keys (they sort after
+// the bare prefix) and return it again — duplicate device streams past 1000
+// devices (post-#59 opus review, Minor).
 func (a *S3Adapter) ListCommonPrefixes(ctx context.Context, prefix, delimiter string) ([]string, error) {
 	var out []string
-	startAfter := ""
+	var token *string
 	for {
 		in := &s3.ListObjectsV2Input{
-			Bucket:    aws.String(a.bucket),
-			Prefix:    aws.String(prefix),
-			Delimiter: aws.String(delimiter),
-			MaxKeys:   aws.Int32(1000),
-		}
-		if startAfter != "" {
-			in.StartAfter = aws.String(startAfter)
+			Bucket:            aws.String(a.bucket),
+			Prefix:            aws.String(prefix),
+			Delimiter:         aws.String(delimiter),
+			MaxKeys:           aws.Int32(1000),
+			ContinuationToken: token,
 		}
 		resp, err := a.client.ListObjectsV2(ctx, in)
 		if err != nil {
 			return nil, mapS3Error(err)
 		}
-		last := ""
 		for _, cp := range resp.CommonPrefixes {
 			if cp.Prefix != nil {
 				out = append(out, *cp.Prefix)
-				last = *cp.Prefix
 			}
 		}
-		if resp.IsTruncated == nil || !*resp.IsTruncated || last == "" {
+		if resp.IsTruncated == nil || !*resp.IsTruncated || resp.NextContinuationToken == nil {
 			return out, nil
 		}
-		startAfter = last
+		token = resp.NextContinuationToken
 	}
 }
 

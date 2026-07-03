@@ -155,41 +155,42 @@ func TestLocalPendingEventsBySeqSurvivesHLCRegression(t *testing.T) {
 	}
 }
 
-func TestPushSeqCursorBackfillsFromLegacyHLCWatermark(t *testing.T) {
+func TestPushSeqCursorIgnoresLegacyHLCWatermark(t *testing.T) {
 	ctx := context.Background()
 	st := openCursorTestStore(t)
 	const hubID = "file:/tmp/hub.json"
-	seedLocalEvents(t, st, [][2]int64{{1, 100}, {2, 200}, {3, 300}})
-
-	// Pre-migration state: the legacy HLC watermark says everything through
-	// HLC 200 (seq 2) was pushed.
-	if err := st.AdvanceHubCursor(ctx, "push:"+hubID, 200); err != nil {
+	// Seq 2 carries a REGRESSED HLC below the legacy push watermark: under the
+	// retired `hlc >` selection it was silently stranded, and a backfill that
+	// inferred "pushed" from `hlc <= watermark` would bake that loss in
+	// forever (post-#59 Codex review, P2). The watermark must start at 0 —
+	// re-pushing seq 1 is an idempotent dedup; losing seq 2 is not.
+	seedLocalEvents(t, st, [][2]int64{{1, 100}, {2, 50}})
+	if err := st.AdvanceHubCursor(ctx, "push:"+hubID, 100); err != nil {
 		t.Fatal(err)
 	}
 	seq, err := st.PushSeqCursor(ctx, hubID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if seq != 2 {
-		t.Fatalf("backfilled push cursor = %d, want 2 (MAX seq with hlc <= legacy watermark)", seq)
+	if seq != 0 {
+		t.Fatalf("push cursor = %d, want 0 (legacy HLC watermark must not be trusted)", seq)
 	}
-	// The backfill is persisted: a second read does not recompute.
 	pending, err := st.LocalPendingEventsBySeq(ctx, seq)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pending) != 1 || pending[0].Seq != 3 {
-		t.Fatalf("pending after backfill = %+v, want only seq 3", pending)
+	if len(pending) != 2 {
+		t.Fatalf("pending = %+v, want both events (incl. the stranded regressed-HLC seq 2)", pending)
 	}
-	if err := st.AdvancePushSeqCursor(ctx, hubID, 3); err != nil {
+	if err := st.AdvancePushSeqCursor(ctx, hubID, 2); err != nil {
 		t.Fatal(err)
 	}
 	seq, err = st.PushSeqCursor(ctx, hubID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if seq != 3 {
-		t.Fatalf("push cursor after advance = %d, want 3", seq)
+	if seq != 2 {
+		t.Fatalf("push cursor after advance = %d, want 2", seq)
 	}
 }
 
