@@ -45,10 +45,11 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P6-DATA-01 | P1 | PR #35 (2026-07-02) | Origin records its own `draft_snapshots` row in one transaction with the `draft.snapshot.created` event (`InsertLocalEventTx` + `RecordDraftSnapshotTx`), on both the create and revoke-rewrap paths; e2e-pinned by `draft_snapshot_gc_retains_origin.txtar`. |
 | P6-HUB-01 | P1 | PR #36 (2026-07-02) | `hub gc` is sync-first (pre-GC pull+apply via `pullAndApplyEvents`, including blob caching), refuses to sweep on any truncated/skipped pull (`PullStats`), quarantined/cursor-held apply (`ApplyEventsWithStats`), or open quarantine conflict, and keeps unreferenced blobs younger than `--grace-window` (default 24h; `Hub.ListBlobs` now carries `LastModified`). Skew quarantines auto-resolve when their event later applies, so a clock hiccup cannot block gc forever. E2e-pinned by `hub_gc_stale_marks.txtar`. Follow-ups: signed retention marker (`P6-HUB-04`); sweep lock + dedup-`PutBlob` `LastModified` refresh, so gc racing a >window-late recovery sync cannot delete a just-re-referenced blob (`P4-HUB-12`); skipped-at-log-tail keeps gc refused until any newer event advances the cursor (`P6-SEC-03`'s class). |
 | P6-GIT-01 | P1 | `fix/p6-git-01` (2026-07-02) | Git timeout split by command class: `Runner.LongTimeout` (default 30m, config `materialization.clone_timeout`, `gitRunner(opts)` at every CLI call site) applies per attempt to clone/fetch/LFS; a self-imposed deadline kill is the distinct terminal `ErrTimeout` (network exit code), ending the wipe-and-retry — a >2-minute blobless clone now completes. Pinned by the one-attempt/no-wipe fake-git tests + config round-trips. **Completes all five Pass 6 P1s (AD-2 P1 wave).** |
+| P6-SYNC-03 | P2 | `fix/p6-sync-03` (2026-07-03) | Sticky fail-closed enrollment: `hasEnrolledDevices` counts `trust_state IN ('approved','revoked','lost')`, so revoking/losing the last approved device keeps verification fail-closed instead of reopening the pre-enrollment window; post-revoke traffic (revoked or unknown devices) quarantines per `P6-SYNC-01`. Pending placeholders still don't count; the never-enrolled bootstrap window (`P4-SEC-04`) is unchanged. Pinned by `TestHasEnrolledDevicesStickyAfterRevoke` + `TestApplyEventsRevokedLastDeviceStaysFailClosed`. Residual: synced `device.revoked` trust propagation. |
 
-### Pass 6 (2026-07-01) — 34 open of 43; **all five P1s shipped**
+### Pass 6 (2026-07-01) — 33 open of 43; **all five P1s shipped**; P2 quick-win wave underway
 
-> The `P6-DOC-*` findings are documentation/gate accuracy fixes; their doc portions were applied in the same PR that landed this audit (spec/00, spec/13, spec/07/09/15 `tracks_code`, and this ledger). `P6-SYNC-01`, `P6-SEC-01`, `P6-SEC-02` (PRs #30–#34), `P6-DATA-01` (PR #35), `P6-HUB-01` (PR #36), and `P6-GIT-01` moved to *Recently shipped* above per convention #3.
+> The `P6-DOC-*` findings are documentation/gate accuracy fixes; their doc portions were applied in the same PR that landed this audit (spec/00, spec/13, spec/07/09/15 `tracks_code`, and this ledger). `P6-SYNC-01`, `P6-SEC-01`, `P6-SEC-02` (PRs #30–#34), `P6-DATA-01` (PR #35), `P6-HUB-01` (PR #36), `P6-GIT-01` (PR #37), and `P6-SYNC-03` moved to *Recently shipped* above per convention #3.
 
 | ID | Sev | Effort | Finding |
 |---|---|---|---|
@@ -69,7 +70,6 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P6-QUAL-03 | P2 | S | Run the MinIO hub conformance test in a CI job |
 | P6-SEC-03 | P2 | L | Separate transient- from permanently-missing epoch; don't truncate-forever |
 | P6-SYNC-02 | P2 | M | Split skip classes by recoverability; quarantine + surface skipped events |
-| P6-SYNC-03 | P2 | S | Make the fail-closed window sticky once enrollment has ever happened |
 | P6-SYNC-04 | P2 | S | Bind the full enc.v1 carrier tuple into the AEAD AAD (enc.v2) |
 | P6-XP-01 | P2 | S | Delete `ShouldPruneDir`'s bare-name fallback; make relSlash authoritative |
 | P6-XP-02 | P2 | M | Align the ignore compiler with real gitignore semantics |

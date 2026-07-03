@@ -27,6 +27,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — P6-SYNC-03: sticky fail-closed enrollment window (P2 quick-win wave)
+
+Changed:
+- `internal/state`: `hasEnrolledDevices` now counts `trust_state IN ('approved','revoked','lost')` instead of `'approved'` only. A revoked/lost row proves an operator trust decision happened, so revoking (or losing) the last approved device keeps `verifyEventSignature` fail-closed instead of silently reopening the pre-enrollment fail-open regime — previously the revoked device (and even unknown/unsigned devices) could inject non-destructive `project.added`/`draft.snapshot.created`/`conflict.resolved` events again. Auto-created `pending` placeholders (`EnsureRemoteDeviceTx`) still don't count, and the genuinely-never-enrolled bootstrap window (`P4-SEC-04`) is unchanged. Post-revoke traffic lands in the shipped `P6-SYNC-01` per-event quarantine (one `event_verification_failure` conflict per event; cursor advances; no batch abort).
+- Model policy note (CLAUDE.md): implemented directly in the main loop (fable-5) — one-line predicate but trust-boundary semantics; PRs 1/3/4 of the wave (`P6-DATA-02`/`P6-GIT-05`/`P6-CLI-02`) are delegated to gpt-5.5 (Codex) per policy.
+- Specs: 07 (P6-SYNC-03 section rewritten as shipped; AD-6 bullet marked shipped), 15 (fail-closed reality paragraph now documents sticky enrollment; related-threat rows updated), 14 (P2 quick-win wave status), 16 (test inventory), 18 (this entry); ledger `docs/audits/README.md` (P6-SYNC-03 → *Recently shipped*; Pass 6 now 33 open of 43).
+
+Validated:
+- `gofmt -w cmd internal`, `golangci-lint run`, `go run ./cmd/spec-drift --base origin/main --head HEAD`, `GOCACHE=/tmp/devstrap-gocache go test -race ./...`.
+- New tests: `TestHasEnrolledDevicesStickyAfterRevoke` (`internal/state`: local-only → open; pending placeholder → still open; approved → closed; revoked/lost last approved → stays closed) and `TestApplyEventsRevokedLastDeviceStaysFailClosed` (`internal/sync`: with only a revoked device on record, a validly-signed event from it and an unknown-device event both quarantine — Quarantined=2, nothing applied, cursor advances).
+
+Follow-ups:
+- Synced `device.revoked` trust propagation (revoke is still local-only) — carried from the P6-SYNC-01 residuals.
+- Rest of the P2 quick-win wave: `P6-DATA-02`, `P6-GIT-05`, `P6-CLI-02`.
+
 ## 2026-07-03 — P6-GIT-01: git timeout split by command class; deadline kills are terminal (PR 3/3 — completes the Pass 6 P1 wave)
 
 Changed:

@@ -447,6 +447,41 @@ func TestApplyEventsChainedRevokedEventsDoNotWedgeCursor(t *testing.T) {
 	}
 }
 
+// P6-SYNC-03: revoking the LAST approved device must not reopen the
+// pre-enrollment bootstrap window. With only a revoked device on record (the
+// post-revoke two-device state — no approved device left), a validly-signed
+// non-destructive event from the revoked device, and any event from an
+// unknown device, must be quarantined rather than applied.
+func TestApplyEventsRevokedLastDeviceStaysFailClosed(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newSyncStore(t)
+	bSigning := addRemoteDeviceForApplyTest(t, st, "device-b", "revoked")
+
+	revokedB := signedProjectEvent(t, bSigning, "device-b", 1, 10<<hlcLogicalBits, "work/acme/b1", "github.com/acme/b1")
+	unknown := projEvent(t, "device-x", EventProjectAdded, 20, "work/acme/x1", "github.com/acme/x1")
+
+	safeCursor, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{revokedB, unknown})
+	if err != nil {
+		t.Fatalf("ApplyEvents should quarantine post-revoke events, not abort: %v", err)
+	}
+	if safeCursor != 20<<hlcLogicalBits {
+		t.Fatalf("safeCursor = %d, want %d", safeCursor, 20<<hlcLogicalBits)
+	}
+	if stats.Quarantined != 2 || stats.CursorHeld {
+		t.Fatalf("stats = %+v, want Quarantined=2 CursorHeld=false", stats)
+	}
+	if projection := projectionOf(t, st); len(projection) != 0 {
+		t.Fatalf("no event may apply after the last approved device is revoked, got %+v", projection)
+	}
+	conflicts, err := st.OpenConflicts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := countConflictType(conflicts, ConflictEventVerification); got != 2 {
+		t.Fatalf("event verification conflicts = %d, want 2: %+v", got, conflicts)
+	}
+}
+
 func TestApplyEventsDivergentEventQuarantines(t *testing.T) {
 	ctx := context.Background()
 	st, device := newSyncStore(t)
