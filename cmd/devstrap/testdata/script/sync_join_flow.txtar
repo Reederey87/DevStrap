@@ -37,6 +37,14 @@ stdout 'Joining an existing workspace'
 
 # Both stores now report the same workspace id.
 exec sh -c 'test "$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --workspace-id)" = "$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --workspace-id)"'
+
+# B pins the founder BEFORE its first sync (P4-SEC-04 joiner half): approving
+# A's keys on keyless B grants nothing (joiner never self-mints) but flips
+# verification fail-closed, closing B's TOFU bootstrap window pre-sync.
+exec sh -c 'A_ID=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices list | awk "NR==1{print \$1}"); AREC=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient); ASIG=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --signing); devstrap --home=$WORK/homeB --root=$WORK/CodeB devices enroll "$A_ID" --name a --os linux --arch arm64 --age-recipient "$AREC" --signing-public-key "$ASIG" --approve'
+stdout 'enrolled as approved'
+stderr 'nothing was granted'
+
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB add --path work/b-proj $WORK/remoteB.git
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
 # The joiner defers the push — no key yet. Its event is queued, not lost.

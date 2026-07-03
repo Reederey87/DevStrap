@@ -176,6 +176,7 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 				}
 				hint := "Joining an existing workspace. Next:\n"
 				steps := []string{
+					"pin the founder — and every other existing device — BEFORE your first sync: devstrap devices enroll <device-id> --name <n> --os <os> --arch <arch> --age-recipient <rec> --signing-public-key <sig> --approve  # closes the TOFU window (P4-SEC-04); events from devices you have not pinned yet quarantine and replay once approved",
 					"devstrap devices recipient            # copy this device's age recipient",
 					"devstrap devices recipient --signing  # and its signing key",
 					"on an approved device: devstrap devices enroll <id> --age-recipient <rec> --signing-public-key <sig> --approve",
@@ -185,7 +186,7 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 					// This init already minted a local id, so a plain re-run
 					// with --workspace-id would hit the mismatch refusal — the
 					// recovery hint must include removing the state home.
-					steps = append([]string{fmt.Sprintf("on the founding device: devstrap status  # copy its Workspace ID, then here: rm -r %s and re-run: devstrap init --join --workspace-id <id>", paths.Home)}, steps...)
+					steps = append([]string{fmt.Sprintf("on the founding device: devstrap status  # copy its Workspace ID, then (r2/s3 hubs only — file hubs need no id) rm -r %s here and re-run: devstrap init --join --workspace-id <id>", paths.Home)}, steps...)
 				} else {
 					if _, err := fmt.Fprintf(stdout, "Adopted workspace id %s.\n", workspaceID); err != nil {
 						return err
