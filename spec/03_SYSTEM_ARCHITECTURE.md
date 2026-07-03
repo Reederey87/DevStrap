@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-01
+last_reviewed: 2026-07-03
 tracks_code: [cmd/**, internal/**, .github/**]
 ---
 # System Architecture
@@ -426,14 +426,11 @@ The near-term hub-hardening imperative is that these `HUB` items land alongside 
 
 **Shipped fix.** Three gates in `hubGC` (`internal/cli/hub.go`): (1) a pre-GC pull+apply (the `pullAndApplyEvents` helper shared with `runSyncCycle`) so every device's latest events enter the mark set; (2) refuse-to-sweep when the view is incomplete — `EncryptedHub.PullStats.Truncated`/`Skipped` counters, `ApplyEventsWithStats` quarantine/cursor-held signals, or any open quarantine-class conflict (`dssync.QuarantineConflictTypes`) abort with a non-zero exit and a remedy hint; (3) an age grace window — `Hub.ListBlobs` now returns `BlobInfo{Key, LastModified}` (S3: `out.Contents[i].LastModified`; FileHub: blob mtime; a zero time is treated as young/kept) and unreferenced blobs younger than `--grace-window` (default 24h) survive, **bounding** the blob-pushed-before-event race to the window (a device offline longer than the window is not protected; it re-pushes on its next successful sync because its push cursor never advanced). The pre-GC pull also caches referenced blobs exactly as `sync` does — the cursor advances past those events, so gc is the only chance to fetch them. A late-applying skew-quarantined event now auto-resolves its `untrustworthy_remote_time` conflict so one transient clock hiccup cannot block gc forever. Known residuals, tracked with the follow-ups: a dedup'd `PutBlob` re-upload does not refresh `LastModified`, so gc racing a >window-late recovery sync within seconds can still delete the blob (needs a timestamp-refreshing re-put or conditional delete — fold into `P4-HUB-12`); an undecryptable event parked at the log tail keeps `Skipped` non-zero until any newer event advances the cursor (`P6-SEC-03`'s class). `hub gc` documents that it runs from one designated device; the S3 conditional-write sweep lock and the signed retention manifest remain follow-ups (`P6-HUB-04`, `P4-HUB-12`).
 
-### P6-HUB-02 — hub S3 credentials are plaintext env/config only; the promised keychain/`op://` resolution is unbuilt
+### P6-HUB-02 — hub S3 credential custody (shipped 2026-07-03, PR #45)
 
-**Problem.** `selectBackendHub` accepts the S3 secret access key only from a plaintext env var or config value and passes it to a static credentials provider (`internal/cli/hub.go:106-110` → `NewS3Client`). The keychain / `op://` / `age_blob:` credential resolution promised (and falsely marked "shipped") in `spec/19` does not exist, and `spec/13`/`spec/15`/`spec/19` contradict each other on hub credential custody.
+**Was.** `selectBackendHub` accepted the S3 secret access key only from a plaintext env var or config value and passed it to a static credentials provider; the keychain / `op://` credential resolution promised in `spec/19` did not exist, and `spec/13`/`spec/15`/`spec/19` contradicted each other on hub credential custody.
 
-**Actionable steps.**
-1. Resolve hub S3 credentials through the same custody path as other secrets (OS keychain / `op://` provider ref), not a bare env/config string.
-2. Reconcile `spec/19` with `spec/13`/`spec/15` so one document owns the credential-custody claim and none marks the unbuilt resolution "shipped".
-3. Add an auth-error branch to `mapS3Error` so a rejected/expired credential surfaces a typed, actionable error. See `docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`.
+**Shipped fix.** Hub S3/R2 credentials now resolve most-explicit-first through `resolveHubS3Credentials` (`internal/cli/hub.go`): `DEVSTRAP_HUB_S3_*` env/config — where either value may be a 1Password `op://` ref resolved via `op read` under the sanitized child env — then `AWS_*` literals, then the per-workspace OS-keychain slot written by the new `devstrap hub login` (0600 file fallback; removed by `hub logout`). The resolved secret rides `redact.Secret` and is revealed only at the `hub.NewS3Client` constructor. `mapS3Error` gained an `ErrS3Auth` branch so rejected/expired credentials surface a typed remediation hint instead of a raw `SignatureDoesNotMatch`. `spec/13`/`spec/15`/`spec/19` are reconciled — `spec/15` owns the custody threat model, `spec/19` the provisioning steps.
 
 ### P6-HUB-03 — `R2Hub.Push` uploads one event per serial round-trip
 

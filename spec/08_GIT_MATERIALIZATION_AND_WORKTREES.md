@@ -432,18 +432,8 @@ if used, _ := dsgit.UsesLFS(ctx, localPath); used {
 }
 ```
 
-### P6-GIT-05 — `createFreshWorktree` leaks a DB-invisible worktree + branch on post-`worktree add` failure
+### P6-GIT-05 — post-`worktree add` failure cleanup (shipped 2026-07-03, `fix/p6-git-05`)
 
-**Problem.** `addWorktreeWithFreshBranch` creates the branch and worktree, but the later `applyWorktreeLFSPolicy`, `store.CurrentDevice`, and `store.InsertWorktree` failures all `return state.Worktree{}, err` without removing them (`internal/cli/worktree.go:170,174-193`). On an LFS repo with a flaky network (or any DB error) every retry leaves a full checkout under `~/.devstrap/worktrees/<project>/` plus an `agent/...` branch untracked by SQLite, so `worktree list`/`cleanup` can't reap it; the M2 cleanup runs only after success and removes only the worktree (`agent.go:72-81`).
+**Was.** `addWorktreeWithFreshBranch` created the branch and worktree, but later `applyWorktreeLFSPolicy`, `store.CurrentDevice`, and `store.InsertWorktree` failures returned without removing them, leaking a full checkout under `~/.devstrap/worktrees/<project>/` plus an `agent/...` branch untracked by SQLite — invisible to `worktree list`/`cleanup`.
 
-**Actionable steps.**
-1. Register a `cleanup` closure (`WorktreeRemove` + `branch -D <branch>`) and invoke it on the three failure returns and the M2 path; include `wtPath` in the LFS error.
-2. Add a `doctor` orphan-worktree check listing on-disk worktrees (`git worktree list --porcelain`) with no `worktrees` row.
-3. Test: stub the worktree adder so LFS pull fails; assert neither the path nor the branch survives.
-
-```go
-cleanup := func() {
-    _ = r.WorktreeRemove(ctx, localPath, wtPath, true)
-    _, _ = r.Run(ctx, localPath, "branch", "-D", branch)
-}
-```
+**Shipped fix.** All three post-`worktree add` failure paths (and the `agent run` file-policy-denial path) now run `removeOrphanWorktree` (`internal/cli/worktree.go`), which removes the just-created checkout and deletes its `agent/...` branch under a detached, bounded context (`context.WithoutCancel` + 2m cap) so the Ctrl-C/deadline that caused the failure cannot also no-op the cleanup; removal failures surface as warnings with a manual-remedy hint, and the LFS error names the worktree path. Pinned by `TestCreateFreshWorktreeCleansUpAfterLFSPullFailure` / `...AfterInsertWorktreeFailure`. The `doctor` orphan-worktree check (on-disk worktrees with no `worktrees` row) was deliberately left out of scope and remains a candidate follow-up.
