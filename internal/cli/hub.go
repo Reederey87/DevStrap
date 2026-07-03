@@ -66,6 +66,11 @@ func hubFromOptions(ctx context.Context, opts *options, store *state.Store, hubF
 		// grant arrives.
 		MissingKeyWait: store.NoteMissingKeyGrant,
 		GraceWindow:    keyGrantGrace(opts),
+		// P6-SYNC-02: durable records for events the pull must drop (unknown
+		// envelope version, retired enc.v1, anti-downgrade plaintext) — the
+		// visibility layer for the per-device retry wedge the seq gap causes.
+		// The same grace window bounds the recoverable unknown-version defer.
+		NoteSkipped: store.NoteSkippedEvent,
 	}, hubID, nil
 }
 
@@ -566,6 +571,15 @@ func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync
 				"%w: pull deferred %d, skipped %d, and quarantined %d undecryptable event(s); this device cannot see the full event log (awaiting a key grant or holding undecryptable events) — resolve that and re-run",
 				errGCRefused, eh.Stats.Truncated, eh.Stats.Skipped, eh.Stats.Undecryptable)}
 		}
+	}
+	// P6-SYNC-02: the durable skip table outlives one pull's in-memory stats —
+	// a record from an EARLIER cycle (unknown envelope version awaiting an
+	// upgrade, retired v1, anti-downgrade plaintext) still means this device's
+	// view is incomplete even when the current pull happened to see nothing.
+	if skipped, sErr := store.OpenSkippedEvents(ctx); sErr == nil && len(skipped) > 0 {
+		return 0, 0, appError{code: exitInvalidConfig, err: fmt.Errorf(
+			"%w: %d event(s) remain skipped (see `devstrap doctor`); the hub is serving objects this device cannot consume yet — upgrade devstrap or investigate, then re-run",
+			errGCRefused, len(skipped))}
 	}
 	if pull.stats.CursorHeld {
 		// A transiently-held event (clock skew or hash-chain break) is

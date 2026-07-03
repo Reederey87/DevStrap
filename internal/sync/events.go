@@ -457,6 +457,17 @@ func ApplyEventsWithStats(ctx context.Context, st *state.Store, events []state.E
 			if err != nil {
 				return err
 			}
+			// P6-SYNC-02: an earlier pull may have dropped this event as
+			// skipped (unknown envelope version pre-upgrade, or a garbled
+			// object the hub has since replaced); now that it is CONSUMED —
+			// applied here, or deduped because it was already inserted — the
+			// durable skip record's wedge is over. Clear it in the same
+			// transaction (idempotent no-op when no record exists), on both
+			// paths: a restored object for an event this device already holds
+			// arrives as a dedup, not an insert.
+			if err := tx.ClearSkippedEventTx(ctx, event.ID); err != nil {
+				return err
+			}
 			if !inserted {
 				return nil
 			}

@@ -27,6 +27,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — fix(sync): durable, classified pull-drop records (P6-SYNC-02 residual)
+
+Changed:
+- `internal/sync/encryptedhub.go`: drop classes re-classified by recoverability. Unknown envelope version (newer client) now defers its ORIGIN DEVICE's tail within `sync.key_grant_grace` (per-device, like a missing grant) and quarantine-forwards past it (post-upgrade replay recovers it); malformed envelopes forward straight to the undecryptable quarantine (the durable conflict IS the record); retired enc.v1 and anti-downgrade plaintext stay dropped-never-applied with durable records. New `NoteSkipped` seam + `SkipReason*` constants; `EnvelopeVersion` partial-parse helper in eventcrypt.
+- Migration `00018_sync_skipped_events.sql` + `Store.NoteSkippedEvent` (stable first-seen = the unknown-version grace clock), `OpenSkippedEvents`, `Tx.ClearSkippedEventTx`; `ApplyEvents` clears an event's records in the same tx that CONSUMES it — on apply and on dedup (a restored object for an event this device already holds arrives as a dedup).
+- Surfacing: `status` "Skipped hub events: N"; `doctor` "skipped hub events" (per-reason breakdown + remedies: upgrade / re-found / investigate the hub); `hub gc` refuses to sweep while any record is open (the durable table outlives one pull's in-memory stats).
+- Deliberately NOT built: `sync --replay-skipped` (nothing to rewind under the per-device Seq cursor — held classes self-retry at the gap, quarantined classes ride `ReplayUndecryptableConflicts`), and skip records for the grant-ingestion branches (`key_grant_waits` + verification conflicts already surface those precisely; a second row would double-count with no lifecycle).
+- Tests: encryptedhub class matrix (defer-within-grace with sighting recorded, quarantine-past-grace, nil-seam defer-forever, malformed forward), store record tests, clear-on-apply AND clear-on-dedup, e2e `sync_skipped_surfacing.txtar` (hub downgrade → record + status/doctor + gc refusal → restore → record clears). Schema pins 17→18.
+- Specs: 07 (P6-SYNC-02 → shipped; AD-6 bullet flipped; cursor-caveat updated), 12 (00018 + version 18 + table section; gitstate reservation → 00020, 00019 claimed by the in-flight key-custody PR), 13 (sync/status/doctor/gc surfacing + the deliberate no-flag note), 16 (test inventory).
+
+Validated:
+- `gofmt -w cmd internal`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOCACHE=/tmp/devstrap-gocache go test -race ./...` (incl. the new e2e).
+
+Follow-ups:
+- Old-epoch containment and snapshot exchange remain the recovery path for the documented byzantine withhold+forge residual (spec/15, P4-SYNC-02).
+
 ## 2026-07-03 — feat(sync): transport cursor decoupled from HLC — per-device Seq pull plane (P5-SYNC-01)
 
 Changed:

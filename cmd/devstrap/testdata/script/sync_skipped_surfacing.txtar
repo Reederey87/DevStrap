@@ -1,0 +1,51 @@
+# P6-SYNC-02: an event the pull must drop (here: the hub serving a PLAINTEXT
+# object where enc.v2 ciphertext is required — a downgrade attempt) leaves a
+# durable sync_skipped_events record instead of only a log line. The record
+# surfaces in `status` and `doctor`, makes `hub gc` refuse to sweep, and
+# clears automatically once the hub serves the real object again (the event
+# is consumed by dedup — this device already holds its own copy).
+
+env DEVSTRAP_NO_KEYCHAIN=1
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+exec git init --bare -b main $WORK/remoteA.git
+exec git clone $WORK/remoteA.git $WORK/srcA
+exec sh -c 'echo hello-a > $WORK/srcA/README.md'
+exec sh -c 'cd $WORK/srcA && git add README.md && git commit -m init && git branch -M main && git push origin main'
+
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA init
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/a-proj $WORK/remoteA.git
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+stdout 'pushed 1'
+
+# The hub "downgrades" the sealed carrier to a plaintext type (the envelope
+# payload stays, so this is exactly a non-encrypted event where ciphertext is
+# required). There is exactly one enc.v2 carrier on the hub (grants ride
+# plaintext by design).
+exec sh -c 'sed "s/\"Type\": \"enc.v2\"/\"Type\": \"project.added\"/" $WORK/hub.json > $WORK/hub2.json && mv $WORK/hub2.json $WORK/hub.json'
+
+# The pull drops it (anti-downgrade), records the durable skip, and the sync
+# still completes — one bad object never fails the cycle.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+
+# Surfaced in status and doctor.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA status
+stdout 'Skipped hub events: 1'
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA doctor
+stdout 'plaintext-anti-downgrade: 1'
+
+# hub gc refuses to sweep while the device cannot consume the full log.
+! exec devstrap --home=$WORK/homeA --root=$WORK/CodeA hub gc --hub-file=$WORK/hub.json
+stderr 'refus'
+
+# The hub serves the real object again; the event is consumed (dedup — this
+# device already holds it) and the record clears.
+exec sh -c 'sed "s/\"Type\": \"project.added\"/\"Type\": \"enc.v2\"/" $WORK/hub.json > $WORK/hub2.json && mv $WORK/hub2.json $WORK/hub.json'
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA status
+! stdout 'Skipped hub events'
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA doctor
+stdout 'skipped hub events'

@@ -3633,3 +3633,96 @@ func nullZero(value int64) any {
 	}
 	return value
 }
+
+// SkippedEvent is one durable record of an event EncryptedHub.Pull dropped
+// from the batch (P6-SYNC-02): under the per-device Seq cursor the drop holds
+// the origin device's cursor at a seq gap, and this row is the visibility for
+// that retry wedge. Reasons: "unknown-envelope-version" (recoverable by
+// upgrading devstrap; first_seen_at is its grace clock), "retired-enc-v1"
+// (re-found the workspace), "plaintext-anti-downgrade" (the hub is serving
+// plaintext where ciphertext is required).
+type SkippedEvent struct {
+	EventID     string
+	DeviceID    string
+	Seq         int64
+	HLC         int64
+	Reason      string
+	FirstSeenAt time.Time
+}
+
+// NoteSkippedEvent records (idempotently) that an event was dropped by the
+// pull for the given reason and returns the STABLE first-seen time of that
+// (event, reason) — re-sightings on later pulls never restart the clock
+// (P6-SYNC-02, mirroring NoteMissingKeyGrant).
+func (s *Store) NoteSkippedEvent(ctx context.Context, ev Event, reason string) (time.Time, error) {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
+	now := timestampNow()
+	if _, err := s.db.ExecContext(ctx, `
+INSERT OR IGNORE INTO sync_skipped_events (workspace_id, event_id, device_id, seq, hlc, reason, first_seen_at)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+`, workspaceID, ev.ID, ev.DeviceID, ev.Seq, ev.HLC, reason, now); err != nil {
+		return time.Time{}, fmt.Errorf("note skipped event: %w", err)
+	}
+	var first string
+	if err := s.db.QueryRowContext(ctx, `
+SELECT first_seen_at FROM sync_skipped_events WHERE workspace_id = ? AND event_id = ? AND reason = ?;
+`, workspaceID, ev.ID, reason).Scan(&first); err != nil {
+		return time.Time{}, fmt.Errorf("read skipped event: %w", err)
+	}
+	seen, err := time.Parse(timestampLayout, first)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse skipped event first_seen_at %q: %w", first, err)
+	}
+	return seen, nil
+}
+
+// OpenSkippedEvents lists every still-open skipped-event record, oldest
+// first (P6-SYNC-02). Rows clear when their event finally applies
+// (Tx.ClearSkippedEventTx from the apply path), so anything returned here is
+// an object the hub is still serving that this device still cannot consume —
+// surfaced by `status` and `doctor`, and a `hub gc` sweep refusal.
+func (s *Store) OpenSkippedEvents(ctx context.Context) ([]SkippedEvent, error) {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT event_id, device_id, seq, hlc, reason, first_seen_at
+FROM sync_skipped_events
+WHERE workspace_id = ?
+ORDER BY first_seen_at ASC, event_id ASC;
+`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("list skipped events: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []SkippedEvent
+	for rows.Next() {
+		var rec SkippedEvent
+		var first string
+		if err := rows.Scan(&rec.EventID, &rec.DeviceID, &rec.Seq, &rec.HLC, &rec.Reason, &first); err != nil {
+			return nil, fmt.Errorf("scan skipped event: %w", err)
+		}
+		if rec.FirstSeenAt, err = time.Parse(timestampLayout, first); err != nil {
+			return nil, fmt.Errorf("parse skipped event first_seen_at %q: %w", first, err)
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
+}
+
+// ClearSkippedEventTx deletes every skip record for an event that finally
+// applied (P6-SYNC-02): a post-upgrade pull consuming a once-unknown-version
+// event, or a hub replacing a garbled object with the real one, closes the
+// wedge and the record with it. Idempotent no-op when no record exists.
+func (tx *Tx) ClearSkippedEventTx(ctx context.Context, eventID string) error {
+	if _, err := tx.tx.ExecContext(ctx, `
+DELETE FROM sync_skipped_events WHERE workspace_id = ? AND event_id = ?;
+`, tx.workspaceID, eventID); err != nil {
+		return fmt.Errorf("clear skipped event: %w", err)
+	}
+	return nil
+}

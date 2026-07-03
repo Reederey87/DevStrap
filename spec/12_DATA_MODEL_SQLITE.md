@@ -201,7 +201,7 @@ CREATE TABLE device_gitstate (
 );
 ```
 
-Status: planned. No `device_gitstate` migration exists yet; add it as `00019_gitstate_mirror.sql` when the Layer A working-state validation plane lands (00010–00017 are now taken; 00018 is claimed by the in-flight skip-quarantine PR — see the migration list below). `sync_cursors` and `event_delivery` are defined; `hub_cursors` (00008) is frozen legacy since 00017 (see its section below); `pending_hub_deletes` (00011) backs the revoke-rewrap cleanup queue (`P5-PROD-02`). `device_sync_state` and `jobs` remain unwired.
+Status: planned. No `device_gitstate` migration exists yet; add it as `00020_gitstate_mirror.sql` when the Layer A working-state validation plane lands (00010–00018 are now taken; 00019 is claimed by the in-flight key-custody PR — see the migration list below). `sync_cursors` and `event_delivery` are defined; `hub_cursors` (00008) is frozen legacy since 00017 (see its section below); `pending_hub_deletes` (00011) backs the revoke-rewrap cleanup queue (`P5-PROD-02`). `device_sync_state` and `jobs` remain unwired.
 
 ### env_profiles
 
@@ -485,6 +485,24 @@ CREATE TABLE key_grant_waits (
 
 `key_grant_waits` (migration `00015_key_grant_waits.sql`, `P6-SEC-03`) is the grace-window bookkeeping for workspace keys this device has seen ciphertext for but never been granted. `EncryptedHub.Pull` records the first sighting through the `MissingKeyWait` seam (`Store.NoteMissingKeyGrant`, INSERT-OR-IGNORE then SELECT, so `first_seen_at` is stable across re-pulls); the grace comparison uses the **earliest** `first_seen_at` across every kid at the epoch, so a hostile hub relabeling the unauthenticated envelope kid hint cannot restart the window per label. `RecordKeyEpoch` deletes satisfied rows the moment a matching key is held (an epoch-level `''` wait clears on any key at the epoch; a kid-specific wait only on that kid). Open rows are surfaced by `doctor` ("awaiting key grants") and consulted by the `devices approve`/`enroll --approve` epoch-contiguity guard. No secret material is stored.
 
+### sync_skipped_events (shipped — durable pull-drop record, P6-SYNC-02)
+
+```sql
+CREATE TABLE sync_skipped_events (
+  workspace_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  device_id TEXT NOT NULL DEFAULT '',
+  seq INTEGER NOT NULL DEFAULT 0,
+  hlc INTEGER NOT NULL DEFAULT 0,
+  reason TEXT NOT NULL,
+  first_seen_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, event_id, reason),
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+);
+```
+
+`sync_skipped_events` (migration `00018_sync_skipped_events.sql`, `P6-SYNC-02`) records every event `EncryptedHub.Pull` drops from the batch (`unknown-envelope-version`, `retired-enc-v1`, `plaintext-anti-downgrade`), written through the `NoteSkipped` seam (`Store.NoteSkippedEvent`, INSERT-OR-IGNORE so `first_seen_at` is stable — it is the grace clock for the recoverable unknown-version class). Under the per-device Seq cursor a dropped event is a seq gap that HOLDS its origin device's cursor; these rows are that wedge's visibility: `status` counts them, `doctor` grades them per reason with remedies, and `hub gc` refuses to sweep while any is open. A row clears in the same transaction that finally consumes its event (apply or dedup — `Tx.ClearSkippedEventTx`). No secret material is stored.
+
 ### blobs (content-addressed encrypted blob index — planned)
 
 **Status: PLANNED — no migration exists.** Planned (`HUB-*`, `DRAFT-*`) local index of the content-addressed encrypted blob store — the hub's second plane (env values + non-git/draft bundles), all age-encrypted client-side and named `age_blob:<sha256>`. The hub sees only ciphertext; this table is the local bookkeeping for what each blob is, whether it is cached locally and/or uploaded, and when it may be reclaimed.
@@ -595,6 +613,7 @@ internal/state/migrations/
   00015_key_grant_waits.sql
   00016_device_hlc_index_single_local.sql
   00017_hub_device_cursors.sql
+  00018_sync_skipped_events.sql
 ```
 
 CLI:
@@ -625,9 +644,10 @@ internal/state/migrations/00014_workspace_key_kids.sql
 internal/state/migrations/00015_key_grant_waits.sql
 internal/state/migrations/00016_device_hlc_index_single_local.sql
 internal/state/migrations/00017_hub_device_cursors.sql
+internal/state/migrations/00018_sync_skipped_events.sql
 ```
 
-The current schema version is **17**. `00010_repo_forge_kind.sql` adds the per-project forge override (`GIT-05`); `00011_pending_hub_deletes.sql` queues blobs orphaned by a local-only revoke for deletion on the next hub-enabled sync (`P5-PROD-02`/`P5-SEC-01`); `00012_draft_snapshot_idempotency.sql` adds a partial `UNIQUE` index on `draft_snapshots(namespace_id, source_event_id)` so idempotency is enforced by the DB, not only the SELECT-then-INSERT guard (`P5-DATA-02`); `00013_workspace_keys.sql` adds the `workspace_keys` and `workspace_key_grants` tables backing the WCK epoch keyring for envelope encryption of the event log (`P4-SEC-02`/`P4-SEC-07`) — `workspace_keys(workspace_id, epoch, created_at)` records which epochs this device holds, and `workspace_key_grants(workspace_id, epoch, recipient, source_event_id, source_event_hlc, source_event_device_id, created_at)` is a membership audit of device.key.granted events (the wrapped WCK itself rides the event payload, never SQLite); `00014_workspace_key_kids.sql` re-keys `workspace_keys` by `(workspace_id, epoch, kid)` and adds `origin` (`P6-SEC-02`/`P6-SEC-01b` — same-epoch keys coexist under content-derived kids instead of overwriting; pre-kid rows backfill as `kid=''`/`origin='legacy'`) and adds the nullable audit `kid` column to `workspace_key_grants`; `00015_key_grant_waits.sql` adds the `key_grant_waits` grace-window table for never-granted workspace keys (`P6-SEC-03`, see its section above); `00016_device_hlc_index_single_local.sql` adds `idx_events_device_hlc` for device-scoped HLC event scans (`P6-DATA-05`) and `idx_devices_single_local` to enforce exactly one local device row (`P6-DATA-06`); `00017_hub_device_cursors.sql` adds the per-origin-device Seq transport cursor table (`P5-SYNC-01`, see its section above) and freezes `hub_cursors` as a read-only legacy row set. Migrations can be applied by `devstrap init` or explicitly with `devstrap db migrate`.
+The current schema version is **18**. `00010_repo_forge_kind.sql` adds the per-project forge override (`GIT-05`); `00011_pending_hub_deletes.sql` queues blobs orphaned by a local-only revoke for deletion on the next hub-enabled sync (`P5-PROD-02`/`P5-SEC-01`); `00012_draft_snapshot_idempotency.sql` adds a partial `UNIQUE` index on `draft_snapshots(namespace_id, source_event_id)` so idempotency is enforced by the DB, not only the SELECT-then-INSERT guard (`P5-DATA-02`); `00013_workspace_keys.sql` adds the `workspace_keys` and `workspace_key_grants` tables backing the WCK epoch keyring for envelope encryption of the event log (`P4-SEC-02`/`P4-SEC-07`) — `workspace_keys(workspace_id, epoch, created_at)` records which epochs this device holds, and `workspace_key_grants(workspace_id, epoch, recipient, source_event_id, source_event_hlc, source_event_device_id, created_at)` is a membership audit of device.key.granted events (the wrapped WCK itself rides the event payload, never SQLite); `00014_workspace_key_kids.sql` re-keys `workspace_keys` by `(workspace_id, epoch, kid)` and adds `origin` (`P6-SEC-02`/`P6-SEC-01b` — same-epoch keys coexist under content-derived kids instead of overwriting; pre-kid rows backfill as `kid=''`/`origin='legacy'`) and adds the nullable audit `kid` column to `workspace_key_grants`; `00015_key_grant_waits.sql` adds the `key_grant_waits` grace-window table for never-granted workspace keys (`P6-SEC-03`, see its section above); `00016_device_hlc_index_single_local.sql` adds `idx_events_device_hlc` for device-scoped HLC event scans (`P6-DATA-05`) and `idx_devices_single_local` to enforce exactly one local device row (`P6-DATA-06`); `00017_hub_device_cursors.sql` adds the per-origin-device Seq transport cursor table (`P5-SYNC-01`, see its section above) and freezes `hub_cursors` as a read-only legacy row set; `00018_sync_skipped_events.sql` adds the durable pull-drop record (`P6-SYNC-02`, see its section below). Migrations can be applied by `devstrap init` or explicitly with `devstrap db migrate`.
 
 ## Backup
 

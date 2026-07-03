@@ -393,32 +393,127 @@ func TestEncryptedHubMissingEpoch(t *testing.T) {
 	}
 }
 
-// TestEncryptedHubUnknownVersion proves an envelope version this build cannot
-// read is refused but skipped (not fatal), so a newer client's events cannot
-// wedge an older client.
-func TestEncryptedHubUnknownVersion(t *testing.T) {
+// skipRecorder is a NoteSkipped seam double: fixed first-seen, records
+// (event id, reason) sightings.
+type skipRecorder struct {
+	firstSeen time.Time
+	sightings [][2]string
+}
+
+func (r *skipRecorder) note(_ context.Context, ev state.Event, reason string) (time.Time, error) {
+	r.sightings = append(r.sightings, [2]string{ev.ID, reason})
+	return r.firstSeen, nil
+}
+
+// TestEncryptedHubUnknownVersionDefersWithinGrace (P6-SYNC-02): an envelope
+// version this build cannot read is DECRYPTABLE AFTER UPGRADE, so within the
+// grace window it defers its origin device's tail (per-device, like a missing
+// grant — the seq gap holds that device's cursor) while other devices' events
+// keep flowing, and the sighting is durably recorded through the NoteSkipped
+// seam.
+func TestEncryptedHubUnknownVersionDefersWithinGrace(t *testing.T) {
 	ctx := context.Background()
 	kr := newFakeKeyring(t, 1)
-	wck1, _ := NewWCK()
-	enc, _ := EncryptEvent(state.Event{ID: "ev", DeviceID: "dev_a", HLC: 1, Type: EventProjectAdded, PayloadJSON: `{}`, ContentHash: state.ContentHash(`{}`)}, wck1, 1)
-	// Forge an unsupported version (the retired v1): rejected fail-closed.
+	wck1, _ := kr.WCK(1)
+	future, _ := EncryptEvent(state.Event{ID: "ev_future", DeviceID: "dev_a", Seq: 1, HLC: 1, Type: EventProjectAdded, PayloadJSON: `{}`, ContentHash: state.ContentHash(`{}`)}, wck1, 1)
 	var env encryptedEnvelope
-	_ = json.Unmarshal([]byte(enc.PayloadJSON), &env)
-	env.Version = 1
+	_ = json.Unmarshal([]byte(future.PayloadJSON), &env)
+	env.Version = 3 // a newer client's format
 	raw, _ := json.Marshal(env)
-	enc.PayloadJSON = string(raw)
-	back := &recordingHub{events: []state.Event{enc}}
-	hub := EncryptedHub{Hub: back, Keyring: kr, Stats: &PullStats{}}
+	future.PayloadJSON = string(raw)
+	// dev_a's later event rides the defer; dev_b's event keeps flowing.
+	tailA, _ := EncryptEvent(state.Event{ID: "ev_tail", DeviceID: "dev_a", Seq: 2, HLC: 3, Type: EventProjectAdded, PayloadJSON: `{"path":"a"}`, ContentHash: state.ContentHash(`{"path":"a"}`)}, wck1, 1)
+	okB, _ := EncryptEvent(state.Event{ID: "ev_b", DeviceID: "dev_b", Seq: 1, HLC: 2, Type: EventProjectAdded, PayloadJSON: `{"path":"b"}`, ContentHash: state.ContentHash(`{"path":"b"}`)}, wck1, 1)
+	rec := &skipRecorder{firstSeen: time.Now()}
+	back := &recordingHub{events: []state.Event{future, okB, tailA}}
+	hub := EncryptedHub{Hub: back, Keyring: kr, Stats: &PullStats{}, NoteSkipped: rec.note, GraceWindow: time.Hour}
 	got, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull unknown version: unexpected error %v", err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("Pull returned %+v, want the unknown-version event skipped", got)
+	if len(got) != 1 || got[0].ID != "ev_b" {
+		t.Fatalf("Pull returned %+v, want only dev_b's event (dev_a deferred)", got)
 	}
-	// P6-HUB-01: the skip must be visible to callers (gc gate).
-	if hub.Stats.Skipped != 1 || hub.Stats.Truncated != 0 {
-		t.Fatalf("Stats = %+v, want Skipped=1 Truncated=0", *hub.Stats)
+	if hub.Stats.Truncated != 2 || hub.Stats.Skipped != 0 {
+		t.Fatalf("Stats = %+v, want Truncated=2 Skipped=0", *hub.Stats)
+	}
+	if len(rec.sightings) != 1 || rec.sightings[0] != [2]string{"ev_future", SkipReasonUnknownVersion} {
+		t.Fatalf("sightings = %v, want one unknown-version record for ev_future", rec.sightings)
+	}
+}
+
+// TestEncryptedHubUnknownVersionQuarantinesPastGrace (P6-SYNC-02): once the
+// grace lapses, the carrier is handed to the undecryptable quarantine so an
+// abandoned old client cannot wedge forever on a permanently-newer fleet; the
+// post-upgrade replay recovers it.
+func TestEncryptedHubUnknownVersionQuarantinesPastGrace(t *testing.T) {
+	ctx := context.Background()
+	kr := newFakeKeyring(t, 1)
+	wck1, _ := kr.WCK(1)
+	future, _ := EncryptEvent(state.Event{ID: "ev_future", DeviceID: "dev_a", Seq: 1, HLC: 1, Type: EventProjectAdded, PayloadJSON: `{}`, ContentHash: state.ContentHash(`{}`)}, wck1, 1)
+	var env encryptedEnvelope
+	_ = json.Unmarshal([]byte(future.PayloadJSON), &env)
+	env.Version = 3
+	raw, _ := json.Marshal(env)
+	future.PayloadJSON = string(raw)
+	rec := &skipRecorder{firstSeen: time.Now().Add(-2 * time.Hour)}
+	back := &recordingHub{events: []state.Event{future}}
+	hub := EncryptedHub{Hub: back, Keyring: kr, Stats: &PullStats{}, NoteSkipped: rec.note, GraceWindow: time.Hour}
+	got, err := hub.Pull(ctx, nil)
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "ev_future" || got[0].Type != EventEncryptedV2 {
+		t.Fatalf("Pull returned %+v, want the still-encrypted carrier forwarded", got)
+	}
+	if hub.Stats.Undecryptable != 1 || hub.Stats.Truncated != 0 {
+		t.Fatalf("Stats = %+v, want Undecryptable=1 Truncated=0", *hub.Stats)
+	}
+}
+
+// TestEncryptedHubUnknownVersionNilSeamDefersForever pins the legacy contract:
+// with no NoteSkipped seam wired, an unknown version defers (never
+// quarantines) — unit-test isolation of the pull classification.
+func TestEncryptedHubUnknownVersionNilSeamDefersForever(t *testing.T) {
+	ctx := context.Background()
+	kr := newFakeKeyring(t, 1)
+	wck1, _ := kr.WCK(1)
+	future, _ := EncryptEvent(state.Event{ID: "ev_future", DeviceID: "dev_a", Seq: 1, HLC: 1, Type: EventProjectAdded, PayloadJSON: `{}`, ContentHash: state.ContentHash(`{}`)}, wck1, 1)
+	var env encryptedEnvelope
+	_ = json.Unmarshal([]byte(future.PayloadJSON), &env)
+	env.Version = 3
+	raw, _ := json.Marshal(env)
+	future.PayloadJSON = string(raw)
+	back := &recordingHub{events: []state.Event{future}}
+	hub := EncryptedHub{Hub: back, Keyring: kr, Stats: &PullStats{}}
+	got, err := hub.Pull(ctx, nil)
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	if len(got) != 0 || hub.Stats.Truncated != 1 {
+		t.Fatalf("got %+v stats %+v, want deferred with Truncated=1", got, *hub.Stats)
+	}
+}
+
+// TestEncryptedHubMalformedEnvelopeForwardsForQuarantine (P6-SYNC-02): junk
+// that does not even parse as an envelope is permanently unreadable — it is
+// FORWARDED so ApplyEvents records the durable undecryptable conflict and the
+// slot is consumed, instead of a log-only drop.
+func TestEncryptedHubMalformedEnvelopeForwardsForQuarantine(t *testing.T) {
+	ctx := context.Background()
+	kr := newFakeKeyring(t, 1)
+	junk := state.Event{ID: "ev_junk", DeviceID: "dev_a", Seq: 1, HLC: 1, Type: EventEncryptedV2, PayloadJSON: `{not json`, ContentHash: "sha256:junk"}
+	back := &recordingHub{events: []state.Event{junk}}
+	hub := EncryptedHub{Hub: back, Keyring: kr, Stats: &PullStats{}}
+	got, err := hub.Pull(ctx, nil)
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "ev_junk" {
+		t.Fatalf("Pull returned %+v, want the malformed carrier forwarded", got)
+	}
+	if hub.Stats.Undecryptable != 1 || hub.Stats.Skipped != 0 {
+		t.Fatalf("Stats = %+v, want Undecryptable=1 Skipped=0", *hub.Stats)
 	}
 }
 

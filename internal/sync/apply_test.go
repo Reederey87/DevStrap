@@ -1122,3 +1122,38 @@ func TestApplyEventsForgedCarrierCannotAdvancePastHeldSlot(t *testing.T) {
 		t.Fatalf("safe = %v — a forged consumed carrier must not advance past the held real event", safe)
 	}
 }
+
+// TestApplyEventsClearsSkipRecordOnConsume (P6-SYNC-02): a durable skip
+// record clears when its event is finally consumed — on first APPLY, and on
+// DEDUP (a restored hub object for an event this device already holds).
+func TestApplyEventsClearsSkipRecordOnConsume(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newSyncStore(t)
+
+	ev, err := NewProjectEvent("device-x", EventProjectAdded, 10<<hlcLogicalBits, ProjectPayload{
+		Path: "work/acme/skiprec", Type: "git_repo", RemoteKey: "github.com/acme/skiprec",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev.Seq = 1
+	if _, err := st.NoteSkippedEvent(ctx, ev, "unknown-envelope-version"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ApplyEventsWithStats(ctx, st, []state.Event{ev}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if open, _ := st.OpenSkippedEvents(ctx); len(open) != 0 {
+		t.Fatalf("skip records after apply = %+v, want cleared", open)
+	}
+	// Dedup path: re-note, re-deliver the SAME (already inserted) event.
+	if _, err := st.NoteSkippedEvent(ctx, ev, "plaintext-anti-downgrade"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ApplyEventsWithStats(ctx, st, []state.Event{ev}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if open, _ := st.OpenSkippedEvents(ctx); len(open) != 0 {
+		t.Fatalf("skip records after dedup = %+v, want cleared", open)
+	}
+}
