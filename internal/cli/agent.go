@@ -76,7 +76,7 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 				if repoPath == "" {
 					repoPath = filepath.Join(opts.paths().Root, filepath.FromSlash(project.Path))
 				}
-				_ = dsgit.NewRunner().WorktreeRemove(cmd.Context(), repoPath, wt.Path, true)
+				_ = gitRunner(opts).WorktreeRemove(cmd.Context(), repoPath, wt.Path, true)
 				_ = store.MarkWorktreeRemoved(cmd.Context(), wt.ID)
 				return err
 			}
@@ -217,7 +217,7 @@ func newAgentPRCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if p, err := store.ProjectByID(cmd.Context(), run.NamespaceID); err == nil {
 				projectForge = p.ForgeKind
 			}
-			drift, err := finalizationBaseDrift(cmd.Context(), wt)
+			drift, err := finalizationBaseDrift(cmd.Context(), opts, wt)
 			if err != nil {
 				return err
 			}
@@ -235,10 +235,10 @@ func newAgentPRCommand(stdout io.Writer, opts *options) *cobra.Command {
 				_, err = fmt.Fprintf(stdout, "Would create PR for %s with base %s and head %s\n", run.ID, baseBranch, wt.Branch)
 				return err
 			}
-			if err := pushAgentBranch(cmd.Context(), wt.Path, wt.Branch); err != nil {
+			if err := pushAgentBranch(cmd.Context(), opts, wt.Path, wt.Branch); err != nil {
 				return err
 			}
-			url, err := createAgentPR(cmd.Context(), wt.Path, baseBranch, wt.Branch, title, body, forgeFlag, projectForge, forgeHostMap(opts.v))
+			url, err := createAgentPR(cmd.Context(), opts, wt.Path, baseBranch, wt.Branch, title, body, forgeFlag, projectForge, forgeHostMap(opts.v))
 			if err != nil {
 				return err
 			}
@@ -475,6 +475,8 @@ func runAgentProcess(ctx context.Context, wt state.Worktree, run state.AgentRun,
 }
 
 func agentDiffSummary(ctx context.Context, worktreePath string) string {
+	// P6-GIT-01: this helper only reads local status/diff state, so it does
+	// not need the materialization clone_timeout plumbing.
 	r := dsgit.NewRunner()
 	status, statusErr := r.Run(ctx, worktreePath, "status", "--short")
 	out, err := r.Run(ctx, worktreePath, "diff", "--stat")
@@ -508,17 +510,17 @@ func agentPRBody(run state.AgentRun) string {
 	return body.String()
 }
 
-func pushAgentBranch(ctx context.Context, dir, branch string) error {
-	if _, err := dsgit.NewRunner().Run(ctx, dir, "push", "-u", "origin", branch); err != nil {
+func pushAgentBranch(ctx context.Context, opts *options, dir, branch string) error {
+	if _, err := gitRunner(opts).Run(ctx, dir, "push", "-u", "origin", branch); err != nil {
 		return appError{code: exitGit, err: err}
 	}
 	return nil
 }
 
-func createAgentPR(ctx context.Context, dir, baseBranch, headBranch, title, body, forgeOverride, projectForge string, hostMap map[string]ForgeKind) (string, error) {
+func createAgentPR(ctx context.Context, opts *options, dir, baseBranch, headBranch, title, body, forgeOverride, projectForge string, hostMap map[string]ForgeKind) (string, error) {
 	// FORGE-01: detect the forge from the remote URL and route PR creation
 	// accordingly (gh/glab/tea), with graceful degradation for unknown forges.
-	remoteURL, err := dsgit.NewRunner().RemoteURL(ctx, dir)
+	remoteURL, err := gitRunner(opts).RemoteURL(ctx, dir)
 	if err != nil {
 		remoteURL = ""
 	}

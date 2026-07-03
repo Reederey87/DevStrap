@@ -16,6 +16,7 @@ import (
 	dsgit "github.com/Reederey87/DevStrap/internal/git"
 	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/state"
+	"github.com/spf13/viper"
 	"github.com/zalando/go-keyring"
 )
 
@@ -51,12 +52,32 @@ func TestExitCodeMapsTypedGitErrors(t *testing.T) {
 		t.Fatalf("ExitCodeWithWriter(ErrNetwork) = %d, want %d", got, exitNetwork)
 	}
 	stderr.Reset()
+	if got := ExitCodeWithWriter(dsgit.ErrTimeout, &stderr); got != exitNetwork {
+		t.Fatalf("ExitCodeWithWriter(ErrTimeout) = %d, want %d", got, exitNetwork)
+	}
+	stderr.Reset()
 	if got := ExitCodeWithWriter(dsgit.ErrAuth, &stderr); got != exitAuth {
 		t.Fatalf("ExitCodeWithWriter(ErrAuth) = %d, want %d", got, exitAuth)
 	}
 	stderr.Reset()
 	if got := ExitCodeWithWriter(dsgit.ErrBranchNotFound, &stderr); got != exitGit {
 		t.Fatalf("ExitCodeWithWriter(ErrBranchNotFound) = %d, want %d", got, exitGit)
+	}
+}
+
+func TestGitRunnerUsesConfiguredCloneTimeout(t *testing.T) {
+	v := viper.New()
+	v.Set("materialization.clone_timeout", "5m")
+	r := gitRunner(&options{v: v})
+	if r.LongTimeout != 5*time.Minute {
+		t.Fatalf("LongTimeout = %s, want 5m", r.LongTimeout)
+	}
+}
+
+func TestGitRunnerDefaultCloneTimeout(t *testing.T) {
+	r := gitRunner(&options{v: viper.New()})
+	if r.LongTimeout != 30*time.Minute {
+		t.Fatalf("LongTimeout = %s, want 30m", r.LongTimeout)
 	}
 }
 

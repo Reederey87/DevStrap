@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	dsgit "github.com/Reederey87/DevStrap/internal/git"
 	"github.com/Reederey87/DevStrap/internal/pathkey"
@@ -33,8 +34,8 @@ func newHydrateCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			if lfs {
-				r := dsgit.NewRunner()
-				if _, err := r.Run(cmd.Context(), localPath, "lfs", "pull"); err != nil {
+				r := gitRunner(opts)
+				if err := r.LFSPull(cmd.Context(), localPath); err != nil {
 					return err
 				}
 			}
@@ -72,6 +73,25 @@ func maintenanceEnabled(opts *options) bool {
 	return opts.v.GetBool("materialization.maintenance")
 }
 
+const defaultCloneTimeout = 30 * time.Minute
+
+func cloneTimeout(opts *options) time.Duration {
+	if opts == nil || opts.v == nil {
+		return defaultCloneTimeout
+	}
+	d := opts.v.GetDuration("materialization.clone_timeout")
+	if d == 0 && !opts.v.IsSet("materialization.clone_timeout") {
+		return defaultCloneTimeout
+	}
+	return d
+}
+
+func gitRunner(opts *options) dsgit.Runner {
+	r := dsgit.NewRunner()
+	r.LongTimeout = cloneTimeout(opts)
+	return r
+}
+
 func hydrateProject(ctx context.Context, opts *options, nsPath string, partial bool) (string, error) {
 	store, err := opts.openState(ctx)
 	if err != nil {
@@ -107,7 +127,7 @@ func hydrateProjectUnlocked(ctx context.Context, store *state.Store, opts *optio
 		}
 	}
 	if dsgit.IsRepo(localPath) {
-		r := dsgit.NewRunner()
+		r := gitRunner(opts)
 		dirty, _ := r.DirtyState(ctx, localPath)
 		_ = store.UpdateProjectLocalState(ctx, project.ID, localPath, "available", string(dirty))
 		return localPath, nil
@@ -125,7 +145,7 @@ func hydrateProjectUnlocked(ctx context.Context, store *state.Store, opts *optio
 			_ = os.RemoveAll(tmpPath)
 		}
 	}()
-	r := dsgit.NewRunner()
+	r := gitRunner(opts)
 	// GIT-06: initialize submodules unless the policy is "never" so the
 	// working tree is structurally complete; with a blobless clone, keep the
 	// submodules blobless too (--also-filter-submodules).

@@ -60,7 +60,7 @@ materialization:
   bootstrap_on_open: ask
 ```
 
-Shipped config keys today: `materialization.submodules` (auto|never) and `materialization.maintenance` (bool); the `mode`/`clone_filter`/`sparse`/`bootstrap_on_open` knobs above are not yet implemented.
+Shipped config keys today: `materialization.submodules` (auto|never), `materialization.maintenance` (bool), and `materialization.clone_timeout` (duration, default 30m — the per-attempt deadline for clone/fetch/LFS transfers, `P6-GIT-01`); the `mode`/`clone_filter`/`sparse`/`bootstrap_on_open` knobs above are not yet implemented.
 
 Modes:
 
@@ -394,20 +394,11 @@ Later:
 
 From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
 
-### P6-GIT-01 — Universal 2-minute git timeout makes large-repo materialization impossible and triple-downloads
+### P6-GIT-01 — Universal 2-minute git timeout makes large-repo materialization impossible and triple-downloads — **shipped (2026-07-02)**
 
-**Problem.** `NewRunner()` applies `Timeout: 2*time.Minute` to every command including clone (`internal/git/git.go:40,80-84`); a `DeadlineExceeded` is classified retryable `ErrNetwork` (`:115-117`) and `CloneWithOptions` retries up to 3× while wiping the staging dir each time (`:163-170,176`), so any blobless clone taking > 2:00 can never materialize and burns ~6 min / 3× bandwidth. `LFSPull` hits the same cap once (`:433-436`).
+**Was.** `NewRunner()` applied `Timeout: 2*time.Minute` to every command including clone; a `DeadlineExceeded` was classified retryable `ErrNetwork` and `CloneWithOptions` retried up to 3× while wiping the staging dir each time, so any blobless clone taking > 2:00 could never materialize and burned ~6 min / 3× bandwidth. `LFSPull` hit the same cap once.
 
-**Actionable steps.**
-1. Add `CloneTimeout` (default 30m, config `materialization.clone_timeout`) and derive per-clone/per-LFS/per-fetch deadlines via `context.WithTimeout` before `Run`.
-2. Return a distinct terminal `ErrTimeout` sentinel for the runner's self-imposed deadline instead of `ErrNetwork`, and stop the wipe-and-retry on it; cover `Fetch`/`runWithNetworkRetry` too.
-3. Tests: a clone that sleeps past a tiny `CloneTimeout` → exactly one attempt + a "timed out" error; a 3-minute-simulated clone succeeds under the new default.
-
-```go
-ctx, cancel := context.WithTimeout(ctx, r.CloneTimeout) // default 30m
-defer cancel()
-// self-imposed DeadlineExceeded → return ErrTimeout (terminal), never retry
-```
+**Shipped fix.** The timeout is split by command class: `Runner.LongTimeout` (default **30m**, config `materialization.clone_timeout`, resolved by the `gitRunner(opts)` helper every CLI call site now uses) is applied **per attempt** to the network-transfer class — `CloneWithOptions`, `Fetch`/`runWithNetworkRetry`, `LFSPull` — via `longTransferContext` (a caller-supplied deadline always wins; `LongTimeout <= 0` opts out); everything else keeps the 2m `Timeout`. A `DeadlineExceeded` is now the distinct terminal `ErrTimeout` (never `ErrNetwork`), so the retry loops stop the wipe-and-retry after one attempt, and the message points at `materialization.clone_timeout`. `ErrTimeout` maps to the network exit code. Local-only helpers (e.g. `agentDiffSummary`) intentionally keep the bare runner. Pinned by `TestRunTimesOutAndReportsTimeoutError`, `TestCloneTimeoutIsTerminalAndDoesNotRetryOrWipe` (one attempt, destination not wiped), `TestCloneUsesLongTimeoutInsteadOfShortTimeout`, `TestFetchTimeoutIsTerminalAndDoesNotRetry`, `TestLFSPullTimeoutIsTerminalAndDoesNotRetry`, and the `gitRunner` config round-trip tests.
 
 ### P6-GIT-03 — Dependency rebuild runs after env hydrate, discards output, and is gated by one global env var
 
