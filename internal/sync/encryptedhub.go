@@ -79,6 +79,22 @@ type EncryptedHub struct {
 	// grant, which must NOT self-found). It is also the seam later cursor and
 	// GC work (P6-HUB-01/SEC-03/SYNC-02) will read.
 	Stats *PullStats
+	// MissingKeyWait records that an event sealed under (epoch, kid) was found
+	// with no held key, and returns the STABLE first-seen time of that missing
+	// key — the start of its grace window (P6-SEC-03). hubFromOptions wires it
+	// to (*state.Store).NoteMissingKeyGrant. nil disables grace expiry
+	// entirely: a missing key truncates forever (the pre-P6-SEC-03 behavior,
+	// kept for unit tests that exercise the truncate contract in isolation).
+	MissingKeyWait func(ctx context.Context, epoch int64, kid string) (time.Time, error)
+	// GraceWindow bounds how long a missing (epoch, kid) may keep truncating
+	// the pull before its events are handed to the undecryptable quarantine so
+	// the cursor can advance (P6-SEC-03). Within the window the grant is
+	// presumed in flight (truncate = retry next sync); past it the wedge is
+	// treated as permanent-until-regrant: the still-encrypted carrier is
+	// forwarded, ApplyEvents quarantines it, and a later grant recovers it via
+	// ReplayUndecryptableConflicts. Zero means expire immediately (quarantine
+	// on first sight); only meaningful when MissingKeyWait is non-nil.
+	GraceWindow time.Duration
 }
 
 // PullStats reports what a single EncryptedHub.Pull observed. Fields are set
@@ -260,11 +276,34 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 			allHeld := h.Keyring.WCKCandidates(env.Epoch, "")
 			if len(allHeld) == 0 {
 				// No key at this epoch at all: the grant has not arrived.
-				// Truncate: return the decryptable prefix and stop, so the
-				// cursor advances only up to here and the next sync retries
-				// from this event once granted.
+				// Within the grace window, truncate: return the decryptable
+				// prefix and stop, so the cursor advances only up to here and
+				// the next sync retries from this event once granted. Past the
+				// window (P6-SEC-03), forward the still-encrypted carrier for a
+				// permanent undecryptable quarantine instead — the cursor can
+				// then advance and later held-epoch events still apply, and a
+				// grant that eventually arrives recovers the carrier via
+				// ReplayUndecryptableConflicts.
+				//
+				// The wait is recorded EPOCH-LEVEL (kid ""), never under the
+				// envelope's kid: with no key at the epoch the kid field is a
+				// useless unauthenticated hub hint, and persisting it would
+				// let a relabeled event leave a phantom kid-specific wait row
+				// that the real grant's RecordKeyEpoch never clears (post-#55
+				// Codex review, P2).
+				if h.missingKeyGraceExpired(ctx, env.Epoch, "") {
+					// kid_hint: the envelope's unauthenticated routing hint —
+					// logged for diagnostics only; the wait above is epoch-level.
+					logging.Logger(ctx).Warn("encrypted hub pull: key grant grace expired; forwarding never-granted event for quarantine",
+						"epoch", env.Epoch, "kid_hint", env.KID, "event_id", event.ID)
+					if h.Stats != nil {
+						h.Stats.Undecryptable++
+					}
+					out = append(out, event)
+					continue
+				}
 				logging.Logger(ctx).Info("encrypted hub pull: awaiting workspace key grant; deferring remaining events",
-					"epoch", env.Epoch, "kid", env.KID, "event_id", event.ID)
+					"epoch", env.Epoch, "kid_hint", env.KID, "event_id", event.ID)
 				if h.Stats != nil {
 					h.Stats.Truncated = len(raw) - i
 				}
@@ -285,8 +324,41 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 					// An unheld kid at a held epoch and none of our keys open
 					// it: this is the fleet-key-vs-self-mint collision
 					// (P6-SEC-02) — the grant for that key may still arrive.
-					// Truncate (defer), never skip, so the event is retried
-					// once granted instead of being permanently jumped.
+					// Within the grace window, truncate (defer), never skip, so
+					// the event is retried once granted instead of being
+					// permanently jumped. Past the window (P6-SEC-03), hand it
+					// to the quarantine like the AEAD-failure branch below —
+					// this is also the forged-kid stall primitive (a hostile
+					// hub naming a random kid at a held epoch), which the
+					// grace bound turns from a forever-wedge into a bounded
+					// delay. The wait clock is keyed per EPOCH (the store MINs
+					// first-seen across kids), so relabeling the
+					// unauthenticated kid hint on every pull cannot restart it.
+					//
+					// A kid that is not even SHAPED like one (kids are
+					// hex(sha256(wck)) by construction) can never be granted,
+					// so there is nothing to wait for: quarantine immediately
+					// without persisting a wait row a hostile hub could use to
+					// pin a phantom "awaiting key grants" warning (post-#55
+					// Codex review hardening).
+					if !isCanonicalKID(env.KID) {
+						logging.Logger(ctx).Warn("encrypted hub pull: malformed kid at a held epoch can never be granted; forwarding event for quarantine",
+							"epoch", env.Epoch, "kid", env.KID, "event_id", event.ID)
+						if h.Stats != nil {
+							h.Stats.Undecryptable++
+						}
+						out = append(out, event)
+						continue
+					}
+					if h.missingKeyGraceExpired(ctx, env.Epoch, env.KID) {
+						logging.Logger(ctx).Warn("encrypted hub pull: key grant grace expired; forwarding never-granted event for quarantine",
+							"epoch", env.Epoch, "kid", env.KID, "event_id", event.ID)
+						if h.Stats != nil {
+							h.Stats.Undecryptable++
+						}
+						out = append(out, event)
+						continue
+					}
 					logging.Logger(ctx).Info("encrypted hub pull: awaiting workspace key grant; deferring remaining events",
 						"epoch", env.Epoch, "kid", env.KID, "event_id", event.ID)
 					if h.Stats != nil {
@@ -328,6 +400,41 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 		}
 	}
 	return out, nil
+}
+
+// isCanonicalKID reports whether s has the only shape a real kid can have:
+// hex(sha256(wck)) — 64 lowercase hex characters (KIDForWCK). Envelope kid
+// fields are unauthenticated hub-writable hints, so anything else is provably
+// never-grantable garbage, not a key to wait for.
+func isCanonicalKID(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// missingKeyGraceExpired reports whether the grace window for a missing
+// (epoch, kid) has run out (P6-SEC-03). It records the sighting through the
+// MissingKeyWait seam (which returns the stable first-seen time) and compares
+// against GraceWindow. Any error — and a nil seam — degrades to "not expired",
+// i.e. the legacy truncate-and-retry behavior: failing toward the truncate is
+// safe (no data is quarantined), just un-bounded until the store recovers.
+func (h EncryptedHub) missingKeyGraceExpired(ctx context.Context, epoch int64, kid string) bool {
+	if h.MissingKeyWait == nil {
+		return false
+	}
+	firstSeen, err := h.MissingKeyWait(ctx, epoch, kid)
+	if err != nil {
+		logging.Logger(ctx).Warn("encrypted hub pull: could not record missing key grant wait; deferring instead",
+			"epoch", epoch, "kid", kid, "err", err.Error())
+		return false
+	}
+	return time.Since(firstSeen) >= h.GraceWindow
 }
 
 // TryDecrypt attempts to restore a single enc.v2 carrier with the keys held

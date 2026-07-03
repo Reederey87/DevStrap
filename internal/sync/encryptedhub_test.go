@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"time"
 
 	"github.com/Reederey87/DevStrap/internal/state"
 )
@@ -737,5 +738,175 @@ func TestReplayRecoveryUnblocksHashChainSuccessor(t *testing.T) {
 	projection := projectionOf(t, st)
 	if projection["work/chain-a"] != "github.com/org/chain-a" || projection["work/chain-b"] != "github.com/org/chain-b" {
 		t.Fatalf("origin-device tail did not converge: %+v", projection)
+	}
+}
+
+// --- P6-SEC-03: grace-bounded quarantine for never-granted keys ---
+
+// grantWaitRecorder is a MissingKeyWait seam double: it returns a fixed
+// first-seen time and records every (epoch, kid) sighting.
+type grantWaitRecorder struct {
+	firstSeen time.Time
+	sightings [][2]interface{}
+}
+
+func (g *grantWaitRecorder) note(_ context.Context, epoch int64, kid string) (time.Time, error) {
+	g.sightings = append(g.sightings, [2]interface{}{epoch, kid})
+	return g.firstSeen, nil
+}
+
+// TestEncryptedHubMissingEpochWithinGraceTruncates pins that a missing epoch
+// still truncates (defer + retry) while its grace window is open, and that the
+// sighting is recorded through the seam so the window has a stable start.
+func TestEncryptedHubMissingEpochWithinGraceTruncates(t *testing.T) {
+	ctx := context.Background()
+	kr := newFakeKeyring(t, 1)
+	wck1, _ := kr.WCK(1)
+	prefix, _ := EncryptEvent(state.Event{ID: "e1", DeviceID: "dev_a", HLC: 1, Type: EventProjectAdded, PayloadJSON: `{"path":"work/a"}`, ContentHash: state.ContentHash(`{"path":"work/a"}`)}, wck1, 1)
+	wck5, _ := NewWCK()
+	future, _ := EncryptEvent(state.Event{ID: "e5", DeviceID: "dev_a", HLC: 2, Type: EventProjectAdded, PayloadJSON: `{}`, ContentHash: state.ContentHash(`{}`)}, wck5, 5)
+	rec := &grantWaitRecorder{firstSeen: time.Now()}
+	hub := EncryptedHub{
+		Hub: &recordingHub{events: []state.Event{prefix, future}}, Keyring: kr,
+		Stats: &PullStats{}, MissingKeyWait: rec.note, GraceWindow: time.Hour,
+	}
+	got, err := hub.Pull(ctx, 0)
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "e1" {
+		t.Fatalf("Pull returned %+v, want the epoch-1 prefix only (epoch-5 deferred within grace)", got)
+	}
+	if hub.Stats.Truncated != 1 || hub.Stats.Undecryptable != 0 {
+		t.Fatalf("Stats = %+v, want Truncated=1 Undecryptable=0", *hub.Stats)
+	}
+	// The wait must be recorded EPOCH-LEVEL: with no key at the epoch the
+	// envelope kid is an unauthenticated hint, and persisting it would leave a
+	// phantom kid-specific row the real grant never clears (post-#55 review).
+	if len(rec.sightings) != 1 || rec.sightings[0][0].(int64) != 5 || rec.sightings[0][1].(string) != "" {
+		t.Fatalf("sightings = %+v, want one epoch-5 sighting with kid \"\"", rec.sightings)
+	}
+}
+
+// TestEncryptedHubMalformedKidQuarantinesImmediately: a kid that is not shaped
+// like hex(sha256) can never be granted, so at a held epoch it skips the grace
+// wait entirely — immediate quarantine, and NO wait row for a hostile hub to
+// pin a phantom "awaiting key grants" warning with.
+func TestEncryptedHubMalformedKidQuarantinesImmediately(t *testing.T) {
+	ctx := context.Background()
+	kr := newFakeKeyring(t, 1)
+	wck1, _ := kr.WCK(1)
+	prefix, _ := EncryptEvent(state.Event{ID: "mine", DeviceID: "dev_a", HLC: 1, Type: EventProjectAdded, PayloadJSON: `{"path":"work/mine"}`, ContentHash: state.ContentHash(`{"path":"work/mine"}`)}, wck1, 1)
+	otherWCK, _ := NewWCK()
+	garbage, _ := EncryptEvent(state.Event{ID: "garbage", DeviceID: "dev_b", HLC: 2, Type: EventProjectAdded, PayloadJSON: `{}`, ContentHash: state.ContentHash(`{}`)}, otherWCK, 1)
+	garbage = rewriteEnvelopeKID(t, garbage, "ab") // hostile short label
+	rec := &grantWaitRecorder{firstSeen: time.Now()}
+	hub := EncryptedHub{
+		Hub: &recordingHub{events: []state.Event{prefix, garbage}}, Keyring: kr,
+		Stats: &PullStats{}, MissingKeyWait: rec.note, GraceWindow: time.Hour,
+	}
+	got, err := hub.Pull(ctx, 0)
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	if len(got) != 2 || got[1].ID != "garbage" || got[1].Type != EventEncryptedV2 {
+		t.Fatalf("Pull returned %+v, want the malformed-kid event forwarded as a carrier immediately", got)
+	}
+	if hub.Stats.Undecryptable != 1 || hub.Stats.Truncated != 0 {
+		t.Fatalf("Stats = %+v, want Undecryptable=1 Truncated=0", *hub.Stats)
+	}
+	if len(rec.sightings) != 0 {
+		t.Fatalf("sightings = %+v, want none (never-grantable kid must not open a wait)", rec.sightings)
+	}
+}
+
+// TestEncryptedHubMissingEpochGraceExpiredQuarantines is the P6-SEC-03 core
+// fix: once the grace window for a never-granted epoch runs out, its events
+// are forwarded as still-encrypted carriers (quarantine path) instead of
+// truncating forever — and LATER events at held epochs still decrypt, so one
+// never-granted epoch no longer wedges all sync behind it.
+func TestEncryptedHubMissingEpochGraceExpiredQuarantines(t *testing.T) {
+	ctx := context.Background()
+	kr := newFakeKeyring(t, 1)
+	wck1, _ := kr.WCK(1)
+	prefix, _ := EncryptEvent(state.Event{ID: "e1", DeviceID: "dev_a", HLC: 1, Type: EventProjectAdded, PayloadJSON: `{"path":"work/a"}`, ContentHash: state.ContentHash(`{"path":"work/a"}`)}, wck1, 1)
+	wck5, _ := NewWCK()
+	sealed, _ := EncryptEvent(state.Event{ID: "e5", DeviceID: "dev_b", HLC: 2, Type: EventProjectAdded, PayloadJSON: `{}`, ContentHash: state.ContentHash(`{}`)}, wck5, 5)
+	trailing, _ := EncryptEvent(state.Event{ID: "e1b", DeviceID: "dev_a", HLC: 3, Type: EventProjectAdded, PayloadJSON: `{"path":"work/b"}`, ContentHash: state.ContentHash(`{"path":"work/b"}`)}, wck1, 1)
+	rec := &grantWaitRecorder{firstSeen: time.Now().Add(-2 * time.Hour)}
+	hub := EncryptedHub{
+		Hub: &recordingHub{events: []state.Event{prefix, sealed, trailing}}, Keyring: kr,
+		Stats: &PullStats{}, MissingKeyWait: rec.note, GraceWindow: time.Hour,
+	}
+	got, err := hub.Pull(ctx, 0)
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	if len(got) != 3 || got[0].ID != "e1" || got[1].ID != "e5" || got[2].ID != "e1b" {
+		t.Fatalf("Pull returned %+v, want prefix + forwarded carrier + trailing", got)
+	}
+	if got[1].Type != EventEncryptedV2 {
+		t.Fatalf("expired-grace event forwarded as %q, want the still-encrypted %q carrier", got[1].Type, EventEncryptedV2)
+	}
+	if got[2].Type != EventProjectAdded {
+		t.Fatalf("trailing held-epoch event = %q, want decrypted %q (later events must still apply)", got[2].Type, EventProjectAdded)
+	}
+	if hub.Stats.Truncated != 0 || hub.Stats.Undecryptable != 1 {
+		t.Fatalf("Stats = %+v, want Truncated=0 Undecryptable=1", *hub.Stats)
+	}
+}
+
+// TestEncryptedHubUnheldKidGraceExpiredQuarantines covers the second truncate
+// site (an unheld kid at a HELD epoch — the P6-SEC-02 collision and the
+// forged-kid stall primitive): past the grace window the event quarantines
+// instead of deferring, and the batch tail still decrypts.
+func TestEncryptedHubUnheldKidGraceExpiredQuarantines(t *testing.T) {
+	ctx := context.Background()
+	kr := newFakeKeyring(t, 1)
+	wck1, _ := kr.WCK(1)
+	prefix, _ := EncryptEvent(state.Event{ID: "mine", DeviceID: "dev_a", HLC: 1, Type: EventProjectAdded, PayloadJSON: `{"path":"work/mine"}`, ContentHash: state.ContentHash(`{"path":"work/mine"}`)}, wck1, 1)
+	fleetWCK, _ := NewWCK()
+	fleet, _ := EncryptEvent(state.Event{ID: "fleet", DeviceID: "dev_b", HLC: 2, Type: EventProjectAdded, PayloadJSON: `{"path":"work/fleet"}`, ContentHash: state.ContentHash(`{"path":"work/fleet"}`)}, fleetWCK, 1)
+	trailing, _ := EncryptEvent(state.Event{ID: "trailing", DeviceID: "dev_a", HLC: 3, Type: EventProjectAdded, PayloadJSON: `{"path":"work/trailing"}`, ContentHash: state.ContentHash(`{"path":"work/trailing"}`)}, wck1, 1)
+	rec := &grantWaitRecorder{firstSeen: time.Now().Add(-2 * time.Hour)}
+	hub := EncryptedHub{
+		Hub: &recordingHub{events: []state.Event{prefix, fleet, trailing}}, Keyring: kr,
+		Stats: &PullStats{}, MissingKeyWait: rec.note, GraceWindow: time.Hour,
+	}
+	got, err := hub.Pull(ctx, 0)
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	if len(got) != 3 || got[1].ID != "fleet" || got[1].Type != EventEncryptedV2 {
+		t.Fatalf("Pull returned %+v, want the fleet-kid event forwarded as a carrier", got)
+	}
+	if got[2].ID != "trailing" || got[2].Type != EventProjectAdded {
+		t.Fatalf("trailing event %+v, want it decrypted (tail unwedged)", got[2])
+	}
+	if hub.Stats.Truncated != 0 || hub.Stats.Undecryptable != 1 {
+		t.Fatalf("Stats = %+v, want Truncated=0 Undecryptable=1", *hub.Stats)
+	}
+	if len(rec.sightings) != 1 || rec.sightings[0][0].(int64) != 1 || rec.sightings[0][1].(string) == "" {
+		t.Fatalf("sightings = %+v, want one epoch-1 sighting carrying the unheld kid", rec.sightings)
+	}
+}
+
+// TestEncryptedHubNilWaitSeamTruncatesForever pins the nil-seam legacy
+// contract explicitly: without MissingKeyWait there is no grace clock and a
+// missing epoch defers indefinitely (the unit-test-only configuration).
+func TestEncryptedHubNilWaitSeamTruncatesForever(t *testing.T) {
+	ctx := context.Background()
+	kr := newFakeKeyring(t, 1)
+	wck5, _ := NewWCK()
+	sealed, _ := EncryptEvent(state.Event{ID: "e5", DeviceID: "dev_b", HLC: 2, Type: EventProjectAdded, PayloadJSON: `{}`, ContentHash: state.ContentHash(`{}`)}, wck5, 5)
+	hub := EncryptedHub{Hub: &recordingHub{events: []state.Event{sealed}}, Keyring: kr, Stats: &PullStats{}, GraceWindow: 0}
+	for i := 0; i < 2; i++ {
+		got, err := hub.Pull(ctx, 0)
+		if err != nil {
+			t.Fatalf("Pull #%d: %v", i, err)
+		}
+		if len(got) != 0 || hub.Stats.Truncated != 1 {
+			t.Fatalf("Pull #%d returned %+v (stats %+v), want empty + Truncated=1 forever", i, got, *hub.Stats)
+		}
 	}
 }

@@ -205,6 +205,7 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 			results = append(results, checkDB(ctx, store)...)
 			results = append(results, checkSecretsRotation(ctx, store)...)
 			results = append(results, checkDeviceKeys(ctx, paths, store)...)
+			results = append(results, checkKeyGrantWaits(ctx, store)...)
 			results = append(results, checkForgeCLIs(ctx, opts, store)...)
 			results = append(results, checkBloblessCaveat(ctx, store)...)
 		}
@@ -331,6 +332,36 @@ func checkBloblessCaveat(ctx context.Context, store *state.Store) []checkResult 
 		return nil
 	}
 	return []checkResult{{Name: "blobless clone caveat", Status: checkOK, Detail: fmt.Sprintf("%d git repo(s) may use blobless clones; historical blobs need the remote online (lazy fetch)", gitRepos), Remedy: "enable materialization.maintenance for a post-clone prefetch; stay online for first blame/log -p"}}
+}
+
+// checkKeyGrantWaits surfaces workspace keys this device has seen ciphertext
+// for but never been granted (P6-SEC-03). An open wait means pulled events at
+// those epochs are deferring (within the grace window) or quarantining (past
+// it) — either way this device cannot read part of the fleet's event log until
+// an approved device re-grants its held epochs.
+func checkKeyGrantWaits(ctx context.Context, store *state.Store) []checkResult {
+	waits, err := store.OpenKeyGrantWaits(ctx)
+	if err != nil {
+		return nil
+	}
+	if len(waits) == 0 {
+		return []checkResult{{Name: "awaiting key grants", Status: checkOK, Detail: "0"}}
+	}
+	labels := make([]string, 0, len(waits))
+	for _, w := range waits {
+		label := fmt.Sprintf("epoch %d", w.Epoch)
+		if w.KID != "" {
+			label += fmt.Sprintf(" (kid %.8s…)", w.KID)
+		}
+		label += fmt.Sprintf(" since %s", w.FirstSeen.UTC().Format("2006-01-02T15:04:05Z"))
+		labels = append(labels, label)
+	}
+	return []checkResult{{
+		Name:   "awaiting key grants",
+		Status: checkWarn,
+		Detail: strings.Join(labels, "; "),
+		Remedy: "on a device that holds these epochs, run 'devstrap devices approve <this device id>' to re-grant every held epoch, then 'devstrap sync' on both devices (quarantined events replay automatically)",
+	}}
 }
 
 func checkDeviceKeys(ctx context.Context, paths config.Paths, store *state.Store) []checkResult {

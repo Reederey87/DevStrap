@@ -410,8 +410,22 @@ func ApplyEventsWithStats(ctx context.Context, st *state.Store, events []state.E
 			if mErr != nil {
 				return mErr
 			}
-			return tx.ResolveConflictByFingerprint(ctx, ConflictUntrustworthyTime, string(skewDetails),
-				`{"action":"auto","reason":"event applied after skew quarantine"}`)
+			if err := tx.ResolveConflictByFingerprint(ctx, ConflictUntrustworthyTime, string(skewDetails),
+				`{"action":"auto","reason":"event applied after skew quarantine"}`); err != nil {
+				return err
+			}
+			// P6-SEC-03: an earlier delivery of this event may have broken on
+			// the per-device hash chain (its predecessor was quarantined as
+			// undecryptable, so the prev-hash had no anchor) and left an open
+			// event_hash_chain_break conflict. Now that the event has applied
+			// — e.g. after ReplayUndecryptableConflicts recovered the
+			// predecessor — that quarantine reason is gone; resolve it so it
+			// cannot block `hub gc` forever. Resolution is by event id, not
+			// details fingerprint, because hash-chain details embed the
+			// volatile cause error. Idempotent/no-op when no such conflict
+			// exists.
+			return tx.ResolveOpenConflictsByEventID(ctx, ConflictEventHashChain, event.ID,
+				`{"action":"auto","reason":"event applied after hash-chain hold (P6-SEC-03)"}`)
 		}); err != nil {
 			if errors.Is(err, state.ErrEventHashChain) {
 				if conflictErr := insertEventHashChainConflict(ctx, st, event, err); conflictErr != nil {

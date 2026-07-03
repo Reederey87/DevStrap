@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/Reederey87/DevStrap/internal/config"
 	"github.com/Reederey87/DevStrap/internal/logging"
@@ -153,6 +155,24 @@ func pullAndApplyEvents(ctx context.Context, store *state.Store, hub dssync.Hub,
 	if err != nil {
 		return pullApplyOutcome{}, err
 	}
+	// P6-SYNC-04 review fix: re-attempt previously-quarantined undecryptable
+	// carriers with the keys held now (this pull may have ingested the grant
+	// they were waiting for). Runs on every pull consumer (sync, run-loop,
+	// hub gc's pre-GC sync), so a hub that mis-steered a not-yet-granted
+	// event into quarantine by tampering with the unauthenticated kid hint
+	// only delays that event until its grant lands — never loses it.
+	// P6-SEC-03: the replay runs BEFORE this batch applies. A recovered
+	// carrier is by construction an EARLIER event than anything in this batch
+	// (its quarantine advanced the cursor past it), and the same origin
+	// device's successors chain onto it via prev-hash — replaying first lets
+	// a batch [recovered predecessor, successor] converge in ONE cycle instead
+	// of quarantining the successor on a broken chain and waiting for the next
+	// pull's re-delivery.
+	if eh, ok := hub.(dssync.EncryptedHub); ok {
+		if _, err := dssync.ReplayUndecryptableConflicts(ctx, store, eh); err != nil {
+			return pullApplyOutcome{}, err
+		}
+	}
 	safeCursor, stats, err := dssync.ApplyEventsWithStats(ctx, store, remoteEvents)
 	if err != nil {
 		return pullApplyOutcome{}, err
@@ -162,18 +182,33 @@ func pullAndApplyEvents(ctx context.Context, store *state.Store, hub dssync.Hub,
 			return pullApplyOutcome{}, err
 		}
 	}
-	// P6-SYNC-04 review fix: re-attempt previously-quarantined undecryptable
-	// carriers with the keys held now (this pull may have ingested the grant
-	// they were waiting for). Runs on every pull consumer (sync, run-loop,
-	// hub gc's pre-GC sync), so a hub that mis-steered a not-yet-granted
-	// event into quarantine by tampering with the unauthenticated kid hint
-	// only delays that event until its grant lands — never loses it.
-	if eh, ok := hub.(dssync.EncryptedHub); ok {
-		if _, err := dssync.ReplayUndecryptableConflicts(ctx, store, eh); err != nil {
-			return pullApplyOutcome{}, err
-		}
-	}
 	return pullApplyOutcome{events: remoteEvents, stats: stats}, nil
+}
+
+// defaultKeyGrantGrace bounds how long a pull keeps deferring (truncating) on
+// an event whose workspace key has not been granted to this device before the
+// event is quarantined instead, unwedging the cursor (P6-SEC-03). 72h rides
+// out a weekend-offline approver; an explicit 0 means quarantine immediately.
+const defaultKeyGrantGrace = 72 * time.Hour
+
+// keyGrantGrace resolves sync.key_grant_grace. Parsed here rather than via
+// viper's GetDuration because GetDuration maps a malformed value to 0 — which
+// would silently turn a typo into "quarantine immediately" (the same trap as
+// materialization.clone_timeout, P6-GIT-01).
+func keyGrantGrace(opts *options) time.Duration {
+	if opts == nil || opts.v == nil {
+		return defaultKeyGrantGrace
+	}
+	raw := strings.TrimSpace(opts.v.GetString("sync.key_grant_grace"))
+	if raw == "" {
+		return defaultKeyGrantGrace
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d < 0 {
+		fmt.Fprintf(os.Stderr, "warning: invalid sync.key_grant_grace %q; using default %s\n", raw, defaultKeyGrantGrace)
+		return defaultKeyGrantGrace
+	}
+	return d
 }
 
 // pushLocalEventsGated runs the push side of a sync cycle behind the P6-SEC-02

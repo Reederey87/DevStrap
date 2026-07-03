@@ -201,7 +201,7 @@ CREATE TABLE device_gitstate (
 );
 ```
 
-Status: planned. No `device_gitstate` migration exists yet; add it as `00015_gitstate_mirror.sql` when the Layer A working-state validation plane lands (00010–00014 are now taken — see the migration list below). `sync_cursors` and `event_delivery` are defined; `hub_cursors` (00008) is wired for cursor-based incremental pull (EAGER-02); `pending_hub_deletes` (00011) backs the revoke-rewrap cleanup queue (`P5-PROD-02`). `device_sync_state` and `jobs` remain unwired.
+Status: planned. No `device_gitstate` migration exists yet; add it as `00016_gitstate_mirror.sql` when the Layer A working-state validation plane lands (00010–00015 are now taken — see the migration list below). `sync_cursors` and `event_delivery` are defined; `hub_cursors` (00008) is wired for cursor-based incremental pull (EAGER-02); `pending_hub_deletes` (00011) backs the revoke-rewrap cleanup queue (`P5-PROD-02`). `device_sync_state` and `jobs` remain unwired.
 
 ### env_profiles
 
@@ -453,6 +453,21 @@ CREATE TABLE workspace_key_grants (
 
 `workspace_keys`/`workspace_key_grants` (migrations 00013 + 00014) back the Workspace Content Key keyring for envelope encryption of the event log (`P4-SEC-02`/`P4-SEC-07`): `workspace_keys` records which keys this device holds, and `workspace_key_grants` is a membership audit of `device.key.granted` events. Both hold only non-secret metadata — the wrapped WCK itself rides the event payload and the raw WCK lives only in the keychain / 0600 file fallback, never in `state.db`. Migration `00014_workspace_key_kids.sql` (`P6-SEC-02`/`P6-SEC-01b`) re-keys `workspace_keys` by `(workspace_id, epoch, kid)` — `kid = hex(sha256(wck))` (the full digest — a short prefix would leave a preimage-prefix aliasing vector) names the specific key — so two keys minted independently at the same epoch (a joiner's legacy self-mint and the founder's fleet key) coexist instead of overwriting each other, and adds `origin` (`'self'` = founder bootstrap/rotate, `'grant'` = verified `device.key.granted` ingest, `'legacy'` = the migration's backfill of pre-kid rows — the only three paths permitted to write rows, `P6-SEC-01c`). Pre-kid rows are backfilled as `kid=''`/`origin='legacy'` and lazily upgraded to their real kid by `Keyring.Prime`. The down-migration is lossy (kids at the same epoch collapse to one row).
 
+### key_grant_waits (shipped)
+
+```sql
+CREATE TABLE key_grant_waits (
+  workspace_id TEXT NOT NULL,
+  epoch INTEGER NOT NULL,
+  kid TEXT NOT NULL DEFAULT '',   -- '' = whole epoch missing; non-'' = unheld kid at a held epoch (P6-SEC-02 collision)
+  first_seen_at TEXT NOT NULL,
+  PRIMARY KEY(workspace_id, epoch, kid),
+  FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+);
+```
+
+`key_grant_waits` (migration `00015_key_grant_waits.sql`, `P6-SEC-03`) is the grace-window bookkeeping for workspace keys this device has seen ciphertext for but never been granted. `EncryptedHub.Pull` records the first sighting through the `MissingKeyWait` seam (`Store.NoteMissingKeyGrant`, INSERT-OR-IGNORE then SELECT, so `first_seen_at` is stable across re-pulls); the grace comparison uses the **earliest** `first_seen_at` across every kid at the epoch, so a hostile hub relabeling the unauthenticated envelope kid hint cannot restart the window per label. `RecordKeyEpoch` deletes satisfied rows the moment a matching key is held (an epoch-level `''` wait clears on any key at the epoch; a kid-specific wait only on that kid). Open rows are surfaced by `doctor` ("awaiting key grants") and consulted by the `devices approve`/`enroll --approve` epoch-contiguity guard. No secret material is stored.
+
 ### blobs (content-addressed encrypted blob index — planned)
 
 **Status: PLANNED — no migration exists.** Planned (`HUB-*`, `DRAFT-*`) local index of the content-addressed encrypted blob store — the hub's second plane (env values + non-git/draft bundles), all age-encrypted client-side and named `age_blob:<sha256>`. The hub sees only ciphertext; this table is the local bookkeeping for what each blob is, whether it is cached locally and/or uploaded, and when it may be reclaimed.
@@ -558,6 +573,7 @@ internal/state/migrations/
   00012_draft_snapshot_idempotency.sql
   00013_workspace_keys.sql
   00014_workspace_key_kids.sql
+  00015_key_grant_waits.sql
 ```
 
 CLI:
@@ -585,9 +601,10 @@ internal/state/migrations/00011_pending_hub_deletes.sql
 internal/state/migrations/00012_draft_snapshot_idempotency.sql
 internal/state/migrations/00013_workspace_keys.sql
 internal/state/migrations/00014_workspace_key_kids.sql
+internal/state/migrations/00015_key_grant_waits.sql
 ```
 
-The current schema version is **14**. `00010_repo_forge_kind.sql` adds the per-project forge override (`GIT-05`); `00011_pending_hub_deletes.sql` queues blobs orphaned by a local-only revoke for deletion on the next hub-enabled sync (`P5-PROD-02`/`P5-SEC-01`); `00012_draft_snapshot_idempotency.sql` adds a partial `UNIQUE` index on `draft_snapshots(namespace_id, source_event_id)` so idempotency is enforced by the DB, not only the SELECT-then-INSERT guard (`P5-DATA-02`); `00013_workspace_keys.sql` adds the `workspace_keys` and `workspace_key_grants` tables backing the WCK epoch keyring for envelope encryption of the event log (`P4-SEC-02`/`P4-SEC-07`) — `workspace_keys(workspace_id, epoch, created_at)` records which epochs this device holds, and `workspace_key_grants(workspace_id, epoch, recipient, source_event_id, source_event_hlc, source_event_device_id, created_at)` is a membership audit of device.key.granted events (the wrapped WCK itself rides the event payload, never SQLite); `00014_workspace_key_kids.sql` re-keys `workspace_keys` by `(workspace_id, epoch, kid)` and adds `origin` (`P6-SEC-02`/`P6-SEC-01b` — same-epoch keys coexist under content-derived kids instead of overwriting; pre-kid rows backfill as `kid=''`/`origin='legacy'`) and adds the nullable audit `kid` column to `workspace_key_grants`. Migrations can be applied by `devstrap init` or explicitly with `devstrap db migrate`.
+The current schema version is **15**. `00010_repo_forge_kind.sql` adds the per-project forge override (`GIT-05`); `00011_pending_hub_deletes.sql` queues blobs orphaned by a local-only revoke for deletion on the next hub-enabled sync (`P5-PROD-02`/`P5-SEC-01`); `00012_draft_snapshot_idempotency.sql` adds a partial `UNIQUE` index on `draft_snapshots(namespace_id, source_event_id)` so idempotency is enforced by the DB, not only the SELECT-then-INSERT guard (`P5-DATA-02`); `00013_workspace_keys.sql` adds the `workspace_keys` and `workspace_key_grants` tables backing the WCK epoch keyring for envelope encryption of the event log (`P4-SEC-02`/`P4-SEC-07`) — `workspace_keys(workspace_id, epoch, created_at)` records which epochs this device holds, and `workspace_key_grants(workspace_id, epoch, recipient, source_event_id, source_event_hlc, source_event_device_id, created_at)` is a membership audit of device.key.granted events (the wrapped WCK itself rides the event payload, never SQLite); `00014_workspace_key_kids.sql` re-keys `workspace_keys` by `(workspace_id, epoch, kid)` and adds `origin` (`P6-SEC-02`/`P6-SEC-01b` — same-epoch keys coexist under content-derived kids instead of overwriting; pre-kid rows backfill as `kid=''`/`origin='legacy'`) and adds the nullable audit `kid` column to `workspace_key_grants`; `00015_key_grant_waits.sql` adds the `key_grant_waits` grace-window table for never-granted workspace keys (`P6-SEC-03`, see its section above). Migrations can be applied by `devstrap init` or explicitly with `devstrap db migrate`.
 
 ## Backup
 

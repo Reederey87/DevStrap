@@ -27,6 +27,25 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — fix(sync): grace-bounded quarantine for never-granted epochs + approve contiguity guard (P6-SEC-03)
+
+Changed:
+- `internal/sync/encryptedhub.go`: `EncryptedHub` gains `MissingKeyWait` (seam to `Store.NoteMissingKeyGrant`) + `GraceWindow`; BOTH truncate sites (missing epoch; unheld kid at a held epoch — also the forged-kid stall primitive) now truncate only within the grace window and forward the still-encrypted carrier to the `P6-SYNC-04` undecryptable quarantine past it, so the cursor advances and later held-epoch events still apply. Nil seam = legacy truncate-forever (unit tests).
+- Migration `00015_key_grant_waits.sql` + `Store.NoteMissingKeyGrant`/`OpenKeyGrantWaits`: stable first-seen per missing key; the grace clock is the epoch's EARLIEST first-seen across kids (hostile kid relabeling cannot restart it); `RecordKeyEpoch` clears satisfied waits.
+- `internal/cli/sync.go`: `ReplayUndecryptableConflicts` moved BEFORE `ApplyEventsWithStats` in `pullAndApplyEvents` (a recovered predecessor applies before its same-batch successors — one-cycle convergence); `sync.key_grant_grace` config (default 72h, `0` = immediate, strict parse with default fallback), wired in `hubFromOptions`.
+- `internal/sync/events.go` + `Tx.ResolveOpenConflictsByEventID`: an event that finally applies auto-resolves its open `event_hash_chain_break` conflict (the successor of a once-quarantined event no longer leaves a stale gc-blocking conflict).
+- `internal/cli/devices.go`: `checkEpochContiguity` guard on `devices approve` + `enroll --approve` (before any trust write) — refuses when held epochs have a gap in `1..max` or any key-grant wait is open; `--allow-epoch-gap` overrides; keyless devices pass (founder-pinning ceremony untouched).
+- `internal/cli/doctor.go`: `awaiting key grants` check listing open waits with the re-approve remedy.
+- Tests: encryptedhub grace cases (within/expired × both sites, nil seam), `key_grant_waits` store tests, `TestSyncQuarantinesNeverGrantedEpochThenRecovers` (full cycle incl. same-cycle recovery), `devices_epoch_guard_test.go`, e2e `sync_never_granted_epoch_wedge.txtar` (three-device fleet, revoke-triggered epoch 2, unknown-to-rotator device quarantines → guard trips → `--allow-epoch-gap` → re-approve recovers).
+- Specs: 07 (P6-SEC-03 section rewritten as shipped; Pull-semantics bullet grace-bounded), 12 (migration 00015 + schema v15), 13 (config key, guard flag, doctor row), 15 (new epoch-injection DoS threat section), 16 (test inventory); ledger: `P6-SEC-03` → Recently shipped, Pass-6 header 27→26.
+
+Validated:
+- `gofmt -w cmd internal`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOCACHE=/tmp/devstrap-gocache go test -race ./...` (incl. the new e2e).
+
+Follow-ups:
+- Periodic (non-revoke) WCK rotation (`P4-SEC-07` remainder — next PR in this wave; rotation multiplies exactly the windows this PR bounds).
+- Documented residual: a rotator grants only locally-known approved devices; unknown fleet devices ride grace→quarantine→replay until re-approved. Old-epoch containment documented-not-built.
+
 ## 2026-07-03 — docs(claude): report-only nudge rule for delegated workers (pairing-wave field note)
 
 Changed:
