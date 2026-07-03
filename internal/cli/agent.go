@@ -77,6 +77,7 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 					repoPath = filepath.Join(opts.paths().Root, filepath.FromSlash(project.Path))
 				}
 				_ = gitRunner(opts).WorktreeRemove(cmd.Context(), repoPath, wt.Path, true)
+				_, _ = gitRunner(opts).Run(cmd.Context(), repoPath, "branch", "-D", wt.Branch)
 				_ = store.MarkWorktreeRemoved(cmd.Context(), wt.ID)
 				return err
 			}

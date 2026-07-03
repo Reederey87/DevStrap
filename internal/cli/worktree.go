@@ -171,11 +171,19 @@ func createFreshWorktree(ctx context.Context, stdout io.Writer, opts *options, s
 	if err != nil {
 		return state.Worktree{}, err
 	}
+	// P6-GIT-05: a failure after `git worktree add` must not leak a
+	// DB-invisible checkout + branch.
+	cleanupOrphan := func() {
+		_ = r.WorktreeRemove(ctx, localPath, wtPath, true)
+		_, _ = r.Run(ctx, localPath, "branch", "-D", branch)
+	}
 	if err := applyWorktreeLFSPolicy(ctx, stdout, r, project, wtPath); err != nil {
+		cleanupOrphan()
 		return state.Worktree{}, err
 	}
 	device, err := store.CurrentDevice(ctx)
 	if err != nil {
+		cleanupOrphan()
 		return state.Worktree{}, err
 	}
 	wt, err := store.InsertWorktree(ctx, state.Worktree{
@@ -189,6 +197,7 @@ func createFreshWorktree(ctx context.Context, stdout io.Writer, opts *options, s
 		DirtyState:  "clean",
 	})
 	if err != nil {
+		cleanupOrphan()
 		return state.Worktree{}, err
 	}
 	return wt, nil
@@ -229,7 +238,7 @@ func applyWorktreeLFSPolicy(ctx context.Context, stdout io.Writer, r dsgit.Runne
 	switch policy {
 	case "always", "agent":
 		if err := r.LFSPull(ctx, wtPath); err != nil {
-			return appError{code: exitGit, err: fmt.Errorf("worktree created but LFS pull failed; objects may remain pointer files: %w", err)}
+			return appError{code: exitGit, err: fmt.Errorf("worktree created at %s but LFS pull failed; objects may remain pointer files: %w", wtPath, err)}
 		}
 	case "auto", "never":
 		_, _ = fmt.Fprintf(stdout, "warning: %s uses Git LFS; worktree %s may contain pointer files (lfs_policy=%s)\n", project.Path, wtPath, policy)

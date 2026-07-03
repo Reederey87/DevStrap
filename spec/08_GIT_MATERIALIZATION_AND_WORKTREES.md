@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-01
+last_reviewed: 2026-07-03
 tracks_code: [internal/git/**, internal/cli/add.go, internal/cli/clone.go, internal/cli/forge.go, internal/cli/hydrate.go, internal/cli/materialize.go, internal/cli/open.go, internal/cli/repo_lock.go, internal/cli/worktree.go]
 ---
 # Git Materialization and Worktree Design
@@ -184,7 +184,7 @@ Never resolve a base from refs/devstrap/wip/* (the working-state plane).
 
 The base resolver reads **only** `origin/<default_branch>` (or an explicitly configured upstream). The working-state plane's WIP refs (`refs/devstrap/wip/<device>/<path_key>`, see `07_NAMESPACE_AND_SYNC_MODEL.md`) are human-convenience recovery and must never become a worktree/agent base; add a test asserting this exclusion (an agent worktree created after a WIP push still bases from `origin/<default_branch>` and does not see the WIP content).
 
-Current implementation fetches `origin <default_branch>` before resolving `origin/<default_branch>` and records `base_ref`, `base_sha`, branch, path, creator, and dirty state in SQLite. It rejects unsupported/option-like remotes, disables interactive git prompts, applies a sanitized git environment with protocol policy, redacts URL credentials in git errors, classifies network/auth/branch/remote Git failures into typed sentinels, and retries transient network clone/fetch failures only. Worktree branches include UTC date/time plus a long random suffix, and branch-name collisions from `git worktree add -b` trigger bounded suffix regeneration before surfacing an error. `devstrap worktree status <id>` re-fetches the recorded base ref and reports `fresh` or `stale (behind N)`. Integration coverage proves the worktree base equals the advanced remote SHA while the hydrated local default branch is stale, then advances the remote again and proves stale-base detection reports the drift.
+Current implementation fetches `origin <default_branch>` before resolving `origin/<default_branch>` and records `base_ref`, `base_sha`, branch, path, creator, and dirty state in SQLite. It rejects unsupported/option-like remotes, disables interactive git prompts, applies a sanitized git environment with protocol policy, redacts URL credentials in git errors, classifies network/auth/branch/remote Git failures into typed sentinels, and retries transient network clone/fetch failures only. Worktree branches include UTC date/time plus a long random suffix, and branch-name collisions from `git worktree add -b` trigger bounded suffix regeneration before surfacing an error. After a successful `git worktree add`, failures in LFS policy handling, current-device lookup, or SQLite worktree insertion remove the just-created checkout and delete its `agent/...` branch so DB-invisible worktrees do not leak. `devstrap worktree status <id>` re-fetches the recorded base ref and reports `fresh` or `stale (behind N)`. Integration coverage proves the worktree base equals the advanced remote SHA while the hydrated local default branch is stale, then advances the remote again and proves stale-base detection reports the drift.
 
 ## Worktree layout
 
@@ -270,7 +270,7 @@ git:
 
 For agents, avoid pulling all LFS objects unless needed.
 
-Current implementation stores `git_repos.lfs_policy` from `devstrap add --lfs-policy` and reads it during `worktree new`. After creating an agent worktree, DevStrap scans checked-out `.gitattributes` files for `filter=lfs`. If LFS is used and the policy is `agent` or `always`, it runs `git lfs pull` in the worktree and fails clearly if the pull fails. If the policy is `auto` or `never`, it leaves the worktree lightweight and prints a warning that LFS pointer files may remain.
+Current implementation stores `git_repos.lfs_policy` from `devstrap add --lfs-policy` and reads it during `worktree new`. After creating an agent worktree, DevStrap scans checked-out `.gitattributes` files for `filter=lfs`. If LFS is used and the policy is `agent` or `always`, it runs `git lfs pull` in the worktree and fails clearly with the worktree path if the pull fails, then removes the orphan checkout and branch. If the policy is `auto` or `never`, it leaves the worktree lightweight and prints a warning that LFS pointer files may remain.
 
 ## Dirty worktree handling
 
