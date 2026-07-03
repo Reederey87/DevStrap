@@ -27,6 +27,18 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — AGENTS.md rewrite: concise branch/worktree/PR guidance
+
+Changed:
+- Rewrote `AGENTS.md` from dense paragraph-bullets into three scannable sections (Branches & worktrees, PR cycle, GitHub access), preserving every existing rule and codifying the operational lessons from the Pass 6 P1 + P2-quick-win waves: fetch-first because local `main` is routinely stale (read status/code via `git show origin/main:`), disposable worktrees based on `origin/main` with post-merge cleanup, the exact working lint invocation fallback, reply-AND-resolve for every review thread (CodeRabbit blocks auto-merge otherwise), `gh pr merge --squash --auto`, the ledger open-count-equals-row-count invariant, and serial-merge/rebase discipline for multi-PR waves (including the leftover-conflict-marker check before `rebase --continue`).
+- No behavior/code change; docs only.
+
+Validated:
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` (work-log entry present); no Go changes, `go build ./...` clean.
+
+Follow-ups:
+- None.
+
 ## 2026-07-03 — P6-GIT-05: clean orphan worktrees after post-add failures (P2 quick-win wave)
 
 Changed:
