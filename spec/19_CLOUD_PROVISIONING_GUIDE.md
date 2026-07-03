@@ -607,6 +607,8 @@ requires `--signing-public-key` so the founder's events can be signature-verifie
 > copy-paste `--fingerprint …` remedy. A full pairing-ceremony rewrite lands with the one-paste
 > pairing code (`P4-SEC-04` part 2).
 
+<!-- MD028 separator between adjacent blockquotes -->
+
 > **Fleets larger than two devices:** pinning any one device flips verification fail-closed,
 > and device records are not synced — so pin **every** existing device this way, not just the
 > founder. Events signed by a device you have not pinned yet quarantine as visible
