@@ -23,7 +23,7 @@ go test -race ./...
 The Phase 0 suite must cover:
 
 - CI lint/security gate: `.golangci.yml` enables `errcheck`, `gosec`, `govet`, `ineffassign`, `staticcheck`, and `unconvert`; the workflow runs it as a separate Ubuntu job using the official pinned `golangci-lint-action`;
-- CI spec-drift gate: every `spec/*.md` file has `last_reviewed` and `tracks_code` frontmatter; `cmd/spec-drift` fails when changed code/config paths do not touch mapped specs or when code/spec/doc changes omit `spec/18_WORK_LOG.md`;
+- CI spec-drift gate: every `spec/*.md` file has `last_reviewed` and `tracks_code` frontmatter; `cmd/spec-drift` fails when changed code/config paths do not touch mapped specs or when code/spec/doc changes omit `spec/18_WORK_LOG.md`. Mapped-spec satisfaction is two-tiered: `tracks_code: [**]` is a work-log catch-all and never satisfies a file owner; when any specific owner exists (for example `internal/cli/**`), one of those specific specs must change; broad package globs (`cmd/**`, `internal/**`) satisfy only files with no more specific owner.
 - SQLite open path: foreign keys enabled and asserted, startup `PRAGMA foreign_key_check`, non-zero busy timeout, single-writer pool, `state.db` mode `0600`;
 - migrations: idempotent `Migrate`, schema version, required tables, generated `ws_` workspace id persistence, singleton workspace enforcement, `PRAGMA quick_check`, `PRAGMA foreign_key_check`, fixed-width UTC nanosecond timestamp formatting, deterministic same-timestamp worktree listing, and an EQP assertion that `ListProjects` uses `idx_namespace_active`;
 - uninitialized state detection uses explicit schema-table checks and returns the friendly `run devstrap init` hint for summary, device, and project reads;
@@ -531,41 +531,13 @@ Test workstreams from `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` (cloud-s
 
 From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
 
-### P6-QUAL-01 — Spec-drift mapped-spec check is vacuously satisfied by the mandatory work-log entry
+### P6-QUAL-01 — Spec-drift mapped-spec check is no longer vacuously satisfied by the mandatory work-log entry — SHIPPED
 
-**Problem.** `Check()` (`internal/specdrift/specdrift.go:76-83`) emits a mapped-spec finding only when *no* mapped spec changed, but `spec/18_WORK_LOG.md:3` declares `tracks_code: [**]`, so spec/18 is in `mapped` for every changed file — and touching spec/18 is already mandatory. The entire path→spec mapping table is therefore dead in practice.
+**Resolved.** `Check()` records the exact matched `tracks_code` pattern for each spec and ignores specs whose only match is `**`, so `spec/18_WORK_LOG.md` can no longer satisfy every mapped-code change. Remaining matches are tiered: `cmd/**` and `internal/**` are broad package globs, while package-scoped globs such as `internal/cli/**` or `internal/git/**` are specific owners. If a changed file has any specific owner, at least one specific spec must be touched; broad specs satisfy only files that have no specific owner. The regression suite pins the load-bearing case `[internal/cli/root.go, spec/18_WORK_LOG.md]` as a failure, the specific-spec success case, broad-spec non-satisfaction when a specific owner exists, and broad-only satisfaction for `internal/specdrift/**`.
 
-**Actionable steps.**
-1. Exclude `**`-matched specs (record the matched pattern; `if pattern == "**" { continue }`) from `mapped` before `anyChanged`, and add a regression test.
-2. When a file has any specific (non-broad) mapping, require one of those specific specs to change.
-3. Assert `[internal/cli/root.go, spec/18_WORK_LOG.md]` produces a drift finding.
+### P6-QUAL-02 — Release workflow verifies tagged commits before publishing — SHIPPED
 
-```go
-// specdrift_test.go — regression guard
-res := Check(Inputs{ChangedFiles: []string{"internal/cli/root.go", "spec/18_WORK_LOG.md"}, RequireWorkLog: true})
-// must fail: spec/13 (internal/cli) was NOT touched; the work log alone must not satisfy the mapping
-if res.OK() { t.Fatal("mapped-spec drift for internal/cli was vacuously satisfied by spec/18") }
-```
-
-### P6-QUAL-02 — Release workflow publishes binaries from any `v*` tag with zero verification
-
-**Problem.** `.github/workflows/release.yml:12-33` is a single `goreleaser` job (`contents: write`, no `needs:` gate, no test/lint/govulncheck), and `ci.yml` has no `tags:` trigger, so a tag never validated on a branch ships signed GitHub Release binaries unverified.
-
-**Actionable steps.**
-1. Add a `verify` job and gate goreleaser on it (`needs: verify`): `fetch-depth: 0`, assert the tagged commit is contained in `origin/main` or `release/*`, run `go vet ./... && go test -race ./...` and `govulncheck ./...`.
-2. Add a GitHub tag-protection ruleset for `v*`; optionally publish SLSA provenance / cosign-signed checksums.
-
-```yaml
-verify:
-  runs-on: ubuntu-latest
-  steps:
-    - uses: actions/checkout@<pinned-sha>
-      with: { fetch-depth: 0 }
-    - run: git branch -r --contains "$GITHUB_SHA" | grep -Eq 'origin/(main|release/)'
-    - run: go vet ./... && go test -race ./... && govulncheck ./...
-release:
-  needs: verify
-```
+**Resolved.** `.github/workflows/release.yml` now gates GoReleaser behind a read-only `verify` job. The job checks out full history, asserts the tagged commit is contained in `origin/main` or `origin/release/*`, then runs `go vet ./...`, `go test -race ./...`, and the same pinned `govulncheck@v1.1.4` invocation used by CI before the `contents: write` publishing job can run. The manual GitHub `v*` tag-protection ruleset remains an operator step; cosign/SLSA/SBOM work remains tracked separately under `P4-SEC-05`/`P4-QUAL-05`.
 
 ### P6-QUAL-03 — The S3/R2 adapter's only real-backend integration test never runs in CI — SHIPPED
 

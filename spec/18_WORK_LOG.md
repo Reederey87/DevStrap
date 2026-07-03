@@ -27,6 +27,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — fix(quality): precise spec-drift owners + verified release tags (P6-QUAL-01/P6-QUAL-02)
+
+Changed:
+- `internal/specdrift`: mapped-spec satisfaction now ignores `**` catch-all matches, requires a specific owner when one exists, and falls back to broad `cmd/**`/`internal/**` specs only for files with no specific owner. Added regression tests for work-log catch-all non-satisfaction, specific satisfaction, broad-spec non-satisfaction when a specific owner exists, and broad-only satisfaction.
+- `.github/workflows/release.yml`: GoReleaser now depends on a read-only `verify` job that confirms the tagged commit is contained in `origin/main` or `origin/release/*`, then runs `go vet`, race tests, and pinned `govulncheck@v1.1.4` before publishing.
+- Specs: `spec/16` documents the two-tier mapped-spec rule and release verification gate; `spec/14` release-gate prose now reflects the verified tag workflow.
+- Post-review (opus): verify job hardened — `DEVSTRAP_NO_KEYCHAIN=1` + `timeout-minutes: 15` mirroring ci.yml (a blocked go-keyring D-Bus call must not hang a 6h default), the ancestry check anchored on full refnames (`^refs/remotes/origin/(main|release/.+)$` — `origin/mainline` lookalikes no longer match), redundant pre-fetch dropped, `cache: true` on setup-go.
+
+Validated:
+- `gofmt -w cmd internal`; `GOCACHE=/tmp/devstrap-gocache-pr5 GOLANGCI_LINT_CACHE=/tmp/devstrap-golangci-cache-pr5 go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` (0 issues); `GOCACHE=/tmp/devstrap-gocache-pr5 go run ./cmd/spec-drift --base origin/main --head HEAD` (20 specs, 6 changed files); `GOCACHE=/tmp/devstrap-gocache-pr5 go test ./internal/specdrift`; `DEVSTRAP_NO_KEYCHAIN=1 GOCACHE=/tmp/devstrap-gocache-pr5 go test -race ./internal/specdrift/ ./...`. The exact race command without `DEVSTRAP_NO_KEYCHAIN=1` hit sandboxed macOS keychain failures in `internal/workspacekeys`; `actionlint` was not installed.
+
+Follow-ups:
+- Add a GitHub `v*` tag-protection ruleset manually in repository settings.
+- Cosign/SLSA/SBOM release hardening stays open under `P4-SEC-05`/`P4-QUAL-05`.
+- The new-package-no-owner gap stays open under `P6-DOC-04`.
+
 ## 2026-07-03 — docs: pairing + rotation runbook close-out (P4-SEC-04 / P4-SEC-07 shipped)
 
 Changed:
