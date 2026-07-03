@@ -71,14 +71,17 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 			}
 			if err := enforceAgentFilePolicy(policy, agentCommand, wt.Path); err != nil {
 				// M2: clean up the just-created worktree so a policy denial
-				// does not leak an orphan git worktree + DB row.
+				// does not leak an orphan git worktree + DB row. Shares the
+				// P6-GIT-05 helper: detached bounded context + surfaced
+				// warnings instead of swallowed errors.
 				repoPath := project.LocalPath
 				if repoPath == "" {
 					repoPath = filepath.Join(opts.paths().Root, filepath.FromSlash(project.Path))
 				}
-				_ = gitRunner(opts).WorktreeRemove(cmd.Context(), repoPath, wt.Path, true)
-				_, _ = gitRunner(opts).Run(cmd.Context(), repoPath, "branch", "-D", wt.Branch)
-				_ = store.MarkWorktreeRemoved(cmd.Context(), wt.ID)
+				removeOrphanWorktree(cmd.Context(), cmd.ErrOrStderr(), gitRunner(opts), repoPath, wt.Path, wt.Branch)
+				if markErr := store.MarkWorktreeRemoved(cmd.Context(), wt.ID); markErr != nil {
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to mark worktree %s removed: %v\n", wt.ID, markErr)
+				}
 				return err
 			}
 			runID, err := id.New("arun")

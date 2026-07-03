@@ -172,16 +172,9 @@ func createFreshWorktree(ctx context.Context, stdout io.Writer, opts *options, s
 		return state.Worktree{}, err
 	}
 	// P6-GIT-05: a failure after `git worktree add` must not leak a
-	// DB-invisible checkout + branch. The cleanup context is detached from
-	// ctx (with its own bound) because the failure being cleaned up may BE a
-	// cancellation (Ctrl-C mid-LFS-pull) — running cleanup under the same
-	// cancelled ctx would no-op and leak the exact orphan this exists to
-	// remove.
+	// DB-invisible checkout + branch.
 	cleanupOrphan := func() {
-		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
-		defer cancel()
-		_ = r.WorktreeRemove(cctx, localPath, wtPath, true)
-		_, _ = r.Run(cctx, localPath, "branch", "-D", branch)
+		removeOrphanWorktree(ctx, stdout, r, localPath, wtPath, branch)
 	}
 	if err := applyWorktreeLFSPolicy(ctx, stdout, r, project, wtPath); err != nil {
 		cleanupOrphan()
@@ -613,4 +606,23 @@ func slugify(value string) string {
 		value = strings.Trim(value[:40], "-")
 	}
 	return value
+}
+
+// removeOrphanWorktree force-removes a just-created worktree checkout and
+// deletes its branch (in that order — git refuses to delete a branch that is
+// still checked out in a live worktree). The cleanup context is detached from
+// the caller's ctx with its own bound, because the failure being cleaned up
+// may BE a cancellation (Ctrl-C mid-LFS-pull) — running cleanup under the
+// same cancelled ctx would no-op and leak the exact orphan this exists to
+// remove. Failures are surfaced as warnings (not swallowed) so an operator
+// knows manual cleanup is needed (P6-GIT-05).
+func removeOrphanWorktree(ctx context.Context, warn io.Writer, r dsgit.Runner, repoPath, wtPath, branch string) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	defer cancel()
+	if err := r.WorktreeRemove(cctx, repoPath, wtPath, true); err != nil {
+		_, _ = fmt.Fprintf(warn, "warning: failed to remove orphaned worktree %s: %v (remove it manually, then 'git worktree prune')\n", wtPath, err)
+	}
+	if _, err := r.Run(cctx, repoPath, "branch", "-D", branch); err != nil {
+		_, _ = fmt.Fprintf(warn, "warning: failed to delete orphaned branch %s in %s: %v\n", branch, repoPath, err)
+	}
 }

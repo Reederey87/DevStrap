@@ -30,7 +30,7 @@ Entries are newest-first: each code-modifying cycle prepends ONE dated entry at 
 ## 2026-07-03 — P6-GIT-05: clean orphan worktrees after post-add failures (P2 quick-win wave)
 
 Changed:
-- `createFreshWorktree` now removes the just-created checkout and deletes its `agent/...` branch when LFS policy handling, current-device lookup, or SQLite worktree insertion fails after `git worktree add`. Dual-review hardening (opus-4.8, Minor): the cleanup runs under `context.WithoutCancel` with a 2-minute bound, because the failure being cleaned up may itself be a cancellation — the same cancelled ctx would no-op both git commands and leak the exact orphan the fix targets.
+- `createFreshWorktree` now removes the just-created checkout and deletes its `agent/...` branch when LFS policy handling, current-device lookup, or SQLite worktree insertion fails after `git worktree add`. Dual-review hardening (opus-4.8 Minor + CodeRabbit Major): both cleanup sites share one `removeOrphanWorktree` helper that runs under `context.WithoutCancel` with a 2-minute bound — the failure being cleaned up may itself be a cancellation, and the same cancelled ctx would no-op both git commands and leak the exact orphan the fix targets — and surfaces `WorktreeRemove`/`branch -D`/`MarkWorktreeRemoved` failures as warnings instead of swallowing them, so an operator knows manual cleanup is needed.
 - LFS pull failures now include the worktree path in the user-facing error.
 - `agent run` file-policy denial cleanup now deletes the just-created branch in addition to removing the worktree and marking the DB row removed.
 - Added CLI regression coverage for LFS-pull failure and SQLite insert failure paths, asserting no checkout directory and no `agent/*` branch remain.
