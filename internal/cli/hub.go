@@ -202,6 +202,11 @@ func resolveHubS3Credentials(ctx context.Context, opts *options, workspaceID str
 	return hubS3Creds{accessKeyID: accessKeyID, secret: redact.New(secret), source: source}, nil
 }
 
+// opReadTimeout bounds a single `op read` credential resolution, long enough
+// for an interactive biometric/desktop-app approval but finite so a wedged
+// prompt cannot hold a sync cycle open forever.
+const opReadTimeout = 60 * time.Second
+
 // resolveOpRef resolves a single 1Password op://vault/item/field reference to
 // its secret value via `op read` (P6-HUB-02), mirroring the provider path
 // `devstrap run`/`env hydrate` use for env profiles. The subprocess runs under
@@ -215,11 +220,19 @@ func resolveOpRef(ctx context.Context, ref string) (redact.Secret, error) {
 	if err != nil {
 		return redact.Secret{}, err
 	}
+	// Bound the external call (CodeRabbit, PR #45): the CLI's root context is
+	// signal-cancellable but has no deadline, and `op read` can block on an
+	// interactive unlock prompt — without a local timeout that would stall
+	// sync/run-loop indefinitely. 60s accommodates a biometric/desktop-app
+	// approval; WaitDelay force-kills a child that ignores the cancel.
+	octx, cancel := context.WithTimeout(ctx, opReadTimeout)
+	defer cancel()
 	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "op", "read", "--no-newline", ref) //nolint:gosec // fixed 1Password CLI command; ref is the operator-configured op:// reference and the env is sanitized.
+	cmd := exec.CommandContext(octx, "op", "read", "--no-newline", ref) //nolint:gosec // fixed 1Password CLI command; ref is the operator-configured op:// reference and the env is sanitized.
 	cmd.Env = env
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	cmd.WaitDelay = 5 * time.Second
 	if err := cmd.Run(); err != nil {
 		return redact.Secret{}, fmt.Errorf("op read failed (is the 1Password CLI signed in?): %w: %s", err, redact.Scrub(strings.TrimSpace(stderr.String())))
 	}

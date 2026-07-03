@@ -179,8 +179,9 @@ names (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION=auto`,
 these are injected from Fly secrets at runtime (section B). On a developer box the *target*
 is to store the secret access key as a 1Password `op://` ref or an age-encrypted blob and
 let DevStrap resolve it at sync time — the same machinery already used for `devstrap env` —
-but that resolution is **not yet wired into the hub path** (`P6-HUB-02`); today the client
-reads the secret literally from the env var / config line.
+and that resolution is now **wired into the hub path** (`P6-HUB-02`, shipped): the client
+resolves `op://` refs via `op read` and falls back to the `hub login` keychain slot before
+constructing the S3 client; only a literal env/config value is passed through as-is.
 
 DevStrap owns object lifecycle: blob **ref-counting** and garbage collection of unreferenced
 `age_blob:<sha256>` objects happen client-side after device revoke/lost re-encryption
@@ -524,9 +525,9 @@ object-store hub, and future per-task runner isolation.
 
 From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
 
-### P6-HUB-02 — Hub S3 credential custody contradicts this guide (only plaintext env/config works)
+### P6-HUB-02 — Hub S3 credential custody contradicts this guide (RESOLVED 2026-07-03, `fix/p6-hub-02`)
 
-**Problem.** `selectBackendHub` (`internal/cli/hub.go:106-110`) reads the secret literally
+**Problem (was).** `selectBackendHub` (`internal/cli/hub.go:106-110`) reads the secret literally
 from `hub_s3_secret_access_key` / `AWS_SECRET_ACCESS_KEY` and passes it straight to
 `NewS3Client` (`internal/hub/s3client_awssdk.go:60-67`). The keychain / age-blob / `op://`
 resolution this guide promised (and annotated "shipped") does not exist, so a `op://` value
