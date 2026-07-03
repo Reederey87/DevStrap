@@ -59,6 +59,13 @@ func hubFromOptions(ctx context.Context, opts *options, store *state.Store, hubF
 		// tell an empty hub (found) from a populated hub a joiner cannot yet
 		// decrypt (wait for grant).
 		Stats: &dssync.PullStats{},
+		// P6-SEC-03: bound the missing-grant truncate. Within the grace
+		// window a not-yet-granted (epoch, kid) defers the pull tail (retry
+		// next sync); past it the events are quarantined as undecryptable so
+		// the cursor advances — recoverable later via the replay path once a
+		// grant arrives.
+		MissingKeyWait: store.NoteMissingKeyGrant,
+		GraceWindow:    keyGrantGrace(opts),
 	}, hubID, nil
 }
 

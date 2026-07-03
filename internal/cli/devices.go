@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Reederey87/DevStrap/internal/state"
@@ -35,6 +36,7 @@ func newDeviceEnrollCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var ageRecipient string
 	var signingPublicKey string
 	var approve bool
+	var allowEpochGap bool
 	cmd := &cobra.Command{
 		Use:   "enroll <device-id>",
 		Short: "Enroll a remote device record",
@@ -58,6 +60,14 @@ func newDeviceEnrollCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			defer closeStore(store)
+			// P6-SEC-03: refuse to approve from an incomplete keyring — the
+			// grant set would inherit the gap and wedge the new device. Runs
+			// BEFORE any trust write so a refusal leaves no partial state.
+			if approve && !allowEpochGap {
+				if err := checkEpochContiguity(cmd.Context(), store); err != nil {
+					return err
+				}
+			}
 			device := state.Device{
 				ID:               args[0],
 				Name:             name,
@@ -91,6 +101,7 @@ func newDeviceEnrollCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&ageRecipient, "age-recipient", "", "device age recipient public key")
 	cmd.Flags().StringVar(&signingPublicKey, "signing-public-key", "", "device Ed25519 signing public key")
 	cmd.Flags().BoolVar(&approve, "approve", false, "mark the enrolled device approved immediately")
+	cmd.Flags().BoolVar(&allowEpochGap, "allow-epoch-gap", false, "approve even though this device's workspace keys are incomplete (the enrolled device will quarantine events at the missing epochs until re-approved from a complete device)")
 	return cmd
 }
 
@@ -123,6 +134,7 @@ func newDevicesListCommand(stdout io.Writer, opts *options) *cobra.Command {
 
 func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState string) *cobra.Command {
 	var hubFile string
+	var allowEpochGap bool
 	cmd := &cobra.Command{
 		Use:   use + " <device-id>",
 		Short: "Mark a device as " + trustState,
@@ -136,6 +148,14 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 			// P5-CLI-05: progress/warnings go to stderr; stdout stays the result
 			// stream.
 			stderr := cmd.ErrOrStderr()
+			// P6-SEC-03: refuse to approve from an incomplete keyring — the
+			// grant set would inherit the gap and wedge the approved device.
+			// Runs BEFORE the trust write so a refusal leaves no partial state.
+			if trustState == "approved" && !allowEpochGap {
+				if err := checkEpochContiguity(cmd.Context(), store); err != nil {
+					return err
+				}
+			}
 			if err := store.SetDeviceTrustState(cmd.Context(), args[0], trustState); err != nil {
 				return err
 			}
@@ -204,7 +224,64 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 	if trustState == "revoked" || trustState == "lost" {
 		cmd.Flags().StringVar(&hubFile, "hub-file", "", "file-backed test hub path; when set, old ciphertext is deleted from the hub on rewrap")
 	}
+	if trustState == "approved" {
+		cmd.Flags().BoolVar(&allowEpochGap, "allow-epoch-gap", false, "approve even though this device's workspace keys are incomplete (the approved device will quarantine events at the missing epochs until re-approved from a complete device)")
+	}
 	return cmd
+}
+
+// checkEpochContiguity refuses an approval from a device whose own workspace
+// keyring is demonstrably incomplete (P6-SEC-03). Approval grants exactly the
+// approver's held epochs (GrantAllEpochs), so a gap in 1..max — or an open
+// key-grant wait for ciphertext this device has seen but cannot decrypt —
+// would be inherited by the approved device, which then wedges (now: grace-
+// quarantines) on the missing epochs until someone re-approves it from a
+// complete device. Passes trivially when NO keys are held: a keyless joiner
+// grants nothing on approve — that approval is the P4-SEC-04 founder-pinning
+// ceremony and must stay friction-free. --allow-epoch-gap overrides (the
+// worktree-finalize --allow-stale-base precedent).
+func checkEpochContiguity(ctx context.Context, store *state.Store) error {
+	epochs, err := store.HeldKeyEpochs(ctx)
+	if err != nil {
+		return err
+	}
+	if len(epochs) == 0 {
+		return nil
+	}
+	var missing []string
+	expect := int64(1)
+	for _, epoch := range epochs { // ascending
+		for expect < epoch {
+			missing = append(missing, strconv.FormatInt(expect, 10))
+			expect++
+		}
+		expect = epoch + 1
+	}
+	waits, err := store.OpenKeyGrantWaits(ctx)
+	if err != nil {
+		return err
+	}
+	var waiting []string
+	for _, w := range waits {
+		label := strconv.FormatInt(w.Epoch, 10)
+		if w.KID != "" {
+			label += " (kid " + w.KID[:8] + "…)"
+		}
+		waiting = append(waiting, label)
+	}
+	if len(missing) == 0 && len(waiting) == 0 {
+		return nil
+	}
+	var reasons []string
+	if len(missing) > 0 {
+		reasons = append(reasons, fmt.Sprintf("missing workspace key epoch(s) %s", strings.Join(missing, ", ")))
+	}
+	if len(waiting) > 0 {
+		reasons = append(reasons, fmt.Sprintf("awaiting key grant(s) for epoch(s) %s", strings.Join(waiting, ", ")))
+	}
+	return appError{code: exitInvalidConfig, err: fmt.Errorf(
+		"refusing to approve: this device's workspace keys are incomplete (%s), so the approval would grant an incomplete key set and strand the approved device on the gap; run 'devstrap sync' (or have a complete device re-approve THIS device) first, or pass --allow-epoch-gap to approve anyway — the approved device will then quarantine unreadable events until re-approved from a complete device",
+		strings.Join(reasons, "; "))}
 }
 
 func newDeviceRenameCommand(stdout io.Writer, opts *options) *cobra.Command {

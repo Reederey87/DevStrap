@@ -2251,6 +2251,25 @@ WHERE workspace_id = ? AND type = ? AND details_json = ? AND status = 'open';
 	return nil
 }
 
+// ResolveOpenConflictsByEventID marks every open conflict of the given type
+// whose details_json names event_id resolved (P6-SEC-03). Unlike
+// ResolveConflictByFingerprint it does not need the full details string —
+// hash-chain-break details embed the volatile cause error, so an exact
+// fingerprint cannot be reconstructed when the event finally applies.
+// Idempotent: zero matching rows is a no-op.
+func (tx *Tx) ResolveOpenConflictsByEventID(ctx context.Context, typ, eventID, resolutionJSON string) error {
+	now := timestampNow()
+	_, err := tx.tx.ExecContext(ctx, `
+UPDATE conflicts SET status = 'resolved', resolution_json = ?, updated_at = ?
+WHERE workspace_id = ? AND type = ? AND status = 'open'
+  AND json_extract(details_json, '$.event_id') = ?;
+`, nullEmpty(resolutionJSON), now, tx.workspaceID, typ, eventID)
+	if err != nil {
+		return fmt.Errorf("resolve conflicts by event id: %w", err)
+	}
+	return nil
+}
+
 func insertConflict(ctx context.Context, exec sqlExecutor, workspaceID, namespaceID, typ, detailsJSON string) error {
 	var existingID string
 	err := exec.QueryRowContext(ctx, `
@@ -2978,7 +2997,92 @@ INSERT OR IGNORE INTO workspace_keys (workspace_id, epoch, kid, origin, created_
 	if err != nil {
 		return fmt.Errorf("record key epoch: %w", err)
 	}
+	// P6-SEC-03: holding a key at this epoch ends any grace-window wait for it.
+	// A kid-specific wait (the P6-SEC-02 collision case) clears only when the
+	// matching kid arrives; an epoch-level wait (kid = '') clears on any key at
+	// the epoch. This is the single clearing path — every key acquisition
+	// (bootstrap, rotate, grant ingest) funnels through RecordKeyEpoch.
+	if _, err := s.db.ExecContext(ctx, `
+DELETE FROM key_grant_waits WHERE workspace_id = ? AND epoch = ? AND kid IN ('', ?);
+`, workspaceID, epoch, kid); err != nil {
+		return fmt.Errorf("clear key grant wait: %w", err)
+	}
 	return nil
+}
+
+// KeyGrantWait is one still-open grace-window wait for a workspace key this
+// device has seen ciphertext for but holds no key to (P6-SEC-03). KID is ”
+// when the whole epoch is missing.
+type KeyGrantWait struct {
+	Epoch     int64
+	KID       string
+	FirstSeen time.Time
+}
+
+// NoteMissingKeyGrant records (idempotently) that an event sealed under
+// (epoch, kid) could not be decrypted because the key is not held, and returns
+// the STABLE start of that epoch's grace window (P6-SEC-03). The returned time
+// is the earliest first_seen_at across every kid recorded at the epoch — never
+// reset by later sightings — so re-pulls cannot restart the window, and a
+// hostile hub relabeling the unauthenticated envelope kid hint on each pull
+// (the forged-kid stall from the P6-SEC-03 audit note) cannot mint a fresh
+// window per label: the epoch's clock keeps running from the first sighting.
+func (s *Store) NoteMissingKeyGrant(ctx context.Context, epoch int64, kid string) (time.Time, error) {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
+	now := timestampNow()
+	if _, err := s.db.ExecContext(ctx, `
+INSERT OR IGNORE INTO key_grant_waits (workspace_id, epoch, kid, first_seen_at) VALUES (?, ?, ?, ?);
+`, workspaceID, epoch, kid, now); err != nil {
+		return time.Time{}, fmt.Errorf("note missing key grant: %w", err)
+	}
+	var first string
+	if err := s.db.QueryRowContext(ctx, `
+SELECT MIN(first_seen_at) FROM key_grant_waits WHERE workspace_id = ? AND epoch = ?;
+`, workspaceID, epoch).Scan(&first); err != nil {
+		return time.Time{}, fmt.Errorf("read key grant wait: %w", err)
+	}
+	seen, err := time.Parse(timestampLayout, first)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse key grant wait first_seen_at %q: %w", first, err)
+	}
+	return seen, nil
+}
+
+// OpenKeyGrantWaits lists every still-open key-grant wait, ordered by epoch
+// then kid (P6-SEC-03). Rows are cleared by RecordKeyEpoch when the key
+// arrives, so anything returned here is a key this device has seen ciphertext
+// for and still cannot decrypt — surfaced by `doctor` as "awaiting key grants"
+// and consulted by the `devices approve` epoch-contiguity guard.
+func (s *Store) OpenKeyGrantWaits(ctx context.Context) ([]KeyGrantWait, error) {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT epoch, kid, first_seen_at FROM key_grant_waits WHERE workspace_id = ? ORDER BY epoch ASC, kid ASC;
+`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("list key grant waits: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var waits []KeyGrantWait
+	for rows.Next() {
+		var wait KeyGrantWait
+		var first string
+		if err := rows.Scan(&wait.Epoch, &wait.KID, &first); err != nil {
+			return nil, fmt.Errorf("scan key grant wait: %w", err)
+		}
+		seen, perr := time.Parse(timestampLayout, first)
+		if perr != nil {
+			return nil, fmt.Errorf("parse key grant wait first_seen_at %q: %w", first, perr)
+		}
+		wait.FirstSeen = seen
+		waits = append(waits, wait)
+	}
+	return waits, rows.Err()
 }
 
 // HeldKey is one WCK this device holds metadata for: an (epoch, kid) pair

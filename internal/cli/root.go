@@ -154,6 +154,7 @@ func initConfig(opts *options) error {
 	opts.v.SetDefault("home", defaults.Home)
 	opts.v.SetDefault("root", defaults.Root)
 	opts.v.SetDefault("materialization.clone_timeout", "30m")
+	opts.v.SetDefault("sync.key_grant_grace", "72h")
 
 	if opts.cfgFile != "" {
 		opts.v.SetConfigFile(opts.cfgFile)
