@@ -27,6 +27,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — fix(data): atomic local event/state writes + device HLC indexes (P6-DATA-03/05/06)
+
+Changed:
+- Local project add/adopt/conflict-resolution/key-grant emission paths now write the event row and derived state/audit row inside one SQLite transaction using Tx-scoped event constructors and store seams.
+- Added migration `00016_device_hlc_index_single_local.sql` with `idx_events_device_hlc` and a partial unique `idx_devices_single_local`; `EnsureDevice` now adopts a concurrent winner after `INSERT ... ON CONFLICT DO NOTHING`.
+- Specs updated for schema version 16, the shipped P6-DATA-03/05/06 behavior, and the reserved gitstate migration renumbering.
+
+- spec/13: `add`/`scan --adopt`/`conflicts resolve` sections document the one-transaction event+state commit (required by the tightened two-tier drift gate that merged mid-wave, PR #60 — its first genuine catch).
+
+Validated:
+- `gofmt -w cmd internal`; `GOCACHE=/tmp/devstrap-gocache-pr3 GOLANGCI_LINT_CACHE=/tmp/devstrap-golangci-pr3 go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run`; `GOCACHE=/tmp/devstrap-gocache-pr3 go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOCACHE=/tmp/devstrap-gocache-pr3 go test ./internal/cli/ -run 'TestMigrationsDocumented'`; `GOCACHE=/tmp/devstrap-gocache-pr3 go test -race ./...`.
+
+Follow-ups:
+- Re-apply-on-duplicate defense-in-depth in `ApplyEvents` deliberately not changed — trust-boundary/out of scope. `P6-DATA-03`, `P6-DATA-05`, and `P6-DATA-06` are closed by this change.
+
 ## 2026-07-03 — fix(quality): precise spec-drift owners + verified release tags (P6-QUAL-01/P6-QUAL-02)
 
 Changed:

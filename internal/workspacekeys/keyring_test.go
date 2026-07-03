@@ -2,18 +2,26 @@ package workspacekeys
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
+	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
 )
 
 type memSecret struct{ values map[string][]byte }
+
+func TestMain(m *testing.M) {
+	_ = os.Setenv(platform.NoKeychainEnv, "1")
+	os.Exit(m.Run())
+}
 
 func (b *memSecret) Store(_ context.Context, service, account string, secret []byte) error {
 	if b.values == nil {
@@ -37,9 +45,15 @@ func (b *memSecret) Delete(_ context.Context, service, account string) error {
 // setupKeyring opens a store, migrates it, ensures a workspace + local device,
 // creates the device age identity, and returns a primed Keyring.
 func setupKeyring(t *testing.T, name string) (*state.Store, *Keyring, devicekeys.Identity) {
+	st, kr, identity, _ := setupKeyringWithDBPath(t, name)
+	return st, kr, identity
+}
+
+func setupKeyringWithDBPath(t *testing.T, name string) (*state.Store, *Keyring, devicekeys.Identity, string) {
 	t.Helper()
 	ctx := context.Background()
-	st, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	dbPath := filepath.Join(t.TempDir(), "state.db")
+	st, err := state.Open(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +76,7 @@ func setupKeyring(t *testing.T, name string) (*state.Store, *Keyring, devicekeys
 	if err := st.SetDevicePublicKey(ctx, device.ID, identity.Recipient); err != nil {
 		t.Fatal(err)
 	}
-	return st, New(st, keyStore), identity
+	return st, New(st, keyStore), identity, dbPath
 }
 
 func TestEnsureBootstrapMintsFirstEpoch(t *testing.T) {
@@ -136,6 +150,46 @@ func TestSelfGrantAndIngestRoundTrip(t *testing.T) {
 	}
 	if string(reloaded) != string(wck1) {
 		t.Fatalf("re-ingested WCK differs from original")
+	}
+}
+
+func TestGrantEventAndAuditRowAtomic(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	ctx := context.Background()
+	_, kr, idA, dbPath := setupKeyringWithDBPath(t, "a")
+	if _, err := kr.EnsureBootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	events, err := kr.GrantAllEpochs(ctx, idA.Recipient)
+	if err != nil {
+		t.Fatalf("GrantAllEpochs: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("GrantAllEpochs emitted %d events, want 1", len(events))
+	}
+	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: dbPath}).String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var grantRows int
+	err = db.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM workspace_key_grants
+WHERE epoch = 1 AND recipient = ? AND source_event_id = ? AND source_event_hlc = ? AND source_event_device_id = ?;
+`, idA.Recipient, events[0].ID, events[0].HLC, events[0].DeviceID).Scan(&grantRows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grantRows != 1 {
+		t.Fatalf("workspace_key_grants matching event = %d, want 1", grantRows)
+	}
+	var eventRows int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE id = ?;`, events[0].ID).Scan(&eventRows); err != nil {
+		t.Fatal(err)
+	}
+	if eventRows != 1 {
+		t.Fatalf("events matching grant = %d, want 1", eventRows)
 	}
 }
 

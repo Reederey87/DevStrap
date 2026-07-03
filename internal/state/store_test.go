@@ -206,8 +206,8 @@ func TestMigrateEnsureSummaryAndVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 15 {
-		t.Fatalf("schema version = %d, want 15", version)
+	if version != 16 {
+		t.Fatalf("schema version = %d, want 16", version)
 	}
 
 	var tableCount int
@@ -347,8 +347,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 14 {
-		t.Fatalf("schema version after down = %d, want 14", version)
+	if version != 15 {
+		t.Fatalf("schema version after down = %d, want 15", version)
 	}
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
@@ -357,8 +357,122 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 15 {
-		t.Fatalf("schema version after re-migrate = %d, want 15", version)
+	if version != 16 {
+		t.Fatalf("schema version after re-migrate = %d, want 16", version)
+	}
+}
+
+func TestEventStateRollbackTogether(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureWorkspace(ctx, "test", "/tmp/Code"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EnsureDevice(ctx, "device-a"); err != nil {
+		t.Fatal(err)
+	}
+	err = st.WithTx(ctx, func(tx *Tx) error {
+		event, err := st.InsertLocalEventTx(ctx, tx, Event{
+			Type:        "project.added",
+			PayloadJSON: `{"path":"work/acme/api"}`,
+			ContentHash: ContentHash(`{"path":"work/acme/api"}`),
+		})
+		if err != nil {
+			return err
+		}
+		_, err = tx.UpsertProject(ctx, UpsertProjectParams{
+			Path:                  "../escape",
+			Type:                  "git_repo",
+			RemoteURL:             "git@github.com:acme/api.git",
+			RemoteKey:             "github.com/acme/api",
+			DefaultBranch:         "main",
+			MaterializationPolicy: "lazy",
+			SourceEventHLC:        event.HLC,
+			SourceEventDeviceID:   event.DeviceID,
+			SourceEventID:         event.ID,
+		})
+		return err
+	})
+	if err == nil {
+		t.Fatal("expected invalid path to roll back the transaction")
+	}
+	events, err := st.PendingEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("events persisted after rollback: %+v", events)
+	}
+	projects, err := st.ListProjects(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projects) != 0 {
+		t.Fatalf("projects persisted after rollback: %+v", projects)
+	}
+}
+
+func TestEnsureDeviceConcurrentSecondCallerAdoptsWinner(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureWorkspace(ctx, "test", "/tmp/Code"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := st.EnsureDevice(ctx, "first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := st.EnsureDevice(ctx, "second")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("second EnsureDevice ID = %s, want winner %s", second.ID, first.ID)
+	}
+	if second.Name != "second" {
+		t.Fatalf("second EnsureDevice name = %q, want update to second", second.Name)
+	}
+}
+
+func TestSingleLocalDeviceIndexRejectsSecondLocalRow(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureWorkspace(ctx, "test", "/tmp/Code"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EnsureDevice(ctx, "device-a"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.db.ExecContext(ctx, `
+INSERT INTO devices (id, name, os, arch, hostname, trust_state, last_seen_at, created_at, updated_at)
+VALUES ('dev_second', 'second', 'linux', 'amd64', 'second', 'local', ?, ?, ?);
+`, timestampNow(), timestampNow(), timestampNow())
+	if err == nil {
+		t.Fatal("expected single-local-device unique index to reject a second local row")
+	}
+	if !strings.Contains(err.Error(), "UNIQUE") && !strings.Contains(err.Error(), "constraint") {
+		t.Fatalf("second local insert err = %v, want constraint failure", err)
 	}
 }
 

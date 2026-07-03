@@ -210,16 +210,28 @@ func NewProjectEvent(deviceID, typ string, hlc int64, payload ProjectPayload) (s
 }
 
 func CreateProjectEvent(ctx context.Context, st *state.Store, typ string, payload ProjectPayload) (state.Event, error) {
+	return createProjectEvent(ctx, st, nil, typ, payload)
+}
+
+func CreateProjectEventTx(ctx context.Context, st *state.Store, tx *state.Tx, typ string, payload ProjectPayload) (state.Event, error) {
+	return createProjectEvent(ctx, st, tx, typ, payload)
+}
+
+func createProjectEvent(ctx context.Context, st *state.Store, tx *state.Tx, typ string, payload ProjectPayload) (state.Event, error) {
 	payload.RemoteURL = redact.StripURLUserinfo(payload.RemoteURL)
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return state.Event{}, err
 	}
-	return st.InsertLocalEvent(ctx, state.Event{
+	event := state.Event{
 		Type:        typ,
 		PayloadJSON: string(raw),
 		ContentHash: state.ContentHash(string(raw)),
-	})
+	}
+	if tx != nil {
+		return st.InsertLocalEventTx(ctx, tx, event)
+	}
+	return st.InsertLocalEvent(ctx, event)
 }
 
 // NewDraftSnapshotEvent builds an unsigned draft.snapshot.created event from a
@@ -250,15 +262,27 @@ func NewDeviceKeyGrantEvent(typ, payloadJSON string) state.Event {
 // (PROD-06) recording the user's resolution decision so it syncs to every
 // device and the open-conflict count converges.
 func CreateConflictResolvedEvent(ctx context.Context, st *state.Store, payload ConflictResolvedPayload) (state.Event, error) {
+	return createConflictResolvedEvent(ctx, st, nil, payload)
+}
+
+func CreateConflictResolvedEventTx(ctx context.Context, st *state.Store, tx *state.Tx, payload ConflictResolvedPayload) (state.Event, error) {
+	return createConflictResolvedEvent(ctx, st, tx, payload)
+}
+
+func createConflictResolvedEvent(ctx context.Context, st *state.Store, tx *state.Tx, payload ConflictResolvedPayload) (state.Event, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return state.Event{}, err
 	}
-	return st.InsertLocalEvent(ctx, state.Event{
+	event := state.Event{
 		Type:        EventConflictResolved,
 		PayloadJSON: string(raw),
 		ContentHash: state.ContentHash(string(raw)),
-	})
+	}
+	if tx != nil {
+		return st.InsertLocalEventTx(ctx, tx, event)
+	}
+	return st.InsertLocalEvent(ctx, event)
 }
 
 // ApplyEvents sorts and applies a batch of remote events. It returns

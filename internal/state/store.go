@@ -546,47 +546,63 @@ func (s *Store) EnsureDevice(ctx context.Context, name string) (Device, error) {
 		name = "local"
 	}
 	var existing Device
-	row := s.db.QueryRowContext(ctx, `
+	if err := s.WithTx(ctx, func(tx *Tx) error {
+		row := tx.tx.QueryRowContext(ctx, `
 SELECT id, name, os, arch, COALESCE(hostname, ''), COALESCE(public_key, ''), COALESCE(signing_public_key, ''), trust_state
 FROM devices
 WHERE trust_state = 'local'
 ORDER BY created_at
 LIMIT 1;
 `)
-	if err := row.Scan(&existing.ID, &existing.Name, &existing.OS, &existing.Arch, &existing.Hostname, &existing.PublicKey, &existing.SigningPublicKey, &existing.TrustState); err == nil {
-		now := timestampNow()
-		_, err = s.db.ExecContext(ctx, `
+		if err := row.Scan(&existing.ID, &existing.Name, &existing.OS, &existing.Arch, &existing.Hostname, &existing.PublicKey, &existing.SigningPublicKey, &existing.TrustState); err == nil {
+			now := timestampNow()
+			_, err = tx.tx.ExecContext(ctx, `
 UPDATE devices
 SET name = ?, os = ?, arch = ?, hostname = ?, last_seen_at = ?, updated_at = ?
 WHERE id = ?;
 `, name, runtimeInfo.OS, runtimeInfo.Arch, name, now, now, existing.ID)
-		if err != nil {
-			return Device{}, fmt.Errorf("update local device: %w", err)
+			if err != nil {
+				return fmt.Errorf("update local device: %w", err)
+			}
+			existing.Name = name
+			existing.OS = runtimeInfo.OS
+			existing.Arch = runtimeInfo.Arch
+			existing.Hostname = name
+			return nil
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("read local device: %w", err)
 		}
-		existing.Name = name
-		existing.OS = runtimeInfo.OS
-		existing.Arch = runtimeInfo.Arch
-		existing.Hostname = name
-		return existing, nil
-	} else if !errors.Is(err, sql.ErrNoRows) {
+		deviceID, err := id.New("dev")
+		if err != nil {
+			return err
+		}
+		now := timestampNow()
+		_, err = tx.tx.ExecContext(ctx, `
+INSERT INTO devices (id, name, os, arch, hostname, trust_state, last_seen_at, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, 'local', ?, ?, ?)
+ON CONFLICT DO NOTHING;
+`, deviceID, name, runtimeInfo.OS, runtimeInfo.Arch, name, now, now, now)
+		if err != nil {
+			return fmt.Errorf("create local device: %w", err)
+		}
+		row = tx.tx.QueryRowContext(ctx, `
+SELECT id, name, os, arch, COALESCE(hostname, ''), COALESCE(public_key, ''), COALESCE(signing_public_key, ''), trust_state
+FROM devices
+WHERE trust_state = 'local'
+ORDER BY created_at
+LIMIT 1;
+`)
+		if err := row.Scan(&existing.ID, &existing.Name, &existing.OS, &existing.Arch, &existing.Hostname, &existing.PublicKey, &existing.SigningPublicKey, &existing.TrustState); err != nil {
+			return fmt.Errorf("read local device after create: %w", err)
+		}
+		return nil
+	}); err != nil {
 		if missing, checkErr := s.missingTable(ctx, "devices"); checkErr == nil && missing {
 			return Device{}, ErrNotInitialized
 		}
-		return Device{}, fmt.Errorf("read local device: %w", err)
-	}
-	deviceID, err := id.New("dev")
-	if err != nil {
 		return Device{}, err
 	}
-	now := timestampNow()
-	_, err = s.db.ExecContext(ctx, `
-INSERT INTO devices (id, name, os, arch, hostname, trust_state, last_seen_at, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, 'local', ?, ?, ?);
-`, deviceID, name, runtimeInfo.OS, runtimeInfo.Arch, name, now, now, now)
-	if err != nil {
-		return Device{}, fmt.Errorf("create local device: %w", err)
-	}
-	return Device{ID: deviceID, Name: name, OS: runtimeInfo.OS, Arch: runtimeInfo.Arch, Hostname: name, TrustState: "local"}, nil
+	return existing, nil
 }
 
 func (s *Store) CurrentDevice(ctx context.Context) (Device, error) {
@@ -2217,6 +2233,25 @@ func (s *Store) ResolveConflict(ctx context.Context, id, resolutionJSON string) 
 	res, err := s.db.ExecContext(ctx, `
 UPDATE conflicts SET status = 'resolved', resolution_json = ?, updated_at = ? WHERE id = ? AND workspace_id = ? AND status = 'open';
 `, nullEmpty(resolutionJSON), now, id, workspaceID)
+	if err != nil {
+		return fmt.Errorf("resolve conflict: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("resolve conflict rows: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("conflict %q not found or already resolved", id)
+	}
+	return nil
+}
+
+// ResolveConflict marks a conflict resolved inside the caller's transaction.
+func (tx *Tx) ResolveConflict(ctx context.Context, id, resolutionJSON string) error {
+	now := timestampNow()
+	res, err := tx.tx.ExecContext(ctx, `
+UPDATE conflicts SET status = 'resolved', resolution_json = ?, updated_at = ? WHERE id = ? AND workspace_id = ? AND status = 'open';
+`, nullEmpty(resolutionJSON), now, id, tx.workspaceID)
 	if err != nil {
 		return fmt.Errorf("resolve conflict: %w", err)
 	}

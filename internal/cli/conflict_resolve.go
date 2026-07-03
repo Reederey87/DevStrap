@@ -170,10 +170,6 @@ func upsertResolvedProject(ctx context.Context, store *state.Store, opts *option
 	if payload.Type == "" {
 		payload.Type = "git_repo"
 	}
-	event, err := dssync.CreateProjectEvent(ctx, store, eventType, payload)
-	if err != nil {
-		return err
-	}
 	params := state.UpsertProjectParams{
 		Path:                  payload.Path,
 		Type:                  payload.Type,
@@ -181,16 +177,23 @@ func upsertResolvedProject(ctx context.Context, store *state.Store, opts *option
 		RemoteKey:             payload.RemoteKey,
 		DefaultBranch:         payload.DefaultBranch,
 		MaterializationPolicy: "lazy",
-		SourceEventHLC:        event.HLC,
-		SourceEventDeviceID:   event.DeviceID,
-		SourceEventID:         event.ID,
 	}
 	if localPath != "" {
 		params.LocalPath = localPath
 		params.MaterializationState = "skeleton"
 		params.DirtyState = "unknown"
 	}
-	if _, err := store.UpsertProject(ctx, params); err != nil {
+	if err := store.WithTx(ctx, func(tx *state.Tx) error {
+		event, err := dssync.CreateProjectEventTx(ctx, store, tx, eventType, payload)
+		if err != nil {
+			return err
+		}
+		params.SourceEventHLC = event.HLC
+		params.SourceEventDeviceID = event.DeviceID
+		params.SourceEventID = event.ID
+		_, err = tx.UpsertProject(ctx, params)
+		return err
+	}); err != nil {
 		return err
 	}
 	if localPath != "" {
@@ -204,11 +207,11 @@ func upsertResolvedProject(ctx context.Context, store *state.Store, opts *option
 // deleteResolvedProject emits a fresh dominating project.deleted event and
 // tombstones the project locally so the deletion wins LWW everywhere.
 func deleteResolvedProject(ctx context.Context, store *state.Store, nsPath string) error {
-	event, err := dssync.CreateProjectEvent(ctx, store, dssync.EventProjectDeleted, dssync.ProjectPayload{Path: nsPath})
-	if err != nil {
-		return err
-	}
 	return store.WithTx(ctx, func(tx *state.Tx) error {
+		event, err := dssync.CreateProjectEventTx(ctx, store, tx, dssync.EventProjectDeleted, dssync.ProjectPayload{Path: nsPath})
+		if err != nil {
+			return err
+		}
 		return tx.TombstoneProject(ctx, nsPath, event.HLC)
 	})
 }

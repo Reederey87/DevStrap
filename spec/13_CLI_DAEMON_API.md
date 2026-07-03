@@ -255,6 +255,8 @@ Options:
 --lfs-policy auto|never|agent|always
 ```
 
+`add` (like `scan --adopt` and the `conflicts resolve` enactment paths) commits its signed `project.added` event and the derived `namespace_entries` row in ONE SQLite transaction (`P6-DATA-03`): a crash can no longer leave a committed event with no derived row — a divergence the origin device could never self-heal, since the apply path skips already-inserted event IDs. Filesystem work (the skeleton write) stays outside the transaction and after the commit.
+
 ### clone
 
 ```bash
@@ -282,7 +284,7 @@ devstrap conflicts show <id>
 devstrap conflicts resolve <id> --keep-local|--keep-remote|--keep-both
 ```
 
-`conflicts` (`PROD-06`) is a command group that turns the detect-don't-merge model from a read-only count into an actionable resolution surface. `list` (the default when `conflicts` is run with no subcommand) shows open conflict rows; `show <id>` prints one conflict's details and status; `resolve <id>` accepts exactly one of `--keep-local` (keep the local version, discard the remote variant), `--keep-remote` (keep the remote version, discard the local), or `--keep-both` (dual-copy: the local entry stays and the remote variant is re-added under a sibling path). Resolving marks the row `resolved` (so the `status` open-conflict count converges), records the decision in `resolution_json`, and emits a signed `conflict.resolved` HLC event so every device sees the same outcome. Namespace files are never byte-merged; the dual-copy safe default mirrors the draft-bundle conflict behavior.
+`conflicts` (`PROD-06`) is a command group that turns the detect-don't-merge model from a read-only count into an actionable resolution surface. `list` (the default when `conflicts` is run with no subcommand) shows open conflict rows; `show <id>` prints one conflict's details and status; `resolve <id>` accepts exactly one of `--keep-local` (keep the local version, discard the remote variant), `--keep-remote` (keep the remote version, discard the local), or `--keep-both` (dual-copy: the local entry stays and the remote variant is re-added under a sibling path). Resolving first ENACTS the choice on namespace state, then commits the signed `conflict.resolved` HLC event and the row's `resolved` flip in one transaction (`P6-DATA-03` — the event and the local resolution can no longer split across a crash), so the `status` open-conflict count converges and every device sees the same outcome; the decision is recorded in `resolution_json`. Namespace files are never byte-merged; the dual-copy safe default mirrors the draft-bundle conflict behavior.
 
 ## Env commands
 

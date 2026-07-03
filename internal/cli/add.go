@@ -65,32 +65,35 @@ func addProject(ctx context.Context, store *state.Store, opts *options, remote, 
 	if err := ensureHydratableTarget(localPath); err != nil {
 		return state.NamespaceEntry{}, err
 	}
-	event, err := dssync.CreateProjectEvent(ctx, store, dssync.EventProjectAdded, dssync.ProjectPayload{
-		Path:          nsPath,
-		Type:          "git_repo",
-		RemoteURL:     remote,
-		RemoteKey:     remoteKey,
-		DefaultBranch: defaultBranch,
-	})
-	if err != nil {
-		return state.NamespaceEntry{}, err
-	}
-	project, err := store.UpsertProject(ctx, state.UpsertProjectParams{
-		Path:                  nsPath,
-		Type:                  "git_repo",
-		RemoteURL:             remote,
-		RemoteKey:             remoteKey,
-		DefaultBranch:         defaultBranch,
-		LFSPolicy:             lfsPolicy,
-		MaterializationPolicy: "lazy",
-		LocalPath:             localPath,
-		MaterializationState:  "skeleton",
-		DirtyState:            "unknown",
-		SourceEventHLC:        event.HLC,
-		SourceEventDeviceID:   event.DeviceID,
-		SourceEventID:         event.ID,
-	})
-	if err != nil {
+	var project state.NamespaceEntry
+	if err := store.WithTx(ctx, func(tx *state.Tx) error {
+		event, err := dssync.CreateProjectEventTx(ctx, store, tx, dssync.EventProjectAdded, dssync.ProjectPayload{
+			Path:          nsPath,
+			Type:          "git_repo",
+			RemoteURL:     remote,
+			RemoteKey:     remoteKey,
+			DefaultBranch: defaultBranch,
+		})
+		if err != nil {
+			return err
+		}
+		project, err = tx.UpsertProject(ctx, state.UpsertProjectParams{
+			Path:                  nsPath,
+			Type:                  "git_repo",
+			RemoteURL:             remote,
+			RemoteKey:             remoteKey,
+			DefaultBranch:         defaultBranch,
+			LFSPolicy:             lfsPolicy,
+			MaterializationPolicy: "lazy",
+			LocalPath:             localPath,
+			MaterializationState:  "skeleton",
+			DirtyState:            "unknown",
+			SourceEventHLC:        event.HLC,
+			SourceEventDeviceID:   event.DeviceID,
+			SourceEventID:         event.ID,
+		})
+		return err
+	}); err != nil {
 		return state.NamespaceEntry{}, err
 	}
 	if err := writeSkeleton(localPath, project.Path, remote); err != nil {

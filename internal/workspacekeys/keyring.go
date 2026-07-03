@@ -318,12 +318,19 @@ func (k *Keyring) GrantAllEpochs(ctx context.Context, recipient string) ([]state
 		if err != nil {
 			return nil, fmt.Errorf("grant epoch %d: marshal payload: %w", epoch, err)
 		}
-		ev, err := k.Store.InsertLocalEvent(ctx, dssync.NewDeviceKeyGrantEvent(dssync.EventDeviceKeyGranted, string(payload)))
-		if err != nil {
-			return nil, fmt.Errorf("grant epoch %d: insert event: %w", epoch, err)
-		}
-		if err := k.Store.RecordKeyGrant(ctx, epoch, hk.KID, recipient, ev.ID, ev.HLC, ev.DeviceID); err != nil {
-			return nil, fmt.Errorf("grant epoch %d: record audit: %w", epoch, err)
+		var ev state.Event
+		if err := k.Store.WithTx(ctx, func(tx *state.Tx) error {
+			var err error
+			ev, err = k.Store.InsertLocalEventTx(ctx, tx, dssync.NewDeviceKeyGrantEvent(dssync.EventDeviceKeyGranted, string(payload)))
+			if err != nil {
+				return fmt.Errorf("insert event: %w", err)
+			}
+			if err := tx.RecordKeyGrantTx(ctx, epoch, hk.KID, recipient, ev); err != nil {
+				return fmt.Errorf("record audit: %w", err)
+			}
+			return nil
+		}); err != nil {
+			return nil, fmt.Errorf("grant epoch %d: %w", epoch, err)
 		}
 		events = append(events, ev)
 	}
@@ -391,12 +398,19 @@ func (k *Keyring) Rotate(ctx context.Context) (int64, []state.Event, error) {
 	k.cacheWCK(next, kid, originSelf, wck)
 	events := make([]state.Event, 0, len(pending))
 	for _, grant := range pending {
-		ev, err := k.Store.InsertLocalEvent(ctx, dssync.NewDeviceKeyGrantEvent(dssync.EventDeviceKeyGranted, grant.payload))
-		if err != nil {
-			return 0, nil, fmt.Errorf("rotate: insert grant: %w", err)
-		}
-		if err := k.Store.RecordKeyGrant(ctx, next, kid, grant.recipient, ev.ID, ev.HLC, ev.DeviceID); err != nil {
-			return 0, nil, fmt.Errorf("rotate: record audit: %w", err)
+		var ev state.Event
+		if err := k.Store.WithTx(ctx, func(tx *state.Tx) error {
+			var err error
+			ev, err = k.Store.InsertLocalEventTx(ctx, tx, dssync.NewDeviceKeyGrantEvent(dssync.EventDeviceKeyGranted, grant.payload))
+			if err != nil {
+				return fmt.Errorf("insert grant: %w", err)
+			}
+			if err := tx.RecordKeyGrantTx(ctx, next, kid, grant.recipient, ev); err != nil {
+				return fmt.Errorf("record audit: %w", err)
+			}
+			return nil
+		}); err != nil {
+			return 0, nil, fmt.Errorf("rotate: %w", err)
 		}
 		events = append(events, ev)
 	}

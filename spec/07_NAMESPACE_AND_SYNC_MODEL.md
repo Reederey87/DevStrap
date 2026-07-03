@@ -179,7 +179,7 @@ Event fields:
 }
 ```
 
-Rows in `events` are insert-only. The shipped per-hub progress cursor is `hub_cursors` (migration 00008); the richer per-peer `event_delivery` / `sync_cursors` shape is defined in the schema but **not yet wired** (future per-peer optimization). Implementations must not update event payload, HLC, signatures, or hashes in place. Local event creation links each sequential same-device event to the previous event content hash before signing. Incoming events with a non-empty `prev_event_hash` must match the previous same-device event already present locally; a missing or mismatched predecessor is treated as a hash-chain break and recorded as an `event_hash_chain_break` conflict.
+Rows in `events` are insert-only. The shipped per-hub progress cursor is `hub_cursors` (migration 00008); the richer per-peer `event_delivery` / `sync_cursors` shape is defined in the schema but **not yet wired** (future per-peer optimization). Implementations must not update event payload, HLC, signatures, or hashes in place. Local event creation links each sequential same-device event to the previous event content hash before signing. Local emission sites that also mutate derived state now commit the event and derived row in the same SQLite transaction (`P6-DATA-03`), so an origin device cannot crash after publishing an event row but before recording the namespace/conflict/key-grant state that the duplicate-skip apply path will never re-derive locally. Incoming events with a non-empty `prev_event_hash` must match the previous same-device event already present locally; a missing or mismatched predecessor is treated as a hash-chain break and recorded as an `event_hash_chain_break` conflict.
 
 ## Clock and ordering
 
