@@ -73,12 +73,18 @@ func Check(ctx context.Context, opts Options) (Report, error) {
 		if strings.HasPrefix(file, "spec/") {
 			continue
 		}
-		mapped := specsTracking(specs, file)
-		if len(mapped) == 0 {
+		specific, broadOnly := specsTrackingTiers(specs, file)
+		switch {
+		case len(specific) > 0:
+			if !anyChanged(specific, changedSet) {
+				findings = append(findings, fmt.Sprintf("%s changed but none of the required specific specs changed: %s", file, strings.Join(specific, ", ")))
+			}
+		case len(broadOnly) > 0:
+			if !anyChanged(broadOnly, changedSet) {
+				findings = append(findings, fmt.Sprintf("%s changed but none of the mapped broad specs changed: %s", file, strings.Join(broadOnly, ", ")))
+			}
+		default:
 			continue
-		}
-		if !anyChanged(mapped, changedSet) {
-			findings = append(findings, fmt.Sprintf("%s changed but none of the mapped specs changed: %s", file, strings.Join(mapped, ", ")))
 		}
 	}
 
@@ -244,18 +250,44 @@ func normalizePaths(files []string) []string {
 	return out
 }
 
-func specsTracking(specs []Spec, file string) []string {
-	var mapped []string
+func specsTrackingTiers(specs []Spec, file string) ([]string, []string) {
+	var specific []string
+	var broadOnly []string
 	for _, spec := range specs {
+		matchedBroad := false
+		matchedSpecific := false
 		for _, pattern := range spec.TracksCode {
-			if globMatch(pattern, file) {
-				mapped = append(mapped, spec.Path)
-				break
+			if !globMatch(pattern, file) {
+				continue
 			}
+			if pattern == "**" {
+				continue
+			}
+			if isBroadPattern(pattern) {
+				matchedBroad = true
+				continue
+			}
+			matchedSpecific = true
+		}
+		switch {
+		case matchedSpecific:
+			specific = append(specific, spec.Path)
+		case matchedBroad:
+			broadOnly = append(broadOnly, spec.Path)
 		}
 	}
-	sort.Strings(mapped)
-	return mapped
+	sort.Strings(specific)
+	sort.Strings(broadOnly)
+	return specific, broadOnly
+}
+
+func isBroadPattern(pattern string) bool {
+	switch filepath.ToSlash(pattern) {
+	case "**", "internal/**", "cmd/**":
+		return true
+	default:
+		return false
+	}
 }
 
 func globMatch(pattern, file string) bool {

@@ -9,9 +9,44 @@ permissions:
   contents: write # create the GitHub Release and upload binaries
 
 jobs:
+  verify:
+    name: Verify tagged commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      # Headless CI runners have no usable OS keychain / Secret Service; force
+      # the file-backed device-key store so key operations do not block or fail
+      # (mirrors ci.yml's test job).
+      DEVSTRAP_NO_KEYCHAIN: "1"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Assert tag is on main or a release branch
+        # fetch-depth: 0 populates refs/remotes/origin/* for all branches; the
+        # refname-anchored match cannot be satisfied by lookalike branches
+        # (origin/mainline, origin/main-wip).
+        run: |
+          if ! git branch -r --format='%(refname)' --contains "$GITHUB_SHA"                | grep -Eq '^refs/remotes/origin/(main|release/.+)$'; then
+            echo "::error::tagged commit $GITHUB_SHA is not contained in origin/main or a release/* branch"
+            exit 1
+          fi
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
   goreleaser:
     name: GoReleaser
     runs-on: ubuntu-latest
+    needs: verify
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:

@@ -458,7 +458,7 @@ Build these early:
 - Upgrade runbook: stop daemon, `devstrap db backup`, migrate, run `doctor`, restart daemon.
 - Rollback requires a pre-migration `VACUUM INTO` backup.
 - Socket/API responses include protocol and schema versions once the daemon exists.
-- Releases are automated by GoReleaser (`.goreleaser.yaml`, `.github/workflows/release.yml`), triggered on `v*` tags: cross-compiled macOS + Linux (amd64/arm64) binaries plus `checksums.txt`, published as a GitHub Release with `version`/`commit`/`date` injected via `-ldflags`. See `RELEASING.md`.
+- Releases are automated by GoReleaser (`.goreleaser.yaml`, `.github/workflows/release.yml`), triggered on `v*` tags: a read-only verify job first confirms the tagged commit is on `main` or `release/*` and passes `go vet`, race tests, and pinned `govulncheck`; the gated publisher then cross-compiles macOS + Linux (amd64/arm64) binaries plus `checksums.txt` and publishes a GitHub Release with `version`/`commit`/`date` injected via `-ldflags`. See `RELEASING.md`.
 - Pre-release testing uses **release-candidate tags** (`vX.Y.Z-rc.N`, auto-published as GitHub pre-releases): validate the candidate binaries, then promote to a stable tag. A `release/vX.Y` branch is used only for stabilization or back-ports; tags are cut from `main` (or such a branch), never a feature branch.
 
 ## Observability and privacy gates
