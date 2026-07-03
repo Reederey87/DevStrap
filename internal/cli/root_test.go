@@ -375,6 +375,34 @@ func TestScanAdoptExplicitWorkspaceRootSucceeds(t *testing.T) {
 	}
 }
 
+// A symlink alias of the workspace root names the same directory, so --adopt
+// must accept it (P6-CLI-02 review: EvalSymlinks-based comparison), and the
+// adopted local paths must use the canonical root spelling, not the alias.
+func TestScanAdoptAcceptsSymlinkedWorkspaceRoot(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init", "--workspace-name", "personal"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+
+	repo := filepath.Join(root, "work", "acme", "api")
+	runGit(t, repo, "init")
+	runGit(t, repo, "remote", "add", "origin", "git@github.com:acme/api.git")
+
+	alias := filepath.Join(t.TempDir(), "CodeAlias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	stdout, stderr, err := executeForTest("--home", home, "scan", alias, "--adopt")
+	if err != nil {
+		t.Fatalf("adopt via symlink alias stdout = %q stderr = %q err = %v", stdout, stderr, err)
+	}
+	if !strings.Contains(stdout, "Adopted 1 projects") {
+		t.Fatalf("adopt stdout = %q", stdout)
+	}
+}
+
 func TestScanReadOnlyAllowsNonWorkspaceRoot(t *testing.T) {
 	home := filepath.Join(t.TempDir(), ".devstrap")
 	root := filepath.Join(t.TempDir(), "Code")

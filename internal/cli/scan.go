@@ -38,9 +38,12 @@ func newScanCommand(stdout io.Writer, opts *options) *cobra.Command {
 				if err != nil {
 					return appError{code: exitInvalidConfig, err: err}
 				}
-				if rootAbs != wsRoot {
+				if !sameResolvedDir(rootAbs, wsRoot) {
 					return appError{code: exitUsage, err: fmt.Errorf("--adopt only adopts from the workspace root %s (scanned %s); scan without --adopt to inspect, or use 'devstrap add' for a single repo", wsRoot, rootAbs)}
 				}
+				// Adopt under the canonical root spelling so stored
+				// local_paths never carry a symlink-alias prefix.
+				rootAbs = wsRoot
 			}
 			result, err := scan.Walk(cmd.Context(), rootAbs, scan.Options{IncludePlainFolders: true})
 			if err != nil {
@@ -195,4 +198,24 @@ func quarantineSecrets(home, root string, secrets []string) ([]quarantinedFile, 
 		moved = append(moved, quarantinedFile{from: rel, to: dst})
 	}
 	return moved, nil
+}
+
+// sameResolvedDir reports whether two cleaned absolute paths name the same
+// directory, resolving symlinks so an alias of the workspace root (e.g.
+// ~/Code -> /Volumes/Dev/Code) is accepted (P6-CLI-02 review). Comparison
+// stays byte-exact after resolution: no case-folding, so on a case-sensitive
+// filesystem two genuinely different directories can never alias, and on a
+// case-insensitive one a different-case spelling of a non-symlinked root is
+// still refused (over-refusal is the safe direction). If either path cannot
+// be resolved (e.g. it does not exist), the lexical comparison decides.
+func sameResolvedDir(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ra, errA := filepath.EvalSymlinks(a)
+	rb, errB := filepath.EvalSymlinks(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return ra == rb
 }
