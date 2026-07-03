@@ -201,7 +201,7 @@ CREATE TABLE device_gitstate (
 );
 ```
 
-Status: planned. No `device_gitstate` migration exists yet; add it as `00016_gitstate_mirror.sql` when the Layer A working-state validation plane lands (00010–00015 are now taken — see the migration list below). `sync_cursors` and `event_delivery` are defined; `hub_cursors` (00008) is wired for cursor-based incremental pull (EAGER-02); `pending_hub_deletes` (00011) backs the revoke-rewrap cleanup queue (`P5-PROD-02`). `device_sync_state` and `jobs` remain unwired.
+Status: planned. No `device_gitstate` migration exists yet; add it as `00019_gitstate_mirror.sql` when the Layer A working-state validation plane lands (00010–00016 are now taken; 00017/00018 are claimed by the in-flight transport-cursor and skip-quarantine PRs — see the migration list below). `sync_cursors` and `event_delivery` are defined; `hub_cursors` (00008) is wired for cursor-based incremental pull (EAGER-02); `pending_hub_deletes` (00011) backs the revoke-rewrap cleanup queue (`P5-PROD-02`). `device_sync_state` and `jobs` remain unwired.
 
 ### env_profiles
 
@@ -520,9 +520,11 @@ CREATE UNIQUE INDEX idx_draft_snapshots_source_event
   ON draft_snapshots(namespace_id, source_event_id)
   WHERE source_event_id IS NOT NULL AND source_event_id != '';                                -- 00012 (unsourced rows stay non-unique)
 CREATE INDEX idx_workspace_key_grants_epoch ON workspace_key_grants(workspace_id, epoch);    -- 00013
+CREATE INDEX idx_events_device_hlc ON events(device_id, hlc);                                 -- 00016
+CREATE UNIQUE INDEX idx_devices_single_local ON devices((1)) WHERE trust_state = 'local';      -- 00016
 ```
 
-Pending (`P6-DATA-05`): add `idx_events_device_hlc ON events(device_id, hlc, id)` so `LocalPendingEvents` (the push path) stops full-scanning the event log — see the P6-DATA-05 section below.
+`idx_events_device_hlc` (`P6-DATA-05`) serves device-scoped HLC scans such as `LocalPendingEvents`, avoiding a full event-log scan and temporary order-by B-tree on the sync push path. `idx_devices_single_local` (`P6-DATA-06`) enforces the Phase-0 single-local-device invariant at the schema layer; a store that already contains two `trust_state = 'local'` rows fails migration loudly and must be repaired manually by deleting the divergent local-device row after operator review. DevStrap never auto-deletes device identity.
 
 `idx_namespace_active` supports the Phase-0 `ListProjects` query shape:
 
@@ -574,6 +576,7 @@ internal/state/migrations/
   00013_workspace_keys.sql
   00014_workspace_key_kids.sql
   00015_key_grant_waits.sql
+  00016_device_hlc_index_single_local.sql
 ```
 
 CLI:
@@ -602,9 +605,10 @@ internal/state/migrations/00012_draft_snapshot_idempotency.sql
 internal/state/migrations/00013_workspace_keys.sql
 internal/state/migrations/00014_workspace_key_kids.sql
 internal/state/migrations/00015_key_grant_waits.sql
+internal/state/migrations/00016_device_hlc_index_single_local.sql
 ```
 
-The current schema version is **15**. `00010_repo_forge_kind.sql` adds the per-project forge override (`GIT-05`); `00011_pending_hub_deletes.sql` queues blobs orphaned by a local-only revoke for deletion on the next hub-enabled sync (`P5-PROD-02`/`P5-SEC-01`); `00012_draft_snapshot_idempotency.sql` adds a partial `UNIQUE` index on `draft_snapshots(namespace_id, source_event_id)` so idempotency is enforced by the DB, not only the SELECT-then-INSERT guard (`P5-DATA-02`); `00013_workspace_keys.sql` adds the `workspace_keys` and `workspace_key_grants` tables backing the WCK epoch keyring for envelope encryption of the event log (`P4-SEC-02`/`P4-SEC-07`) — `workspace_keys(workspace_id, epoch, created_at)` records which epochs this device holds, and `workspace_key_grants(workspace_id, epoch, recipient, source_event_id, source_event_hlc, source_event_device_id, created_at)` is a membership audit of device.key.granted events (the wrapped WCK itself rides the event payload, never SQLite); `00014_workspace_key_kids.sql` re-keys `workspace_keys` by `(workspace_id, epoch, kid)` and adds `origin` (`P6-SEC-02`/`P6-SEC-01b` — same-epoch keys coexist under content-derived kids instead of overwriting; pre-kid rows backfill as `kid=''`/`origin='legacy'`) and adds the nullable audit `kid` column to `workspace_key_grants`; `00015_key_grant_waits.sql` adds the `key_grant_waits` grace-window table for never-granted workspace keys (`P6-SEC-03`, see its section above). Migrations can be applied by `devstrap init` or explicitly with `devstrap db migrate`.
+The current schema version is **16**. `00010_repo_forge_kind.sql` adds the per-project forge override (`GIT-05`); `00011_pending_hub_deletes.sql` queues blobs orphaned by a local-only revoke for deletion on the next hub-enabled sync (`P5-PROD-02`/`P5-SEC-01`); `00012_draft_snapshot_idempotency.sql` adds a partial `UNIQUE` index on `draft_snapshots(namespace_id, source_event_id)` so idempotency is enforced by the DB, not only the SELECT-then-INSERT guard (`P5-DATA-02`); `00013_workspace_keys.sql` adds the `workspace_keys` and `workspace_key_grants` tables backing the WCK epoch keyring for envelope encryption of the event log (`P4-SEC-02`/`P4-SEC-07`) — `workspace_keys(workspace_id, epoch, created_at)` records which epochs this device holds, and `workspace_key_grants(workspace_id, epoch, recipient, source_event_id, source_event_hlc, source_event_device_id, created_at)` is a membership audit of device.key.granted events (the wrapped WCK itself rides the event payload, never SQLite); `00014_workspace_key_kids.sql` re-keys `workspace_keys` by `(workspace_id, epoch, kid)` and adds `origin` (`P6-SEC-02`/`P6-SEC-01b` — same-epoch keys coexist under content-derived kids instead of overwriting; pre-kid rows backfill as `kid=''`/`origin='legacy'`) and adds the nullable audit `kid` column to `workspace_key_grants`; `00015_key_grant_waits.sql` adds the `key_grant_waits` grace-window table for never-granted workspace keys (`P6-SEC-03`, see its section above); `00016_device_hlc_index_single_local.sql` adds `idx_events_device_hlc` for device-scoped HLC event scans (`P6-DATA-05`) and `idx_devices_single_local` to enforce exactly one local device row (`P6-DATA-06`). Migrations can be applied by `devstrap init` or explicitly with `devstrap db migrate`.
 
 ## Backup
 
@@ -690,30 +694,15 @@ devstrap db backup --full ~/.devstrap/backups/state-20260701.tar   # state.db + 
 devstrap db restore ~/.devstrap/backups/state-20260701.tar         # refuses over non-empty state dir without --force
 ```
 
-### P6-DATA-05 — No index serves `events(device_id, hlc)`; every push/doctor full-scans the log
+### P6-DATA-05 — `events(device_id, hlc)` index shipped
 
-**Problem.** `LocalPendingEvents` (`store.go:2682-2687`) filters `device_id = ? AND hlc > ? ORDER BY hlc, id`, but neither `idx_events_order` (leads with `workspace_id`) nor partial `idx_events_device_seq` serves it, so `EXPLAIN QUERY PLAN` reports `SCAN events` + `USE TEMP B-TREE FOR ORDER BY` on a table that grows unbounded (`P4-SYNC-02`).
+**Status.** Migration `00016_device_hlc_index_single_local.sql` adds `idx_events_device_hlc ON events(device_id, hlc)` so device-scoped HLC scans use an index instead of full-scanning the append-only event log. This serves the sync push path and doctor-style event scans that filter by local device and HLC.
 
-**Actionable steps.**
-1. Add a migration `idx_events_device_hlc ON events(device_id, hlc, id)` (trailing `id` satisfies the ORDER BY tiebreak) and update the migration list / index inventory in this file; note spec/12 reserves `00014` for `gitstate_mirror`, so renumber accordingly.
-2. Verify `EXPLAIN` reports `SEARCH events USING INDEX` with no temp B-tree.
+### P6-DATA-06 — Single-local-device invariant shipped
 
-```sql
-CREATE INDEX idx_events_device_hlc ON events(device_id, hlc, id);
-```
+**Status.** Migration `00016_device_hlc_index_single_local.sql` adds `idx_devices_single_local`, a partial unique expression index over rows where `trust_state = 'local'`. `EnsureDevice` now runs inside one transaction: select the local row, otherwise `INSERT ... ON CONFLICT DO NOTHING`, then re-select so a concurrent caller adopts the winner instead of minting a second local identity.
 
-### P6-DATA-06 — No DB invariant enforces a single `local` device; concurrent `init` can fork identity
-
-**Problem.** `EnsureDevice` (`store.go:487-538`) runs a SELECT for `trust_state = 'local'` then, on `ErrNoRows`, an INSERT as two autocommit statements with no flock, so racing `devstrap init` processes can each insert a `local` device. Migration 00006 gives `workspaces` a singleton index but `devices` has no counterpart, and the three `LEFT JOIN devices d ON d.trust_state = 'local'` sites (`store.go:1262,1287,1316`) then row-multiply `ListProjects`.
-
-**Actionable steps.**
-1. Add a partial unique index (with a dedup guard keeping MIN(created_at)) mirroring 00006.
-2. Make `EnsureDevice` transactional/race-tolerant (SELECT+INSERT inside `s.WithTx`, or treat a UNIQUE error as "lost the race" and re-SELECT).
-3. Add a doctor check asserting `SUM(trust_state = 'local') = 1` (note: `COUNT(trust_state='local')` counts every row, since the expression is non-NULL — use `SUM` of the boolean predicate).
-
-```sql
-CREATE UNIQUE INDEX idx_devices_local_singleton ON devices((1)) WHERE trust_state = 'local';
-```
+The migration intentionally fails if an existing store already has multiple local rows. Recovery is manual: inspect the divergent identities and delete the wrong `local` row by hand before rerunning migration. Device identity is never auto-deleted.
 
 ## Audit implementation notes (2026-06-28)
 

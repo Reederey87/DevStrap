@@ -6,6 +6,7 @@ import (
 	"io"
 
 	"github.com/Reederey87/DevStrap/internal/redact"
+	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
 	"github.com/spf13/cobra"
 )
@@ -149,20 +150,22 @@ func newConflictsResolveCommand(stdout io.Writer, opts *options) *cobra.Command 
 			if err != nil {
 				return appError{code: exitConflict, err: fmt.Errorf("apply resolution: %w", err)}
 			}
-			// Then emit the conflict.resolved event so the resolved state syncs,
-			// then mark the local row resolved. The event before ResolveConflict
-			// keeps a mid-failure recoverable: the row stays open and `resolve`
-			// can be retried (the apply handler treats the event idempotently).
-			if _, err := dssync.CreateConflictResolvedEvent(cmd.Context(), store, dssync.ConflictResolvedPayload{
-				ConflictID:  c.ID,
-				NamespaceID: c.NamespaceID,
-				Type:        c.Type,
-				DetailsJSON: c.DetailsJSON,
-				Action:      action,
+			// Then emit the conflict.resolved event and mark the local row
+			// resolved in one commit. The retry story is unchanged for a failure
+			// before this point: enactment may already have happened, while the
+			// row stays open and `resolve` can be retried.
+			if err := store.WithTx(cmd.Context(), func(tx *state.Tx) error {
+				if _, err := dssync.CreateConflictResolvedEventTx(cmd.Context(), store, tx, dssync.ConflictResolvedPayload{
+					ConflictID:  c.ID,
+					NamespaceID: c.NamespaceID,
+					Type:        c.Type,
+					DetailsJSON: c.DetailsJSON,
+					Action:      action,
+				}); err != nil {
+					return fmt.Errorf("record conflict.resolved event: %w", err)
+				}
+				return tx.ResolveConflict(cmd.Context(), c.ID, string(raw))
 			}); err != nil {
-				return fmt.Errorf("record conflict.resolved event: %w", err)
-			}
-			if err := store.ResolveConflict(cmd.Context(), c.ID, string(raw)); err != nil {
 				return err
 			}
 			_, _ = fmt.Fprintf(stdout, "Conflict %s resolved (%s).\n", c.ID, action)

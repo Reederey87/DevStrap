@@ -134,23 +134,26 @@ func adoptFindings(ctx context.Context, store *state.Store, rootAbs string, resu
 			RemoteKey:     finding.RemoteKey,
 			DefaultBranch: finding.DefaultBranch,
 		}
-		event, err := dssync.CreateProjectEvent(ctx, store, dssync.EventProjectAdded, payload)
-		if err != nil {
-			return adopted, err
-		}
-		if _, err := store.UpsertProject(ctx, state.UpsertProjectParams{
-			Path:                  finding.Path,
-			Type:                  string(finding.Type),
-			RemoteURL:             finding.RemoteURL,
-			RemoteKey:             finding.RemoteKey,
-			DefaultBranch:         finding.DefaultBranch,
-			MaterializationPolicy: "lazy",
-			LocalPath:             localPath,
-			MaterializationState:  materialization,
-			DirtyState:            dirty,
-			SourceEventHLC:        event.HLC,
-			SourceEventDeviceID:   event.DeviceID,
-			SourceEventID:         event.ID,
+		if err := store.WithTx(ctx, func(tx *state.Tx) error {
+			event, err := dssync.CreateProjectEventTx(ctx, store, tx, dssync.EventProjectAdded, payload)
+			if err != nil {
+				return err
+			}
+			_, err = tx.UpsertProject(ctx, state.UpsertProjectParams{
+				Path:                  finding.Path,
+				Type:                  string(finding.Type),
+				RemoteURL:             finding.RemoteURL,
+				RemoteKey:             finding.RemoteKey,
+				DefaultBranch:         finding.DefaultBranch,
+				MaterializationPolicy: "lazy",
+				LocalPath:             localPath,
+				MaterializationState:  materialization,
+				DirtyState:            dirty,
+				SourceEventHLC:        event.HLC,
+				SourceEventDeviceID:   event.DeviceID,
+				SourceEventID:         event.ID,
+			})
+			return err
 		}); err != nil {
 			return adopted, err
 		}
