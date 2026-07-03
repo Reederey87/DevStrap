@@ -27,6 +27,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — P6-HUB-02: keychain/op:// hub S3 credential custody + auth error hint (R2 go-live wave)
+
+Changed:
+- `internal/cli/hub.go`: `selectBackendHub` now resolves the hub S3/R2 credential pair through `resolveHubS3Credentials` (most-explicit-first: `DEVSTRAP_HUB_S3_*` env/config where either value may be a 1Password `op://` ref resolved via a new `resolveOpRef` helper — `op read --no-newline` under the sanitized `childenv` allowing `OP_*` — then `AWS_*` literals, then the per-workspace keychain slot). The resolved secret rides `redact.Secret` and is revealed only at the `hub.NewS3Client` call. New `devstrap hub login` (hidden-prompt/piped-stdin secret, never argv; refuses `op://` literals; reports keychain-vs-file landing) and `devstrap hub logout` commands.
+- `internal/devicekeys`: per-workspace `HubS3Credentials` custody slot (`hub-s3.<workspace_id>` keychain account, `hub-s3-<workspace_id>.json` 0600 file fallback) with Store/Load/Delete on `HybridStore`, same fail-closed keychain semantics as WCK custody.
+- `internal/hub`: new `ErrS3Auth` sentinel; `mapS3Error` maps 401/403/`AccessDenied`/`SignatureDoesNotMatch`/`InvalidAccessKeyId` to it with a remediation hint (previously the raw SDK error).
+- New dependency `golang.org/x/term` (hidden terminal prompt).
+- Specs: spec/19 custody block flipped PLANNED→shipped and documents the resolution order + `hub login`; spec/13 documents `hub login`/`logout` and the custody order; spec/15 custody paragraph updated — the three specs no longer contradict each other (age-blob custody variant explicitly not built; keychain + op:// cover the client need).
+
+Validated:
+- `gofmt`; `golangci-lint run` (0 issues); `GOCACHE=/tmp/devstrap-gocache go test -race ./...` (all green: resolution-order table incl. PATH-shim fake `op`, login/logout round-trip under `DEVSTRAP_NO_KEYCHAIN`, devicekeys file round-trip + 0600 mode + path-hostile refusal, `mapS3Error` auth rows); `go run ./cmd/spec-drift --base origin/main --head HEAD` after commit.
+
+Follow-ups:
+- Live two-machine R2 dogfood using `hub login` against the registered bucket (wave close-out); hosted-mode temporary prefix-scoped credentials remain `P4-SEC-08`.
 ## 2026-07-03 — P6-QUAL-03: run the MinIO hub conformance test in CI (R2 go-live wave)
 
 Changed:

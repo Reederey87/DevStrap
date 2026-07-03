@@ -351,6 +351,13 @@ var ErrS3Throttle = errors.New("s3 throttling (429/503 slow down)")
 // reset) that is retryable after a short backoff (HUB-10).
 var ErrS3Transient = errors.New("s3 transient (500/connection reset)")
 
+// ErrS3Auth signals a credential/authorization failure (401/403,
+// SignatureDoesNotMatch, InvalidAccessKeyId, AccessDenied). Terminal — never
+// retried — and carries remediation guidance so a bad or unresolved secret
+// (e.g. an op:// ref pasted where a literal was expected before P6-HUB-02)
+// surfaces as an actionable message instead of a raw SDK error.
+var ErrS3Auth = errors.New("s3 authentication/authorization failed")
+
 // s3ErrorClass classifies an S3 operation error for retry purposes (HUB-10).
 type s3ErrorClass int
 

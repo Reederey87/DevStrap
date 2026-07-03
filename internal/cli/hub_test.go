@@ -1,9 +1,16 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Reederey87/DevStrap/internal/devicekeys"
+	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/spf13/viper"
 )
 
@@ -81,5 +88,209 @@ func TestHubConfigured(t *testing.T) {
 				t.Errorf("hubConfigured(%s): want nil, got %v", c.name, err)
 			}
 		})
+	}
+}
+
+// stubOp installs a fake `op` binary on PATH (the P6-QUAL-04 PATH-shim
+// pattern) whose behavior is the given shell script body. Returns the temp
+// dir so tests can inspect files the shim writes.
+func stubOp(t *testing.T, script string) string {
+	t.Helper()
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "op")
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return dir
+}
+
+func newHubCredOptions(t *testing.T) *options {
+	t.Helper()
+	opts := &options{v: viper.New()}
+	opts.v.Set("home", t.TempDir())
+	return opts
+}
+
+// TestResolveHubS3CredentialsOpRef (P6-HUB-02): an op:// secret ref resolves
+// through `op read --no-newline` instead of being signed as the literal AWS
+// secret (the pre-fix failure mode was an opaque SignatureDoesNotMatch).
+func TestResolveHubS3CredentialsOpRef(t *testing.T) {
+	dir := stubOp(t, `printf '%s ' "$@" > "$(dirname "$0")/op-args"; printf 'resolved-op-secret'`)
+	opts := newHubCredOptions(t)
+	opts.v.Set("hub_s3_access_key_id", "AKIALITERAL")
+	opts.v.Set("hub_s3_secret_access_key", "op://vault/item/secret-key")
+
+	creds, err := resolveHubS3Credentials(context.Background(), opts, "ws_test")
+	if err != nil {
+		t.Fatalf("resolveHubS3Credentials: %v", err)
+	}
+	if creds.accessKeyID != "AKIALITERAL" {
+		t.Errorf("accessKeyID = %q, want AKIALITERAL", creds.accessKeyID)
+	}
+	if got := creds.secret.Reveal(); got != "resolved-op-secret" {
+		t.Errorf("secret = %q, want resolved-op-secret", got)
+	}
+	if creds.source != "op" {
+		t.Errorf("source = %q, want op", creds.source)
+	}
+	args, err := os.ReadFile(filepath.Join(dir, "op-args"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(args), "read --no-newline op://vault/item/secret-key") {
+		t.Errorf("op invoked with %q, want read --no-newline <ref>", string(args))
+	}
+	// The Secret wrapper must not leak the value through formatting.
+	if s := fmt.Sprintf("%v %s", creds.secret, creds.secret); strings.Contains(s, "resolved-op-secret") {
+		t.Errorf("redact.Secret leaked the value: %q", s)
+	}
+}
+
+// TestResolveHubS3CredentialsOpMissing: a clear, actionable error when an
+// op:// ref is configured but the 1Password CLI is not installed.
+func TestResolveHubS3CredentialsOpMissing(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // no op anywhere
+	opts := newHubCredOptions(t)
+	opts.v.Set("hub_s3_access_key_id", "AKIALITERAL")
+	opts.v.Set("hub_s3_secret_access_key", "op://vault/item/secret-key")
+	_, err := resolveHubS3Credentials(context.Background(), opts, "ws_test")
+	if err == nil || !strings.Contains(err.Error(), "1Password CLI") {
+		t.Fatalf("err = %v, want 1Password CLI hint", err)
+	}
+}
+
+// TestResolveHubS3CredentialsStoredPair (P6-HUB-02): with nothing in
+// env/config, the pair stored by `hub login` is used — here via the 0600 file
+// fallback (DEVSTRAP_NO_KEYCHAIN=1, the headless/CI custody path).
+func TestResolveHubS3CredentialsStoredPair(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	opts := newHubCredOptions(t)
+	keys := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain)
+	location, err := keys.StoreHubS3Credentials(context.Background(), "ws_test", devicekeys.HubS3Credentials{
+		AccessKeyID: "AKIASTORED", SecretAccessKey: "stored-secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if location != "file" {
+		t.Fatalf("location = %q, want file (DEVSTRAP_NO_KEYCHAIN)", location)
+	}
+	creds, err := resolveHubS3Credentials(context.Background(), opts, "ws_test")
+	if err != nil {
+		t.Fatalf("resolveHubS3Credentials: %v", err)
+	}
+	if creds.accessKeyID != "AKIASTORED" || creds.secret.Reveal() != "stored-secret" || creds.source != "keychain" {
+		t.Errorf("creds = {%s, source=%s}, want stored pair with source=keychain", creds.accessKeyID, creds.source)
+	}
+}
+
+// TestResolveHubS3CredentialsEnvOverridesStored: explicit env/config values
+// win over a stored pair (12-factor/CI override).
+func TestResolveHubS3CredentialsEnvOverridesStored(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	opts := newHubCredOptions(t)
+	keys := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain)
+	if _, err := keys.StoreHubS3Credentials(context.Background(), "ws_test", devicekeys.HubS3Credentials{
+		AccessKeyID: "AKIASTORED", SecretAccessKey: "stored-secret",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	opts.v.Set("hub_s3_access_key_id", "AKIAENV")
+	opts.v.Set("hub_s3_secret_access_key", "env-secret")
+	creds, err := resolveHubS3Credentials(context.Background(), opts, "ws_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if creds.accessKeyID != "AKIAENV" || creds.secret.Reveal() != "env-secret" || creds.source != "env/config" {
+		t.Errorf("creds = {%s, source=%s}, want explicit env/config pair", creds.accessKeyID, creds.source)
+	}
+}
+
+// TestResolveHubS3CredentialsNothingConfigured: the failure names both
+// remedies (env vars / hub login) instead of an opaque SDK error downstream.
+func TestResolveHubS3CredentialsNothingConfigured(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+	opts := newHubCredOptions(t)
+	_, err := resolveHubS3Credentials(context.Background(), opts, "ws_test")
+	if err == nil || !strings.Contains(err.Error(), "devstrap hub login") || !strings.Contains(err.Error(), "DEVSTRAP_HUB_S3_ACCESS_KEY_ID") {
+		t.Fatalf("err = %v, want both remedies named", err)
+	}
+}
+
+// TestHubLoginLogoutRoundTrip (P6-HUB-02): `hub login` stores the pair (secret
+// via piped stdin, never argv), sync-time resolution finds it, and `hub
+// logout` removes it.
+func TestHubLoginLogoutRoundTrip(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init: %v (%s)", err, stderr)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd := NewRootCommand(&stdout, &stderr)
+	cmd.SetIn(strings.NewReader("login-secret-value\n"))
+	cmd.SetArgs([]string{"--home", home, "--root", root, "hub", "login", "--access-key-id", "AKIALOGIN"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("hub login: %v (%s)", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "file store") {
+		t.Errorf("login output = %q, want file-store location report", stdout.String())
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "login-secret-value") {
+		t.Fatalf("login output leaked the secret")
+	}
+
+	opts := &options{v: viper.New()}
+	opts.v.Set("home", home)
+	// Workspace id from the initialized store.
+	st, err := opts.openState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, err := st.WorkspaceID(context.Background())
+	closeStore(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds, err := resolveHubS3Credentials(context.Background(), opts, ws)
+	if err != nil {
+		t.Fatalf("resolve after login: %v", err)
+	}
+	if creds.accessKeyID != "AKIALOGIN" || creds.secret.Reveal() != "login-secret-value" {
+		t.Errorf("resolved creds = %q/<secret>, want the login pair", creds.accessKeyID)
+	}
+
+	stdout.Reset()
+	cmd = NewRootCommand(&stdout, &stderr)
+	cmd.SetArgs([]string{"--home", home, "--root", root, "hub", "logout"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("hub logout: %v (%s)", err, stderr.String())
+	}
+	if _, err := resolveHubS3Credentials(context.Background(), opts, ws); err == nil {
+		t.Fatal("resolve after logout: want error, got credentials")
+	}
+}
+
+// TestHubLoginRefusesOpRef: op:// refs belong in env/config (resolved at sync
+// time), not frozen into the custody store as literals.
+func TestHubLoginRefusesOpRef(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init: %v (%s)", err, stderr)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd := NewRootCommand(&stdout, &stderr)
+	cmd.SetIn(strings.NewReader("op://vault/item/key\n"))
+	cmd.SetArgs([]string{"--home", home, "--root", root, "hub", "login", "--access-key-id", "AKIALOGIN"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "op://") {
+		t.Fatalf("hub login with op:// secret: err = %v, want refusal", err)
 	}
 }

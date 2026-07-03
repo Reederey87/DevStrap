@@ -359,3 +359,56 @@ func TestWCKEntryPointsRejectInvalidKID(t *testing.T) {
 		})
 	}
 }
+
+// TestHubS3CredentialsFileRoundTrip (P6-HUB-02): the hub S3 credential blob
+// round-trips through the file fallback (nil keychain backend — the
+// DEVSTRAP_NO_KEYCHAIN/headless custody path), lands with mode 0600, and
+// deletes idempotently.
+func TestHubS3CredentialsFileRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store := NewHybridStore(t.TempDir(), nil)
+	const ws = "ws_0123456789abcdef"
+	creds := HubS3Credentials{AccessKeyID: "AKIAROUNDTRIP", SecretAccessKey: "round-trip-secret"}
+
+	location, err := store.StoreHubS3Credentials(ctx, ws, creds)
+	if err != nil {
+		t.Fatalf("StoreHubS3Credentials: %v", err)
+	}
+	if location != "file" {
+		t.Fatalf("location = %q, want file (nil keychain backend)", location)
+	}
+	info, err := os.Stat(store.File.hubS3Path(ws))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("credential file mode = %o, want 0600", got)
+	}
+
+	got, err := store.LoadHubS3Credentials(ctx, ws)
+	if err != nil {
+		t.Fatalf("LoadHubS3Credentials: %v", err)
+	}
+	if got != creds {
+		t.Fatalf("loaded = %+v, want %+v", got, creds)
+	}
+	// Another workspace's slot is independent.
+	if _, err := store.LoadHubS3Credentials(ctx, "ws_other"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("other workspace load = %v, want os.ErrNotExist", err)
+	}
+
+	if err := store.DeleteHubS3Credentials(ctx, ws); err != nil {
+		t.Fatalf("DeleteHubS3Credentials: %v", err)
+	}
+	if _, err := store.LoadHubS3Credentials(ctx, ws); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("load after delete = %v, want os.ErrNotExist", err)
+	}
+	// Deleting again is a no-op, not an error.
+	if err := store.DeleteHubS3Credentials(ctx, ws); err != nil {
+		t.Fatalf("second delete: %v", err)
+	}
+	// A path-hostile workspace id is refused before touching the filesystem.
+	if _, err := store.StoreHubS3Credentials(ctx, "../escape", creds); err == nil {
+		t.Fatal("path-hostile workspace id accepted")
+	}
+}

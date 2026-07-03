@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -343,6 +344,143 @@ func (s HybridStore) LoadWCK(ctx context.Context, workspaceID string, epoch int6
 		}
 	}
 	return s.File.ReadWCK(workspaceID, epoch, kid)
+}
+
+// HubS3Credentials is the hub S3/R2 credential pair kept in local custody
+// (P6-HUB-02): one JSON blob per workspace under the device-identity keychain
+// service, with a 0600 file fallback. The secret access key never enters
+// SQLite, config.yaml, or logs — plaintext env remains only a CI/override
+// fallback resolved by the CLI layer.
+type HubS3Credentials struct {
+	AccessKeyID     string `json:"access_key_id"`
+	SecretAccessKey string `json:"secret_access_key"`
+}
+
+// hubS3Account is the keychain account name for a workspace's hub S3
+// credential blob (P6-HUB-02).
+func hubS3Account(workspaceID string) string {
+	return "hub-s3." + workspaceID
+}
+
+func (s FileStore) hubS3Path(workspaceID string) string {
+	//nolint:gosec // workspaceID is an internally-generated ws_<uuidv7> and is
+	// validated against path separators; no user-controlled path component
+	// reaches this filename.
+	return filepath.Join(s.Dir, "hub-s3-"+workspaceID+".json")
+}
+
+// WriteHubS3Credentials persists the credential blob to the file fallback
+// store with mode 0600.
+func (s FileStore) WriteHubS3Credentials(workspaceID string, creds HubS3Credentials) error {
+	if err := validateWorkspaceID(workspaceID); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(creds)
+	if err != nil {
+		return fmt.Errorf("marshal hub s3 credentials: %w", err)
+	}
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		return fmt.Errorf("create device key directory: %w", err)
+	}
+	if err := os.WriteFile(s.hubS3Path(workspaceID), raw, 0o600); err != nil {
+		return fmt.Errorf("write hub s3 credentials: %w", err)
+	}
+	return nil
+}
+
+// ReadHubS3Credentials loads the credential blob from the file fallback store.
+func (s FileStore) ReadHubS3Credentials(workspaceID string) (HubS3Credentials, error) {
+	if err := validateWorkspaceID(workspaceID); err != nil {
+		return HubS3Credentials{}, err
+	}
+	raw, err := os.ReadFile(s.hubS3Path(workspaceID))
+	if err != nil {
+		return HubS3Credentials{}, err
+	}
+	var creds HubS3Credentials
+	if err := json.Unmarshal(raw, &creds); err != nil {
+		return HubS3Credentials{}, fmt.Errorf("parse hub s3 credentials: %w", err)
+	}
+	return creds, nil
+}
+
+// DeleteHubS3Credentials removes the credential blob from the file fallback
+// store; a missing file is not an error.
+func (s FileStore) DeleteHubS3Credentials(workspaceID string) error {
+	if err := validateWorkspaceID(workspaceID); err != nil {
+		return err
+	}
+	if err := os.Remove(s.hubS3Path(workspaceID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("delete hub s3 credentials: %w", err)
+	}
+	return nil
+}
+
+// StoreHubS3Credentials persists the hub S3 credential pair (P6-HUB-02),
+// reusing the keychain/file custody path used for device identities and WCKs:
+// keychain preferred, 0600 file fallback only when the keychain is genuinely
+// unavailable (DEVSTRAP_NO_KEYCHAIN or a missing Secret Service); a
+// present-but-failing keychain fails closed (SECR-04/SECU-01). Returns where
+// the credentials landed ("keychain" or "file") so the CLI can tell the user.
+func (s HybridStore) StoreHubS3Credentials(ctx context.Context, workspaceID string, creds HubS3Credentials) (string, error) {
+	if err := validateWorkspaceID(workspaceID); err != nil {
+		return "", err
+	}
+	raw, err := json.Marshal(creds)
+	if err != nil {
+		return "", fmt.Errorf("marshal hub s3 credentials: %w", err)
+	}
+	// storeSecret maps a nil keychain backend to os.ErrNotExist; treat that
+	// like an unavailable keychain (same fallthrough the load path uses).
+	if err := s.storeSecret(ctx, hubS3Account(workspaceID), string(raw)); err == nil {
+		return "keychain", nil
+	} else if !errors.Is(err, os.ErrNotExist) && !IsKeychainUnavailable(err) {
+		return "", fmt.Errorf("store hub s3 credentials in keychain: %w", err)
+	}
+	slog.Warn("keychain unavailable; writing hub s3 credentials to file fallback", "workspace_id", workspaceID)
+	if err := s.File.WriteHubS3Credentials(workspaceID, creds); err != nil {
+		return "", err
+	}
+	return "file", nil
+}
+
+// LoadHubS3Credentials loads the stored hub S3 credential pair, or an error
+// wrapping os.ErrNotExist when none is stored.
+func (s HybridStore) LoadHubS3Credentials(ctx context.Context, workspaceID string) (HubS3Credentials, error) {
+	if err := validateWorkspaceID(workspaceID); err != nil {
+		return HubS3Credentials{}, err
+	}
+	if s.Secret != nil {
+		raw, err := s.loadSecret(ctx, hubS3Account(workspaceID))
+		if err == nil {
+			var creds HubS3Credentials
+			if err := json.Unmarshal([]byte(raw), &creds); err != nil {
+				return HubS3Credentials{}, fmt.Errorf("parse hub s3 credentials: %w", err)
+			}
+			return creds, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) && fileMissing(s.File.hubS3Path(workspaceID)) {
+			return HubS3Credentials{}, err
+		}
+	}
+	return s.File.ReadHubS3Credentials(workspaceID)
+}
+
+// DeleteHubS3Credentials removes the stored pair from both custody backends
+// (hub logout). Missing entries are not errors.
+func (s HybridStore) DeleteHubS3Credentials(ctx context.Context, workspaceID string) error {
+	if err := validateWorkspaceID(workspaceID); err != nil {
+		return err
+	}
+	if s.Secret != nil {
+		// IsKeychainUnavailable also matches not-found ("not found" is in its
+		// substring set), so a missing keychain entry is tolerated here.
+		if err := s.Secret.Delete(ctx, keychainService, hubS3Account(workspaceID)); err != nil &&
+			!errors.Is(err, os.ErrNotExist) && !IsKeychainUnavailable(err) {
+			return fmt.Errorf("delete hub s3 credentials from keychain: %w", err)
+		}
+	}
+	return s.File.DeleteHubS3Credentials(workspaceID)
 }
 
 func Sign(privateKey, domain string, message []byte) (string, error) {

@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-01
+last_reviewed: 2026-07-03
 tracks_code: [internal/hub/**, internal/cli/hub.go]
 ---
 # Cloud Provisioning & Configuration Guide
@@ -134,16 +134,23 @@ credentials in `state.db`"):
 
 - **Non-secret connection settings** (bucket, endpoint, region, workspace prefix) are
   plain DevStrap config.
-- **The Secret Access Key is a secret.** *Target state:* it goes through DevStrap's existing
-  encrypted secrets path — OS keychain / Secret Service, an age-encrypted blob, a 1Password
-  `op://` ref, or — for the server side — a Fly secret. **Current state (`P6-HUB-02`): the
-  client hub path resolves the secret only from a plaintext env var or a plaintext config
-  line — the keychain / age-blob / `op://` resolution promised below is *not yet built*.**
-  Passing `DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY=op://vault/item/key` today signs the literal
-  string as the AWS secret and fails with an opaque `SignatureDoesNotMatch`. Until
-  `P6-HUB-02` lands, the only working custody on a developer box is a plaintext env var (see
-  spec/13 and spec/15, which sanction plaintext-env custody); server-side Fly secrets inject
-  a plaintext env var at runtime and work as documented.
+- **The Secret Access Key is a secret.** It goes through DevStrap's secrets path
+  (**shipped, `P6-HUB-02`**), resolved most-explicit-first:
+  1. `DEVSTRAP_HUB_S3_ACCESS_KEY_ID` / `DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY` env/config —
+     either value may be a 1Password `op://vault/item/field` reference, resolved at sync
+     time via `op read --no-newline` under the sanitized child environment (requires the
+     `op` CLI on PATH and a signed-in account);
+  2. `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` literals (SDK-standard fallback);
+  3. the per-workspace OS-keychain slot written once by `devstrap hub login`
+     (account `hub-s3.<workspace_id>` under the device-identity keychain service; 0600
+     file fallback when the keychain is genuinely unavailable, e.g.
+     `DEVSTRAP_NO_KEYCHAIN=1`; removed with `devstrap hub logout`).
+  Explicit env always overrides the stored pair (CI/12-factor). Plaintext env remains a
+  sanctioned fallback (spec/13/spec/15 agree); the keychain or `op://` path is the
+  recommended custody on developer boxes. A wrong or missing credential now surfaces as
+  `ErrS3Auth` with a remediation hint, not an opaque `SignatureDoesNotMatch`; the age-blob
+  custody variant was not built (keychain + op:// cover the client need). Server-side Fly
+  secrets inject a plaintext env var at runtime and work as documented.
 
 Client invocation (shipped, `P5-HUB-01`) — a developer box running sync:
 
@@ -159,11 +166,11 @@ DEVSTRAP_HUB_S3_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com  # shippe
 DEVSTRAP_HUB_S3_REGION=auto                                          # shipped (default: auto)
 ```
 
-Secret values — target custody is the secrets path; until `P6-HUB-02` lands the client reads them from a plaintext env var (prefer an ephemeral export or direnv-ignored file over a shell profile):
+Secret values — store them once with `devstrap hub login`, or supply env values (literal, or `op://` refs resolved at sync time); prefer an ephemeral export or direnv-ignored file over a shell profile when using plaintext env:
 
 ```text
 DEVSTRAP_HUB_S3_ACCESS_KEY_ID                                        # shipped (id; low sensitivity, still not committed; AWS_ACCESS_KEY_ID fallback)
-DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY                                    # shipped as PLAINTEXT env/config only; keychain / age blob / op:// resolution is PLANNED (P6-HUB-02). AWS_SECRET_ACCESS_KEY fallback
+DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY                                    # shipped: literal or op:// ref (P6-HUB-02); keychain via `devstrap hub login`; AWS_SECRET_ACCESS_KEY fallback
 ```
 
 Because R2's API is S3-compatible, the underlying client also honors the standard AWS SDK

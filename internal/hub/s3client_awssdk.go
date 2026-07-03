@@ -205,15 +205,16 @@ func (a *S3Adapter) ListObjectsV2(ctx context.Context, prefix, startAfter string
 }
 
 // mapS3Error is the pure, load-bearing translation from aws-sdk-go-v2 errors
-// into the four hub sentinels (P5-HUB-01 / HUB-10). Classification:
+// into the hub sentinels (P5-HUB-01 / HUB-10 / P6-HUB-02). Classification:
 //
 //	412 / PreconditionFailed (R2 10031 -> 412)        -> ErrPreconditionFailed (terminal dedup)
 //	*types.NoSuchKey / *types.NotFound / 404          -> dssync.ErrBlobNotFound  (terminal)
 //	429 / 503 / SlowDown / TooManyRequests            -> ErrS3Throttle           (throttle)
 //	500 / 502 / 504 / InternalError                   -> ErrS3Transient          (transient)
 //	no modeled APIError in the chain (net/EOF/reset)  -> ErrS3Transient          (transient)
-//	403 / AccessDenied / SignatureDoesNotMatch /      -> raw wrapped SDK error   (terminal)
-//	NoSuchBucket / other API error
+//	401 / 403 / AccessDenied /                        -> ErrS3Auth               (terminal + hint)
+//	SignatureDoesNotMatch / InvalidAccessKeyId
+//	NoSuchBucket / other API error                    -> raw wrapped SDK error   (terminal)
 //
 // Precondition + not-found are checked before the transport-error fallback so a
 // dropped connection (no APIError in the chain) is retried as transient.
@@ -254,6 +255,11 @@ func mapS3Error(err error) error {
 		return fmt.Errorf("%w: %w", ErrS3Throttle, err)
 	case status == 500 || status == 502 || status == 504 || code == "InternalError":
 		return fmt.Errorf("%w: %w", ErrS3Transient, err)
+	case status == 401 || status == 403 || code == "AccessDenied" || code == "SignatureDoesNotMatch" || code == "InvalidAccessKeyId":
+		// P6-HUB-02: credential failures carry an actionable hint instead of
+		// surfacing as an opaque SDK error. Terminal — R2Hub.Retry only
+		// retries the throttle/transient sentinels.
+		return fmt.Errorf("%w (check DEVSTRAP_HUB_S3_ACCESS_KEY_ID/DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY — values may be op:// refs — or store credentials once with 'devstrap hub login'): %w", ErrS3Auth, err)
 	case !hasAPI:
 		// No modeled API error anywhere in the chain: a transport-level failure
 		// (EOF, connection reset, dial/refused) — retry as transient.
