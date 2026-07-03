@@ -2651,8 +2651,10 @@ WHERE id = ?;
 // hasEnrolledDevices reports whether the workspace has ever completed
 // enrollment (HUB-03). Once true, event verification fails closed for all
 // non-local event types. Revoked/lost rows count too (P6-SYNC-03): a device
-// only reaches those states through an operator trust decision, so their
-// presence proves enrollment happened — revoking the last approved device must
+// only reaches those states through a deliberate local operator trust decision
+// (SetDeviceTrustState also permits pending -> revoked/lost directly, which is
+// the safe, more-fail-closed direction), so their presence proves an operator
+// trust decision happened — revoking the last approved device must
 // keep the window closed, not silently reopen the pre-enrollment fail-open
 // regime for the revoked (or any unknown) device. Auto-created 'pending'
 // placeholders from EnsureRemoteDeviceTx deliberately do not count.
