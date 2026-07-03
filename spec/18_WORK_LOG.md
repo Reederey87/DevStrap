@@ -27,6 +27,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — P4-SEC-04 (joiner half): founder-pinning ceremony before first sync (pairing wave)
+
+Changed:
+- `internal/cli/devices.go`: reworded the keyless-joiner grant warning — the old text read as if the *enrolled* device were awaiting a grant; it now states the approval pins that device's keys for fail-closed verification while this joiner receives its own key later. No mechanism change: `grantWorkspaceKeyToApprovedDevice` was already founder-gated, and one approved row already flips `hasEnrolledDevices` fail-closed.
+- `internal/cli/init.go`: the join hint gained the pinning step (pin the founder — and, in a multi-device fleet, every other existing device — via `devices enroll … --approve` BEFORE the first sync; an unpinned signer's events quarantine and replay on approval, per the Codex review of this PR). The bare-join recovery step is now scoped to r2/s3 hubs (file hubs need no id).
+- Tests: `internal/cli/devices_pin_founder_test.go` — keyless-joiner `enroll --approve` exits 0, emits no `device.key.granted`, epoch stays 0; a forged grant from an unknown device quarantines on the pinned joiner BEFORE its first sync (TOFU closed pre-sync); a founder-signed (v2 domain) grant still ingests to epoch 1 with zero conflicts. `sync_join_flow.txtar` gained the pinning step on device B and stays green end-to-end.
+- Specs: `spec/15` TOFU passages narrowed (joiner half closed by the documented ceremony; residual = founder-side automation + fingerprint UX + authenticated snapshot); `spec/13` devices prose; `spec/07` Approve lifecycle bullet; `docs/audits/README.md` P4-SEC-04 row narrowed (stays open).
+
+Validated:
+- `gofmt -w cmd internal`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOCACHE=/tmp/devstrap-gocache go test -race ./...`.
+
+Follow-ups:
+- Founder-side automation of the pairing exchange + in-band fingerprint-confirmation UX (`P4-SEC-04` residual). The two-device runbook documenting this ceremony lands in the pairing-wave docs PR.
+
 ## 2026-07-03 — P4-SEC-07: workspace-id pairing — `init --join --workspace-id` adopts the founder's id (pairing wave)
 
 Changed:

@@ -346,8 +346,8 @@ func TestJoinerApprovingAnotherDeviceDoesNotSelfMint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("enroll --approve stderr = %q err = %v", stderr, err)
 	}
-	if !strings.Contains(stderr, "holds no workspace key yet") {
-		t.Fatalf("stderr = %q, want joiner-cannot-grant warning", stderr)
+	if !strings.Contains(stderr, "holds no workspace key, so nothing was granted") {
+		t.Fatalf("stderr = %q, want joiner-cannot-grant note", stderr)
 	}
 
 	store, err := state.Open(ctx, filepath.Join(home, "state.db"))

@@ -412,7 +412,13 @@ func grantWorkspaceKeyToApprovedDevice(ctx context.Context, stderr io.Writer, op
 		// approving another device before it is itself granted. A keyless joiner
 		// simply has nothing to grant yet.
 		if isJoiner(opts) {
-			_, _ = fmt.Fprintf(stderr, "warning: this device holds no workspace key yet (joining); cannot grant to %s until it is approved and granted the fleet key\n", deviceID)
+			// P4-SEC-04 joiner half: this branch IS the founder-pinning
+			// ceremony. Approving the founder on a keyless joiner grants
+			// nothing (a joiner never self-mints), but the approved row pins
+			// the founder's keys and flips verification fail-closed BEFORE
+			// the joiner's first sync — so the wording must not read as if
+			// the enrolled device were the one awaiting a grant.
+			_, _ = fmt.Fprintf(stderr, "note: this joining device holds no workspace key, so nothing was granted to %s — the approval still pins that device's keys for fail-closed verification; this device receives its own key when an approved device approves it (then run 'devstrap sync')\n", deviceID)
 			return
 		}
 		if _, berr := kr.EnsureBootstrap(ctx); berr != nil {
