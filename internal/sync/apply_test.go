@@ -994,3 +994,61 @@ func TestApplyEventsQuarantinesUndecryptableCarrier(t *testing.T) {
 		t.Fatalf("conflict rows after re-delivery = %d, want 1 (dedup)", n)
 	}
 }
+
+// TestApplyEventsImplausibleCarrierHLCDoesNotJumpCursor (CodeRabbit, PR #44):
+// the carrier HLC is hub-writable — the mutation that made a carrier
+// undecryptable may BE an HLC rewrite — so a poisoned carrier with a
+// far-future HLC must be quarantined WITHOUT advancing the cursor past real
+// events (and without holding it: it is re-delivered and re-deduped later).
+func TestApplyEventsImplausibleCarrierHLCDoesNotJumpCursor(t *testing.T) {
+	ctx := context.Background()
+	st, device := newSyncStore(t)
+
+	otherWCK, _ := NewWCK()
+	carrier, err := EncryptEvent(state.Event{
+		ID: "evt_hlc_bomb", DeviceID: "dev_remote", Seq: 1, HLC: 20 << hlcLogicalBits,
+		Type:        EventProjectAdded,
+		PayloadJSON: `{"path":"work/bomb"}`,
+		ContentHash: state.ContentHash(`{"path":"work/bomb"}`),
+	}, otherWCK, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The hub rewrites the carrier HLC to the far future (which is also what
+	// breaks the AEAD). ApplyEvents sees the rewritten value.
+	farFuture := (time.Now().Add(24 * time.Hour).UnixMilli()) << hlcLogicalBits
+	carrier.HLC = farFuture
+
+	good := projEvent(t, device.ID, EventProjectAdded, 30, "work/real", "github.com/org/real")
+
+	safe, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{good, carrier})
+	if err != nil {
+		t.Fatalf("ApplyEventsWithStats: %v", err)
+	}
+	if stats.Quarantined != 1 {
+		t.Fatalf("Quarantined = %d, want 1", stats.Quarantined)
+	}
+	if stats.CursorHeld {
+		t.Fatal("implausible carrier must not hold the cursor")
+	}
+	if safe != 30<<hlcLogicalBits {
+		t.Fatalf("safeAdvanceHLC = %d, want %d — the poisoned carrier's HLC must not drag the cursor", safe, int64(30)<<hlcLogicalBits)
+	}
+	// A plausible carrier HLC still advances the cursor (no eternal re-delivery).
+	carrier2, err := EncryptEvent(state.Event{
+		ID: "evt_plain_poison", DeviceID: "dev_remote", Seq: 2, HLC: 40 << hlcLogicalBits,
+		Type:        EventProjectAdded,
+		PayloadJSON: `{"path":"work/poison2"}`,
+		ContentHash: state.ContentHash(`{"path":"work/poison2"}`),
+	}, otherWCK, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	safe, _, err = ApplyEventsWithStats(ctx, st, []state.Event{carrier2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if safe != 40<<hlcLogicalBits {
+		t.Fatalf("plausible carrier safeAdvanceHLC = %d, want %d", safe, int64(40)<<hlcLogicalBits)
+	}
+}

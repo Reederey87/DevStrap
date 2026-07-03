@@ -55,7 +55,7 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 
 ### Pass 6 (2026-07-01) — 30 open of 43; **all five P1s shipped**; **P2 quick-win wave complete**
 
-> The header count equals the rows in the table below (CodeRabbit, PR #39): 43 findings − 8 shipped − 2 fully-applied doc fixes (`P6-DOC-02`/`P6-DOC-03`, now in *Recently shipped*) = 31, minus `P6-SYNC-04` (shipped 2026-07-03) = 30. `P6-DOC-01`/`P6-DOC-04` stay listed because their test-hardening residuals are open even though their doc portions were applied in the audit PR. `P6-SYNC-01`, `P6-SEC-01`, `P6-SEC-02` (PRs #30–#34), `P6-DATA-01` (PR #35), `P6-HUB-01` (PR #36), `P6-GIT-01` (PR #37), `P6-SYNC-03` (PR #38), `P6-DATA-02` (PR #39), `P6-CLI-02` (PR #40), and `P6-GIT-05` moved to *Recently shipped* above per convention #3.
+> The header count equals the rows in the table below (CodeRabbit, PR #39): 43 findings − 13 rows in *Recently shipped* (including the 2 fully-applied doc fixes `P6-DOC-02`/`P6-DOC-03`) = 30. `P6-DOC-01`/`P6-DOC-04` stay listed because their test-hardening residuals are open even though their doc portions were applied in the audit PR. `P6-SYNC-01`, `P6-SEC-01`, `P6-SEC-02` (PRs #30–#34), `P6-DATA-01` (PR #35), `P6-HUB-01` (PR #36), `P6-GIT-01` (PR #37), `P6-SYNC-03` (PR #38), `P6-DATA-02` (PR #39), `P6-CLI-02` (PR #40), and `P6-GIT-05` moved to *Recently shipped* above per convention #3.
 
 | ID | Sev | Effort | Finding |
 |---|---|---|---|

@@ -328,7 +328,14 @@ func ApplyEventsWithStats(ctx context.Context, st *state.Store, events []state.E
 				return 0, stats, err
 			}
 			stats.Quarantined++
-			if event.HLC > maxAppliedHLC {
+			// Consume the carrier's HLC for the cursor ONLY when it is
+			// plausible (positive, not beyond the trusted skew). The carrier
+			// HLC is hub-writable — the mutation that made it undecryptable
+			// may BE an HLC rewrite — so an implausible value must never drag
+			// the cursor past real events (CodeRabbit, PR #44). An implausible
+			// carrier is simply re-delivered and re-deduped on later pulls; it
+			// neither advances nor holds the cursor.
+			if physical := event.HLC >> hlcLogicalBits; event.HLC > 0 && physical-now <= maxSkewMS && event.HLC > maxAppliedHLC {
 				maxAppliedHLC = event.HLC
 			}
 			continue
