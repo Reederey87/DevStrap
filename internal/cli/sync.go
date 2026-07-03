@@ -160,6 +160,17 @@ func pullAndApplyEvents(ctx context.Context, store *state.Store, hub dssync.Hub,
 			return pullApplyOutcome{}, err
 		}
 	}
+	// P6-SYNC-04 review fix: re-attempt previously-quarantined undecryptable
+	// carriers with the keys held now (this pull may have ingested the grant
+	// they were waiting for). Runs on every pull consumer (sync, run-loop,
+	// hub gc's pre-GC sync), so a hub that mis-steered a not-yet-granted
+	// event into quarantine by tampering with the unauthenticated kid hint
+	// only delays that event until its grant lands — never loses it.
+	if eh, ok := hub.(dssync.EncryptedHub); ok {
+		if _, err := dssync.ReplayUndecryptableConflicts(ctx, store, eh); err != nil {
+			return pullApplyOutcome{}, err
+		}
+	}
 	return pullApplyOutcome{events: remoteEvents, stats: stats}, nil
 }
 

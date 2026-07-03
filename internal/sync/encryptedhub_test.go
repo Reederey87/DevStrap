@@ -582,3 +582,74 @@ func TestEncryptedHubRelabeledKidStillDecrypts(t *testing.T) {
 		t.Fatalf("relabeled event not restored: %+v", got[0])
 	}
 }
+
+// TestReplayRecoversKidStrippedEventAfterGrant pins the P6-SYNC-04 review fix
+// (gpt-5.5 Major): a hostile hub strips the untrusted kid hint from an event
+// whose key this device has NOT been granted yet, while the device holds a
+// different key at the same epoch. The AEAD failure steers the carrier into
+// the permanent undecryptable quarantine (the defer heuristic keys on the
+// attacker-controlled kid, so it cannot be trusted to defer) — but the
+// quarantine preserves the carrier, and once the real grant arrives,
+// ReplayUndecryptableConflicts decrypts it, applies it, and auto-resolves the
+// conflict. The hub can delay a not-yet-granted event; it can no longer
+// destroy it.
+func TestReplayRecoversKidStrippedEventAfterGrant(t *testing.T) {
+	ctx := context.Background()
+	st, device := newSyncStore(t)
+	kr := newFakeKeyring(t, 1) // the device's own key at epoch 1
+	fleetWCK, _ := NewWCK()    // the not-yet-granted key, same epoch
+
+	sealed, err := EncryptEvent(state.Event{
+		ID: "evt_stripped", DeviceID: device.ID, Seq: 0, HLC: 20 << hlcLogicalBits,
+		Type:        EventProjectAdded,
+		PayloadJSON: `{"path":"work/stripped","type":"git_repo","remote_key":"github.com/org/stripped"}`,
+		ContentHash: state.ContentHash(`{"path":"work/stripped","type":"git_repo","remote_key":"github.com/org/stripped"}`),
+	}, fleetWCK, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stripped := rewriteEnvelopeKID(t, sealed, "") // the hostile-hub mutation
+
+	back := &recordingHub{events: []state.Event{stripped}}
+	hub := EncryptedHub{Hub: back, Keyring: kr, Stats: &PullStats{}}
+
+	// Pull: the kid-stripped carrier cannot be classified as deferrable, so it
+	// is forwarded and quarantined permanently by ApplyEvents.
+	pulled, err := hub.Pull(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pulled) != 1 || pulled[0].Type != EventEncryptedV2 {
+		t.Fatalf("Pull = %+v, want the forwarded carrier", pulled)
+	}
+	if _, stats, err := ApplyEventsWithStats(ctx, st, pulled); err != nil || stats.Quarantined != 1 {
+		t.Fatalf("apply: stats=%+v err=%v, want Quarantined=1", stats, err)
+	}
+
+	// Replay before the grant: still undecryptable, conflict stays open.
+	if n, err := ReplayUndecryptableConflicts(ctx, st, hub); err != nil || n != 0 {
+		t.Fatalf("pre-grant replay = (%d, %v), want (0, nil)", n, err)
+	}
+	open, err := st.OpenConflictsByType(ctx, ConflictEventVerification)
+	if err != nil || len(open) != 1 {
+		t.Fatalf("open conflicts = %d (%v), want 1", len(open), err)
+	}
+
+	// The grant arrives (simulated: the keyring now holds the fleet key).
+	kr.keys[1] = fleetWCK
+
+	replayed, err := ReplayUndecryptableConflicts(ctx, st, hub)
+	if err != nil || replayed != 1 {
+		t.Fatalf("post-grant replay = (%d, %v), want (1, nil)", replayed, err)
+	}
+	// The event applied and the quarantine auto-resolved.
+	if open, _ := st.OpenConflictsByType(ctx, ConflictEventVerification); len(open) != 0 {
+		t.Fatalf("conflict still open after recovery: %+v", open)
+	}
+	if projection := projectionOf(t, st); projection["work/stripped"] != "github.com/org/stripped" {
+		t.Fatalf("recovered event did not apply: %+v", projection)
+	}
+	if ev, err := st.EventByID(ctx, "evt_stripped"); err != nil || ev.Type != EventProjectAdded {
+		t.Fatalf("recovered event not in log as plaintext: %+v err=%v", ev, err)
+	}
+}

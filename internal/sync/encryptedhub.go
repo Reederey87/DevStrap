@@ -329,6 +329,89 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 	return out, nil
 }
 
+// TryDecrypt attempts to restore a single enc.v2 carrier with the keys held
+// NOW — the exact-kid candidate first, then every held key at the epoch (the
+// same candidate policy as Pull). It primes the keyring but never truncates,
+// skips, or touches Stats: it exists for the undecryptable-conflict replay
+// path (P6-SYNC-04 review fix), which re-attempts quarantined carriers after
+// later grants arrive.
+func (h EncryptedHub) TryDecrypt(ctx context.Context, event state.Event) (state.Event, error) {
+	if err := h.Keyring.Prime(ctx); err != nil {
+		return state.Event{}, fmt.Errorf("encrypted hub try-decrypt: prime keyring: %w", err)
+	}
+	env, err := ParseEncryptedEnvelope(event)
+	if err != nil {
+		return state.Event{}, err
+	}
+	var candidates [][]byte
+	if env.KID != "" {
+		candidates = h.Keyring.WCKCandidates(env.Epoch, env.KID)
+	}
+	candidates = append(candidates, h.Keyring.WCKCandidates(env.Epoch, "")...)
+	if len(candidates) == 0 {
+		return state.Event{}, fmt.Errorf("%w: epoch %d", ErrMissingWorkspaceKey, env.Epoch)
+	}
+	var lastErr error
+	for _, wck := range candidates {
+		restored, decErr := DecryptEvent(event, wck)
+		if decErr == nil {
+			return restored, nil
+		}
+		lastErr = decErr
+	}
+	return state.Event{}, lastErr
+}
+
+// ReplayUndecryptableConflicts re-attempts every open "undecryptable"
+// quarantine conflict with the keys held now (P6-SYNC-04 review fix, gpt-5.5
+// Major). Without this, a hostile hub could strip or relabel the untrusted
+// envelope kid on an event whose grant had not arrived yet, steering the
+// defer-vs-quarantine classification into permanent quarantine — and since
+// the cursor advances past quarantined events, a later legitimate grant could
+// never recover it. The quarantine preserves the full carrier, so each sync
+// cycle replays it: once the grant lands, the carrier decrypts, the conflict
+// auto-resolves, and the restored event applies through the normal verified
+// path. Genuinely corrupt carriers keep failing and their conflicts stay open
+// (visible, gc-blocking, deduped — no growth, no wedge).
+//
+// The conflict is resolved BEFORE the apply: if the restored event then fails
+// signature verification, ApplyEvents records a FRESH verification conflict
+// (the open-conflict dedup would otherwise swallow it into the row being
+// resolved and lose the signal).
+func ReplayUndecryptableConflicts(ctx context.Context, st *state.Store, h EncryptedHub) (int, error) {
+	conflicts, err := st.OpenConflictsByType(ctx, ConflictEventVerification)
+	if err != nil {
+		return 0, err
+	}
+	replayed := 0
+	for _, c := range conflicts {
+		var details eventVerificationConflictDetails
+		if json.Unmarshal([]byte(c.DetailsJSON), &details) != nil || details.Kind != EventConflictKindUndecryptable {
+			continue
+		}
+		var carrier state.Event
+		if err := json.Unmarshal([]byte(details.EventJSON), &carrier); err != nil {
+			logging.Logger(ctx).Warn("undecryptable replay: conflict carries unparseable event JSON",
+				"conflict_id", c.ID, "event_id", details.EventID, "err", err.Error())
+			continue
+		}
+		restored, decErr := h.TryDecrypt(ctx, carrier)
+		if decErr != nil {
+			continue // still undecryptable; leave the conflict open for the next cycle
+		}
+		if err := st.ResolveConflict(ctx, c.ID, `{"action":"auto","reason":"carrier decrypted after a later key grant (P6-SYNC-04 replay)"}`); err != nil {
+			return replayed, err
+		}
+		if _, _, err := ApplyEventsWithStats(ctx, st, []state.Event{restored}); err != nil {
+			return replayed, err
+		}
+		logging.Logger(ctx).Info("undecryptable replay: quarantined carrier recovered after key grant",
+			"event_id", details.EventID, "device_id", details.DeviceID)
+		replayed++
+	}
+	return replayed, nil
+}
+
 // Blob operations pass through. Blobs are age-encrypted by the bundle layer
 // before they reach the hub, so the blob plane is already ciphertext; envelope
 // encryption covers only the event-log plane.
