@@ -1206,3 +1206,82 @@ func TestMarkEncryptedBindingsNeedingRotation(t *testing.T) {
 		t.Fatalf("second flag = %d, err = %v, want 0", again, err)
 	}
 }
+
+func TestClearRotationForProject(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureWorkspace(ctx, "personal", "/tmp/Code"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EnsureDevice(ctx, "test-device"); err != nil {
+		t.Fatal(err)
+	}
+	projectA, err := st.UpsertProject(ctx, UpsertProjectParams{
+		Path:          "work/acme/api",
+		Type:          "git_repo",
+		RemoteURL:     "git@github.com:acme/api.git",
+		RemoteKey:     "github.com/acme/api",
+		DefaultBranch: "main",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectB, err := st.UpsertProject(ctx, UpsertProjectParams{
+		Path:          "work/acme/web",
+		Type:          "git_repo",
+		RemoteURL:     "git@github.com:acme/web.git",
+		RemoteKey:     "github.com/acme/web",
+		DefaultBranch: "main",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	varsA := []string{"API_TOKEN", "DB_URL"}
+	varsB := []string{"API_TOKEN"}
+	if _, err := st.SaveCapturedEnvProfile(ctx, projectA.ID, "default", varsA, "age_blob:deadbeef"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveCapturedEnvProfile(ctx, projectB.ID, "default", varsB, "age_blob:cafebabe"); err != nil {
+		t.Fatal(err)
+	}
+	flagged, err := st.MarkEncryptedBindingsNeedingRotation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flagged != len(varsA)+len(varsB) {
+		t.Fatalf("flagged = %d, want %d", flagged, len(varsA)+len(varsB))
+	}
+
+	cleared, err := st.ClearRotationForProject(ctx, projectA.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared != len(varsA) {
+		t.Fatalf("cleared = %d, want %d", cleared, len(varsA))
+	}
+	_, bindingsA, err := st.EnvProfileForProject(ctx, projectA.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, binding := range bindingsA {
+		if binding.NeedsRotation {
+			t.Fatalf("project A binding %s still flagged needs_rotation", binding.VarName)
+		}
+	}
+	_, bindingsB, err := st.EnvProfileForProject(ctx, projectB.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, binding := range bindingsB {
+		if !binding.NeedsRotation {
+			t.Fatalf("project B binding %s unexpectedly cleared needs_rotation", binding.VarName)
+		}
+	}
+}

@@ -1636,7 +1636,10 @@ func (s *Store) ClearRotationForProject(ctx context.Context, namespaceID string)
 UPDATE secret_bindings
 SET needs_rotation = 0, updated_at = ?
 WHERE needs_rotation = 1
-  AND env_profile_id IN (SELECT id FROM env_profiles WHERE namespace_id = ?);
+  AND env_profile_id IN (
+    SELECT env_profile_id FROM namespace_entries
+    WHERE id = ? AND env_profile_id IS NOT NULL
+  );
 `, timestampNow(), namespaceID)
 	if err != nil {
 		return 0, fmt.Errorf("clear rotation for project: %w", err)
