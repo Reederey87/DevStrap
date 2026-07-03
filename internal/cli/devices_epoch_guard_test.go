@@ -42,7 +42,7 @@ func withGuardStore(t *testing.T, home string, fn func(ctx context.Context, st *
 	}
 }
 
-func enrollPendingDevice(t *testing.T, home, root, id string) {
+func enrollPendingDevice(t *testing.T, home, root, id string) (fingerprint string) {
 	t.Helper()
 	ageID, err := devicekeys.NewIdentity()
 	if err != nil {
@@ -57,6 +57,11 @@ func enrollPendingDevice(t *testing.T, home, root, id string) {
 		"--age-recipient", ageID.Recipient, "--signing-public-key", signing.Public); err != nil {
 		t.Fatalf("enroll pending: %v (%s)", err, stderr)
 	}
+	fingerprint, err = devicekeys.Fingerprint(signing.Public, ageID.Recipient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fingerprint
 }
 
 func trustStateOf(t *testing.T, home, id string) string {
@@ -80,7 +85,7 @@ func trustStateOf(t *testing.T, home, id string) string {
 func TestApproveRefusesHeldEpochGap(t *testing.T) {
 	t.Setenv(platform.NoKeychainEnv, "1")
 	home, root := initGuardHome(t)
-	enrollPendingDevice(t, home, root, "dev_gap_target")
+	fp := enrollPendingDevice(t, home, root, "dev_gap_target")
 	withGuardStore(t, home, func(ctx context.Context, st *state.Store) {
 		// Held epochs 1 and 3: epoch 2's grant never arrived.
 		if err := st.RecordKeyEpoch(ctx, 1, "kid1", "self"); err != nil {
@@ -103,8 +108,9 @@ func TestApproveRefusesHeldEpochGap(t *testing.T) {
 	}
 
 	// The override approves anyway (grant wrap fails on the missing custody
-	// slots with a warning, but the trust write itself must land).
-	if _, _, err := executeForTest("--home", home, "--root", root, "devices", "approve", "dev_gap_target", "--allow-epoch-gap"); err != nil {
+	// slots with a warning, but the trust write itself must land). The
+	// fingerprint gate (P4-SEC-04) still applies, so the override passes it.
+	if _, _, err := executeForTest("--home", home, "--root", root, "devices", "approve", "dev_gap_target", "--allow-epoch-gap", "--fingerprint", fp); err != nil {
 		t.Fatalf("approve --allow-epoch-gap: %v", err)
 	}
 	if got := trustStateOf(t, home, "dev_gap_target"); got != "approved" {
@@ -115,7 +121,7 @@ func TestApproveRefusesHeldEpochGap(t *testing.T) {
 func TestApproveRefusesOpenKeyGrantWait(t *testing.T) {
 	t.Setenv(platform.NoKeychainEnv, "1")
 	home, root := initGuardHome(t)
-	enrollPendingDevice(t, home, root, "dev_wait_target")
+	_ = enrollPendingDevice(t, home, root, "dev_wait_target")
 	withGuardStore(t, home, func(ctx context.Context, st *state.Store) {
 		if err := st.RecordKeyEpoch(ctx, 1, "kid1", "self"); err != nil {
 			t.Fatal(err)
@@ -144,7 +150,7 @@ func TestApproveRefusesOpenKeyGrantWait(t *testing.T) {
 func TestApproveGuardShortKidLabelDoesNotPanic(t *testing.T) {
 	t.Setenv(platform.NoKeychainEnv, "1")
 	home, root := initGuardHome(t)
-	enrollPendingDevice(t, home, root, "dev_short_kid")
+	_ = enrollPendingDevice(t, home, root, "dev_short_kid")
 	withGuardStore(t, home, func(ctx context.Context, st *state.Store) {
 		if err := st.RecordKeyEpoch(ctx, 1, "kid1", "self"); err != nil {
 			t.Fatal(err)
@@ -181,9 +187,13 @@ func TestKeylessApproveSkipsGuard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fp, err := devicekeys.Fingerprint(signing.Public, ageID.Recipient)
+	if err != nil {
+		t.Fatal(err)
+	}
 	stdout, stderr, err := executeForTest("--home", home, "--root", root,
 		"devices", "enroll", "dev_founder", "--name", "founder", "--os", "darwin", "--arch", "arm64",
-		"--age-recipient", ageID.Recipient, "--signing-public-key", signing.Public, "--approve")
+		"--age-recipient", ageID.Recipient, "--signing-public-key", signing.Public, "--approve", "--fingerprint", fp)
 	if err != nil {
 		t.Fatalf("keyless enroll --approve: %v (%s)", err, stderr)
 	}

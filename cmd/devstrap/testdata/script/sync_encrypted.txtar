@@ -32,7 +32,7 @@ grep 'enc.v2' $WORK/hub.json
 
 # Device B: init, then enroll+approve on A so A grants its WCK epochs to B.
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB init
-exec sh -c 'REC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); SIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll dev_b --name b --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve'
+exec sh -c 'REC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); SIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); FP=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --fingerprint); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll dev_b --name b --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve --fingerprint "$FP"'
 stdout 'enrolled as approved'
 
 # A syncs to publish the grant events.

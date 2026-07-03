@@ -561,6 +561,7 @@ Then read the founder's public identity so it can be shared out-of-band:
 devstrap devices recipient           # founder age recipient (X25519 public key)
 devstrap devices recipient --signing # founder Ed25519 signing public key
 devstrap devices recipient --workspace-id  # prints the workspace id (same value as `status`)
+devstrap devices recipient --fingerprint   # founder fingerprint — compare out-of-band during approval (P4-SEC-04)
 devstrap devices list                # the row whose trust state is `local` is the founder device id
 ```
 
@@ -591,11 +592,22 @@ devstrap devices enroll <founder-device-id> \
   --name founder --os macos --arch arm64 \
   --age-recipient <founder-age-recipient> \
   --signing-public-key <founder-signing-public-key> \
-  --approve
+  --approve --fingerprint <founder-fingerprint>
 ```
 
 `--name`, `--os`, `--arch`, and `--age-recipient` are required; `--approve` additionally
 requires `--signing-public-key` so the founder's events can be signature-verified.
+
+> **Approval now requires fingerprint confirmation (`P4-SEC-04` part 1, interim note).**
+> `--approve` will not change trust state until the device's fingerprint is confirmed
+> out-of-band. Read the far device's `devstrap devices recipient --fingerprint` (or its
+> `devices list` row), compare it character-for-character over the same trusted channel you used
+> for the keys, and pass `--fingerprint <value>`. In an interactive terminal you may instead
+> omit the flag and type `yes` at the prompt; a non-interactive shell (no TTY) refuses with a
+> copy-paste `--fingerprint …` remedy. A full pairing-ceremony rewrite lands with the one-paste
+> pairing code (`P4-SEC-04` part 2).
+
+<!-- MD028 separator between adjacent blockquotes -->
 
 > **Fleets larger than two devices:** pinning any one device flips verification fail-closed,
 > and device records are not synced — so pin **every** existing device this way, not just the
@@ -630,7 +642,7 @@ devstrap devices enroll <joiner-device-id> \
   --name laptop --os macos --arch arm64 \
   --age-recipient <joiner-age-recipient> \
   --signing-public-key <joiner-signing-public-key> \
-  --approve
+  --approve --fingerprint <joiner-fingerprint>   # confirm against `devices recipient --fingerprint` on the joiner
 devstrap sync        # pushes the device.key.granted events
 ```
 

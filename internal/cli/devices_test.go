@@ -195,10 +195,14 @@ func TestEnrollApproveReplaysQuarantinedEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fp, err := devicekeys.Fingerprint(newSigning.Public, newIdentity.Recipient)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, stderr, err := executeForTest("--home", home, "--root", root,
 		"devices", "enroll", "dev_unknown_yet", "--name", "laptop", "--os", "linux", "--arch", "arm64",
 		"--age-recipient", newIdentity.Recipient,
-		"--signing-public-key", newSigning.Public, "--approve"); err != nil {
+		"--signing-public-key", newSigning.Public, "--approve", "--fingerprint", fp); err != nil {
 		t.Fatalf("enroll --approve stderr = %q err = %v", stderr, err)
 	}
 
@@ -340,9 +344,13 @@ func TestJoinerApprovingAnotherDeviceDoesNotSelfMint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fp, err := devicekeys.Fingerprint(remoteSigning.Public, remoteAge.Recipient)
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, stderr, err := executeForTest("--home", home, "--root", root,
 		"devices", "enroll", "dev_c", "--name", "c", "--os", "linux", "--arch", "arm64",
-		"--age-recipient", remoteAge.Recipient, "--signing-public-key", remoteSigning.Public, "--approve")
+		"--age-recipient", remoteAge.Recipient, "--signing-public-key", remoteSigning.Public, "--approve", "--fingerprint", fp)
 	if err != nil {
 		t.Fatalf("enroll --approve stderr = %q err = %v", stderr, err)
 	}

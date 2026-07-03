@@ -176,10 +176,11 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 				}
 				hint := "Joining an existing workspace. Next:\n"
 				steps := []string{
-					"pin the founder — and every other existing device — BEFORE your first sync: devstrap devices enroll <device-id> --name <n> --os <os> --arch <arch> --age-recipient <rec> --signing-public-key <sig> --approve  # closes the TOFU window (P4-SEC-04); events from devices you have not pinned yet quarantine and replay once approved",
-					"devstrap devices recipient            # copy this device's age recipient",
-					"devstrap devices recipient --signing  # and its signing key",
-					"on an approved device: devstrap devices enroll <id> --age-recipient <rec> --signing-public-key <sig> --approve",
+					"pin the founder — and every other existing device — BEFORE your first sync: devstrap devices enroll <device-id> --name <n> --os <os> --arch <arch> --age-recipient <rec> --signing-public-key <sig> --approve --fingerprint <fp>  # closes the TOFU window (P4-SEC-04); events from devices you have not pinned yet quarantine and replay once approved",
+					"devstrap devices recipient              # copy this device's age recipient",
+					"devstrap devices recipient --signing    # and its signing key",
+					"devstrap devices recipient --fingerprint  # and its fingerprint to compare out-of-band during approval",
+					"on an approved device: devstrap devices enroll <id> --age-recipient <rec> --signing-public-key <sig> --approve --fingerprint <fp>  # compare the fingerprint against 'devstrap devices recipient --fingerprint' here before approving",
 					"set 'hub: r2://<bucket>' in ~/.devstrap/config.yaml, then devstrap sync  # ingests the grant, then pushes your projects",
 				}
 				if workspaceID == "" {

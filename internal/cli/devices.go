@@ -1,17 +1,21 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 func newDevicesCommand(stdout io.Writer, opts *options) *cobra.Command {
@@ -37,6 +41,7 @@ func newDeviceEnrollCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var signingPublicKey string
 	var approve bool
 	var allowEpochGap bool
+	var fingerprint string
 	cmd := &cobra.Command{
 		Use:   "enroll <device-id>",
 		Short: "Enroll a remote device record",
@@ -62,9 +67,20 @@ func newDeviceEnrollCommand(stdout io.Writer, opts *options) *cobra.Command {
 			defer closeStore(store)
 			// P6-SEC-03: refuse to approve from an incomplete keyring — the
 			// grant set would inherit the gap and wedge the new device. Runs
-			// BEFORE any trust write so a refusal leaves no partial state.
+			// BEFORE any trust write so a refusal leaves no partial state, and
+			// BEFORE the fingerprint prompt so the operator is never asked to
+			// confirm an approval that will be refused anyway.
 			if approve && !allowEpochGap {
 				if err := checkEpochContiguity(cmd.Context(), store); err != nil {
+					return err
+				}
+			}
+			// P4-SEC-04: approving binds the device's keys into the trust set,
+			// so it must be gated on out-of-band fingerprint confirmation. The
+			// fingerprint is computed from the flag inputs (the keys being
+			// enrolled), never from the local keystore.
+			if approve {
+				if err := confirmDeviceFingerprint(cmd, args[0], signingPublicKey, ageRecipient, fingerprint); err != nil {
 					return err
 				}
 			}
@@ -102,6 +118,7 @@ func newDeviceEnrollCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&signingPublicKey, "signing-public-key", "", "device Ed25519 signing public key")
 	cmd.Flags().BoolVar(&approve, "approve", false, "mark the enrolled device approved immediately")
 	cmd.Flags().BoolVar(&allowEpochGap, "allow-epoch-gap", false, "approve even though this device's workspace keys are incomplete (the enrolled device will quarantine events at the missing epochs — and its open quarantine conflicts keep 'hub gc' refused on it — until re-approved from a complete device)")
+	cmd.Flags().StringVar(&fingerprint, "fingerprint", "", "with --approve: the device fingerprint confirmed out-of-band (see 'devstrap devices recipient --fingerprint' on that device); skips the interactive prompt")
 	return cmd
 }
 
@@ -125,7 +142,16 @@ func newDevicesListCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return enc.Encode(devices)
 			}
 			for _, device := range devices {
-				_, _ = fmt.Fprintf(stdout, "%s\t%s\t%s\t%s/%s\n", device.ID, device.TrustState, device.Name, device.OS, device.Arch)
+				// P4-SEC-04: fingerprint is the LAST column so existing awk
+				// scrapes of the earlier fields stay stable. A row missing
+				// either key (a bare placeholder) has no bindable fingerprint.
+				fp := "-"
+				if device.SigningPublicKey != "" && device.PublicKey != "" {
+					if computed, err := devicekeys.Fingerprint(device.SigningPublicKey, device.PublicKey); err == nil {
+						fp = computed
+					}
+				}
+				_, _ = fmt.Fprintf(stdout, "%s\t%s\t%s\t%s/%s\t%s\n", device.ID, device.TrustState, device.Name, device.OS, device.Arch, fp)
 			}
 			return nil
 		},
@@ -135,6 +161,7 @@ func newDevicesListCommand(stdout io.Writer, opts *options) *cobra.Command {
 func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState string) *cobra.Command {
 	var hubFile string
 	var allowEpochGap bool
+	var fingerprint string
 	cmd := &cobra.Command{
 		Use:   use + " <device-id>",
 		Short: "Mark a device as " + trustState,
@@ -150,9 +177,33 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 			stderr := cmd.ErrOrStderr()
 			// P6-SEC-03: refuse to approve from an incomplete keyring — the
 			// grant set would inherit the gap and wedge the approved device.
-			// Runs BEFORE the trust write so a refusal leaves no partial state.
+			// Runs BEFORE the trust write so a refusal leaves no partial state,
+			// and BEFORE the fingerprint prompt so the operator is never asked
+			// to confirm an approval that will be refused anyway.
 			if trustState == "approved" && !allowEpochGap {
 				if err := checkEpochContiguity(cmd.Context(), store); err != nil {
+					return err
+				}
+			}
+			// P4-SEC-04: approval binds the stored device's keys into the trust
+			// set, so it is gated on out-of-band fingerprint confirmation BEFORE
+			// any DB write. The fingerprint is computed from the STORED row, never
+			// the local keystore. Revoke/lost are untouched.
+			if use == "approve" {
+				dev, err := deviceByID(cmd.Context(), store, args[0])
+				if err != nil {
+					return err
+				}
+				// SECU-05 tightening: a bare pending placeholder auto-created by
+				// sync has no keys to bind — approving it would pin nothing and
+				// re-open the fail-open verification path. Refuse with a
+				// re-enroll remedy rather than approve a keyless row.
+				if strings.TrimSpace(dev.SigningPublicKey) == "" || strings.TrimSpace(dev.PublicKey) == "" {
+					return appError{code: exitInvalidConfig, err: fmt.Errorf(
+						"device %s cannot be approved: it has no %s on record (a bare placeholder auto-created by sync). Re-enroll it with full keys: devstrap devices enroll %s --name <n> --os <os> --arch <arch> --age-recipient <rec> --signing-public-key <sig> --approve --fingerprint <fp>",
+						args[0], missingDeviceKeyDesc(dev), args[0])}
+				}
+				if err := confirmDeviceFingerprint(cmd, args[0], dev.SigningPublicKey, dev.PublicKey, fingerprint); err != nil {
 					return err
 				}
 			}
@@ -224,8 +275,9 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 	if trustState == "revoked" || trustState == "lost" {
 		cmd.Flags().StringVar(&hubFile, "hub-file", "", "file-backed test hub path; when set, old ciphertext is deleted from the hub on rewrap")
 	}
-	if trustState == "approved" {
+	if use == "approve" {
 		cmd.Flags().BoolVar(&allowEpochGap, "allow-epoch-gap", false, "approve even though this device's workspace keys are incomplete (the approved device will quarantine events at the missing epochs — and its open quarantine conflicts keep 'hub gc' refused on it — until re-approved from a complete device)")
+		cmd.Flags().StringVar(&fingerprint, "fingerprint", "", "the device fingerprint confirmed out-of-band (see 'devstrap devices recipient --fingerprint' on that device); skips the interactive prompt")
 	}
 	return cmd
 }
@@ -413,6 +465,75 @@ func devicePublicKey(ctx context.Context, store *state.Store, deviceID string) (
 	return "", fmt.Errorf("device %s not found", deviceID)
 }
 
+// deviceByID returns the full stored device row by ID (P4-SEC-04).
+func deviceByID(ctx context.Context, store *state.Store, deviceID string) (state.Device, error) {
+	devices, err := store.ListDevices(ctx)
+	if err != nil {
+		return state.Device{}, err
+	}
+	for _, d := range devices {
+		if d.ID == deviceID {
+			return d, nil
+		}
+	}
+	return state.Device{}, appError{code: exitInvalidConfig, err: fmt.Errorf("device %s not found", deviceID)}
+}
+
+// missingDeviceKeyDesc names which key(s) a placeholder row lacks, for the
+// SECU-05 re-enroll remedy.
+func missingDeviceKeyDesc(dev state.Device) string {
+	noSign := strings.TrimSpace(dev.SigningPublicKey) == ""
+	noRecip := strings.TrimSpace(dev.PublicKey) == ""
+	switch {
+	case noSign && noRecip:
+		return "signing public key or age recipient"
+	case noSign:
+		return "signing public key"
+	default:
+		return "age recipient"
+	}
+}
+
+// confirmDeviceFingerprint gates a device approval on out-of-band fingerprint
+// confirmation (P4-SEC-04). expected is derived from the keys being approved
+// (never from the local keystore). It returns nil to proceed and a non-nil
+// appError to refuse WITHOUT any DB write:
+//   - --fingerprint given: constant-time compare; mismatch refuses.
+//   - no flag + TTY: prints the fingerprint and prompts; anything but "yes"
+//     refuses.
+//   - no flag + non-TTY: refuses with a copy-paste remedy embedding the
+//     computed fingerprint.
+func confirmDeviceFingerprint(cmd *cobra.Command, deviceID, signingPublicKey, ageRecipient, flagFP string) error {
+	expected, err := devicekeys.Fingerprint(signingPublicKey, ageRecipient)
+	if err != nil {
+		return appError{code: exitInvalidConfig, err: fmt.Errorf("cannot compute fingerprint for device %s: %w", deviceID, err)}
+	}
+	if strings.TrimSpace(flagFP) != "" {
+		if devicekeys.FingerprintEqual(flagFP, expected) {
+			return nil
+		}
+		return appError{code: exitInvalidConfig, err: fmt.Errorf(
+			"fingerprint mismatch for device %s: the value you passed does not match this device's keys.\n  expected: %s\nCompare the full value out-of-band (e.g. over a call) before approving; no changes were made",
+			deviceID, expected)}
+	}
+	stderr := cmd.ErrOrStderr()
+	if f, ok := cmd.InOrStdin().(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		_, _ = fmt.Fprintf(stderr,
+			"Approving device %s. Verify its fingerprint out-of-band (it must match\n'devstrap devices recipient --fingerprint' on that device, character for character):\n\n  %s\n\n",
+			deviceID, expected)
+		_, _ = fmt.Fprint(stderr, "Type 'yes' to approve: ")
+		reader := bufio.NewReader(cmd.InOrStdin())
+		line, _ := reader.ReadString('\n')
+		if strings.TrimSpace(line) != "yes" {
+			return appError{code: exitInvalidConfig, err: fmt.Errorf("approval of device %s refused: fingerprint not confirmed", deviceID)}
+		}
+		return nil
+	}
+	return appError{code: exitInvalidConfig, err: fmt.Errorf(
+		"approving device %s requires fingerprint confirmation, but stdin is not a terminal.\nVerify the fingerprint out-of-band against 'devstrap devices recipient --fingerprint' on that device, then re-run with:\n  --fingerprint %s",
+		deviceID, expected)}
+}
+
 // newDeviceRecipientCommand implements `devstrap devices recipient`, a
 // read-only helper that prints the local device's age recipient (or Ed25519
 // signing public key with --signing) so it can be shared for out-of-band
@@ -420,12 +541,19 @@ func devicePublicKey(ctx context.Context, store *state.Store, deviceID string) (
 func newDeviceRecipientCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var signing bool
 	var workspaceID bool
+	var fingerprint bool
 	cmd := &cobra.Command{
 		Use:   "recipient",
-		Short: "Print the local device's age recipient (or signing public key with --signing, workspace id with --workspace-id)",
+		Short: "Print the local device's age recipient (or signing public key with --signing, workspace id with --workspace-id, fingerprint with --fingerprint)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if signing && workspaceID {
-				return appError{code: exitUsage, err: fmt.Errorf("--signing and --workspace-id are mutually exclusive")}
+			set := 0
+			for _, b := range []bool{signing, workspaceID, fingerprint} {
+				if b {
+					set++
+				}
+			}
+			if set > 1 {
+				return appError{code: exitUsage, err: fmt.Errorf("--signing, --workspace-id, and --fingerprint are mutually exclusive")}
 			}
 			store, err := opts.openState(cmd.Context())
 			if err != nil {
@@ -454,6 +582,19 @@ func newDeviceRecipientCommand(stdout io.Writer, opts *options) *cobra.Command {
 				_, err = fmt.Fprintln(stdout, dev.SigningPublicKey)
 				return err
 			}
+			// P4-SEC-04: print this device's fingerprint so it can be read aloud
+			// on the untrusted pairing channel and compared during approval.
+			if fingerprint {
+				if dev.SigningPublicKey == "" || dev.PublicKey == "" {
+					return appError{code: exitInvalidConfig, err: fmt.Errorf("local device is missing the keys needed for a fingerprint; run devstrap init")}
+				}
+				fp, err := devicekeys.Fingerprint(dev.SigningPublicKey, dev.PublicKey)
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprintln(stdout, fp)
+				return err
+			}
 			if dev.PublicKey == "" {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("local device has no age recipient; run devstrap init")}
 			}
@@ -463,6 +604,7 @@ func newDeviceRecipientCommand(stdout io.Writer, opts *options) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&signing, "signing", false, "print the Ed25519 signing public key instead of the age recipient")
 	cmd.Flags().BoolVar(&workspaceID, "workspace-id", false, "print the workspace id instead of the age recipient (for init --join --workspace-id)")
+	cmd.Flags().BoolVar(&fingerprint, "fingerprint", false, "print this device's fingerprint to compare out-of-band during approval (P4-SEC-04)")
 	return cmd
 }
 

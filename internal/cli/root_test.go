@@ -458,7 +458,11 @@ func TestEnvCaptureEncryptsBindingsAndDoesNotPersistPlaintext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stdout, stderr, err := executeForTest("--home", home, "devices", "enroll", "dev_remote", "--name", "remote", "--os", "linux", "--arch", "arm64", "--age-recipient", remoteDevice.Recipient, "--signing-public-key", remoteSigning.Public, "--approve"); err != nil {
+	remoteFP, err := devicekeys.Fingerprint(remoteSigning.Public, remoteDevice.Recipient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stdout, stderr, err := executeForTest("--home", home, "devices", "enroll", "dev_remote", "--name", "remote", "--os", "linux", "--arch", "arm64", "--age-recipient", remoteDevice.Recipient, "--signing-public-key", remoteSigning.Public, "--approve", "--fingerprint", remoteFP); err != nil {
 		t.Fatalf("device enroll stdout = %q stderr = %q err = %v", stdout, stderr, err)
 	}
 	stdout, stderr, err := executeForTest("--home", home, "env", "capture", "work/acme/api", ".env")

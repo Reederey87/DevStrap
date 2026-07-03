@@ -33,17 +33,17 @@ stdout 'pushed 1'
 
 # Device B: join, pin A, get approved by A, sync both ways -> B holds epoch 1.
 exec sh -c 'WS=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --workspace-id); devstrap --home=$WORK/homeB --root=$WORK/CodeB init --join --workspace-id "$WS"'
-exec sh -c 'A_ID=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices list | awk "NR==1{print \$1}"); AREC=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient); ASIG=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --signing); devstrap --home=$WORK/homeB --root=$WORK/CodeB devices enroll "$A_ID" --name a --os linux --arch arm64 --age-recipient "$AREC" --signing-public-key "$ASIG" --approve'
-exec sh -c 'B_ID=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices list | awk "NR==1{print \$1}"); REC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); SIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll "$B_ID" --name b --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve'
+exec sh -c 'A_ID=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices list | awk "NR==1{print \$1}"); AREC=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient); ASIG=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --signing); AFP=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --fingerprint); devstrap --home=$WORK/homeB --root=$WORK/CodeB devices enroll "$A_ID" --name a --os linux --arch arm64 --age-recipient "$AREC" --signing-public-key "$ASIG" --approve --fingerprint "$AFP"'
+exec sh -c 'B_ID=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices list | awk "NR==1{print \$1}"); REC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); SIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); BFP=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --fingerprint); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll "$B_ID" --name b --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve --fingerprint "$BFP"'
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
 
 # Device C: join, pin BOTH existing devices (fleets >2 pin every device), get
 # approved by B (NOT A — A never learns C exists), sync -> C holds epoch 1.
 exec sh -c 'WS=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --workspace-id); devstrap --home=$WORK/homeC --root=$WORK/CodeC init --join --workspace-id "$WS"'
-exec sh -c 'A_ID=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices list | awk "NR==1{print \$1}"); AREC=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient); ASIG=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --signing); devstrap --home=$WORK/homeC --root=$WORK/CodeC devices enroll "$A_ID" --name a --os linux --arch arm64 --age-recipient "$AREC" --signing-public-key "$ASIG" --approve'
-exec sh -c 'B_ID=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices list | awk "NR==1{print \$1}"); BREC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); BSIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); devstrap --home=$WORK/homeC --root=$WORK/CodeC devices enroll "$B_ID" --name b --os linux --arch arm64 --age-recipient "$BREC" --signing-public-key "$BSIG" --approve'
-exec sh -c 'C_ID=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices list | awk "NR==1{print \$1}"); CREC=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices recipient); CSIG=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices recipient --signing); devstrap --home=$WORK/homeB --root=$WORK/CodeB devices enroll "$C_ID" --name c --os linux --arch arm64 --age-recipient "$CREC" --signing-public-key "$CSIG" --approve'
+exec sh -c 'A_ID=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices list | awk "NR==1{print \$1}"); AREC=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient); ASIG=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --signing); AFP=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --fingerprint); devstrap --home=$WORK/homeC --root=$WORK/CodeC devices enroll "$A_ID" --name a --os linux --arch arm64 --age-recipient "$AREC" --signing-public-key "$ASIG" --approve --fingerprint "$AFP"'
+exec sh -c 'B_ID=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices list | awk "NR==1{print \$1}"); BREC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); BSIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); BFP=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --fingerprint); devstrap --home=$WORK/homeC --root=$WORK/CodeC devices enroll "$B_ID" --name b --os linux --arch arm64 --age-recipient "$BREC" --signing-public-key "$BSIG" --approve --fingerprint "$BFP"'
+exec sh -c 'C_ID=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices list | awk "NR==1{print \$1}"); CREC=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices recipient); CSIG=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices recipient --signing); CFP=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices recipient --fingerprint); devstrap --home=$WORK/homeB --root=$WORK/CodeB devices enroll "$C_ID" --name c --os linux --arch arm64 --age-recipient "$CREC" --signing-public-key "$CSIG" --approve --fingerprint "$CFP"'
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
 exec devstrap --home=$WORK/homeC --root=$WORK/CodeC sync --hub-file=$WORK/hub.json
 exec sh -c 'test -d $WORK/CodeC/work/a-proj/.git'
@@ -52,7 +52,7 @@ exec sh -c 'test -d $WORK/CodeC/work/a-proj/.git'
 # The revoke rotates the workspace key to epoch 2 and grants it to A's known
 # approved devices only — B, never C.
 exec devstrap --home=$WORK/homeD --root=$WORK/CodeD init
-exec sh -c 'D_ID=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices list | awk "NR==1{print \$1}"); DREC=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices recipient); DSIG=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices recipient --signing); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll "$D_ID" --name d --os linux --arch arm64 --age-recipient "$DREC" --signing-public-key "$DSIG" --approve'
+exec sh -c 'D_ID=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices list | awk "NR==1{print \$1}"); DREC=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices recipient); DSIG=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices recipient --signing); DFP=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices recipient --fingerprint); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll "$D_ID" --name d --os linux --arch arm64 --age-recipient "$DREC" --signing-public-key "$DSIG" --approve --fingerprint "$DFP"'
 exec sh -c 'D_ID=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices list | awk "NR==1{print \$1}"); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices revoke "$D_ID"'
 stderr 'Rotated workspace key to epoch 2'
 
@@ -77,16 +77,16 @@ stdout 'epoch 2'
 
 # The contiguity guard: C must not propagate its gap by approving new devices
 # while it knows it is missing epoch 2 — unless explicitly overridden.
-! exec sh -c 'DREC=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices recipient); DSIG=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices recipient --signing); devstrap --home=$WORK/homeC --root=$WORK/CodeC devices enroll dev_e --name e --os linux --arch arm64 --age-recipient "$DREC" --signing-public-key "$DSIG" --approve'
+! exec sh -c 'DREC=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices recipient); DSIG=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices recipient --signing); DFP=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices recipient --fingerprint); devstrap --home=$WORK/homeC --root=$WORK/CodeC devices enroll dev_e --name e --os linux --arch arm64 --age-recipient "$DREC" --signing-public-key "$DSIG" --approve --fingerprint "$DFP"'
 stderr 'awaiting key grant'
 stderr 'allow-epoch-gap'
-exec sh -c 'DREC=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices recipient); DSIG=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices recipient --signing); devstrap --home=$WORK/homeC --root=$WORK/CodeC devices enroll dev_e --name e --os linux --arch arm64 --age-recipient "$DREC" --signing-public-key "$DSIG" --approve --allow-epoch-gap'
+exec sh -c 'DREC=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices recipient); DSIG=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices recipient --signing); DFP=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices recipient --fingerprint); devstrap --home=$WORK/homeC --root=$WORK/CodeC devices enroll dev_e --name e --os linux --arch arm64 --age-recipient "$DREC" --signing-public-key "$DSIG" --approve --allow-epoch-gap --fingerprint "$DFP"'
 stdout 'enrolled as approved'
 
 # Recovery: B (holding epochs 1+2) re-approves C, granting every held epoch;
 # after B pushes and C pulls, the quarantined epoch-2 event replays, the
 # conflict auto-resolves, and a2-proj materializes on C.
-exec sh -c 'C_ID=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices list | awk "NR==1{print \$1}"); devstrap --home=$WORK/homeB --root=$WORK/CodeB devices approve "$C_ID"'
+exec sh -c 'C_ID=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices list | awk "NR==1{print \$1}"); CFP=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices recipient --fingerprint); devstrap --home=$WORK/homeB --root=$WORK/CodeB devices approve "$C_ID" --fingerprint "$CFP"'
 stderr 'Granted 2 workspace key epoch'
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
 exec devstrap --home=$WORK/homeC --root=$WORK/CodeC sync --hub-file=$WORK/hub.json

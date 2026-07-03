@@ -209,6 +209,7 @@ devstrap sync                               # founds the workspace, pushes the n
 devstrap status                             # copy the `Workspace ID:` line
 devstrap devices recipient                  # founder age recipient (public)
 devstrap devices recipient --signing        # founder signing public key
+devstrap devices recipient --fingerprint    # founder fingerprint — compare it out-of-band at approval
 devstrap devices list                       # the `local` row is the founder device id
 
 # Joiner — adopt the id FIRST, then pin the founder BEFORE the first sync
@@ -218,7 +219,8 @@ devstrap init ~/Code --join --workspace-id <workspace-id>   # born-correct; keyc
 devstrap devices enroll <founder-device-id> \
   --name founder --os macos --arch arm64 \
   --age-recipient <founder-age-recipient> \
-  --signing-public-key <founder-signing-public-key> --approve
+  --signing-public-key <founder-signing-public-key> \
+  --approve --fingerprint <founder-fingerprint>   # from `devices recipient --fingerprint` on the founder; on a TTY you may omit the flag and confirm interactively
 devstrap hub login                          # AFTER the id-adopting init (the credential slot keys on the workspace id)
 # joiner needs the same `hub: r2://<bucket>` config.yaml entry as the founder
 
@@ -226,7 +228,8 @@ devstrap hub login                          # AFTER the id-adopting init (the cr
 devstrap devices enroll <joiner-device-id> \
   --name laptop --os macos --arch arm64 \
   --age-recipient <joiner-age-recipient> \
-  --signing-public-key <joiner-signing-public-key> --approve
+  --signing-public-key <joiner-signing-public-key> \
+  --approve --fingerprint <joiner-fingerprint>    # from `devices recipient --fingerprint` on the joiner
 devstrap sync                               # pushes the key grants
 
 # Joiner — sync once more; the whole tree materializes
