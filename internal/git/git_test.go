@@ -311,7 +311,7 @@ func TestUsesLFSIgnoresCommentsAndGitDir(t *testing.T) {
 	}
 }
 
-func TestRunTimesOutAndReportsNetworkError(t *testing.T) {
+func TestRunTimesOutAndReportsTimeoutError(t *testing.T) {
 	// `exec sleep` so the shell is replaced by sleep (no grandchild holding the
 	// output pipe), letting the context-kill return promptly.
 	script := writeFakeGit(t, "#!/bin/sh\nexec sleep 5\n")
@@ -319,14 +319,114 @@ func TestRunTimesOutAndReportsNetworkError(t *testing.T) {
 	start := time.Now()
 	_, err := r.Run(context.Background(), "", "fetch", "origin")
 	elapsed := time.Since(start)
-	if !errors.Is(err, ErrNetwork) {
-		t.Fatalf("Run err = %v, want ErrNetwork on timeout", err)
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Run err = %v, want ErrTimeout on timeout", err)
+	}
+	var cmdErr CommandError
+	if !errors.As(err, &cmdErr) || !errors.Is(cmdErr.Kind, ErrTimeout) {
+		t.Fatalf("Run err = %#v, want CommandError kind ErrTimeout", err)
 	}
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("Run err = %v, want timeout message", err)
 	}
+	// A short-class timeout must not misdirect the user at a knob that only
+	// governs the transfer class (P6-GIT-01 review).
+	if strings.Contains(err.Error(), "clone_timeout") {
+		t.Fatalf("Run err = %v, want NO clone_timeout hint on a non-transfer command", err)
+	}
 	if elapsed > 3*time.Second {
 		t.Fatalf("Run took %s, want it to return near the 100ms timeout", elapsed)
+	}
+}
+
+func TestCloneTimeoutIsTerminalAndDoesNotRetryOrWipe(t *testing.T) {
+	tmp := t.TempDir()
+	countPath := filepath.Join(tmp, "count")
+	dest := filepath.Join(tmp, "repo")
+	if err := os.MkdirAll(dest, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(dest, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := writeFakeGit(t, fmt.Sprintf(`#!/bin/sh
+echo attempt >> %[1]q
+exec sleep 1
+`, countPath))
+	r := Runner{Bin: script, Timeout: 5 * time.Second, LongTimeout: 500 * time.Millisecond, RetryAttempts: 3, RetryBackoff: time.Millisecond}
+	err := r.CloneWithOptions(context.Background(), "https://example.test/org/repo.git", dest, CloneOptions{Partial: true})
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("CloneWithOptions err = %v, want ErrTimeout", err)
+	}
+	var cmdErr CommandError
+	if !errors.As(err, &cmdErr) || !errors.Is(cmdErr.Kind, ErrTimeout) {
+		t.Fatalf("CloneWithOptions err = %#v, want CommandError kind ErrTimeout", err)
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("CloneWithOptions err = %v, want timeout message", err)
+	}
+	if got := attemptCount(t, countPath); got != 1 {
+		t.Fatalf("attempt count = %d, want 1", got)
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("destination was wiped after terminal timeout: %v", err)
+	}
+}
+
+func TestCloneUsesLongTimeoutInsteadOfShortTimeout(t *testing.T) {
+	countPath := filepath.Join(t.TempDir(), "count")
+	script := writeFakeGit(t, fmt.Sprintf(`#!/bin/sh
+echo attempt >> %[1]q
+sleep 0.2
+exit 0
+`, countPath))
+	r := Runner{Bin: script, Timeout: 50 * time.Millisecond, LongTimeout: 2 * time.Second, RetryAttempts: 1}
+	if err := r.CloneWithOptions(context.Background(), "https://example.test/org/repo.git", filepath.Join(t.TempDir(), "repo"), CloneOptions{Partial: true}); err != nil {
+		t.Fatalf("CloneWithOptions err = %v, want success under LongTimeout", err)
+	}
+	if got := attemptCount(t, countPath); got != 1 {
+		t.Fatalf("attempt count = %d, want 1", got)
+	}
+}
+
+func TestFetchTimeoutIsTerminalAndDoesNotRetry(t *testing.T) {
+	countPath := filepath.Join(t.TempDir(), "count")
+	script := writeFakeGit(t, fmt.Sprintf(`#!/bin/sh
+echo attempt >> %[1]q
+exec sleep 1
+`, countPath))
+	r := Runner{Bin: script, Timeout: 5 * time.Second, LongTimeout: 500 * time.Millisecond, RetryAttempts: 3, RetryBackoff: time.Millisecond}
+	err := r.Fetch(context.Background(), "", "origin", "main")
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("Fetch err = %v, want ErrTimeout", err)
+	}
+	var cmdErr CommandError
+	if !errors.As(err, &cmdErr) || !errors.Is(cmdErr.Kind, ErrTimeout) {
+		t.Fatalf("Fetch err = %#v, want CommandError kind ErrTimeout", err)
+	}
+	if got := attemptCount(t, countPath); got != 1 {
+		t.Fatalf("attempt count = %d, want 1", got)
+	}
+}
+
+func TestLFSPullTimeoutIsTerminalAndDoesNotRetry(t *testing.T) {
+	countPath := filepath.Join(t.TempDir(), "count")
+	script := writeFakeGit(t, fmt.Sprintf(`#!/bin/sh
+echo attempt >> %[1]q
+exec sleep 1
+`, countPath))
+	r := Runner{Bin: script, Timeout: 5 * time.Second, LongTimeout: 500 * time.Millisecond, RetryAttempts: 3, RetryBackoff: time.Millisecond}
+	err := r.LFSPull(context.Background(), "")
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("LFSPull err = %v, want ErrTimeout", err)
+	}
+	var cmdErr CommandError
+	if !errors.As(err, &cmdErr) || !errors.Is(cmdErr.Kind, ErrTimeout) {
+		t.Fatalf("LFSPull err = %#v, want CommandError kind ErrTimeout", err)
+	}
+	if got := attemptCount(t, countPath); got != 1 {
+		t.Fatalf("attempt count = %d, want 1", got)
 	}
 }
 
@@ -436,6 +536,15 @@ func writeFakeGit(t *testing.T, script string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func attemptCount(t *testing.T, path string) int {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(strings.Fields(string(raw)))
 }
 
 // QUAL-06: jitterDelay produces full-jitter capped-exponential backoff. Delays
@@ -555,5 +664,36 @@ func TestCloneWithOptionsInitializesSubmodules(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dest, "vendor", "sub", "README.md")); err != nil {
 		t.Fatalf("submodule not materialized: %v", err)
+	}
+}
+
+// P6-GIT-01 review: push is the same transfer class as clone — it gets the
+// long deadline, a terminal timeout, and the config hint.
+func TestPushBranchTimeoutIsTerminalWithHint(t *testing.T) {
+	countPath := filepath.Join(t.TempDir(), "count")
+	script := writeFakeGit(t, fmt.Sprintf(`#!/bin/sh
+echo attempt >> %[1]q
+exec sleep 1
+`, countPath))
+	r := Runner{Bin: script, Timeout: 5 * time.Second, LongTimeout: 500 * time.Millisecond}
+	err := r.PushBranch(context.Background(), "", "origin", "agent/x")
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("PushBranch err = %v, want ErrTimeout", err)
+	}
+	if !strings.Contains(err.Error(), "clone_timeout") {
+		t.Fatalf("PushBranch err = %v, want the clone_timeout hint on a transfer-class timeout", err)
+	}
+	if got := attemptCount(t, countPath); got != 1 {
+		t.Fatalf("attempt count = %d, want 1", got)
+	}
+}
+
+// P6-GIT-01 review: LongTimeout <= 0 means the transfer class is explicitly
+// unbounded — it must NOT silently fall back to the short 2m-class cap.
+func TestZeroLongTimeoutMeansUnboundedTransfer(t *testing.T) {
+	script := writeFakeGit(t, "#!/bin/sh\nsleep 0.2\nexit 0\n")
+	r := Runner{Bin: script, Timeout: 50 * time.Millisecond, LongTimeout: 0, RetryAttempts: 1}
+	if err := r.CloneWithOptions(context.Background(), "https://example.test/org/repo.git", filepath.Join(t.TempDir(), "repo"), CloneOptions{Partial: true}); err != nil {
+		t.Fatalf("CloneWithOptions err = %v, want success with unbounded transfer class", err)
 	}
 }

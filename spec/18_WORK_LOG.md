@@ -27,6 +27,24 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — P6-GIT-01: git timeout split by command class; deadline kills are terminal (PR 3/3 — completes the Pass 6 P1 wave)
+
+Changed:
+- `internal/git`: new `Runner.LongTimeout` (default 30m) — the per-**attempt** deadline for the network-transfer command class (`CloneWithOptions`, `Fetch`/`runWithNetworkRetry`, `LFSPull`) via `longTransferContext` (a caller-supplied ctx deadline always wins; `LongTimeout <= 0` opts out); every other command keeps the 2m `Timeout`. Per-attempt (not whole-loop) so a slow failed transfer cannot starve a retry after a genuine transient network error.
+- A self-imposed `context.DeadlineExceeded` is now the distinct terminal **`ErrTimeout`** (was retryable `ErrNetwork`), with the message pointing at `materialization.clone_timeout` — the retry loops retry only `ErrNetwork`, so the triple wipe-and-retry of a >2-minute blobless clone is gone and the staging destination survives untouched. The timeout label uses the actual effective deadline, not the 2m default.
+- `internal/cli`: `materialization.clone_timeout` config key (viper `GetDuration`, `SetDefault "30m"` in `root.go`; documented in spec/08's shipped-config-keys line) and a `gitRunner(opts)` helper that stamps `LongTimeout`; all network-relevant `dsgit.NewRunner()` call sites in hydrate/worktree/agent switched to it (`hydrate --lfs` now routes through `LFSPull` so it gets the long deadline). `agentDiffSummary` intentionally keeps the bare runner (local status/diff only, commented). `ErrTimeout` maps to the network exit code.
+- Delegation note (CLAUDE.md model policy): implementation delegated to gpt-5.5 (Codex); the job completed its file changes but its runtime died before reporting (zombie "running" record cancelled via the companion CLI). The on-disk diff was reviewed line-by-line against the written spec in the main loop and accepted; docs authored directly.
+- Specs: 08 (P6-GIT-01 section → shipped; config-keys line), 13 (via spec/08 cross-refs), 14 (P1-wave status — all five P1s closed), 16 (test inventory), 18 (this entry); ledger `docs/audits/README.md` (P6-GIT-01 → *Recently shipped*; Pass 6 now 34 open of 43, zero open P1s).
+
+Validated:
+- `gofmt -w cmd internal`, `golangci-lint run`, `go run ./cmd/spec-drift --base origin/main --head HEAD`, `GOCACHE=/tmp/devstrap-gocache go test -race ./...`.
+- New tests: `TestRunTimesOutAndReportsTimeoutError` (renamed; `ErrTimeout` kind + message), `TestCloneTimeoutIsTerminalAndDoesNotRetryOrWipe` (attempt-count file proves exactly one attempt; sentinel file proves no wipe), `TestCloneUsesLongTimeoutInsteadOfShortTimeout` (long class ignores the short cap), `TestFetchTimeoutIsTerminalAndDoesNotRetry`, `TestLFSPullTimeoutIsTerminalAndDoesNotRetry`, `ExitCodeWithWriter(ErrTimeout)`, and `gitRunner` config/default round-trips.
+
+- Dual-review hardening (independent opus-4.8 + Codex passes on the PR; both independently flagged the push gap) fixed four findings: (1) `pushAgentBranch`'s `gitRunner` switch was inert — plain `Run` never reads `LongTimeout` — and a large `agent pr` push stayed 2m-capped; new `Runner.PushBranch` puts push in the transfer class; (2) the "raise materialization.clone_timeout" hint fired on every timeout, misdirecting non-transfer commands — it is now scoped to the transfer class via a context marker; (3) an explicit `clone_timeout: 0` silently reintroduced the 2m cap — the marked class with `LongTimeout <= 0` now runs unbounded; (4) documented that any deadline expiry (including a caller's) is terminal while cancellation still classifies normally. Pinned by `TestPushBranchTimeoutIsTerminalWithHint`, `TestZeroLongTimeoutMeansUnboundedTransfer`, and the no-hint assertion in `TestRunTimesOutAndReportsTimeoutError`. Signed-off trade-off (spec/08): a hard-hung transfer is now detected at 30m instead of ~6m and can hold a materialize worker slot that long — the accepted cost of letting slow-but-progressing transfers finish; `http.lowSpeedLimit/Time` noted as the hang-vs-slow follow-up.
+
+Follow-ups:
+- Pass 6 P2 wave next (quick wins first: `P6-DATA-02`, `P6-GIT-05`, `P6-SYNC-03`, `P6-CLI-02`); `P6-GIT-04` should give materialize-path LFS pulls the same `LongTimeout`.
+
 ## 2026-07-02 — P6-HUB-01: hub gc is sync-first, grace-windowed, and refuses to sweep when blind (PR 2/3 of the P1 wave)
 
 Changed:

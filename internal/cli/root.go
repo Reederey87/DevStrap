@@ -153,6 +153,7 @@ func initConfig(opts *options) error {
 	}
 	opts.v.SetDefault("home", defaults.Home)
 	opts.v.SetDefault("root", defaults.Root)
+	opts.v.SetDefault("materialization.clone_timeout", "30m")
 
 	if opts.cfgFile != "" {
 		opts.v.SetConfigFile(opts.cfgFile)
@@ -208,7 +209,7 @@ func ExitCodeWithWriter(err error, stderr io.Writer) int {
 	if errors.Is(err, dsgit.ErrAuth) {
 		return exitAuth
 	}
-	if errors.Is(err, dsgit.ErrNetwork) {
+	if errors.Is(err, dsgit.ErrNetwork) || errors.Is(err, dsgit.ErrTimeout) {
 		return exitNetwork
 	}
 	if errors.Is(err, dsgit.ErrBranchNotFound) || errors.Is(err, dsgit.ErrRemoteMissing) {

@@ -151,7 +151,7 @@ func createFreshWorktree(ctx context.Context, stdout io.Writer, opts *options, s
 	if err != nil {
 		return state.Worktree{}, err
 	}
-	r := dsgit.NewRunner()
+	r := gitRunner(opts)
 	defaultBranch, err := resolveWorktreeDefaultBranch(ctx, stdout, r, localPath, project.DefaultBranch)
 	if err != nil {
 		return state.Worktree{}, appError{code: exitGit, err: err}
@@ -275,7 +275,7 @@ func newWorktreeStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			r := dsgit.NewRunner()
+			r := gitRunner(opts)
 			drift, err := r.BaseDrift(cmd.Context(), wt.Path, wt.BaseRef, wt.BaseSHA)
 			if err != nil {
 				return appError{code: exitGit, err: err}
@@ -326,7 +326,7 @@ func newWorktreeFinalizeCommand(stdout io.Writer, opts *options) *cobra.Command 
 			if err != nil {
 				return err
 			}
-			drift, err := finalizationBaseDrift(cmd.Context(), wt)
+			drift, err := finalizationBaseDrift(cmd.Context(), opts, wt)
 			if err != nil {
 				return err
 			}
@@ -345,8 +345,8 @@ func newWorktreeFinalizeCommand(stdout io.Writer, opts *options) *cobra.Command 
 	return cmd
 }
 
-func finalizationBaseDrift(ctx context.Context, wt state.Worktree) (dsgit.BaseDrift, error) {
-	r := dsgit.NewRunner()
+func finalizationBaseDrift(ctx context.Context, opts *options, wt state.Worktree) (dsgit.BaseDrift, error) {
+	r := gitRunner(opts)
 	drift, err := r.BaseDrift(ctx, wt.Path, wt.BaseRef, wt.BaseSHA)
 	if err != nil {
 		return dsgit.BaseDrift{}, appError{code: exitGit, err: err}
@@ -401,7 +401,7 @@ func newWorktreeRemoveCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			r := dsgit.NewRunner()
+			r := gitRunner(opts)
 			repoPath := project.LocalPath
 			if repoPath == "" {
 				repoPath = filepath.Join(opts.paths().Root, filepath.FromSlash(project.Path))
@@ -467,7 +467,7 @@ func newWorktreeCleanupCommand(stdout io.Writer, opts *options) *cobra.Command {
 			removed := 0
 			skipped := 0
 			for _, wt := range worktrees {
-				r := dsgit.NewRunner()
+				r := gitRunner(opts)
 				project, err := store.ProjectByID(cmd.Context(), wt.NamespaceID)
 				if err != nil {
 					return err

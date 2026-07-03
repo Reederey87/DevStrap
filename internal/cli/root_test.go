@@ -16,6 +16,7 @@ import (
 	dsgit "github.com/Reederey87/DevStrap/internal/git"
 	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/state"
+	"github.com/spf13/viper"
 	"github.com/zalando/go-keyring"
 )
 
@@ -51,12 +52,32 @@ func TestExitCodeMapsTypedGitErrors(t *testing.T) {
 		t.Fatalf("ExitCodeWithWriter(ErrNetwork) = %d, want %d", got, exitNetwork)
 	}
 	stderr.Reset()
+	if got := ExitCodeWithWriter(dsgit.ErrTimeout, &stderr); got != exitNetwork {
+		t.Fatalf("ExitCodeWithWriter(ErrTimeout) = %d, want %d", got, exitNetwork)
+	}
+	stderr.Reset()
 	if got := ExitCodeWithWriter(dsgit.ErrAuth, &stderr); got != exitAuth {
 		t.Fatalf("ExitCodeWithWriter(ErrAuth) = %d, want %d", got, exitAuth)
 	}
 	stderr.Reset()
 	if got := ExitCodeWithWriter(dsgit.ErrBranchNotFound, &stderr); got != exitGit {
 		t.Fatalf("ExitCodeWithWriter(ErrBranchNotFound) = %d, want %d", got, exitGit)
+	}
+}
+
+func TestGitRunnerUsesConfiguredCloneTimeout(t *testing.T) {
+	v := viper.New()
+	v.Set("materialization.clone_timeout", "5m")
+	r := gitRunner(&options{v: v})
+	if r.LongTimeout != 5*time.Minute {
+		t.Fatalf("LongTimeout = %s, want 5m", r.LongTimeout)
+	}
+}
+
+func TestGitRunnerDefaultCloneTimeout(t *testing.T) {
+	r := gitRunner(&options{v: viper.New()})
+	if r.LongTimeout != 30*time.Minute {
+		t.Fatalf("LongTimeout = %s, want 30m", r.LongTimeout)
 	}
 }
 
@@ -1028,4 +1049,26 @@ func runGitOutput(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %v failed: %v\n%s", args, err, out)
 	}
 	return string(out)
+}
+
+// P6-GIT-01 review (CodeRabbit): a malformed clone_timeout must fall back to
+// the default, never silently become "no timeout"; an explicit "0" stays the
+// documented unbounded opt-out.
+func TestGitRunnerCloneTimeoutValidation(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want time.Duration
+	}{
+		{"3 hours", 30 * time.Minute}, // malformed → default, not unbounded
+		{"-5m", 30 * time.Minute},     // negative → default
+		{"0", 0},                      // explicit unbounded opt-out
+		{"45m", 45 * time.Minute},
+	}
+	for _, tc := range cases {
+		v := viper.New()
+		v.Set("materialization.clone_timeout", tc.raw)
+		if got := gitRunner(&options{v: v}).LongTimeout; got != tc.want {
+			t.Fatalf("clone_timeout %q: LongTimeout = %s, want %s", tc.raw, got, tc.want)
+		}
+	}
 }

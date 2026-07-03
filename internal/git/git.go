@@ -19,8 +19,12 @@ import (
 )
 
 type Runner struct {
-	Bin           string
-	Timeout       time.Duration
+	Bin     string
+	Timeout time.Duration
+	// LongTimeout is the per-attempt deadline for network-transfer commands
+	// that legitimately run for tens of minutes on large repositories: clone,
+	// fetch, and git lfs pull. Other git commands use Timeout.
+	LongTimeout   time.Duration
 	RetryAttempts int
 	RetryBackoff  time.Duration
 	// RetryCap bounds the per-sleep backoff so exponential growth cannot exceed
@@ -38,6 +42,7 @@ func NewRunner() Runner {
 	return Runner{
 		Bin:           "git",
 		Timeout:       2 * time.Minute,
+		LongTimeout:   30 * time.Minute,
 		RetryAttempts: 3,
 		RetryBackoff:  200 * time.Millisecond,
 		RetryCap:      5 * time.Second,
@@ -46,6 +51,7 @@ func NewRunner() Runner {
 
 var (
 	ErrNetwork        = errors.New("git network error")
+	ErrTimeout        = errors.New("git timeout")
 	ErrAuth           = errors.New("git authentication error")
 	ErrBranchNotFound = errors.New("git branch not found")
 	ErrRemoteMissing  = errors.New("git remote missing")
@@ -77,10 +83,20 @@ func (r Runner) Run(ctx context.Context, dir string, args ...string) (string, er
 	if timeout == 0 {
 		timeout = 2 * time.Minute
 	}
-	if _, ok := ctx.Deadline(); !ok && timeout > 0 {
+	longClass := ctx.Value(longTransferMarker{}) != nil
+	timeoutLabel := timeout
+	if deadline, ok := ctx.Deadline(); ok {
+		timeoutLabel = time.Until(deadline)
+		if timeoutLabel < 0 {
+			timeoutLabel = 0
+		}
+	} else if timeout > 0 && !longClass {
+		// A marked transfer-class ctx with no deadline is explicitly
+		// unbounded (LongTimeout <= 0); everything else gets the short cap.
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
+		timeoutLabel = timeout
 	}
 	args = secureArgs(args)
 	//nolint:gosec // Runner constrains git arguments with secureArgs and a sanitized non-interactive environment.
@@ -112,8 +128,17 @@ func (r Runner) Run(ctx context.Context, dir string, args ...string) (string, er
 		argText := redactGitText(strings.Join(args, " "))
 		msg = redactGitText(msg)
 		kind := classifyGitError(msg)
+		// Any deadline expiry — the runner's own or a caller-supplied one —
+		// is terminal ErrTimeout and never retried; caller CANCELLATION
+		// (context.Canceled) still routes through classifyGitError below.
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return "", CommandError{Kind: ErrNetwork, Args: argText, Message: fmt.Sprintf("timed out after %s", timeout)}
+			msg := fmt.Sprintf("timed out after %s", timeoutLabel)
+			if longClass {
+				// Only transfer-class commands honor the config knob; a hint
+				// on a 2m rev-parse/push-metadata timeout would misdirect.
+				msg += " (raise materialization.clone_timeout for large repos)"
+			}
+			return "", CommandError{Kind: ErrTimeout, Args: argText, Message: msg}
 		}
 		return "", CommandError{Kind: kind, Args: argText, Message: msg}
 	}
@@ -168,7 +193,12 @@ func (r Runner) CloneWithOptions(ctx context.Context, remote, dest string, opts 
 				return fmt.Errorf("recreate clone destination for retry: %w", err)
 			}
 		}
-		_, err := r.Run(ctx, "", args...)
+		// P6-GIT-01: apply the long transfer deadline per attempt, not across
+		// the whole retry loop, so a slow failed transfer does not starve a
+		// later retry after a genuine transient network error.
+		attemptCtx, cancel := r.longTransferContext(ctx)
+		_, err := r.Run(attemptCtx, "", args...)
+		cancel()
 		if err == nil {
 			return nil
 		}
@@ -219,6 +249,37 @@ func (r Runner) Fetch(ctx context.Context, dir, remote, branch string) error {
 	return r.runWithNetworkRetry(ctx, dir, args...)
 }
 
+// longTransferMarker tags a context as belonging to the network-transfer
+// command class (clone/fetch/push/LFS), so Run can scope the
+// materialization.clone_timeout hint to commands that actually honor it and
+// skip its short default when the class is explicitly unbounded.
+type longTransferMarker struct{}
+
+func (r Runner) longTransferContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx = context.WithValue(ctx, longTransferMarker{}, true)
+	if r.LongTimeout <= 0 {
+		// Explicit no-ceiling: the transfer runs unbounded (Run skips its
+		// short default for the marked class) instead of silently falling
+		// back to the 2m cap this fix removed.
+		return ctx, func() {}
+	}
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, r.LongTimeout)
+}
+
+// PushBranch pushes branch to remote with -u under the long transfer deadline
+// (P6-GIT-01): a large branch push is the same network-transfer class as
+// clone/fetch. No retry loop — the wrapper cannot know a failed push is safe
+// to repeat, so the caller decides.
+func (r Runner) PushBranch(ctx context.Context, dir, remote, branch string) error {
+	ctx, cancel := r.longTransferContext(ctx)
+	defer cancel()
+	_, err := r.Run(ctx, dir, "push", "-u", remote, branch)
+	return err
+}
+
 // MaintenanceRun runs a one-time `git maintenance run --auto` (commit-graph +
 // prefetch) so common history ops (blame, log -p) do not trigger per-object
 // lazy fetches on a blobless clone (GIT-06). It is best-effort: older git or a
@@ -250,7 +311,12 @@ func (r Runner) runWithNetworkRetry(ctx context.Context, dir string, args ...str
 	start := time.Now()
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt++ {
-		_, err := r.Run(ctx, dir, args...)
+		// P6-GIT-01: apply the long transfer deadline per attempt, not across
+		// the whole retry loop, so a slow failed transfer does not starve a
+		// later retry after a genuine transient network error.
+		attemptCtx, cancel := r.longTransferContext(ctx)
+		_, err := r.Run(attemptCtx, dir, args...)
+		cancel()
 		if err == nil {
 			return nil
 		}
@@ -431,7 +497,9 @@ func (r Runner) WorktreePrune(ctx context.Context, dir string) error {
 }
 
 func (r Runner) LFSPull(ctx context.Context, dir string) error {
-	_, err := r.Run(ctx, dir, "lfs", "pull")
+	attemptCtx, cancel := r.longTransferContext(ctx)
+	defer cancel()
+	_, err := r.Run(attemptCtx, dir, "lfs", "pull")
 	return err
 }
 
