@@ -35,7 +35,7 @@ exec devstrap --home=$WORK/homeB --root=$WORK/CodeB init
 
 # P4-SEC-07: enroll B on A and approve, so A grants its WCK epochs to B.
 # Extract B's age recipient + signing public key via the read-only helper.
-exec sh -c 'REC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); SIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll dev_b --name b --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve'
+exec sh -c 'REC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); SIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); FP=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --fingerprint); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll dev_b --name b --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve --fingerprint "$FP"'
 stdout 'enrolled as approved'
 
 # A syncs to publish the device.key.granted events for B.

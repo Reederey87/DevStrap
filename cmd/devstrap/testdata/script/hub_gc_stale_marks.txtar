@@ -18,7 +18,7 @@ exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.js
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB init --join
 
 # Enroll + approve B on A under B's real device id, then publish the grant.
-exec sh -c 'B_ID=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices list | awk "NR==1{print \$1}"); REC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); SIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll "$B_ID" --name b --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve'
+exec sh -c 'B_ID=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices list | awk "NR==1{print \$1}"); REC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); SIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); FP=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --fingerprint); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll "$B_ID" --name b --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve --fingerprint "$FP"'
 stdout 'enrolled as approved'
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
 
@@ -29,7 +29,7 @@ exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.js
 # Mirror enrollment: B approves A so A's recipient is in the bundle encryption
 # set (recipient sets are per-store trust; without this A could retain but not
 # decrypt B's draft).
-exec sh -c 'A_ID=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices list | awk "\$2==\"local\"{print \$1}"); REC=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient); SIG=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --signing); devstrap --home=$WORK/homeB --root=$WORK/CodeB devices enroll "$A_ID" --name a --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve'
+exec sh -c 'A_ID=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices list | awk "\$2==\"local\"{print \$1}"); REC=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient); SIG=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --signing); FP=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --fingerprint); devstrap --home=$WORK/homeB --root=$WORK/CodeB devices enroll "$A_ID" --name a --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve --fingerprint "$FP"'
 stdout 'enrolled as approved'
 exec git init -b main $WORK/CodeB/work/b-draft
 exec sh -c 'echo b-secret-notes > $WORK/CodeB/work/b-draft/note.txt'

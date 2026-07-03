@@ -37,9 +37,9 @@ stdout 'pushed 1'
 
 # Enroll and approve B and C on A using their actual generated device IDs, so
 # A can verify their later signed events.
-exec sh -c 'B_ID=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices list | awk "NR==1{print \$1}"); REC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); SIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll "$B_ID" --name b --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve'
+exec sh -c 'B_ID=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices list | awk "NR==1{print \$1}"); REC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); SIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); FP=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --fingerprint); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll "$B_ID" --name b --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve --fingerprint "$FP"'
 stdout 'enrolled as approved'
-exec sh -c 'C_ID=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices list | awk "NR==1{print \$1}"); REC=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices recipient); SIG=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices recipient --signing); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll "$C_ID" --name c --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve'
+exec sh -c 'C_ID=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices list | awk "NR==1{print \$1}"); REC=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices recipient); SIG=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices recipient --signing); FP=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices recipient --fingerprint); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll "$C_ID" --name c --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve --fingerprint "$FP"'
 stdout 'enrolled as approved'
 
 # A publishes WCK grants; B and C ingest them so both can push encrypted events.

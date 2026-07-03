@@ -27,6 +27,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — feat(devices): device-key fingerprint + compare-and-confirm on approve (P4-SEC-04 part 1)
+
+Changed:
+- New `internal/devicekeys/fingerprint.go`: `Fingerprint(signingPublicKey, ageRecipient)` derives a full 256-bit device fingerprint — `sha256("devstrap/device-fp/v1" || 0x00 || canonicalSigning || 0x00 || canonicalRecipient)`, both inputs canonicalized by parse-then-re-encode (reusing `parsePublicSigningKey` + `age.ParseX25519Recipient`), encoded as unpadded uppercase base32 in 13 dash-separated groups of 4. Plus `NormalizeFingerprint` and constant-time `FingerprintEqual`.
+- `devices approve` and `enroll --approve` now gate the trust-state change on out-of-band fingerprint confirmation BEFORE any DB write (`--fingerprint <value>` compare / interactive `yes` on a TTY / non-TTY refusal with a copy-paste remedy). Fingerprint is computed from the approved row/flags, never the local keystore. `SECU-05`: approving a keyless placeholder row is refused with a re-enroll remedy.
+- `devices recipient --fingerprint` prints the local device's fingerprint (mutually exclusive with `--signing`/`--workspace-id`; bare output frozen). `devices list` appends the fingerprint as the LAST column (`-` when a row lacks keys); `--json` unchanged.
+- `init --join` hint gained fingerprint-comparison guidance and a `devices recipient --fingerprint` step.
+- Spec: `13_CLI_DAEMON_API.md` (flags + list column + confirmation model), `15_SECURITY_THREAT_MODEL.md` (new MITM/tamper-on-pairing-channel threat; full-strength-vs-SAS rationale), `07_NAMESPACE_AND_SYNC_MODEL.md` (approve bullet), `19_CLOUD_PROVISIONING_GUIDE.md` §E (interim note + `--fingerprint` on the ceremony examples). Ledger P4-SEC-04 row narrowed (fingerprint half shipped, pairing-code half open).
+
+Validated:
+- `gofmt -w cmd internal`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `go test -race ./...` (all green).
+- New golden-vector test pins the derivation forever; both-keys-bound, normalization/equality, CLI match/mismatch-no-write/non-TTY-remedy/keyless-refuse tests; e2e txtar (`sync_*`, `hub_gc_stale_marks`) updated to scrape `devices recipient --fingerprint` and pass `--fingerprint`.
+
+Follow-ups:
+- One-paste pairing code that bundles + integrity-checks the seven exchanged values (`P4-SEC-04` part 2). Founder-side automation of the exchange and an authenticated full-state snapshot remain future work.
 ## 2026-07-03 — fix(sync): grace-bounded quarantine for never-granted epochs + approve contiguity guard (P6-SEC-03)
 
 Changed:

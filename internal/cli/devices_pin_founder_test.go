@@ -76,12 +76,17 @@ func setupKeylessJoiner(t *testing.T) pinnedJoiner {
 
 func (j pinnedJoiner) pinFounder(t *testing.T) (stdout, stderr string) {
 	t.Helper()
-	stdout, stderr, err := executeForTest("--home", j.home, "--root", j.root,
+	fp, ferr := devicekeys.Fingerprint(j.founderSigning.Public, j.founderAge.Recipient)
+	if ferr != nil {
+		t.Fatal(ferr)
+	}
+	var err error
+	stdout, stderr, err = executeForTest("--home", j.home, "--root", j.root,
 		"devices", "enroll", "dev_founder",
 		"--name", "founder", "--os", "darwin", "--arch", "arm64",
 		"--age-recipient", j.founderAge.Recipient,
 		"--signing-public-key", j.founderSigning.Public,
-		"--approve")
+		"--approve", "--fingerprint", fp)
 	if err != nil {
 		t.Fatalf("pin founder: stderr = %q err = %v", stderr, err)
 	}
