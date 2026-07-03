@@ -587,3 +587,52 @@ func TestPrimeRefusesLegacyUpgradeOverDifferentBytes(t *testing.T) {
 		t.Fatal("Prime overwrote the existing kid-aware slot despite refusing")
 	}
 }
+
+// Post-#56 Codex review (P1): Rotate must wrap every grant BEFORE writing any
+// state. A malformed recipient on an approved device row must abort the
+// rotation with NOTHING recorded — no new epoch row, no custody slot, no grant
+// events — so the caller can never push under a half-minted epoch whose grants
+// never published.
+func TestRotateBadRecipientLeavesNoHalfMintedEpoch(t *testing.T) {
+	ctx := context.Background()
+	st, kr, _ := setupKeyring(t, "a")
+	if _, err := kr.EnsureBootstrap(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertDevice(ctx, state.Device{
+		ID: "dev_bad", Name: "bad", OS: "linux", Arch: "arm64",
+		PublicKey: "not-an-age-recipient", TrustState: "approved",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pendingBefore, err := st.LocalPendingEvents(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := kr.Rotate(ctx); err == nil {
+		t.Fatal("Rotate with a malformed approved recipient succeeded, want error")
+	}
+	epoch, err := st.CurrentKeyEpoch(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if epoch != 1 {
+		t.Fatalf("CurrentKeyEpoch = %d after failed rotate, want 1 (no half-minted epoch row)", epoch)
+	}
+	keys, err := st.HeldKeys(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range keys {
+		if k.Epoch != 1 {
+			t.Fatalf("held key at epoch %d after failed rotate, want epoch 1 only", k.Epoch)
+		}
+	}
+	pendingAfter, err := st.LocalPendingEvents(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pendingAfter) != len(pendingBefore) {
+		t.Fatalf("failed rotate queued %d new event(s), want none", len(pendingAfter)-len(pendingBefore))
+	}
+}

@@ -292,11 +292,15 @@ func maybeRotateWorkspaceKey(ctx context.Context, stdout io.Writer, opts *option
 	kr := buildKeyring(opts, store)
 	newEpoch, grants, rerr := kr.Rotate(ctx)
 	if rerr != nil {
-		// A failed periodic rotation must not abort the sync cycle — the old
-		// epoch keeps working and the next cycle retries.
-		logging.Logger(ctx).Warn("periodic workspace key rotation failed; continuing with the current epoch",
-			"epoch", epoch, "err", rerr.Error())
-		return false, nil
+		// FATAL for the cycle (post-#56 Codex review, P1): Rotate wraps every
+		// grant before writing any state, so a failure here is either
+		// harmless-and-early (nothing recorded; a malformed recipient row
+		// needs fixing, not retrying) or a rare DB/custody fault mid-commit —
+		// and in the latter case pushing would seal this cycle's events under
+		// a half-minted epoch whose grants never published, while the fresh
+		// created_at suppresses the retry. Aborting keeps the cycle's events
+		// queued and the failure loud.
+		return false, fmt.Errorf("periodic workspace key rotation failed (fix the cause or disable via keys.rotate_max_age=0 / --key-max-age 0): %w", rerr)
 	}
 	_, _ = fmt.Fprintf(stdout, "Rotated workspace key to epoch %d (epoch %d exceeded keys.rotate_max_age %s); %d grant event(s) ride this push\n",
 		newEpoch, epoch, maxAge, len(grants))
