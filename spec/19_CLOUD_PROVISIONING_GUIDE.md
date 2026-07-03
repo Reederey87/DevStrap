@@ -98,7 +98,8 @@ s3://devstrap-hub/workspaces/<workspace_id>/snapshots/<hlc-padded>.json.age   # 
 
 `<workspace_id>` is a `ws_<uuidv7>` identity minted on the **founder** device during
 `devstrap init`. A second device does **not** mint its own — it **adopts** the founder's id
-with `devstrap init --join --workspace-id <id>`, so both devices key under the same
+with `devstrap init --join --code <devstrap-pair1:...>` (or the manual fallback
+`--workspace-id <id>`), so both devices key under the same
 `workspaces/<workspace_id>/` prefix and see each other. A device that initializes with its
 own fresh id keys a disjoint prefix and never observes the founder's content; the fix is the
 born-correct join, not a post-hoc rewrite (see *E. Pair a second device*). Because every
@@ -555,57 +556,43 @@ devstrap sync                        # founds epoch 1 against the empty hub and 
 devstrap status                      # copy the `Workspace ID:` line (also `--json` → workspace_id)
 ```
 
-Then read the founder's public identity so it can be shared out-of-band:
+Then print the founder's one-paste pairing code and read the fingerprint aloud:
 
 ```bash
-devstrap devices recipient           # founder age recipient (X25519 public key)
-devstrap devices recipient --signing # founder Ed25519 signing public key
-devstrap devices recipient --workspace-id  # prints the workspace id (same value as `status`)
-devstrap devices recipient --fingerprint   # founder fingerprint — compare out-of-band during approval (P4-SEC-04)
-devstrap devices list                # the row whose trust state is `local` is the founder device id
+devstrap devices pairing-code        # stdout: devstrap-pair1:...; stderr: founder fingerprint + instructions
+devstrap devices recipient --fingerprint   # same founder fingerprint, useful for scripts/checks
 ```
 
-Share four **non-secret** values with the second device over any trusted out-of-band channel
-(the same channel you would use to confirm a device fingerprint): the **workspace id**, the
-founder's **device id**, its **age recipient**, and its **signing public key**. None of these
-are secrets — the age recipient and signing key are public keys, and the workspace id is a
-prefix selector — but the channel must have integrity so a MITM cannot substitute its own keys.
+Share the **non-secret** `devstrap-pair1:` blob with the second device, and read the
+fingerprint over a trusted channel. THE BLOB IS UNAUTHENTICATED BY DESIGN: it carries the
+workspace id, device id, display name, OS, arch, age recipient, and signing public key, but
+it carries no fingerprint and has no MAC/signature. Integrity comes from the fingerprint
+ceremony: the receiver derives the fingerprint from the carried keys and must compare it
+out-of-band before approval. Tampering with the carried keys changes the derived fingerprint
+and fails the ceremony.
 
 ### E.2 Joiner — adopt the id, then pin the founder before the first sync
 
-Run the id-adopting init **first** (this is also what makes `hub login` land in the right
-keychain slot — see E.3):
+Run the code-adopting init **first** (this is also what makes `hub login` land in the right
+keychain slot — see E.3). Pass the founder fingerprint you confirmed out-of-band:
 
 ```bash
-devstrap init ~/Code --join --workspace-id <workspace-id>   # born-correct: adopts the founder's id
+devstrap init ~/Code --join --code '<founder-code>' --fingerprint <founder-fingerprint>
 ```
 
+`--code` implies `--join`, adopts the founder's workspace id, and enrolls the founder row. With
+`--fingerprint`, a mismatch fails before any filesystem write. If you omit `--fingerprint` in an
+interactive terminal, DevStrap prints the derived fingerprint and asks for `yes`; without a TTY it
+keeps init scriptable by storing the founder as pending and printing the exact follow-up
+`devstrap devices approve <founder-device-id> --fingerprint <derived-fp>` command. Run that
+follow-up before the first `devstrap sync`.
+
+Manual fallback (still supported for docs/tests and recovery): use
+`devstrap init ~/Code --join --workspace-id <workspace-id>`, then pin the founder with
+`devstrap devices enroll <founder-device-id> --name <n> --os <os> --arch <arch>
+--age-recipient <rec> --signing-public-key <sig> --approve --fingerprint <fp>`.
 `--workspace-id` implies `--join`. A bare `devstrap init --join` (no id) still initializes, but
-warns that r2/s3 hubs key by workspace id — supply the id to actually converge.
-
-Pin the founder **before the first `devstrap sync`**, so fail-closed verification rejects any
-event or key grant from an unknown device during the joiner's bootstrap window (this closes the
-joiner half of the `P4-SEC-04` trust-on-first-use gap; `15_SECURITY_THREAT_MODEL.md`):
-
-```bash
-devstrap devices enroll <founder-device-id> \
-  --name founder --os macos --arch arm64 \
-  --age-recipient <founder-age-recipient> \
-  --signing-public-key <founder-signing-public-key> \
-  --approve --fingerprint <founder-fingerprint>
-```
-
-`--name`, `--os`, `--arch`, and `--age-recipient` are required; `--approve` additionally
-requires `--signing-public-key` so the founder's events can be signature-verified.
-
-> **Approval now requires fingerprint confirmation (`P4-SEC-04` part 1, interim note).**
-> `--approve` will not change trust state until the device's fingerprint is confirmed
-> out-of-band. Read the far device's `devstrap devices recipient --fingerprint` (or its
-> `devices list` row), compare it character-for-character over the same trusted channel you used
-> for the keys, and pass `--fingerprint <value>`. In an interactive terminal you may instead
-> omit the flag and type `yes` at the prompt; a non-interactive shell (no TTY) refuses with a
-> copy-paste `--fingerprint …` remedy. A full pairing-ceremony rewrite lands with the one-paste
-> pairing code (`P4-SEC-04` part 2).
+warns that r2/s3 hubs key by workspace id — supply the id (or a pairing code) to actually converge.
 
 <!-- MD028 separator between adjacent blockquotes -->
 
@@ -631,18 +618,19 @@ devstrap hub login   # store the R2/S3 secret — AFTER the id-adopting init in 
 
 ### E.4 Founder — approve the joiner, then both sync
 
-The joiner shares its own device id, age recipient, and signing public key back (same
-`devstrap devices recipient` / `devices list` reads as E.1). The founder enrolls and approves
-it — `--approve` wraps every held WCK epoch to the joiner's recipient (`GrantAllEpochs`), so
-the joiner can decrypt history:
+The joiner shares its own one-paste code back, and reads its fingerprint aloud:
+
+```bash
+# on the joiner
+devstrap devices pairing-code
+```
+
+The founder enrolls and approves it in one command — `--approve` wraps every held WCK epoch
+to the joiner's recipient (`GrantAllEpochs`), so the joiner can decrypt history:
 
 ```bash
 # on the founder
-devstrap devices enroll <joiner-device-id> \
-  --name laptop --os macos --arch arm64 \
-  --age-recipient <joiner-age-recipient> \
-  --signing-public-key <joiner-signing-public-key> \
-  --approve --fingerprint <joiner-fingerprint>   # confirm against `devices recipient --fingerprint` on the joiner
+devstrap devices enroll --code '<joiner-code>' --approve --fingerprint <joiner-fingerprint>
 devstrap sync        # pushes the device.key.granted events
 ```
 
@@ -704,4 +692,3 @@ client, err := hub.NewS3Client(ctx, hub.S3Config{
     Region:          region,
 })
 ```
-

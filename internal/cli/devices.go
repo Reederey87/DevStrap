@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
+	"github.com/Reederey87/DevStrap/internal/pairing"
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
 	"github.com/spf13/cobra"
@@ -24,6 +25,7 @@ func newDevicesCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Short: "Manage device trust state",
 	}
 	cmd.AddCommand(newDevicesListCommand(stdout, opts))
+	cmd.AddCommand(newDevicesPairingCodeCommand(stdout, opts))
 	cmd.AddCommand(newDeviceEnrollCommand(stdout, opts))
 	cmd.AddCommand(newDeviceTrustCommand(stdout, opts, "approve", "approved"))
 	cmd.AddCommand(newDeviceTrustCommand(stdout, opts, "revoke", "revoked"))
@@ -42,73 +44,61 @@ func newDeviceEnrollCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var approve bool
 	var allowEpochGap bool
 	var fingerprint string
+	var codeBlob string
 	cmd := &cobra.Command{
-		Use:   "enroll <device-id>",
+		Use:   "enroll [device-id]",
 		Short: "Enroll a remote device record",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			deviceID := ""
+			if len(args) == 1 {
+				deviceID = args[0]
+			}
+			if strings.TrimSpace(codeBlob) != "" {
+				if len(args) > 0 {
+					return appError{code: exitUsage, err: fmt.Errorf("--code carries the device id; drop the positional argument")}
+				}
+				for _, flag := range []string{"name", "os", "arch", "age-recipient", "signing-public-key"} {
+					if cmd.Flags().Changed(flag) {
+						return appError{code: exitUsage, err: fmt.Errorf("--code is mutually exclusive with the manual enrollment flags (--name/--os/--arch/--age-recipient/--signing-public-key)")}
+					}
+				}
+				decoded, err := pairing.Decode(codeBlob)
+				if err != nil {
+					return appError{code: exitInvalidConfig, err: err}
+				}
+				store, err := opts.openState(cmd.Context())
+				if err != nil {
+					return err
+				}
+				defer closeStore(store)
+				localWorkspaceID, err := store.WorkspaceID(cmd.Context())
+				if err != nil {
+					return err
+				}
+				if decoded.WorkspaceID != localWorkspaceID {
+					return appError{code: exitInvalidConfig, err: fmt.Errorf("pairing code is for workspace %s, but this store is %s; it was generated on a device from a different workspace", decoded.WorkspaceID, localWorkspaceID)}
+				}
+				deviceID = decoded.DeviceID
+				name = decoded.Name
+				osName = decoded.OS
+				arch = decoded.Arch
+				ageRecipient = decoded.AgeRecipient
+				signingPublicKey = decoded.SigningPublicKey
+				return runDeviceEnroll(cmd, stdout, opts, store, deviceID, name, osName, arch, ageRecipient, signingPublicKey, approve, allowEpochGap, fingerprint)
+			}
+			if len(args) == 0 {
+				return appError{code: exitUsage, err: fmt.Errorf("device id argument required (or use --code)")}
+			}
 			if name == "" || osName == "" || arch == "" || ageRecipient == "" {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("--name, --os, --arch, and --age-recipient are required")}
-			}
-			// SECU-05: require a signing public key when --approve is set so
-			// an approved device can never silently combine with the fail-open
-			// event verification path (SECU-03).
-			if approve && strings.TrimSpace(signingPublicKey) == "" {
-				return appError{code: exitInvalidConfig, err: fmt.Errorf("--approve requires --signing-public-key so the device's events can be signature-verified")}
-			}
-			trustState := "pending"
-			if approve {
-				trustState = "approved"
 			}
 			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
 			defer closeStore(store)
-			// P6-SEC-03: refuse to approve from an incomplete keyring — the
-			// grant set would inherit the gap and wedge the new device. Runs
-			// BEFORE any trust write so a refusal leaves no partial state, and
-			// BEFORE the fingerprint prompt so the operator is never asked to
-			// confirm an approval that will be refused anyway.
-			if approve && !allowEpochGap {
-				if err := checkEpochContiguity(cmd.Context(), store); err != nil {
-					return err
-				}
-			}
-			// P4-SEC-04: approving binds the device's keys into the trust set,
-			// so it must be gated on out-of-band fingerprint confirmation. The
-			// fingerprint is computed from the flag inputs (the keys being
-			// enrolled), never from the local keystore.
-			if approve {
-				if err := confirmDeviceFingerprint(cmd, args[0], signingPublicKey, ageRecipient, fingerprint); err != nil {
-					return err
-				}
-			}
-			device := state.Device{
-				ID:               args[0],
-				Name:             name,
-				OS:               osName,
-				Arch:             arch,
-				PublicKey:        strings.TrimSpace(ageRecipient),
-				SigningPublicKey: strings.TrimSpace(signingPublicKey),
-				TrustState:       trustState,
-			}
-			if err := store.UpsertDevice(cmd.Context(), device); err != nil {
-				return err
-			}
-			// P4-SEC-07: when --approve is set, grant every held WCK epoch to
-			// the newly-approved device so it can decrypt the namespace-map
-			// history on its first pull.
-			if approve {
-				grantWorkspaceKeyToApprovedDevice(cmd.Context(), cmd.ErrOrStderr(), opts, store, args[0])
-				// Events that arrived before enrollment were quarantined
-				// (auto-created pending placeholder / missing signing key);
-				// approving via enroll must replay them just like
-				// `devices approve` does.
-				replayQuarantinedEvents(cmd.Context(), cmd.ErrOrStderr(), opts, store, args[0])
-			}
-			_, err = fmt.Fprintf(stdout, "Device %s enrolled as %s\n", args[0], trustState)
-			return err
+			return runDeviceEnroll(cmd, stdout, opts, store, deviceID, name, osName, arch, ageRecipient, signingPublicKey, approve, allowEpochGap, fingerprint)
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "", "device display name")
@@ -119,7 +109,111 @@ func newDeviceEnrollCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().BoolVar(&approve, "approve", false, "mark the enrolled device approved immediately")
 	cmd.Flags().BoolVar(&allowEpochGap, "allow-epoch-gap", false, "approve even though this device's workspace keys are incomplete (the enrolled device will quarantine events at the missing epochs — and its open quarantine conflicts keep 'hub gc' refused on it — until re-approved from a complete device)")
 	cmd.Flags().StringVar(&fingerprint, "fingerprint", "", "with --approve: the device fingerprint confirmed out-of-band (see 'devstrap devices recipient --fingerprint' on that device); skips the interactive prompt")
+	cmd.Flags().StringVar(&codeBlob, "code", "", "one-paste pairing code from 'devstrap devices pairing-code'; with --approve --fingerprint, completes founder-side enrollment")
 	return cmd
+}
+
+func runDeviceEnroll(cmd *cobra.Command, stdout io.Writer, opts *options, store *state.Store, deviceID, name, osName, arch, ageRecipient, signingPublicKey string, approve, allowEpochGap bool, fingerprint string) error {
+	// SECU-05: require a signing public key when --approve is set so an
+	// approved device can never silently combine with the fail-open event
+	// verification path (SECU-03).
+	if approve && strings.TrimSpace(signingPublicKey) == "" {
+		return appError{code: exitInvalidConfig, err: fmt.Errorf("--approve requires --signing-public-key so the device's events can be signature-verified")}
+	}
+	trustState := "pending"
+	if approve {
+		trustState = "approved"
+	}
+	// P6-SEC-03: refuse to approve from an incomplete keyring — the grant set
+	// would inherit the gap and wedge the new device. Runs BEFORE any trust
+	// write so a refusal leaves no partial state, and BEFORE the fingerprint
+	// prompt so the operator is never asked to confirm an approval that will be
+	// refused anyway.
+	if approve && !allowEpochGap {
+		if err := checkEpochContiguity(cmd.Context(), store); err != nil {
+			return err
+		}
+	}
+	// P4-SEC-04: approving binds the device's keys into the trust set, so it
+	// must be gated on out-of-band fingerprint confirmation. The fingerprint
+	// is computed from the flag/code inputs (the keys being enrolled), never
+	// from the local keystore.
+	if approve {
+		if err := confirmDeviceFingerprint(cmd, deviceID, signingPublicKey, ageRecipient, fingerprint); err != nil {
+			return err
+		}
+	}
+	device := state.Device{
+		ID:               deviceID,
+		Name:             name,
+		OS:               osName,
+		Arch:             arch,
+		PublicKey:        strings.TrimSpace(ageRecipient),
+		SigningPublicKey: strings.TrimSpace(signingPublicKey),
+		TrustState:       trustState,
+	}
+	if err := store.UpsertDevice(cmd.Context(), device); err != nil {
+		return err
+	}
+	// P4-SEC-07: when --approve is set, grant every held WCK epoch to the
+	// newly-approved device so it can decrypt the namespace-map history on its
+	// first pull.
+	if approve {
+		grantWorkspaceKeyToApprovedDevice(cmd.Context(), cmd.ErrOrStderr(), opts, store, deviceID)
+		// Events that arrived before enrollment were quarantined (auto-created
+		// pending placeholder / missing signing key); approving via enroll must
+		// replay them just like `devices approve` does.
+		replayQuarantinedEvents(cmd.Context(), cmd.ErrOrStderr(), opts, store, deviceID)
+	}
+	_, err := fmt.Fprintf(stdout, "Device %s enrolled as %s\n", deviceID, trustState)
+	return err
+}
+
+func newDevicesPairingCodeCommand(stdout io.Writer, opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "pairing-code",
+		Short: "Print this device's one-paste pairing code",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := opts.openState(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer closeStore(store)
+			dev, err := store.CurrentDevice(cmd.Context())
+			if err != nil {
+				return err
+			}
+			workspaceID, err := store.WorkspaceID(cmd.Context())
+			if err != nil {
+				return err
+			}
+			if dev.PublicKey == "" || dev.SigningPublicKey == "" {
+				return appError{code: exitInvalidConfig, err: fmt.Errorf("local device is missing keys; run devstrap init")}
+			}
+			blob, err := pairing.Encode(pairing.Code{
+				WorkspaceID:      workspaceID,
+				DeviceID:         dev.ID,
+				Name:             dev.Name,
+				OS:               dev.OS,
+				Arch:             dev.Arch,
+				AgeRecipient:     dev.PublicKey,
+				SigningPublicKey: dev.SigningPublicKey,
+			})
+			if err != nil {
+				return err
+			}
+			fp, err := devicekeys.Fingerprint(dev.SigningPublicKey, dev.PublicKey)
+			if err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(stdout, blob); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.ErrOrStderr(), "Pairing code printed to stdout. On the other device run:\n  devstrap init --join --code '<paste>'      # first device setup\n  devstrap devices enroll --code '<paste>' --approve --fingerprint <this device's fingerprint>\nThis device's fingerprint (read it aloud over a trusted channel; the approver must confirm it):\n  %s\n", fp)
+			return err
+		},
+	}
 }
 
 func newDevicesListCommand(stdout io.Writer, opts *options) *cobra.Command {

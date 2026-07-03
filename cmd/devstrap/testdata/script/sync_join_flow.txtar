@@ -27,23 +27,22 @@ exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/a-proj $WORK
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
 stdout 'pushed 1'
 
-# Device B (joiner): init --join --workspace-id <founder id>, add a project,
-# then sync BEFORE being approved. The id is copied from the founder
-# (P4-SEC-07 pairing: r2/s3 hubs key by workspace id; on the flat file hub the
-# flag is inert, which this flow proves by staying green end-to-end).
-exec sh -c 'WS=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --workspace-id); devstrap --home=$WORK/homeB --root=$WORK/CodeB init --join --workspace-id "$WS"'
+# Device B (joiner): init --join --code <founder code>, add a project,
+# then sync BEFORE being approved. The one-paste code carries the founder's
+# workspace id and keys; the fingerprint is still scraped separately and
+# compared out-of-band.
+exec sh -c 'CODE=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices pairing-code 2>/dev/null); AFP=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --fingerprint); devstrap --home=$WORK/homeB --root=$WORK/CodeB init --join --code "$CODE" --fingerprint "$AFP"'
 stdout 'Adopted workspace id ws_'
 stdout 'Joining an existing workspace'
 
 # Both stores now report the same workspace id.
 exec sh -c 'test "$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --workspace-id)" = "$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --workspace-id)"'
 
-# B pins the founder BEFORE its first sync (P4-SEC-04 joiner half): approving
-# A's keys on keyless B grants nothing (joiner never self-mints) but flips
-# verification fail-closed, closing B's TOFU bootstrap window pre-sync.
-exec sh -c 'A_ID=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices list | awk "NR==1{print \$1}"); AREC=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient); ASIG=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --signing); AFP=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --fingerprint); devstrap --home=$WORK/homeB --root=$WORK/CodeB devices enroll "$A_ID" --name a --os linux --arch arm64 --age-recipient "$AREC" --signing-public-key "$ASIG" --approve --fingerprint "$AFP"'
-stdout 'enrolled as approved'
-stderr 'nothing was granted'
+# B already pinned the founder during init --join --code. Because B is keyless,
+# that approval grants nothing (joiner never self-mints) but flips verification
+# fail-closed, closing B's TOFU bootstrap window pre-sync.
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB devices list
+stdout 'approved'
 
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB add --path work/b-proj $WORK/remoteB.git
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
@@ -54,9 +53,10 @@ stdout 'pushed 0'
 # The joiner must NOT have pushed b-proj to the hub (in any form) yet.
 ! grep 'b-proj' $WORK/hub.json
 
-# Enroll + approve B on A under B's REAL device id (so A can verify B's signed
-# events, not just decrypt the grant addressed to B's recipient).
-exec sh -c 'B_ID=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices list | awk "NR==1{print \$1}"); REC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); SIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); FP=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --fingerprint); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll "$B_ID" --name b --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve --fingerprint "$FP"'
+# Enroll + approve B on A under B's REAL device id via B's one-paste code (so A
+# can verify B's signed events, not just decrypt the grant addressed to B's
+# recipient).
+exec sh -c 'BCODE=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices pairing-code 2>/dev/null); BFP=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --fingerprint); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll --code "$BCODE" --approve --fingerprint "$BFP"'
 stdout 'enrolled as approved'
 
 # A syncs to publish the grant events.
