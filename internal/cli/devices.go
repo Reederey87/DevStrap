@@ -101,7 +101,7 @@ func newDeviceEnrollCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&ageRecipient, "age-recipient", "", "device age recipient public key")
 	cmd.Flags().StringVar(&signingPublicKey, "signing-public-key", "", "device Ed25519 signing public key")
 	cmd.Flags().BoolVar(&approve, "approve", false, "mark the enrolled device approved immediately")
-	cmd.Flags().BoolVar(&allowEpochGap, "allow-epoch-gap", false, "approve even though this device's workspace keys are incomplete (the enrolled device will quarantine events at the missing epochs until re-approved from a complete device)")
+	cmd.Flags().BoolVar(&allowEpochGap, "allow-epoch-gap", false, "approve even though this device's workspace keys are incomplete (the enrolled device will quarantine events at the missing epochs — and its open quarantine conflicts keep 'hub gc' refused on it — until re-approved from a complete device)")
 	return cmd
 }
 
@@ -225,7 +225,7 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 		cmd.Flags().StringVar(&hubFile, "hub-file", "", "file-backed test hub path; when set, old ciphertext is deleted from the hub on rewrap")
 	}
 	if trustState == "approved" {
-		cmd.Flags().BoolVar(&allowEpochGap, "allow-epoch-gap", false, "approve even though this device's workspace keys are incomplete (the approved device will quarantine events at the missing epochs until re-approved from a complete device)")
+		cmd.Flags().BoolVar(&allowEpochGap, "allow-epoch-gap", false, "approve even though this device's workspace keys are incomplete (the approved device will quarantine events at the missing epochs — and its open quarantine conflicts keep 'hub gc' refused on it — until re-approved from a complete device)")
 	}
 	return cmd
 }

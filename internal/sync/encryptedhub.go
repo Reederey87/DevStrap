@@ -292,8 +292,10 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 				// that the real grant's RecordKeyEpoch never clears (post-#55
 				// Codex review, P2).
 				if h.missingKeyGraceExpired(ctx, env.Epoch, "") {
+					// kid_hint: the envelope's unauthenticated routing hint —
+					// logged for diagnostics only; the wait above is epoch-level.
 					logging.Logger(ctx).Warn("encrypted hub pull: key grant grace expired; forwarding never-granted event for quarantine",
-						"epoch", env.Epoch, "kid", env.KID, "event_id", event.ID)
+						"epoch", env.Epoch, "kid_hint", env.KID, "event_id", event.ID)
 					if h.Stats != nil {
 						h.Stats.Undecryptable++
 					}
@@ -301,7 +303,7 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 					continue
 				}
 				logging.Logger(ctx).Info("encrypted hub pull: awaiting workspace key grant; deferring remaining events",
-					"epoch", env.Epoch, "kid", env.KID, "event_id", event.ID)
+					"epoch", env.Epoch, "kid_hint", env.KID, "event_id", event.ID)
 				if h.Stats != nil {
 					h.Stats.Truncated = len(raw) - i
 				}
