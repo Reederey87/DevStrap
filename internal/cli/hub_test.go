@@ -11,6 +11,7 @@ import (
 
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/platform"
+	"github.com/Reederey87/DevStrap/internal/redact"
 	"github.com/spf13/viper"
 )
 
@@ -292,5 +293,72 @@ func TestHubLoginRefusesOpRef(t *testing.T) {
 	err := cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "op://") {
 		t.Fatalf("hub login with op:// secret: err = %v, want refusal", err)
+	}
+}
+
+// TestResolveHubS3CredentialsOpSecretWithStoredKeyID (post-#45 review Major,
+// gpt-5.5): an op:// secret must NOT short-circuit the keychain fill for the
+// access key id — the "hub login stored key id + rotated op:// secret"
+// combination the resolver's contract promises.
+func TestResolveHubS3CredentialsOpSecretWithStoredKeyID(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	stubOp(t, `printf 'rotated-op-secret'`)
+	opts := newHubCredOptions(t)
+	keys := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain)
+	if _, err := keys.StoreHubS3Credentials(context.Background(), "ws_test", devicekeys.HubS3Credentials{
+		AccessKeyID: "AKIASTORED", SecretAccessKey: "old-stored-secret",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	opts.v.Set("hub_s3_secret_access_key", "op://vault/item/rotated")
+
+	creds, err := resolveHubS3Credentials(context.Background(), opts, "ws_test")
+	if err != nil {
+		t.Fatalf("resolveHubS3Credentials: %v", err)
+	}
+	if creds.accessKeyID != "AKIASTORED" {
+		t.Errorf("accessKeyID = %q, want the stored AKIASTORED (op:// secret must not skip the keychain fill)", creds.accessKeyID)
+	}
+	if got := creds.secret.Reveal(); got != "rotated-op-secret" {
+		t.Errorf("secret = %q, want the op-resolved value (explicit env wins over stored)", got)
+	}
+}
+
+// TestResolveHubS3CredentialsOpSecretMissingKeyID: op:// secret with no access
+// key id anywhere must fail with the crafted two-remedy error, not return
+// half-empty credentials.
+func TestResolveHubS3CredentialsOpSecretMissingKeyID(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+	stubOp(t, `printf 'resolved-op-secret'`)
+	opts := newHubCredOptions(t)
+	opts.v.Set("hub_s3_secret_access_key", "op://vault/item/secret-key")
+
+	_, err := resolveHubS3Credentials(context.Background(), opts, "ws_test")
+	if err == nil || !strings.Contains(err.Error(), "DEVSTRAP_HUB_S3_ACCESS_KEY_ID") || !strings.Contains(err.Error(), "devstrap hub login") {
+		t.Fatalf("err = %v, want the two-remedy no-credentials error", err)
+	}
+}
+
+// TestHubS3CredsNeverFormatsSecret (post-#45 review, gpt-5.5): fmt cannot
+// dispatch a Stringer on an UNEXPORTED struct field, so without hubS3Creds's
+// own String/GoString/LogValue a %+v would dump the raw secret. Pin every
+// common formatting path.
+func TestHubS3CredsNeverFormatsSecret(t *testing.T) {
+	creds := hubS3Creds{accessKeyID: "AKIAFMT", secret: redact.New("super-secret-value"), source: "env/config"}
+	for _, s := range []string{
+		fmt.Sprint(creds),
+		fmt.Sprintf("%v", creds),
+		fmt.Sprintf("%+v", creds),
+		fmt.Sprintf("%#v", creds),
+		creds.String(),
+	} {
+		if strings.Contains(s, "super-secret-value") {
+			t.Fatalf("formatting leaked the secret: %q", s)
+		}
+		if !strings.Contains(s, "AKIAFMT") {
+			t.Fatalf("formatting lost the non-secret fields: %q", s)
+		}
 	}
 }

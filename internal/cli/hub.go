@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
@@ -134,11 +135,25 @@ func selectBackendHub(ctx context.Context, opts *options, store *state.Store, hu
 // hubS3Creds is a resolved hub credential pair (P6-HUB-02). The secret is
 // wrapped in redact.Secret from the moment it is resolved; the single Reveal()
 // is the hub.NewS3Client call in selectBackendHub.
+//
+// NOTE: redact.Secret's own Stringer does NOT protect this struct — Go's
+// reflection-based fmt cannot dispatch a Stringer on an UNEXPORTED field, so
+// `%+v` of a bare hubS3Creds would dump the raw secret. The String/GoString/
+// LogValue methods below exist to close exactly that hole; never print the
+// struct through any other path (post-#45 review, gpt-5.5).
 type hubS3Creds struct {
 	accessKeyID string
 	secret      redact.Secret
 	source      string // "env/config", "op", or "keychain" — logged, never the values
 }
+
+func (c hubS3Creds) String() string {
+	return fmt.Sprintf("hubS3Creds{accessKeyID:%s, secret:%s, source:%s}", c.accessKeyID, redact.Placeholder, c.source)
+}
+
+func (c hubS3Creds) GoString() string { return c.String() }
+
+func (c hubS3Creds) LogValue() slog.Value { return slog.StringValue(c.String()) }
 
 // resolveHubS3Credentials resolves the S3/R2 credential pair for the hub
 // (P6-HUB-02). Resolution order, most explicit first:
@@ -172,15 +187,24 @@ func resolveHubS3Credentials(ctx context.Context, opts *options, workspaceID str
 		accessKeyID = resolved.Reveal()
 		source = "op"
 	}
+	// The secret is carried as redact.Secret from the moment it is known; the
+	// op:// branch must NOT return early — the keychain fill for a missing
+	// access key id and the final validation below apply to every path
+	// (post-#45 review Major, gpt-5.5: the early return silently broke the
+	// keychain-access-key + op://-secret combination and skipped the
+	// two-remedy error).
+	var resolvedSecret redact.Secret
 	if strings.HasPrefix(secret, "op://") {
 		resolved, err := resolveOpRef(ctx, secret)
 		if err != nil {
 			return hubS3Creds{}, fmt.Errorf("resolve hub s3 secret access key: %w", err)
 		}
+		resolvedSecret = resolved
 		source = "op"
-		return hubS3Creds{accessKeyID: accessKeyID, secret: resolved, source: source}, nil
+	} else if secret != "" {
+		resolvedSecret = redact.New(secret)
 	}
-	if secret == "" || accessKeyID == "" {
+	if resolvedSecret.IsZero() || accessKeyID == "" {
 		stored, err := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain).
 			LoadHubS3Credentials(ctx, workspaceID)
 		switch {
@@ -188,18 +212,18 @@ func resolveHubS3Credentials(ctx context.Context, opts *options, workspaceID str
 			if accessKeyID == "" {
 				accessKeyID = stored.AccessKeyID
 			}
-			if secret == "" {
-				secret = stored.SecretAccessKey
+			if resolvedSecret.IsZero() && stored.SecretAccessKey != "" {
+				resolvedSecret = redact.New(stored.SecretAccessKey)
 				source = "keychain"
 			}
 		case !errors.Is(err, os.ErrNotExist):
 			return hubS3Creds{}, fmt.Errorf("load stored hub s3 credentials: %w", err)
 		}
 	}
-	if secret == "" || accessKeyID == "" {
+	if resolvedSecret.IsZero() || accessKeyID == "" {
 		return hubS3Creds{}, fmt.Errorf("no hub S3 credentials: set DEVSTRAP_HUB_S3_ACCESS_KEY_ID and DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY (values may be 1Password op:// refs), or store them once with 'devstrap hub login' (see spec/19_CLOUD_PROVISIONING_GUIDE.md)")
 	}
-	return hubS3Creds{accessKeyID: accessKeyID, secret: redact.New(secret), source: source}, nil
+	return hubS3Creds{accessKeyID: accessKeyID, secret: resolvedSecret, source: source}, nil
 }
 
 // opReadTimeout bounds a single `op read` credential resolution, long enough

@@ -39,8 +39,11 @@ Changed:
 Validated:
 - `gofmt`; `golangci-lint run` (0 issues); `GOCACHE=/tmp/devstrap-gocache go test -race ./...` (all green: resolution-order table incl. PATH-shim fake `op`, login/logout round-trip under `DEVSTRAP_NO_KEYCHAIN`, devicekeys file round-trip + 0600 mode + path-hostile refusal, `mapS3Error` auth rows); `go run ./cmd/spec-drift --base origin/main --head HEAD` after commit.
 
+- Dual-review fixes (gpt-5.5): (1) the op:// secret branch no longer returns early — it falls through to the keychain fill and final validation, so a `hub login`-stored access key id pairs with a rotated op:// secret and a missing key id gets the two-remedy error (pinned by `TestResolveHubS3CredentialsOpSecretWithStoredKeyID`/`...MissingKeyID`); (2) `hubS3Creds` gained String/GoString/LogValue — fmt cannot dispatch a Stringer on an unexported field, so a bare `%+v` would have dumped the raw secret (pinned by `TestHubS3CredsNeverFormatsSecret`); (3) the SECR-04 fail-closed property (hard keychain failure errors instead of falling to file) now has its first real test, `TestHubS3CredentialsHardKeychainFailureFailsClosed`, which also pins the pre-existing stale-file-preferred residual. CodeRabbit: `op read` bounded (60s + WaitDelay), spec/13/19 wording reconciled.
+
 Follow-ups:
 - Live two-machine R2 dogfood using `hub login` against the registered bucket (wave close-out); hosted-mode temporary prefix-scoped credentials remain `P4-SEC-08`.
+- Review-noted UX follow-ups (non-blocking): TTY paste-both-lines can strand the secret between the bufio reader and `term.ReadPassword` (real-terminal path, untestable in CI); `run-loop` preflight (`hubConfigured`) validates hub shape but not credential resolvability, so a broken credential surfaces on the first tick rather than at preflight; single-line piped `hub login` without `--access-key-id` consumes the line as the key id.
 ## 2026-07-03 — P6-QUAL-03: run the MinIO hub conformance test in CI (R2 go-live wave)
 
 Changed:
