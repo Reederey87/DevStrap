@@ -216,7 +216,7 @@ Future:
 For device identity and personal encryption keys:
 
 - target: store device private key in macOS Keychain;
-- current CLI foundation: store private age and Ed25519 signing identities through the platform keychain adapter, using macOS Keychain when available and `~/.devstrap/keys` with mode `0600` as a fallback, while persisting only public keys in SQLite;
+- current CLI foundation: store private age and Ed25519 signing identities through the platform keychain adapter, using macOS Keychain when available and `~/.devstrap/keys` with mode `0600` as a fallback, while persisting only public keys in SQLite; the keychain-vs-file choice is a typed, recorded custody decision made once at init and honored thereafter, and the mint paths never generate a divergent identity over an already-published key or an unreachable keychain (`P6-XP-04`, see `spec/09`);
 - store encrypted env bundles in Hub/local cache;
 - decrypt only on approved device;
 - never log secret values.

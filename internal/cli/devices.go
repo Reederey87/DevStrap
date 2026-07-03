@@ -530,7 +530,7 @@ func replayQuarantinedEvents(ctx context.Context, stderr io.Writer, opts *option
 			var grant dssync.DeviceKeyGrant
 			if err := json.Unmarshal([]byte(replay.event.PayloadJSON), &grant); err != nil {
 				_, _ = fmt.Fprintf(stderr, "warning: could not decode replayed grant %s: %v\n", replay.event.ID, err)
-			} else if err := buildKeyring(opts, store).IngestGrant(ctx, grant); err != nil {
+			} else if err := buildKeyring(ctx, opts, store).IngestGrant(ctx, grant); err != nil {
 				_, _ = fmt.Fprintf(stderr, "warning: could not ingest replayed grant %s (epoch %d): %v\n", replay.event.ID, grant.Epoch, err)
 			}
 		}
@@ -718,7 +718,7 @@ func grantWorkspaceKeyToApprovedDevice(ctx context.Context, stderr io.Writer, op
 		_, _ = fmt.Fprintf(stderr, "warning: device %s has no age recipient; cannot grant workspace key\n", deviceID)
 		return
 	}
-	kr := buildKeyring(opts, store)
+	kr := buildKeyring(ctx, opts, store)
 	if epoch, _ := kr.CurrentEpoch(ctx); epoch == 0 {
 		// P6-SEC-02: found defensively ONLY for a founder. A joining device that
 		// has not yet been granted the fleet WCK must never self-mint one here —
@@ -756,7 +756,7 @@ func grantWorkspaceKeyToApprovedDevice(ctx context.Context, stderr io.Writer, op
 // revoked device is excluded because its trust_state was just changed. Skipped
 // silently if no epoch was ever bootstrapped. Warnings go to stderr.
 func rotateWorkspaceKeyOnRevoke(ctx context.Context, stderr io.Writer, opts *options, store *state.Store) {
-	kr := buildKeyring(opts, store)
+	kr := buildKeyring(ctx, opts, store)
 	epoch, err := kr.CurrentEpoch(ctx)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "warning: workspace key rotation skipped: %v\n", err)

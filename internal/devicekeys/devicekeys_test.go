@@ -3,10 +3,13 @@ package devicekeys
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Reederey87/DevStrap/internal/platform"
 )
 
 type memorySecretBackend struct {
@@ -128,7 +131,7 @@ func TestHybridStorePrefersSecretBackend(t *testing.T) {
 	dir := t.TempDir()
 	backend := &memorySecretBackend{}
 	store := NewHybridStore(dir, backend)
-	identity, created, err := store.Ensure(t.Context(), "dev_test")
+	identity, created, err := store.Ensure(t.Context(), "dev_test", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +141,7 @@ func TestHybridStorePrefersSecretBackend(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "dev_test.agekey")); !os.IsNotExist(err) {
 		t.Fatalf("file identity err = %v, want no file when keychain backend succeeds", err)
 	}
-	again, created, err := store.Ensure(t.Context(), "dev_test")
+	again, created, err := store.Ensure(t.Context(), "dev_test", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,14 +149,14 @@ func TestHybridStorePrefersSecretBackend(t *testing.T) {
 		t.Fatalf("second ensure = %+v created=%v, want existing %+v", again, created, identity)
 	}
 
-	signing, created, err := store.EnsureSigning(t.Context(), "dev_test")
+	signing, created, err := store.EnsureSigning(t.Context(), "dev_test", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !created {
 		t.Fatal("signing created = false, want true")
 	}
-	signingAgain, created, err := store.EnsureSigning(t.Context(), "dev_test")
+	signingAgain, created, err := store.EnsureSigning(t.Context(), "dev_test", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,8 +167,8 @@ func TestHybridStorePrefersSecretBackend(t *testing.T) {
 
 func TestHybridStoreFallsBackToFileStore(t *testing.T) {
 	dir := t.TempDir()
-	store := NewHybridStore(dir, &memorySecretBackend{err: errors.New("unsupported keychain")})
-	identity, created, err := store.Ensure(t.Context(), "dev_test")
+	store := NewHybridStore(dir, &memorySecretBackend{err: fmt.Errorf("%w: unsupported keychain", platform.ErrUnsupported)})
+	identity, created, err := store.Ensure(t.Context(), "dev_test", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +182,7 @@ func TestHybridStoreFallsBackToFileStore(t *testing.T) {
 	if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("fallback identity permissions = %s, want 0600", got)
 	}
-	again, created, err := store.Ensure(t.Context(), "dev_test")
+	again, created, err := store.Ensure(t.Context(), "dev_test", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,7 +294,7 @@ func TestFileStoreWCKRoundTripWithKID(t *testing.T) {
 func TestHybridStoreWCKFallsBackToFile(t *testing.T) {
 	// A keychain backend that reports "unsupported" triggers the file fallback
 	// (mirrors DEVSTRAP_NO_KEYCHAIN=1 -> platform.UnsupportedKeychain).
-	backend := &memorySecretBackend{err: errors.New("keyring: unsupported platform")}
+	backend := &memorySecretBackend{err: fmt.Errorf("%w: keyring unsupported platform", platform.ErrUnsupported)}
 	store := NewHybridStore(t.TempDir(), backend)
 	wck := []byte("0123456789abcdef0123456789abcdef")
 	if err := store.StoreWCK(t.Context(), "ws_test", 3, "", wck); err != nil {
@@ -307,7 +310,7 @@ func TestHybridStoreWCKFallsBackToFile(t *testing.T) {
 }
 
 func TestHybridStoreWCKFallsBackToFileWithKID(t *testing.T) {
-	backend := &memorySecretBackend{err: errors.New("keyring: unsupported platform")}
+	backend := &memorySecretBackend{err: fmt.Errorf("%w: keyring unsupported platform", platform.ErrUnsupported)}
 	store := NewHybridStore(t.TempDir(), backend)
 	wck := []byte("0123456789abcdef0123456789abcdef")
 	const kid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -414,8 +417,9 @@ func TestHubS3CredentialsFileRoundTrip(t *testing.T) {
 }
 
 // hardFailBackend is a SecretBackend whose every operation fails with an
-// error keychainUnavailable() does NOT recognize — a genuine hard failure
-// (e.g. a locked or corrupted keychain), not an absent one.
+// untyped error the custody classifier does NOT treat as unavailable (neither
+// platform.ErrSecretNotFound nor ErrUnsupported) — a genuine hard failure
+// (e.g. a locked or corrupted keychain), not an absent or unreachable one.
 type hardFailBackend struct{}
 
 func (hardFailBackend) Store(context.Context, string, string, []byte) error {

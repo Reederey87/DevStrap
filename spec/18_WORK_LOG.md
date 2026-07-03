@@ -27,6 +27,23 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — typed keychain custody + never mint over a published identity (P6-XP-04)
+
+Changed:
+- `internal/platform/platform.go`: `mapKeyringError` now classifies untyped godbus/Secret-Service-unreachable errors (dead session bus) as `ErrUnsupported` via a new `secretServiceUnreachable` needle set — the substring recognition moved DOWN to the layer closest to go-keyring, so higher layers rely only on typed sentinels. (Deviation from the audit's step 2, which said keep the substring cases in `devicekeys`; moving them to `platform` is strictly better and still keeps the headless file fallback working.)
+- `internal/devicekeys/devicekeys.go`: replaced the `err.Error()` substring heuristic with `errors.Is` against `platform.ErrUnsupported`/`ErrSecretNotFound`; added `Custody` (`keychain`/`file`/unset) with `WithCustody`/`Probe`; `Ensure`/`EnsureSigning` now take the device's published public key and refuse to mint a divergent identity when the keychain is unreachable or a key is already published but its private half is absent (`mintGuard`); unified read/store through `resolveSecret`/`storeSecretCustody` that honor custody (keychain custody fails closed, file custody skips the keychain, legacy/unset preserves today's fallback); `LoadWCK`/`StoreWCK` inherit the same guards; new exported `ErrKeychainUnreachable`.
+- `internal/state`: migration `00019_local_meta.sql` (local, never-synced KV); `KeyCustody`/`RecordKeyCustody` (write-once) + `EffectiveKeyCustody` (DEVSTRAP_NO_KEYCHAIN override); `ensureLocalEventSignature` threads the published signing key + recorded custody into `EnsureSigning`.
+- `internal/cli`: `resolveKeyStore` is side-effect-free (reads recorded custody + NO_KEYCHAIN override); recording happens once, at init, via `recordKeyCustodyAtInit`, and only from *safe evidence* — `file` on NO_KEYCHAIN, `keychain` on a positive probe, and `file` from an unreachable probe ONLY for a genuine first init (no already-published keys). An unreachable probe on an already-initialized store records nothing and stays unset (fixes a wedge where a pre-`00016` keychain-only store, first run headless, would strand later desktop runs). `buildKeyring`, doctor, init, and the env/blob_gc/materialize/run reads plus the hub-cred slot all thread the recorded custody through custody-aware stores; new `doctor` `key custody` row.
+- Specs: `spec/09` key-custody model + SECR-04 refinement; `spec/15` split-custody-wedge threat (mitigated) + custody status; `spec/06` P6-XP-04 marked shipped with the platform-layer deviation called out + headless note; `spec/05` custody one-liner; `spec/13` doctor row; `spec/12` migration `00016` + schema version 16.
+
+Validated:
+- `gofmt -w cmd internal`; `golangci-lint run` (0 issues, fresh cache); `go test -race ./...` (all green).
+- New tests: `internal/devicekeys/custody_test.go` (typed not-found mints; unreachable+published refuses with remedy and writes no file; keychain-custody fails closed; unset+unreachable+nothing-published preserves file fallback; untyped error fails closed; `Probe` classification); `internal/platform` `TestMapKeyringErrorClassification` (dbus→ErrUnsupported, hard error stays untyped); `internal/state/custody_wedge_test.go` (headless dead-D-Bus regression through `InsertLocalEvent` — refusal + no divergent key file; custody write-once round-trip; NO_KEYCHAIN override); `internal/cli` init-records-file-custody-under-NO_KEYCHAIN + doctor custody row, `TestRecordKeyCustodyAtInitNeverStrandsAnAlreadyInitializedStore` (headless init on an already-initialized store stays unset, no file recorded/written), `TestRecordedFileCustodyNeverConsultsKeychain` (file custody reads the file key, a stale keychain entry never shadows it).
+- Dual-review fixes (Codex P2s): (P2-1) recording moved out of `resolveKeyStore` into `recordKeyCustodyAtInit`, gated so a mere unreachable probe never records `file` on an already-initialized store; (P2-2) `devstrap run`'s env decrypt now threads the recorded custody through `resolveKeyStore`; and the hub-credential slot (`resolveHubS3Credentials`/login/logout) now threads recorded custody too — the only other unstamped construction site found.
+
+Follow-ups:
+- Live Linux Secret Service integration under a real `service install` daemon (`XP-03`) remains the standing coverage gap; the recorded custody decision is the prerequisite that is now in place.
+
 ## 2026-07-03 — fix(sync): durable, classified pull-drop records (P6-SYNC-02 residual)
 
 Changed:

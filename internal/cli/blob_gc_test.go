@@ -159,7 +159,7 @@ func TestRewrapDraftBlobRecordsOriginSupersedingSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, _, err := devicekeys.NewHybridStore(paths.KeyDir(), platform.Detect().Keychain).Ensure(ctx, device.ID)
+	identity, _, err := devicekeys.NewHybridStore(paths.KeyDir(), platform.Detect().Keychain).Ensure(ctx, device.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -162,7 +162,7 @@ func TestInitStatusAndDBCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stdout = %q stderr = %q err = %v", stdout, stderr, err)
 	}
-	if !strings.Contains(stdout, "schema version: 18") || !strings.Contains(stdout, "sqlite quick_check: ok") || !strings.Contains(stdout, "sqlite foreign_key_check: ok") {
+	if !strings.Contains(stdout, "schema version: 19") || !strings.Contains(stdout, "sqlite quick_check: ok") || !strings.Contains(stdout, "sqlite foreign_key_check: ok") {
 		t.Fatalf("stdout = %q, want db status", stdout)
 	}
 	syncHubPath := filepath.Join(t.TempDir(), "hub.json")
@@ -245,6 +245,11 @@ func TestInitStatusAndDBCommands(t *testing.T) {
 	// device-key and DB-integrity checks present and zero errors.
 	if !strings.Contains(stdout, "foreign_key_check") || !strings.Contains(stdout, "device key") || !strings.Contains(stdout, "device signing key") {
 		t.Fatalf("doctor stdout = %q, want device key + db checks present", stdout)
+	}
+	// P6-XP-04: doctor reports the recorded key-custody backend. TestMain uses a
+	// reachable mock keyring, so init records and honors keychain custody.
+	if !strings.Contains(stdout, "key custody") || !strings.Contains(stdout, "keychain") {
+		t.Fatalf("doctor stdout = %q, want a key custody row reporting keychain", stdout)
 	}
 	if !strings.Contains(stdout, "0 error(s)") {
 		t.Fatalf("doctor stdout = %q, want 0 errors on a healthy workspace", stdout)

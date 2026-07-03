@@ -2452,7 +2452,21 @@ func (tx *Tx) ensureLocalEventSignature(ctx context.Context, keyDir string, even
 	if event.DeviceSig != "" {
 		return nil
 	}
-	signing, _, err := devicekeys.NewHybridStore(keyDir, platform.Detect().Keychain).EnsureSigning(ctx, event.DeviceID)
+	// Thread the device's already-published signing public key and the recorded
+	// key-custody decision into EnsureSigning so it never mints a divergent key
+	// when the keychain is merely unreachable (P6-XP-04). Both are read from the
+	// same transaction that will persist the event.
+	publishedPub, err := tx.deviceSigningPublicKey(ctx, event.DeviceID)
+	if err != nil {
+		return err
+	}
+	custody, err := tx.keyCustody(ctx)
+	if err != nil {
+		return err
+	}
+	keyStore := devicekeys.NewHybridStore(keyDir, platform.Detect().Keychain).
+		WithCustody(EffectiveKeyCustody(custody))
+	signing, _, err := keyStore.EnsureSigning(ctx, event.DeviceID, publishedPub)
 	if err != nil {
 		return fmt.Errorf("ensure local event signing identity: %w", err)
 	}
@@ -2485,6 +2499,87 @@ WHERE id = ? AND (signing_public_key IS NULL OR signing_public_key = ?);
 		return fmt.Errorf("device signing public key mismatch")
 	}
 	return nil
+}
+
+// keyCustodyMetaKey names the local_meta row that records this machine's key
+// custody backend (P6-XP-04).
+const keyCustodyMetaKey = "key_custody"
+
+// deviceSigningPublicKey returns the device's already-published signing public
+// key, or "" if none is recorded yet, read within the current transaction.
+func (tx *Tx) deviceSigningPublicKey(ctx context.Context, deviceID string) (string, error) {
+	var pub string
+	err := tx.tx.QueryRowContext(ctx, `
+SELECT COALESCE(signing_public_key, '')
+FROM devices
+WHERE id = ?;
+`, deviceID).Scan(&pub)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read device signing public key: %w", err)
+	}
+	return pub, nil
+}
+
+// keyCustody reads the recorded key-custody decision within the transaction,
+// returning devicekeys.CustodyUnset when none has been recorded (a
+// pre-P6-XP-04 store).
+func (tx *Tx) keyCustody(ctx context.Context) (devicekeys.Custody, error) {
+	var v string
+	err := tx.tx.QueryRowContext(ctx, `SELECT value FROM local_meta WHERE key = ?;`, keyCustodyMetaKey).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return devicekeys.CustodyUnset, nil
+	}
+	if err != nil {
+		return devicekeys.CustodyUnset, fmt.Errorf("read key custody: %w", err)
+	}
+	return devicekeys.Custody(v), nil
+}
+
+// KeyCustody reports the recorded key-custody backend, or
+// devicekeys.CustodyUnset when init has not recorded one yet (P6-XP-04).
+func (s *Store) KeyCustody(ctx context.Context) (devicekeys.Custody, error) {
+	var v string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM local_meta WHERE key = ?;`, keyCustodyMetaKey).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return devicekeys.CustodyUnset, nil
+	}
+	if err != nil {
+		return devicekeys.CustodyUnset, fmt.Errorf("read key custody: %w", err)
+	}
+	return devicekeys.Custody(v), nil
+}
+
+// RecordKeyCustody records the key-custody decision once (P6-XP-04). A decision
+// already on disk is left untouched — custody is chosen at init and honored
+// thereafter, never silently rewritten.
+func (s *Store) RecordKeyCustody(ctx context.Context, c devicekeys.Custody) error {
+	if c != devicekeys.CustodyKeychain && c != devicekeys.CustodyFile {
+		return fmt.Errorf("invalid key custody %q", c)
+	}
+	now := timestampNow()
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO local_meta (key, value, updated_at)
+VALUES (?, ?, ?)
+ON CONFLICT(key) DO NOTHING;
+`, keyCustodyMetaKey, string(c), now)
+	if err != nil {
+		return fmt.Errorf("record key custody: %w", err)
+	}
+	return nil
+}
+
+// EffectiveKeyCustody applies the DEVSTRAP_NO_KEYCHAIN override to a recorded
+// custody decision: when set, file custody is forced regardless of what was
+// recorded, so headless/CI runs always use the file store (P6-XP-04). Otherwise
+// the recorded decision (possibly unset) stands.
+func EffectiveKeyCustody(recorded devicekeys.Custody) devicekeys.Custody {
+	if os.Getenv(platform.NoKeychainEnv) == "1" {
+		return devicekeys.CustodyFile
+	}
+	return recorded
 }
 
 func (tx *Tx) nextLocalEventStamp(ctx context.Context, deviceID string) (int64, int64, error) {

@@ -44,7 +44,7 @@ re-encrypts blobs and flags secrets for source rotation.`,
 				return err
 			}
 			defer closeStore(store)
-			kr := buildKeyring(opts, store)
+			kr := buildKeyring(cmd.Context(), opts, store)
 			epoch, err := kr.CurrentEpoch(cmd.Context())
 			if err != nil {
 				return err

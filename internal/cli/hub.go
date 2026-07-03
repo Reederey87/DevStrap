@@ -53,7 +53,7 @@ func hubFromOptions(ctx context.Context, opts *options, store *state.Store, hubF
 	}
 	return dssync.EncryptedHub{
 		Hub:     backend,
-		Keyring: buildKeyring(opts, store),
+		Keyring: buildKeyring(ctx, opts, store),
 		Verify:  store.VerifyRemoteEvent,
 		// P6-SEC-02: the founder/join gate in runSyncCycle reads RawSeen to
 		// tell an empty hub (found) from a populated hub a joiner cannot yet
@@ -74,12 +74,30 @@ func hubFromOptions(ctx context.Context, opts *options, store *state.Store, hubF
 	}, hubID, nil
 }
 
+// hubCredStore builds the device key custody store for the hub S3 credential
+// slot (P6-HUB-02), stamped with the recorded custody backend (P6-XP-04) so a
+// file-custody machine never lets a stale keychain entry shadow the file slot.
+// Reading the recorded decision is best-effort (an unreadable decision leaves
+// legacy hybrid custody); DEVSTRAP_NO_KEYCHAIN still forces file custody.
+func hubCredStore(ctx context.Context, opts *options, store *state.Store) devicekeys.HybridStore {
+	base := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain)
+	var custody devicekeys.Custody
+	if store != nil {
+		custody, _ = store.KeyCustody(ctx)
+	}
+	return base.WithCustody(state.EffectiveKeyCustody(custody))
+}
+
 // buildKeyring constructs the WCK epoch keyring (P4-SEC-07) from the state store
-// and the local device key custody store. It is cheap (stores refs only); the
-// keychain is read lazily on first Prime/IngestGrant/GrantAllEpochs.
-func buildKeyring(opts *options, store *state.Store) *workspacekeys.Keyring {
-	keyStore := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain)
-	return workspacekeys.New(store, keyStore)
+// and the local device key custody store. It is cheap (one meta read for the
+// recorded custody backend, then stores refs only); the keychain is read lazily
+// on first Prime/IngestGrant/GrantAllEpochs. Stamping the recorded custody here
+// (P6-XP-04) is best-effort: an unreadable decision leaves the store in the
+// legacy hybrid mode, and DEVSTRAP_NO_KEYCHAIN still forces file custody.
+func buildKeyring(ctx context.Context, opts *options, store *state.Store) *workspacekeys.Keyring {
+	base := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain)
+	custody, _ := store.KeyCustody(ctx)
+	return workspacekeys.New(store, base.WithCustody(state.EffectiveKeyCustody(custody)))
 }
 
 // selectBackendHub resolves the raw backend Hub (FileHub or R2Hub) without the
@@ -128,7 +146,7 @@ func selectBackendHub(ctx context.Context, opts *options, store *state.Store, hu
 		if region == "" {
 			region = "auto"
 		}
-		creds, err := resolveHubS3Credentials(ctx, opts, ws)
+		creds, err := resolveHubS3Credentials(ctx, opts, store, ws)
 		if err != nil {
 			return nil, "", err
 		}
@@ -181,7 +199,7 @@ func (c hubS3Creds) LogValue() slog.Value { return slog.StringValue(c.String()) 
 // The secret decides the source: an explicit secret wins even when the
 // keychain also holds a pair (12-factor override), but a keychain pair only
 // fills in whichever half is not explicitly set.
-func resolveHubS3Credentials(ctx context.Context, opts *options, workspaceID string) (hubS3Creds, error) {
+func resolveHubS3Credentials(ctx context.Context, opts *options, store *state.Store, workspaceID string) (hubS3Creds, error) {
 	accessKeyID := strings.TrimSpace(opts.v.GetString("hub_s3_access_key_id"))
 	if accessKeyID == "" {
 		accessKeyID = strings.TrimSpace(os.Getenv("AWS_ACCESS_KEY_ID"))
@@ -217,8 +235,7 @@ func resolveHubS3Credentials(ctx context.Context, opts *options, workspaceID str
 		resolvedSecret = redact.New(secret)
 	}
 	if resolvedSecret.IsZero() || accessKeyID == "" {
-		stored, err := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain).
-			LoadHubS3Credentials(ctx, workspaceID)
+		stored, err := hubCredStore(ctx, opts, store).LoadHubS3Credentials(ctx, workspaceID)
 		switch {
 		case err == nil:
 			if accessKeyID == "" {
@@ -399,7 +416,7 @@ time. Remove stored credentials with 'devstrap hub logout'.`,
 			if strings.HasPrefix(secret.Reveal(), "op://") || strings.HasPrefix(accessKeyID, "op://") {
 				return appError{code: exitUsage, err: fmt.Errorf("hub login stores literal credentials; keep op:// refs in DEVSTRAP_HUB_S3_* env/config instead — they resolve at sync time")}
 			}
-			keys := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain)
+			keys := hubCredStore(cmd.Context(), opts, store)
 			location, err := keys.StoreHubS3Credentials(cmd.Context(), ws, devicekeys.HubS3Credentials{
 				AccessKeyID:     accessKeyID,
 				SecretAccessKey: secret.Reveal(),
@@ -429,7 +446,7 @@ func newHubLogoutCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			keys := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain)
+			keys := hubCredStore(cmd.Context(), opts, store)
 			if err := keys.DeleteHubS3Credentials(cmd.Context(), ws); err != nil {
 				return err
 			}

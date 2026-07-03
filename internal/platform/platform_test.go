@@ -81,3 +81,40 @@ func TestSystemKeychainStoresLoadsAndDeletes(t *testing.T) {
 		t.Fatalf("Load after Delete err = %v, want ErrSecretNotFound", err)
 	}
 }
+
+// TestMapKeyringErrorClassification (P6-XP-04): the platform seam is the single
+// place that turns go-keyring's error vocabulary into the typed sentinels the
+// key-custody layer relies on. Crucially, an untyped godbus "session bus
+// missing" error — which go-keyring does NOT surface as ErrUnsupportedPlatform —
+// must map to ErrUnsupported here so higher layers never string-match it.
+func TestMapKeyringErrorClassification(t *testing.T) {
+	cases := []struct {
+		name string
+		in   error
+		want error
+	}{
+		{"unsupported platform", keyring.ErrUnsupportedPlatform, ErrUnsupported},
+		{"not found", keyring.ErrNotFound, ErrSecretNotFound},
+		{"dbus session bus missing", errors.New("dbus: DBUS_SESSION_BUS_ADDRESS not set and unable to locate session bus"), ErrUnsupported},
+		{"dbus connection refused", errors.New("dial unix /run/user/1000/bus: connect: connection refused"), ErrUnsupported},
+		{"secret service not provided", errors.New("dbus: org.freedesktop.secrets was not provided by any .service files"), ErrUnsupported},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := mapKeyringError(tc.in, "test")
+			if !errors.Is(got, tc.want) {
+				t.Fatalf("mapKeyringError(%v) = %v, want it to wrap %v", tc.in, got, tc.want)
+			}
+			if !errors.Is(got, tc.in) {
+				t.Fatalf("mapKeyringError(%v) dropped the underlying error: %v", tc.in, got)
+			}
+		})
+	}
+
+	// A live-backend hard failure stays untyped so custody fails closed rather
+	// than treating it as unavailable.
+	hard := mapKeyringError(errors.New("keychain io failure: device busy"), "test")
+	if errors.Is(hard, ErrUnsupported) || errors.Is(hard, ErrSecretNotFound) {
+		t.Fatalf("hard failure %v was misclassified as a typed sentinel", hard)
+	}
+}

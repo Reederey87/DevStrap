@@ -192,7 +192,7 @@ Options:
 3. encrypted local key file protected by passphrase for MVP;
 4. age-encrypted per-device env bundles.
 
-Do not require GNOME Keyring in headless Ubuntu environments. Headless support needs non-GUI auth, for example service token or passphrase unlock.
+Do not require GNOME Keyring in headless Ubuntu environments. Headless support needs non-GUI auth, for example service token or passphrase unlock. A headless box that never had a Secret Service records `file` custody at init and keeps using the `0600` file store; a box that had a keychain at init and later runs without a session bus fails closed rather than silently minting a divergent file identity, and the operator opts into file custody with `DEVSTRAP_NO_KEYCHAIN=1` (`P6-XP-04`, see the shipped section below).
 
 ## Toolchain differences
 
@@ -259,7 +259,9 @@ The 2026-06-28 cloud-sync architecture (`docs/audits/AUDIT_RECOMMENDATIONS_2026-
 
 From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
 
-### P6-XP-04 — headless Linux keychain-`unavailable` heuristic mints a divergent identity, wedging sync
+### P6-XP-04 — headless Linux keychain-`unavailable` heuristic mints a divergent identity, wedging sync — **shipped (2026-07-03)**
+
+**Resolution (shipped).** Fixed with a small deviation from step 2 below, made deliberately and with a better outcome: rather than **keeping** the D-Bus substring classification inside `internal/devicekeys` and layering typed checks on top, the substring recognition was **moved down to `internal/platform` (`mapKeyringError`/`secretServiceUnreachable`)** — the layer closest to go-keyring, where the untyped godbus error actually arrives — and re-emitted as the typed `platform.ErrUnsupported`. `internal/devicekeys` now classifies purely with `errors.Is` against `ErrUnsupported`/`ErrSecretNotFound` and no longer inspects any error string, so the file-store fallback still engages on headless Linux (the concern step 2 raised) while the classification lives in one correct place instead of two. The published-key mint guard (step 1), the WCK custody guard (step 3), the recorded `key_custody` decision in the new `local_meta` table (step 4, migration `00016`), and the headless-dead-D-Bus regression test (step 5) all shipped as specified. See the key-custody model in `spec/09` and the split-custody-wedge threat in `spec/15`. Note the one behavioral tightening: a store initialized under a reachable keychain and later run headless now **fails closed** (rather than silently minting a file identity) unless `DEVSTRAP_NO_KEYCHAIN=1` is set — the deliberate no-silent-downgrade rule.
 
 **Problem.** On headless Linux — the exact cron/systemd-unit target of the deferred `service install` work — the Secret Service is session-scoped, so any event-stamping command run without `DBUS_SESSION_BUS_ADDRESS` produces a `"dbus"`/`"connection refused"` error. `keychainUnavailable` (`internal/devicekeys/devicekeys.go:414-430`) classifies these by substring, `loadSecret` (`devicekeys.go:394-396`) maps them to `os.ErrNotExist`, and `EnsureSigning` (`devicekeys.go:180-204`) mints a brand-new signing identity into `~/.devstrap/keys` without ever consulting the device's already-published `devices.signing_public_key`. The too-late SQL guard in `store.go:2325-2344` then rejects the mismatch after the orphan key file is on disk, permanently wedging every later headless run (`run-loop` aborts after 5 failing ticks) while desktop runs keep working. The same substring heuristic also guards the WCK custody path (`StoreWCK`/`LoadWCK`, `devicekeys.go:291-322`), extending the blast radius to the workspace-key foundation.
 

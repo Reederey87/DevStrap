@@ -14,7 +14,38 @@ import (
 	"strings"
 
 	"filippo.io/age"
+
+	"github.com/Reederey87/DevStrap/internal/platform"
 )
+
+// Custody names where a HybridStore keeps its secret material. It is a
+// per-machine decision recorded once at init (P6-XP-04) and honored on every
+// later run so a store never silently migrates custody backends:
+//
+//   - CustodyKeychain: the OS keychain is authoritative. If it is unreachable,
+//     operations fail closed rather than falling back to the file store — that
+//     silent downgrade is exactly the split-custody wedge P6-XP-04 fixes.
+//   - CustodyFile: the 0600 file store is authoritative and the keychain is
+//     never consulted (headless/CI hosts, or DEVSTRAP_NO_KEYCHAIN=1).
+//   - CustodyUnset: no decision recorded yet (a pre-P6-XP-04 store). Legacy
+//     hybrid behavior applies: prefer the keychain, fall back to the file store
+//     when the backend is unavailable. The published-key mint guard still holds,
+//     so even this path can never mint a divergent identity.
+type Custody string
+
+const (
+	CustodyUnset    Custody = ""
+	CustodyKeychain Custody = "keychain"
+	CustodyFile     Custody = "file"
+)
+
+// ErrKeychainUnreachable wraps a keychain error that means the backend could
+// not be reached (unsupported platform, or a missing Secret Service / D-Bus
+// session), as opposed to a secret that is genuinely absent. Load paths return
+// it so callers can distinguish "custody unreachable" from "key not found",
+// and mint paths refuse to generate a divergent identity when they see it
+// (P6-XP-04).
+var ErrKeychainUnreachable = errors.New("keychain backend unreachable")
 
 type Identity struct {
 	Private   string
@@ -37,11 +68,16 @@ type SecretBackend interface {
 }
 
 type HybridStore struct {
-	File   FileStore
-	Secret SecretBackend
+	File    FileStore
+	Secret  SecretBackend
+	Custody Custody
 }
 
 const keychainService = "devstrap.device-identity"
+
+// probeAccount is a never-stored account name used by Probe to test keychain
+// reachability with a read-only lookup.
+const probeAccount = "__devstrap_custody_probe__"
 
 func NewFileStore(dir string) FileStore {
 	return FileStore{Dir: dir}
@@ -49,6 +85,52 @@ func NewFileStore(dir string) FileStore {
 
 func NewHybridStore(dir string, secret SecretBackend) HybridStore {
 	return HybridStore{File: NewFileStore(dir), Secret: secret}
+}
+
+// WithCustody returns a copy of the store pinned to the recorded custody
+// backend (P6-XP-04). Callers resolve the recorded decision (and any
+// DEVSTRAP_NO_KEYCHAIN override) and stamp it here before minting or reading.
+func (s HybridStore) WithCustody(c Custody) HybridStore {
+	s.Custody = c
+	return s
+}
+
+// useKeychain reports whether the keychain backend should be consulted at all:
+// only when a backend is wired and custody is not pinned to files.
+func (s HybridStore) useKeychain() bool {
+	return s.Secret != nil && s.Custody != CustodyFile
+}
+
+// requireKeychain reports whether custody forbids any file fallback: a
+// keychain-custody store must fail closed rather than silently degrade.
+func (s HybridStore) requireKeychain() bool {
+	return s.Custody == CustodyKeychain
+}
+
+// Probe classifies the current keychain reachability into a custody decision
+// with a single read-only lookup, without side effects. It is used once at init
+// to record the custody backend (P6-XP-04). A nil backend or an unreachable
+// Secret Service resolves to file custody; a reachable backend (the probe
+// account is expectedly absent) resolves to keychain custody.
+func (s HybridStore) Probe(ctx context.Context) Custody {
+	if s.Secret == nil {
+		return CustodyFile
+	}
+	_, err := s.Secret.Load(ctx, keychainService, probeAccount)
+	switch {
+	case err == nil:
+		// Unexpected hit, but the backend is clearly reachable.
+		return CustodyKeychain
+	case keychainUnreachable(err):
+		return CustodyFile
+	case keychainSecretMissing(err):
+		return CustodyKeychain
+	default:
+		// A live backend that returned some other error (locked, busy). Treat it
+		// as reachable so custody stays keychain and later failures fail closed
+		// rather than silently using files.
+		return CustodyKeychain
+	}
 }
 
 func NewIdentity() (Identity, error) {
@@ -95,28 +177,25 @@ func (s FileStore) Ensure(deviceID string) (Identity, bool, error) {
 	return identity, true, nil
 }
 
-func (s HybridStore) Ensure(ctx context.Context, deviceID string) (Identity, bool, error) {
+// Ensure ensures a device age identity exists, minting one only when none is
+// stored. publishedRecipient is the device's already-published age recipient
+// ("" if none); when it is set and the keychain is unreachable, Ensure refuses
+// to mint a divergent identity rather than wedge custody (P6-XP-04).
+func (s HybridStore) Ensure(ctx context.Context, deviceID, publishedRecipient string) (Identity, bool, error) {
 	existing, err := s.Read(ctx, deviceID)
 	if err == nil {
 		return existing, false, nil
 	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return Identity{}, false, err
+	if guard := s.mintGuard("age", publishedRecipient, err); guard != nil {
+		return Identity{}, false, guard
 	}
 	identity, err := NewIdentity()
 	if err != nil {
 		return Identity{}, false, err
 	}
-	// SECR-04/SECU-01: only fall back to the plaintext file store when the
-	// keychain is genuinely unavailable; a present-but-failing keychain must
-	// fail closed so a transient error never silently downgrades key custody.
-	if err := s.storeSecret(ctx, ageAccount(deviceID), identity.Private); err == nil {
-		return identity, true, nil
-	} else if !IsKeychainUnavailable(err) {
-		return Identity{}, false, fmt.Errorf("store device key in keychain: %w", err)
-	}
-	slog.Warn("keychain unavailable; writing device age key to file fallback", "device_id", deviceID)
-	if err := s.File.writeIdentity(deviceID, identity); err != nil {
+	if _, err := s.storeSecretCustody(ctx, ageAccount(deviceID), identity.Private, "device age key", "device_id", deviceID, func() error {
+		return s.File.writeIdentity(deviceID, identity)
+	}); err != nil {
 		return Identity{}, false, err
 	}
 	return identity, true, nil
@@ -142,16 +221,14 @@ func (s HybridStore) Read(ctx context.Context, deviceID string) (Identity, error
 	if err := validateDeviceID(deviceID); err != nil {
 		return Identity{}, err
 	}
-	if s.Secret != nil {
-		private, err := s.loadSecret(ctx, ageAccount(deviceID))
-		if err == nil {
-			return parseAgeIdentity(private)
-		}
-		if !errors.Is(err, os.ErrNotExist) && fileMissing(s.File.path(deviceID)) {
-			return Identity{}, err
-		}
+	raw, err := s.resolveSecret(ctx, ageAccount(deviceID), s.File.path(deviceID), func() (string, error) {
+		id, ferr := s.File.Read(deviceID)
+		return id.Private, ferr
+	})
+	if err != nil {
+		return Identity{}, err
 	}
-	return s.File.Read(deviceID)
+	return parseAgeIdentity(raw)
 }
 
 func (s FileStore) EnsureSigning(deviceID string) (SigningIdentity, bool, error) {
@@ -178,27 +255,26 @@ func (s FileStore) EnsureSigning(deviceID string) (SigningIdentity, bool, error)
 	return identity, true, nil
 }
 
-func (s HybridStore) EnsureSigning(ctx context.Context, deviceID string) (SigningIdentity, bool, error) {
+// EnsureSigning ensures a device signing identity exists, minting one only when
+// none is stored. publishedPub is the device's already-published signing public
+// key ("" if none). When the keychain is unreachable, or when a key is already
+// published but its private half is absent, EnsureSigning refuses to mint a
+// divergent identity — the split-custody wedge P6-XP-04 fixes.
+func (s HybridStore) EnsureSigning(ctx context.Context, deviceID, publishedPub string) (SigningIdentity, bool, error) {
 	existing, err := s.ReadSigning(ctx, deviceID)
 	if err == nil {
 		return existing, false, nil
 	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return SigningIdentity{}, false, err
+	if guard := s.mintGuard("signing", publishedPub, err); guard != nil {
+		return SigningIdentity{}, false, guard
 	}
 	identity, err := NewSigningIdentity()
 	if err != nil {
 		return SigningIdentity{}, false, err
 	}
-	// SECR-04/SECU-01: only fall back to the plaintext file store when the
-	// keychain is genuinely unavailable; fail closed on other errors.
-	if err := s.storeSecret(ctx, signingAccount(deviceID), identity.Private); err == nil {
-		return identity, true, nil
-	} else if !IsKeychainUnavailable(err) {
-		return SigningIdentity{}, false, fmt.Errorf("store device signing key in keychain: %w", err)
-	}
-	slog.Warn("keychain unavailable; writing device signing key to file fallback", "device_id", deviceID)
-	if err := s.File.writeSigningIdentity(deviceID, identity); err != nil {
+	if _, err := s.storeSecretCustody(ctx, signingAccount(deviceID), identity.Private, "device signing key", "device_id", deviceID, func() error {
+		return s.File.writeSigningIdentity(deviceID, identity)
+	}); err != nil {
 		return SigningIdentity{}, false, err
 	}
 	return identity, true, nil
@@ -231,16 +307,14 @@ func (s HybridStore) ReadSigning(ctx context.Context, deviceID string) (SigningI
 	if err := validateDeviceID(deviceID); err != nil {
 		return SigningIdentity{}, err
 	}
-	if s.Secret != nil {
-		private, err := s.loadSecret(ctx, signingAccount(deviceID))
-		if err == nil {
-			return parseSigningIdentity(private)
-		}
-		if !errors.Is(err, os.ErrNotExist) && fileMissing(s.File.signingPath(deviceID)) {
-			return SigningIdentity{}, err
-		}
+	raw, err := s.resolveSecret(ctx, signingAccount(deviceID), s.File.signingPath(deviceID), func() (string, error) {
+		id, ferr := s.File.ReadSigning(deviceID)
+		return id.Private, ferr
+	})
+	if err != nil {
+		return SigningIdentity{}, err
 	}
-	return s.File.ReadSigning(deviceID)
+	return parseSigningIdentity(raw)
 }
 
 // wckAccount is the keychain account name for a Workspace Content Key
@@ -315,13 +389,10 @@ func (s HybridStore) StoreWCK(ctx context.Context, workspaceID string, epoch int
 		return err
 	}
 	enc := base64.StdEncoding.EncodeToString(wck)
-	if err := s.storeSecret(ctx, wckAccount(workspaceID, epoch, kid), enc); err == nil {
-		return nil
-	} else if !IsKeychainUnavailable(err) {
-		return fmt.Errorf("store workspace key in keychain: %w", err)
-	}
-	slog.Warn("keychain unavailable; writing workspace key to file fallback", "workspace_id", workspaceID, "epoch", epoch, "kid", kid)
-	return s.File.WriteWCK(workspaceID, epoch, kid, wck)
+	_, err := s.storeSecretCustody(ctx, wckAccount(workspaceID, epoch, kid), enc, "workspace key", "workspace_id", workspaceID, func() error {
+		return s.File.WriteWCK(workspaceID, epoch, kid, wck)
+	})
+	return err
 }
 
 // LoadWCK loads the WCK for a workspace+epoch+kid, or an error wrapping
@@ -334,16 +405,17 @@ func (s HybridStore) LoadWCK(ctx context.Context, workspaceID string, epoch int6
 	if err := validateKID(kid); err != nil {
 		return nil, err
 	}
-	if s.Secret != nil {
-		raw, err := s.loadSecret(ctx, wckAccount(workspaceID, epoch, kid))
-		if err == nil {
-			return base64.StdEncoding.DecodeString(raw)
+	raw, err := s.resolveSecret(ctx, wckAccount(workspaceID, epoch, kid), s.File.wckPath(workspaceID, epoch, kid), func() (string, error) {
+		b, ferr := s.File.ReadWCK(workspaceID, epoch, kid)
+		if ferr != nil {
+			return "", ferr
 		}
-		if !errors.Is(err, os.ErrNotExist) && fileMissing(s.File.wckPath(workspaceID, epoch, kid)) {
-			return nil, err
-		}
+		return base64.StdEncoding.EncodeToString(b), nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return s.File.ReadWCK(workspaceID, epoch, kid)
+	return base64.StdEncoding.DecodeString(raw)
 }
 
 // HubS3Credentials is the hub S3/R2 credential pair kept in local custody
@@ -430,18 +502,9 @@ func (s HybridStore) StoreHubS3Credentials(ctx context.Context, workspaceID stri
 	if err != nil {
 		return "", fmt.Errorf("marshal hub s3 credentials: %w", err)
 	}
-	// storeSecret maps a nil keychain backend to os.ErrNotExist; treat that
-	// like an unavailable keychain (same fallthrough the load path uses).
-	if err := s.storeSecret(ctx, hubS3Account(workspaceID), string(raw)); err == nil {
-		return "keychain", nil
-	} else if !errors.Is(err, os.ErrNotExist) && !IsKeychainUnavailable(err) {
-		return "", fmt.Errorf("store hub s3 credentials in keychain: %w", err)
-	}
-	slog.Warn("keychain unavailable; writing hub s3 credentials to file fallback", "workspace_id", workspaceID)
-	if err := s.File.WriteHubS3Credentials(workspaceID, creds); err != nil {
-		return "", err
-	}
-	return "file", nil
+	return s.storeSecretCustody(ctx, hubS3Account(workspaceID), string(raw), "hub s3 credentials", "workspace_id", workspaceID, func() error {
+		return s.File.WriteHubS3Credentials(workspaceID, creds)
+	})
 }
 
 // LoadHubS3Credentials loads the stored hub S3 credential pair, or an error
@@ -450,20 +513,22 @@ func (s HybridStore) LoadHubS3Credentials(ctx context.Context, workspaceID strin
 	if err := validateWorkspaceID(workspaceID); err != nil {
 		return HubS3Credentials{}, err
 	}
-	if s.Secret != nil {
-		raw, err := s.loadSecret(ctx, hubS3Account(workspaceID))
-		if err == nil {
-			var creds HubS3Credentials
-			if err := json.Unmarshal([]byte(raw), &creds); err != nil {
-				return HubS3Credentials{}, fmt.Errorf("parse hub s3 credentials: %w", err)
-			}
-			return creds, nil
+	raw, err := s.resolveSecret(ctx, hubS3Account(workspaceID), s.File.hubS3Path(workspaceID), func() (string, error) {
+		creds, ferr := s.File.ReadHubS3Credentials(workspaceID)
+		if ferr != nil {
+			return "", ferr
 		}
-		if !errors.Is(err, os.ErrNotExist) && fileMissing(s.File.hubS3Path(workspaceID)) {
-			return HubS3Credentials{}, err
-		}
+		b, merr := json.Marshal(creds)
+		return string(b), merr
+	})
+	if err != nil {
+		return HubS3Credentials{}, err
 	}
-	return s.File.ReadHubS3Credentials(workspaceID)
+	var creds HubS3Credentials
+	if err := json.Unmarshal([]byte(raw), &creds); err != nil {
+		return HubS3Credentials{}, fmt.Errorf("parse hub s3 credentials: %w", err)
+	}
+	return creds, nil
 }
 
 // DeleteHubS3Credentials removes the stored pair from both custody backends
@@ -472,9 +537,9 @@ func (s HybridStore) DeleteHubS3Credentials(ctx context.Context, workspaceID str
 	if err := validateWorkspaceID(workspaceID); err != nil {
 		return err
 	}
-	if s.Secret != nil {
-		// IsKeychainUnavailable also matches not-found ("not found" is in its
-		// substring set), so a missing keychain entry is tolerated here.
+	if s.useKeychain() {
+		// A missing entry or an unreachable/unsupported backend is tolerated
+		// here; only a live-backend hard failure surfaces.
 		if err := s.Secret.Delete(ctx, keychainService, hubS3Account(workspaceID)); err != nil &&
 			!errors.Is(err, os.ErrNotExist) && !IsKeychainUnavailable(err) {
 			return fmt.Errorf("delete hub s3 credentials from keychain: %w", err)
@@ -547,48 +612,162 @@ func (s HybridStore) storeSecret(ctx context.Context, account, secret string) er
 	return nil
 }
 
+// loadSecret loads a raw secret from the keychain backend, translating its
+// error into the typed vocabulary the custody logic depends on (P6-XP-04):
+//   - a genuinely-absent secret → os.ErrNotExist;
+//   - an unreachable/unsupported backend → ErrKeychainUnreachable;
+//   - anything else (a live-backend hard failure) → the error verbatim.
 func (s HybridStore) loadSecret(ctx context.Context, account string) (string, error) {
 	if s.Secret == nil {
 		return "", os.ErrNotExist
 	}
 	raw, err := s.Secret.Load(ctx, keychainService, account)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) || keychainUnavailable(err) {
+		switch {
+		case keychainSecretMissing(err):
 			return "", os.ErrNotExist
+		case keychainUnreachable(err):
+			return "", fmt.Errorf("%w: %w", ErrKeychainUnreachable, err)
+		default:
+			return "", err
 		}
-		return "", err
 	}
 	return strings.TrimSpace(string(raw)), nil
 }
 
-// IsKeychainUnavailable reports whether a keychain error means the backend is
-// missing/not-present (so the file store should be used) rather than a genuine
-// failure. Covers macOS "not found", an unsupported platform, and a Linux
-// Secret Service / D-Bus that is not running (common on headless/CI hosts).
-func IsKeychainUnavailable(err error) bool {
-	return keychainUnavailable(err)
+// resolveSecret loads a secret across the custody backends and returns the raw
+// stored string. It honors the recorded custody decision (P6-XP-04):
+//   - under keychain custody the keychain is authoritative and no file is ever
+//     read — a keychain failure (unreachable or hard) surfaces rather than
+//     silently degrading;
+//   - under file custody the keychain is skipped entirely;
+//   - under unset (legacy) custody the keychain is preferred, and the file
+//     store is used only as a fallback when a file is actually present — so an
+//     unreachable keychain with no local file surfaces ErrKeychainUnreachable
+//     ("custody unreachable") instead of a misleading "not found".
+func (s HybridStore) resolveSecret(ctx context.Context, account, filePath string, readFile func() (string, error)) (string, error) {
+	if s.useKeychain() {
+		raw, err := s.loadSecret(ctx, account)
+		if err == nil {
+			return raw, nil
+		}
+		if s.requireKeychain() {
+			return "", err
+		}
+		if fileMissing(filePath) {
+			return "", err
+		}
+		// A local file exists: legacy/unset custody prefers it over surfacing
+		// the keychain error (the documented pre-P6-XP-04 read residual).
+	}
+	return readFile()
 }
 
-// keychainUnavailable reports whether a keychain error means the backend is
-// missing/not-present (so the file store should be used) rather than a genuine
-// failure. Covers macOS "not found", an unsupported platform, and a Linux
-// Secret Service / D-Bus that is not running (common on headless/CI hosts).
-func keychainUnavailable(err error) bool {
-	msg := strings.ToLower(err.Error())
-	for _, needle := range []string{
-		"not found",
-		"unsupported",
-		"was not provided", // dbus: org.freedesktop.secrets not provided
-		"org.freedesktop.secrets",
-		"no such interface",
-		"connection refused",
-		"dbus",
-	} {
-		if strings.Contains(msg, needle) {
-			return true
+// storeSecretCustody stores a secret honoring the recorded custody decision and
+// reports where it landed ("keychain" or "file") (P6-XP-04):
+//   - keychain custody must land in the keychain; any failure fails closed;
+//   - file custody writes the file store and never touches the keychain;
+//   - unset (legacy) custody prefers the keychain and falls back to the file
+//     store only when the backend is unavailable — a live-backend hard failure
+//     still fails closed (SECR-04/SECU-01).
+func (s HybridStore) storeSecretCustody(ctx context.Context, account, secret, label, logKey, logVal string, writeFile func() error) (string, error) {
+	if s.useKeychain() {
+		err := s.storeSecret(ctx, account, secret)
+		switch {
+		case err == nil:
+			return "keychain", nil
+		case s.requireKeychain():
+			return "", fmt.Errorf("store %s in keychain (custody=keychain, refusing file fallback): %w", label, err)
+		case keychainUnreachable(err) || keychainSecretMissing(err):
+			slog.Warn("keychain unavailable; writing "+label+" to file fallback", logKey, logVal)
+		default:
+			// Live-backend hard failure: fail closed rather than downgrade.
+			return "", fmt.Errorf("store %s in keychain: %w", label, err)
 		}
 	}
-	return false
+	if err := writeFile(); err != nil {
+		return "", err
+	}
+	return "file", nil
+}
+
+// IsKeychainUnavailable reports whether a keychain error means the backend is
+// missing/not-present (so an operation may tolerate it and use the file store)
+// rather than a live-backend hard failure. It is the coarse predicate used by
+// tolerant paths (e.g. delete); mint/store paths use the finer
+// keychainUnreachable / keychainSecretMissing split so a divergent identity is
+// never minted (P6-XP-04).
+func IsKeychainUnavailable(err error) bool {
+	return keychainSecretMissing(err) || keychainUnreachable(err)
+}
+
+// keychainSecretMissing reports that the keychain is reachable but holds no such
+// secret.
+func keychainSecretMissing(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, platform.ErrSecretNotFound)
+}
+
+// keychainUnreachable reports that the keychain backend could not be reached
+// (unsupported platform, or a missing Secret Service / D-Bus session). The
+// platform adapter types these as ErrUnsupported (see mapKeyringError), and the
+// store's own ErrKeychainUnreachable wraps ErrUnsupported, so both match.
+func keychainUnreachable(err error) bool {
+	return errors.Is(err, platform.ErrUnsupported) || errors.Is(err, ErrKeychainUnreachable)
+}
+
+// mintGuard decides whether a mint may proceed given the error from reading the
+// existing key (P6-XP-04). It returns a refusal error when minting would risk a
+// divergent or silently-downgraded identity, or nil when minting into the
+// recorded custody backend is safe:
+//   - keychain unreachable + a key already published, or keychain custody: refuse
+//     (the split-custody wedge, and the no-silent-downgrade rule);
+//   - keychain unreachable + nothing published under legacy/unset custody: allow
+//     the file fallback (today's headless behavior, preserved);
+//   - reachable but genuinely absent + a key already published: refuse (custody
+//     lost the private half; a replacement would diverge);
+//   - reachable but genuinely absent + nothing published: allow the mint;
+//   - any other (live-backend hard) error: propagate it.
+func (s HybridStore) mintGuard(kind, published string, readErr error) error {
+	switch {
+	case errors.Is(readErr, ErrKeychainUnreachable):
+		if published != "" || s.requireKeychain() {
+			return mintRefusedUnreachable(kind, published, readErr)
+		}
+		return nil
+	case errors.Is(readErr, os.ErrNotExist):
+		if published != "" {
+			return mintRefusedPublishedAbsent(kind, published)
+		}
+		return nil
+	default:
+		return readErr
+	}
+}
+
+// mintRefusedUnreachable is returned when the keychain is unreachable and
+// minting would risk a divergent identity (P6-XP-04). The remedy names both
+// escape hatches: run from a desktop session, or opt into file custody.
+func mintRefusedUnreachable(kind, published string, err error) error {
+	if published != "" {
+		return fmt.Errorf(
+			"device %s key exists (%s) but the keychain is unreachable (session bus missing?); "+
+				"refusing to mint a divergent key — run from your desktop session, or set %s=1 and migrate the key file: %w",
+			kind, published, platform.NoKeychainEnv, err)
+	}
+	return fmt.Errorf(
+		"keychain unreachable; refusing to mint a divergent device %s key — "+
+			"run from your desktop session, or set %s=1 to use file custody: %w",
+		kind, platform.NoKeychainEnv, err)
+}
+
+// mintRefusedPublishedAbsent is returned when a key is already published but its
+// private half is missing from a reachable custody backend (P6-XP-04): minting a
+// replacement would diverge from the published public key.
+func mintRefusedPublishedAbsent(kind, published string) error {
+	return fmt.Errorf(
+		"device %s key %s is already published but its private half is missing from custody; "+
+			"refusing to mint a divergent key — restore the key file/keychain entry, or set %s=1 and migrate it",
+		kind, published, platform.NoKeychainEnv)
 }
 
 func ageAccount(deviceID string) string {
