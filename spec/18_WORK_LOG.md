@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-01
+last_reviewed: 2026-07-03
 tracks_code: [**]
 ---
 # Work Log
@@ -26,6 +26,23 @@ Follow-ups:
 ```
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
+
+## 2026-07-03 — P4-SEC-07: workspace-id pairing — `init --join --workspace-id` adopts the founder's id (pairing wave)
+
+Changed:
+- `internal/id`: new `Valid(prefix, value)` canonical-shape check (`<prefix>_` + 32 lowercase hex); the package gained its first tests (the spec/00 + spec/16 `internal/id` test exemption ended).
+- `internal/state`: `EnsureWorkspaceWithID` adopts an explicitly supplied workspace id under the singleton index (fresh insert / idempotent re-ensure / `ErrWorkspaceIDMismatch` refusal on a store initialized under a different id — no post-hoc rewrite); `EnsureWorkspace` refactored to mint + delegate, and a lost concurrent mint race now adopts the survivor; `Summary` gained `WorkspaceID` (JSON `workspace_id`).
+- `internal/cli/init.go`: `--workspace-id <id>` flag (implies `--join`), shape-validated before any filesystem write; mismatch maps to exit 2 with a remove-and-reinit remedy; bare `--join` warns non-fatally that r2/s3 hubs key by workspace id; `--dry-run` prints the would-adopted id; existing-config `--join` re-runs warn the config was not modified; the join hint now walks founder-`status` → copy Workspace ID → `init --join --workspace-id <id>`.
+- `internal/cli/status.go`: human output gained a `Workspace ID:` row (JSON via `Summary`).
+- `internal/cli/devices.go`: `devices recipient --workspace-id` print-only flag (mutually exclusive with `--signing`; the bare default output stays frozen for scripts).
+- Tests: `internal/id` table tests; `internal/state/workspace_id_test.go` (adopt/idempotent/mismatch/memo/FK safety/mint-delegation); `internal/cli/init_workspace_id_test.go` (adopt+implies-join, invalid shape refused before MkdirAll, reinit-different-id refusal, bare-join warning, dry-run, recipient `--workspace-id` + frozen default); `sync_join_flow.txtar` threads the founder's id through the joiner's init and asserts both stores report one id (proves the flag inert on the file hub).
+- Specs: `spec/13` init/status/devices sections; `spec/07` HLC-section identity paragraph (pairing shipped, founder-minted/joiner-adopted); `spec/00` workspace-identity + test-coverage bullets; `spec/16` coverage-gate wording + TEST-03 note; `docs/audits/README.md` P4-SEC-07 row annotated (pairing shipped; rotation remainder stays open).
+
+Validated:
+- `gofmt -w cmd internal`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOCACHE=/tmp/devstrap-gocache go test -race ./...` (includes the extended `sync_join_flow` e2e).
+
+Follow-ups:
+- PR B of this wave documents the joiner-side founder-pinning ceremony (P4-SEC-04 joiner half); PR C ships doctor mismatch detection + the hub prefix-isolation regression test; PR D ships the two-device runbook. Periodic WCK rotation stays open under P4-SEC-07/P6-SEC-03.
 
 ## 2026-07-03 — P6-CLI-05: document the shipped r2:// hub path (R2 go-live wave)
 

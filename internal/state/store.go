@@ -40,6 +40,12 @@ var ErrDivergentEvent = errors.New("event id already exists with different immut
 var ErrEventHashChain = errors.New("event prev_event_hash chain break")
 var ErrEventVerification = errors.New("event verification failed")
 
+// ErrWorkspaceIDMismatch reports that an explicitly supplied workspace id
+// (init --workspace-id) conflicts with the id this store was initialized
+// under. There is no in-place rewrite path — the remedy is to remove the state
+// home and re-run `devstrap init --join --workspace-id <id>` (P4-SEC-07).
+var ErrWorkspaceIDMismatch = errors.New("workspace id mismatch")
+
 const (
 	hlcLogicalBits  = 16
 	hlcLogicalMask  = (1 << hlcLogicalBits) - 1
@@ -48,6 +54,7 @@ const (
 
 type Summary struct {
 	WorkspaceName string          `json:"workspace_name"`
+	WorkspaceID   string          `json:"workspace_id"`
 	RootPath      string          `json:"root_path"`
 	ProjectCount  int             `json:"project_count"`
 	DeviceID      string          `json:"device_id,omitempty"`
@@ -451,12 +458,48 @@ LIMIT 1;
 }
 
 func (s *Store) EnsureWorkspace(ctx context.Context, name, rootPath string) error {
-	now := timestampNow()
 	workspaceID, err := currentWorkspaceID(ctx, s.db)
 	if errors.Is(err, sql.ErrNoRows) {
 		workspaceID, err = id.New("ws")
 		if err != nil {
 			return err
+		}
+	} else if err != nil {
+		return fmt.Errorf("read workspace: %w", err)
+	}
+	err = s.EnsureWorkspaceWithID(ctx, workspaceID, name, rootPath)
+	if errors.Is(err, ErrWorkspaceIDMismatch) {
+		// A concurrent EnsureWorkspace won the singleton-index race with a
+		// different minted id. Unlike an explicitly supplied id, a freshly
+		// minted one carries no pairing intent — adopt the survivor.
+		survivor, rerr := currentWorkspaceID(ctx, s.db)
+		if rerr != nil {
+			return fmt.Errorf("read workspace: %w", rerr)
+		}
+		return s.EnsureWorkspaceWithID(ctx, survivor, name, rootPath)
+	}
+	return err
+}
+
+// EnsureWorkspaceWithID adopts an explicitly supplied workspace id (P4-SEC-07
+// pairing: a joiner adopts the founder's id at init so both devices read the
+// same hub prefix). The id must be born-correct — the singleton workspace
+// index plus ON DELETE CASCADE on the child tables make post-hoc rewriting
+// hazardous, so a store already initialized under a different id is refused
+// with ErrWorkspaceIDMismatch rather than rewritten.
+func (s *Store) EnsureWorkspaceWithID(ctx context.Context, workspaceID, name, rootPath string) error {
+	if workspaceID == "" {
+		return errors.New("workspace id must not be empty")
+	}
+	now := timestampNow()
+	existing, err := currentWorkspaceID(ctx, s.db)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// Defense in depth: never let a non-canonical id become a fresh hub
+		// prefix, even if a future caller skips the CLI-layer validation.
+		// Pre-existing rows are grandfathered (only the insert is guarded).
+		if !id.Valid("ws", workspaceID) {
+			return fmt.Errorf("workspace id %q is not canonical (want ws_ followed by 32 lowercase hex)", workspaceID)
 		}
 		if _, err := s.db.ExecContext(ctx, `
 INSERT OR IGNORE INTO workspaces (id, name, root_path, created_at, updated_at)
@@ -464,12 +507,19 @@ VALUES (?, ?, ?, ?, ?);
 `, workspaceID, name, rootPath, now, now); err != nil {
 			return fmt.Errorf("create workspace: %w", err)
 		}
-		workspaceID, err = currentWorkspaceID(ctx, s.db)
+		existing, err = currentWorkspaceID(ctx, s.db)
 		if err != nil {
 			return fmt.Errorf("read created workspace: %w", err)
 		}
-	} else if err != nil {
+		if existing != workspaceID {
+			// A concurrent init won the singleton-index race with a different
+			// id; the survivor is authoritative.
+			return fmt.Errorf("%w: store holds %s, supplied %s", ErrWorkspaceIDMismatch, existing, workspaceID)
+		}
+	case err != nil:
 		return fmt.Errorf("read workspace: %w", err)
+	case existing != workspaceID:
+		return fmt.Errorf("%w: store holds %s, supplied %s", ErrWorkspaceIDMismatch, existing, workspaceID)
 	}
 	_, err = s.db.ExecContext(ctx, `
 UPDATE workspaces
@@ -725,6 +775,7 @@ func (s *Store) Summary(ctx context.Context) (Summary, error) {
 		return Summary{}, err
 	}
 	var summary Summary
+	summary.WorkspaceID = workspaceID
 	row := s.db.QueryRowContext(ctx, `
 SELECT w.name, w.root_path, COUNT(n.id)
 FROM workspaces w

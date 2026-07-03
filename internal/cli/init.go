@@ -10,6 +10,7 @@ import (
 
 	"github.com/Reederey87/DevStrap/internal/config"
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
+	"github.com/Reederey87/DevStrap/internal/id"
 	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/scan"
 	"github.com/Reederey87/DevStrap/internal/state"
@@ -21,12 +22,22 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var dryRun bool
 	var scanAdopt bool
 	var join bool
+	var workspaceID string
 
 	cmd := &cobra.Command{
 		Use:   "init [root]",
 		Short: "Initialize a DevStrap workspace",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// P4-SEC-07 pairing: validate the supplied workspace id shape
+			// before touching the filesystem so a bad paste never creates a
+			// half-initialized state home. Supplying an id IS joining.
+			if workspaceID != "" {
+				if !id.Valid("ws", workspaceID) {
+					return appError{code: exitInvalidConfig, err: fmt.Errorf("invalid --workspace-id %q: want ws_ followed by 32 lowercase hex characters (copy the Workspace ID from `devstrap status` on the founding device)", workspaceID)}
+				}
+				join = true
+			}
 			paths := opts.paths()
 			if len(args) == 1 {
 				if cmd.Root().PersistentFlags().Changed("root") {
@@ -48,6 +59,11 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 			paths = config.Paths{Home: cleanHome, Root: cleanRoot}
 
 			if dryRun {
+				if workspaceID != "" {
+					if _, err := fmt.Fprintf(stdout, "Would adopt workspace id %s (join)\n", workspaceID); err != nil {
+						return err
+					}
+				}
 				_, err := fmt.Fprintf(stdout, "Would create %s, %s, %s, and %s\n", paths.Root, paths.Home, paths.LogDir(), paths.StateDB())
 				return err
 			}
@@ -66,10 +82,10 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if join {
 				role = "joiner"
 			}
-			if err := writeDefaultConfig(paths, workspaceName, role); err != nil {
+			wroteConfig, err := writeDefaultConfig(paths, workspaceName, role)
+			if err != nil {
 				return err
 			}
-
 			store, err := state.Open(cmd.Context(), paths.StateDB())
 			if err != nil {
 				return err
@@ -79,8 +95,28 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := store.Migrate(); err != nil {
 				return err
 			}
-			if err := store.EnsureWorkspace(cmd.Context(), workspaceName, paths.Root); err != nil {
+			if workspaceID != "" {
+				err = store.EnsureWorkspaceWithID(cmd.Context(), workspaceID, workspaceName, paths.Root)
+			} else {
+				err = store.EnsureWorkspace(cmd.Context(), workspaceName, paths.Root)
+			}
+			if err != nil {
+				if errors.Is(err, state.ErrWorkspaceIDMismatch) {
+					// No post-hoc rewrite: the singleton workspace row cascades
+					// into every workspace-scoped table, so adopting a new id
+					// means starting from a clean state home (P4-SEC-07).
+					return appError{code: exitInvalidConfig, err: fmt.Errorf("%w; this store was initialized under a different workspace id — remove %s and re-run devstrap init --join --workspace-id %s", err, paths.Home, workspaceID)}
+				}
 				return err
+			}
+			// Printed only after the workspace ensure succeeded so a refused
+			// re-init reports the id mismatch alone, without role noise.
+			existingRole := opts.v.GetString("role")
+			if existingRole == "" {
+				existingRole = "founder"
+			}
+			if !wroteConfig && join && existingRole != "joiner" {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s already exists and was not modified (role: %q stays); edit it by hand to change the role\n", filepath.Join(paths.Home, "config.yaml"), existingRole)
 			}
 			device, err := store.EnsureDevice(cmd.Context(), "")
 			if err != nil {
@@ -130,11 +166,35 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// is role-aware (P6-SEC-02): a joining device must be approved from
 			// an existing device before its events can sync.
 			if join {
-				if _, err := fmt.Fprintf(stdout, "Joining an existing workspace. Next:\n"+
-					"  1. devstrap devices recipient            # copy this device's age recipient\n"+
-					"  2. devstrap devices recipient --signing  # and its signing key\n"+
-					"  3. on an approved device: devstrap devices enroll <id> --age-recipient <rec> --signing-public-key <sig> --approve\n"+
-					"  4. set 'hub: r2://<bucket>' in ~/.devstrap/config.yaml, then devstrap sync  # ingests the grant, then pushes your projects\n"); err != nil {
+				// P4-SEC-07 pairing: r2/s3 hubs key everything under
+				// workspaces/<workspace_id>/, so a joiner that mints its own id
+				// reads an empty prefix and never sees the founder. Flat file
+				// hubs are unaffected. The hint (and warning, when the id is
+				// missing) walks the founder-status → copy-id → re-init path.
+				if workspaceID == "" {
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: r2/s3 hubs key events by workspace id; without --workspace-id this device minted its own id and will not see the founder's hub data (file hubs are unaffected)\n")
+				}
+				hint := "Joining an existing workspace. Next:\n"
+				steps := []string{
+					"devstrap devices recipient            # copy this device's age recipient",
+					"devstrap devices recipient --signing  # and its signing key",
+					"on an approved device: devstrap devices enroll <id> --age-recipient <rec> --signing-public-key <sig> --approve",
+					"set 'hub: r2://<bucket>' in ~/.devstrap/config.yaml, then devstrap sync  # ingests the grant, then pushes your projects",
+				}
+				if workspaceID == "" {
+					// This init already minted a local id, so a plain re-run
+					// with --workspace-id would hit the mismatch refusal — the
+					// recovery hint must include removing the state home.
+					steps = append([]string{fmt.Sprintf("on the founding device: devstrap status  # copy its Workspace ID, then here: rm -r %s and re-run: devstrap init --join --workspace-id <id>", paths.Home)}, steps...)
+				} else {
+					if _, err := fmt.Fprintf(stdout, "Adopted workspace id %s.\n", workspaceID); err != nil {
+						return err
+					}
+				}
+				for i, step := range steps {
+					hint += fmt.Sprintf("  %d. %s\n", i+1, step)
+				}
+				if _, err := fmt.Fprint(stdout, hint); err != nil {
 					return err
 				}
 			} else {
@@ -150,6 +210,7 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show planned changes without writing")
 	cmd.Flags().BoolVar(&scanAdopt, "scan", false, "scan the root and adopt existing repos on init")
 	cmd.Flags().BoolVar(&join, "join", false, "join an existing workspace: do not found a new one; wait to be approved from an existing device (P6-SEC-02)")
+	cmd.Flags().StringVar(&workspaceID, "workspace-id", "", "adopt the founding device's workspace id (copy it from `devstrap status` there); implies --join (P4-SEC-07)")
 	return cmd
 }
 
@@ -194,18 +255,20 @@ func cleanAbsPath(path string) (string, error) {
 	return filepath.Abs(filepath.Clean(path))
 }
 
-func writeDefaultConfig(paths config.Paths, workspaceName, role string) error {
+// writeDefaultConfig writes config.yaml if missing and reports whether it
+// wrote (false = a pre-existing config was left untouched).
+func writeDefaultConfig(paths config.Paths, workspaceName, role string) (bool, error) {
 	path := filepath.Join(paths.Home, "config.yaml")
 	if _, err := os.Stat(path); err == nil {
-		return nil
+		return false, nil
 	} else if !os.IsNotExist(err) {
-		return fmt.Errorf("stat config: %w", err)
+		return false, fmt.Errorf("stat config: %w", err)
 	}
 	// role (P6-SEC-02): "founder" (default) or "joiner". A joiner never founds
 	// a workspace on first sync; it waits to be granted the fleet WCK.
 	content := fmt.Sprintf("home: %q\nroot: %q\nworkspace_name: %q\nrole: %q\n", paths.Home, paths.Root, workspaceName, role)
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		return fmt.Errorf("write config: %w", err)
+		return false, fmt.Errorf("write config: %w", err)
 	}
-	return nil
+	return true, nil
 }

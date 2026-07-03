@@ -340,15 +340,30 @@ func devicePublicKey(ctx context.Context, store *state.Store, deviceID string) (
 // enrollment on another device (P4-SEC-07).
 func newDeviceRecipientCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var signing bool
+	var workspaceID bool
 	cmd := &cobra.Command{
 		Use:   "recipient",
-		Short: "Print the local device's age recipient (or signing public key with --signing)",
+		Short: "Print the local device's age recipient (or signing public key with --signing, workspace id with --workspace-id)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if signing && workspaceID {
+				return appError{code: exitUsage, err: fmt.Errorf("--signing and --workspace-id are mutually exclusive")}
+			}
 			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
 			defer closeStore(store)
+			// P4-SEC-07 pairing: print the workspace id alone so scripts can
+			// thread it into `init --join --workspace-id` (the bare recipient
+			// output is frozen — existing scripts consume it unadorned).
+			if workspaceID {
+				wsID, err := store.WorkspaceID(cmd.Context())
+				if err != nil {
+					return err
+				}
+				_, err = fmt.Fprintln(stdout, wsID)
+				return err
+			}
 			dev, err := store.CurrentDevice(cmd.Context())
 			if err != nil {
 				return err
@@ -368,6 +383,7 @@ func newDeviceRecipientCommand(stdout io.Writer, opts *options) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&signing, "signing", false, "print the Ed25519 signing public key instead of the age recipient")
+	cmd.Flags().BoolVar(&workspaceID, "workspace-id", false, "print the workspace id instead of the age recipient (for init --join --workspace-id)")
 	return cmd
 }
 

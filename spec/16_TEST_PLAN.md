@@ -10,7 +10,7 @@ This project can destroy trust if it loses code, leaks secrets, or creates stale
 
 ## Current coverage gate
 
-Phase 0 currently implements `cmd/devstrap`, `cmd/spec-drift`, and `internal/{childenv, cli, config, devicekeys, draftbundle, envbundle, envfile, git, hub, ignore, logging, pathkey, platform, redact, scan, specdrift, state, sync, workspacekeys}`. Every package under `cmd/` and `internal/` except `internal/id` (a trivial ID generator, exempt — matching `spec/00`) must have executable tests before handoff.
+Phase 0 currently implements `cmd/devstrap`, `cmd/spec-drift`, and `internal/{childenv, cli, config, devicekeys, draftbundle, envbundle, envfile, git, hub, id, ignore, logging, pathkey, platform, redact, scan, specdrift, state, sync, workspacekeys}`. Every package under `cmd/` and `internal/` must have executable tests before handoff (the former `internal/id` exemption ended when `id.Valid` began gating `--workspace-id` input).
 
 Required now:
 
@@ -507,7 +507,7 @@ Testing gaps (`TEST-*`, from `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md`):
 
 - **No fuzz targets** for any untrusted-input parser, incl. the env parser, pathkey, and the secret scrubber (`TEST-01`); add `go test -fuzz`. **[Partially implemented: fuzz targets shipped for the env parser (`internal/envfile`) and the ignore compiler (`internal/ignore`); pathkey and the secret scrubber remain.]**
 - **e2e harness covers only `init`/`status`** (`TEST-02`); the riskiest flows (scan/hydrate/worktree/agent/env/sync) are tested in-process and bypass the real exit-code/`--json` contract. Extend the `rogpeppe/go-internal` testscript suite. **[Largely implemented: 12 testscripts now cover clone/doctor/draft/materialize/run-loop/encrypted sync; remaining gaps: worktree/agent/env flows through the real binary.]**
-- **Coverage profile is computed then discarded** and the vacuous-test guard checks only 3 packages; `internal/id` is untested (`TEST-03`).
+- **Coverage profile is computed then discarded** and the vacuous-test guard checks only 3 packages (`TEST-03`). **[Partially implemented: `internal/id` gained tests with the P4-SEC-07 pairing work; the coverage-profile and vacuous-test-guard gaps remain.]**
 - **gosec is narrowed to a 6-rule allowlist** disabling hardcoded-credential and weak-crypto checks (`TEST-04`); widen it. **[Implemented 2026-06-28: removed `includes` allowlist, all gosec rules now run; added `errorlint`; set `max-same-issues: 0`.]**
 - **`govulncheck` is unpinned (`@latest`) and bundled into the "Go tests" job** (`TEST-05`/`CI-01`); pin it and split it into its own (non-blocking/scheduled) job. **[Implemented 2026-06-28: pinned `@v1.1.4`, split into own `vuln` CI job, `continue-on-error` on PRs, daily scheduled run.]**
 - **The fsnotify watcher has no tests and concurrent code has no goroutine-leak detection** (`TEST-06`).

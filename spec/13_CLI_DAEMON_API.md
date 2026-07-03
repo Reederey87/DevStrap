@@ -17,7 +17,7 @@ tracks_code: [cmd/**, internal/cli/**, internal/platform/**]
 
 ```text
 Implemented:
-devstrap init [--join]
+devstrap init [--join] [--workspace-id <id>]
 devstrap version
 devstrap scan
 devstrap status
@@ -78,10 +78,11 @@ Options:
 ```bash
 --workspace-name my-workspace
 --dry-run
---join   # join an existing workspace: do not found one; wait to be approved (P6-SEC-02)
+--join                 # join an existing workspace: do not found one; wait to be approved (P6-SEC-02)
+--workspace-id ws_...  # adopt the founding device's workspace id; implies --join (P4-SEC-07 pairing)
 ```
 
-`init` normalizes the root to an absolute clean path, creates `~/.devstrap/config.yaml` with mode `0600` if missing, and does not overwrite an existing config file. It records `role: founder` (default) or `role: joiner` (`--join`) in the config and, per `P6-SEC-02`, **no longer mints a workspace key** — founding is deferred to the first `devstrap sync` and happens only against an empty hub (see `sync` below). `--join` prints approval-first next steps (share `devices recipient` / `--signing`, get approved on an existing device, then sync); default init prints the `devstrap status • devstrap scan --adopt • set 'hub: r2://<bucket>' in ~/.devstrap/config.yaml then devstrap sync` hint. `--scan` (`PROD-03`) runs the existing `scan --adopt` path inline after workspace creation so a populated root is adopted on the first command and prints the adopted count. Per `P6-CLI-05` (resolved), both hint forms teach the shipped production path (`hub: r2://<bucket>` in `~/.devstrap/config.yaml`) rather than the file-backed `--hub-file` test hub — see the P6-CLI-05 section below.
+`init` normalizes the root to an absolute clean path, creates `~/.devstrap/config.yaml` with mode `0600` if missing, and does not overwrite an existing config file (re-running with `--join` against a pre-existing founder config warns that the config was not modified). It records `role: founder` (default) or `role: joiner` (`--join`) in the config and, per `P6-SEC-02`, **no longer mints a workspace key** — founding is deferred to the first `devstrap sync` and happens only against an empty hub (see `sync` below). `--workspace-id <id>` (P4-SEC-07 pairing) adopts the founder's `ws_<32 hex>` id instead of minting one so both devices read the same r2/s3 hub prefix; the shape is validated before anything is written, supplying an id implies `--join`, `--dry-run` prints the would-adopted id, and a store already initialized under a different id is **refused** (exit 2) with a remove-the-state-home-and-re-init remedy — there is no post-hoc id rewrite. Bare `--join` without `--workspace-id` warns non-fatally that r2/s3 hubs key events by workspace id (flat file hubs are unaffected). `--join` prints approval-first next steps (copy the founder's Workspace ID from `devstrap status` when it was not supplied, share `devices recipient` / `--signing`, get approved on an existing device, then sync); default init prints the `devstrap status • devstrap scan --adopt • set 'hub: r2://<bucket>' in ~/.devstrap/config.yaml then devstrap sync` hint. `--scan` (`PROD-03`) runs the existing `scan --adopt` path inline after workspace creation so a populated root is adopted on the first command and prints the adopted count. Per `P6-CLI-05` (resolved), both hint forms teach the shipped production path (`hub: r2://<bucket>` in `~/.devstrap/config.yaml`) rather than the file-backed `--hub-file` test hub — see the P6-CLI-05 section below.
 
 ### db
 
@@ -137,7 +138,7 @@ devstrap status --watch [--interval 2s]
 
 `status --watch` re-renders the snapshot on an interval until interrupted.
 
-Current Phase-0 status shows workspace name, root path, project count, local device ID, and adopted project rows. Future daemon-backed status adds:
+Current Phase-0 status shows workspace name, workspace ID (`Workspace ID:` row / JSON `workspace_id` — the value a founder copies into `init --join --workspace-id <id>` on a joining device, P4-SEC-07 pairing), root path, project count, local device ID, and adopted project rows. Future daemon-backed status adds:
 
 ```bash
 devstrap status --devices
@@ -318,11 +319,12 @@ devstrap devices approve dev_01jz...
 devstrap devices revoke dev_01jz...
 devstrap devices lost dev_01jz...
 devstrap devices rename dev_01jz... linux-desktop
-devstrap devices recipient              # print local device's age recipient (for out-of-band enrollment)
-devstrap devices recipient --signing    # print local device's Ed25519 signing public key
+devstrap devices recipient                 # print local device's age recipient (for out-of-band enrollment)
+devstrap devices recipient --signing       # print local device's Ed25519 signing public key
+devstrap devices recipient --workspace-id  # print the workspace id (for init --join --workspace-id on a joining device)
 ```
 
-Current implementation manually enrolls remote device records with age recipients, lists and renames device records, and updates non-local device trust state to `approved`, `revoked`, or `lost`. `devices recipient` is a read-only helper that prints the local device's age recipient (or Ed25519 signing public key with `--signing`) so it can be shared out-of-band for enrollment on another device. Env capture encrypts local bundles to the local recipient plus approved remote recipients. `devices approve` and `enroll --approve` grant every held WCK epoch to the newly-approved device (`P4-SEC-07`); `devices approve` and `enroll --approve` also replay open `verification`-kind `event_verification_failure` conflicts from that device using the stored full event JSON and resolve conflicts whose events now apply (`divergent`-kind rows are never auto-resolved). `devices revoke`/`lost` rotate the WCK to a new epoch (go-forward forward secrecy) before the existing blob re-encryption pass. It refuses to change the current local device trust state so a user cannot revoke the only active local root by accident. Automatic remote enrollment, out-of-band fingerprint confirmation UX, a synced `device.revoked` event path, and bundle re-encryption hooks remain future work.
+Current implementation manually enrolls remote device records with age recipients, lists and renames device records, and updates non-local device trust state to `approved`, `revoked`, or `lost`. `devices recipient` is a read-only helper that prints the local device's age recipient (or Ed25519 signing public key with `--signing`, or the workspace id with `--workspace-id` for `init --join --workspace-id` pairing; `--signing` and `--workspace-id` are mutually exclusive, and the bare default output stays frozen because scripts consume it unadorned) so it can be shared out-of-band for enrollment on another device. Env capture encrypts local bundles to the local recipient plus approved remote recipients. `devices approve` and `enroll --approve` grant every held WCK epoch to the newly-approved device (`P4-SEC-07`); `devices approve` and `enroll --approve` also replay open `verification`-kind `event_verification_failure` conflicts from that device using the stored full event JSON and resolve conflicts whose events now apply (`divergent`-kind rows are never auto-resolved). `devices revoke`/`lost` rotate the WCK to a new epoch (go-forward forward secrecy) before the existing blob re-encryption pass. It refuses to change the current local device trust state so a user cannot revoke the only active local root by accident. Automatic remote enrollment, out-of-band fingerprint confirmation UX, a synced `device.revoked` event path, and bundle re-encryption hooks remain future work.
 
 ## Doctor command
 
