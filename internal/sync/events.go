@@ -168,9 +168,14 @@ type eventHashChainConflictDetails struct {
 // once the source device is approved, so `devices approve` replays them.
 // "divergent" failures are data-integrity conflicts with an already-stored
 // event of the same ID and must NEVER be auto-resolved by approval.
+// "undecryptable" failures are enc.v2 carriers that failed AEAD
+// authentication on every held key (corruption, forgery, or a hub-side
+// carrier mutation — P6-SYNC-04): permanent, never applied, and never
+// replayed by approval (a replay would fail authentication identically).
 const (
-	EventConflictKindVerification = "verification"
-	EventConflictKindDivergent    = "divergent"
+	EventConflictKindVerification  = "verification"
+	EventConflictKindDivergent     = "divergent"
+	EventConflictKindUndecryptable = "undecryptable"
 )
 
 type eventVerificationConflictDetails struct {
@@ -308,6 +313,26 @@ func ApplyEventsWithStats(ctx context.Context, st *state.Store, events []state.E
 	var maxAppliedHLC int64
 	lowestUnapplied := int64(math.MaxInt64)
 	for _, event := range events {
+		// P6-SYNC-04: an enc.v2 carrier reaching the apply path is one
+		// EncryptedHub.Pull forwarded because AEAD authentication failed on
+		// every held key — corruption, forgery, or a hub-side carrier
+		// mutation. It is PERMANENTLY unappliable (a re-delivery fails
+		// authentication identically), so quarantine it as an undecryptable
+		// conflict and advance the cursor past it — never insert it (routing
+		// it through insertEvent would backfill a content hash over
+		// ciphertext and, pre-enrollment, accept an unknown-device carrier
+		// into the log), and never hold the cursor (that would wedge sync on
+		// one poisoned object forever).
+		if event.Type == EventEncryptedV2 {
+			if err := insertUndecryptableEventConflict(ctx, st, event); err != nil {
+				return 0, stats, err
+			}
+			stats.Quarantined++
+			if event.HLC > maxAppliedHLC {
+				maxAppliedHLC = event.HLC
+			}
+			continue
+		}
 		// SYNC-03: quarantine remote events with implausible HLC values
 		// (non-positive or below the epoch floor) so they cannot win every
 		// same-path conflict from the "past" direction. These are permanently
@@ -468,10 +493,29 @@ func insertEventHashChainConflict(ctx context.Context, st *state.Store, event st
 }
 
 func insertEventVerificationConflict(ctx context.Context, st *state.Store, event state.Event, cause error) error {
-	// Dedup on event ID, not exact details: the same event re-quarantined for
-	// a different reason (e.g. an approve-time replay that fails the signature
-	// check where the original failure was pending trust) must not open a
-	// second conflict row — the error string is volatile, the event is not.
+	kind := EventConflictKindVerification
+	if errors.Is(cause, state.ErrDivergentEvent) {
+		kind = EventConflictKindDivergent
+	}
+	return insertEventConflictOnce(ctx, st, event, kind, cause.Error())
+}
+
+// insertUndecryptableEventConflict quarantines an enc.v2 carrier that failed
+// AEAD authentication on every held key (P6-SYNC-04). The specific decrypt
+// error was logged by EncryptedHub.Pull; the conflict preserves the full
+// carrier (EventJSON) for forensics. Never replayed by `devices approve`.
+func insertUndecryptableEventConflict(ctx context.Context, st *state.Store, event state.Event) error {
+	return insertEventConflictOnce(ctx, st, event, EventConflictKindUndecryptable,
+		"enc.v2 AEAD authentication failed on every held key (corruption, forgery, or hub-side carrier mutation)")
+}
+
+// insertEventConflictOnce records an event_verification_failure conflict,
+// dedupping on event ID rather than exact details: the same event
+// re-quarantined for a different reason (e.g. an approve-time replay that
+// fails the signature check where the original failure was pending trust)
+// must not open a second conflict row — the error string is volatile, the
+// event is not.
+func insertEventConflictOnce(ctx context.Context, st *state.Store, event state.Event, kind, cause string) error {
 	existing, err := st.OpenConflictsByType(ctx, ConflictEventVerification)
 	if err != nil {
 		return err
@@ -486,10 +530,6 @@ func insertEventVerificationConflict(ctx context.Context, st *state.Store, event
 	if err != nil {
 		return err
 	}
-	kind := EventConflictKindVerification
-	if errors.Is(cause, state.ErrDivergentEvent) {
-		kind = EventConflictKindDivergent
-	}
 	raw, err := json.Marshal(eventVerificationConflictDetails{
 		Kind:      kind,
 		EventID:   event.ID,
@@ -497,7 +537,7 @@ func insertEventVerificationConflict(ctx context.Context, st *state.Store, event
 		HLC:       event.HLC,
 		Seq:       event.Seq,
 		Type:      event.Type,
-		Error:     cause.Error(),
+		Error:     cause,
 		EventJSON: string(eventRaw),
 	})
 	if err != nil {

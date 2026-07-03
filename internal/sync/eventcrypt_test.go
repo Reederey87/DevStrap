@@ -45,8 +45,8 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncryptEvent: %v", err)
 	}
-	if enc.Type != EventEncryptedV1 {
-		t.Errorf("encrypted Type = %q, want %q", enc.Type, EventEncryptedV1)
+	if enc.Type != EventEncryptedV2 {
+		t.Errorf("encrypted Type = %q, want %q", enc.Type, EventEncryptedV2)
 	}
 	if enc.ContentHash != "" || enc.PrevEventHash != "" || enc.CreatedAt != "" {
 		t.Errorf("encrypted carrier must clear ContentHash/PrevEventHash/CreatedAt, got %q/%q/%q", enc.ContentHash, enc.PrevEventHash, enc.CreatedAt)
@@ -115,16 +115,73 @@ func TestDecryptWrongKeyFails(t *testing.T) {
 	}
 }
 
-func TestDecryptMutatedIDFails(t *testing.T) {
+// TestDecryptMutatedCarrierFails is the core enc.v2 tamper proof (P6-SYNC-04):
+// every carrier field an untrusted hub could rewrite on a stored object — ID,
+// DeviceID, Seq, HLC — is bound into the AEAD AAD, so any mutation is an
+// authentication failure at decrypt time, never an apply-path wedge
+// (under enc.v1 a Seq rewrite reached validatePrevEventHash and held the
+// cursor forever — a keyless hub-controlled soft-wedge).
+func TestDecryptMutatedCarrierFails(t *testing.T) {
 	wck, _ := NewWCK()
-	enc, err := EncryptEvent(state.Event{ID: "evt_orig_id", Type: EventProjectAdded, PayloadJSON: `{}`, ContentHash: state.ContentHash(`{}`)}, wck, 1)
+	original := state.Event{
+		ID:          "evt_orig_id",
+		DeviceID:    "dev_orig",
+		Seq:         7,
+		HLC:         115763879690240001,
+		Type:        EventProjectAdded,
+		PayloadJSON: `{}`,
+		ContentHash: state.ContentHash(`{}`),
+	}
+	tests := []struct {
+		name   string
+		mutate func(e *state.Event)
+	}{
+		{"mutated ID", func(e *state.Event) { e.ID = "evt_tampered_id" }},
+		{"mutated DeviceID", func(e *state.Event) { e.DeviceID = "dev_attacker" }},
+		{"mutated Seq", func(e *state.Event) { e.Seq = 1 }},
+		{"mutated HLC", func(e *state.Event) { e.HLC = original.HLC + 1 }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			enc, err := EncryptEvent(original, wck, 1)
+			if err != nil {
+				t.Fatalf("EncryptEvent: %v", err)
+			}
+			tt.mutate(&enc)
+			if _, err := DecryptEvent(enc, wck); err == nil {
+				t.Fatalf("DecryptEvent with %s unexpectedly succeeded", tt.name)
+			}
+		})
+	}
+	// Control: the untampered carrier still decrypts.
+	enc, err := EncryptEvent(original, wck, 1)
 	if err != nil {
 		t.Fatalf("EncryptEvent: %v", err)
 	}
-	// Swap the carrier ID: the AAD no longer matches, so Open must fail.
-	enc.ID = "evt_tampered_id"
-	if _, err := DecryptEvent(enc, wck); err == nil {
-		t.Fatalf("DecryptEvent with mutated ID unexpectedly succeeded")
+	if _, err := DecryptEvent(enc, wck); err != nil {
+		t.Fatalf("untampered DecryptEvent: %v", err)
+	}
+}
+
+// TestDecryptRelabeledKIDHintStillDecrypts pins the deliberate asymmetry: the
+// envelope's kid FIELD is a routing hint outside the AAD (the AAD binds the
+// sealing key's kid derived from the candidate in hand), so a hub-side relabel
+// of the hint cannot turn a decryptable event into a permanent failure.
+func TestDecryptRelabeledKIDHintStillDecrypts(t *testing.T) {
+	wck, _ := NewWCK()
+	enc, err := EncryptEvent(state.Event{ID: "evt_kidhint", Type: EventProjectAdded, PayloadJSON: `{}`, ContentHash: state.ContentHash(`{}`)}, wck, 1)
+	if err != nil {
+		t.Fatalf("EncryptEvent: %v", err)
+	}
+	var env encryptedEnvelope
+	if err := json.Unmarshal([]byte(enc.PayloadJSON), &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	env.KID = "0000000000000000000000000000000000000000000000000000000000000000"
+	raw, _ := json.Marshal(env)
+	enc.PayloadJSON = string(raw)
+	if _, err := DecryptEvent(enc, wck); err != nil {
+		t.Fatalf("DecryptEvent with relabeled kid hint: %v", err)
 	}
 }
 
@@ -134,12 +191,13 @@ func TestParseEncryptedEnvelopeUnknownVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncryptEvent: %v", err)
 	}
-	// Forge an envelope with version 2.
+	// Forge an envelope with the retired v1 version: rejected fail-closed, so
+	// a downgrade to the weaker (ID, epoch)-only AAD can never be decrypted.
 	var env encryptedEnvelope
 	if err := json.Unmarshal([]byte(enc.PayloadJSON), &env); err != nil {
 		t.Fatalf("unmarshal envelope: %v", err)
 	}
-	env.Version = 2
+	env.Version = 1
 	raw, _ := json.Marshal(env)
 	enc.PayloadJSON = string(raw)
 	_, err = ParseEncryptedEnvelope(enc)
@@ -164,7 +222,7 @@ func TestDecryptShortCiphertextFails(t *testing.T) {
 	wck, _ := NewWCK()
 	env := encryptedEnvelope{Version: envelopeVersion, Epoch: 1, CT: base64.StdEncoding.EncodeToString([]byte("short"))}
 	raw, _ := json.Marshal(env)
-	enc := state.Event{ID: "evt_short", Type: EventEncryptedV1, PayloadJSON: string(raw)}
+	enc := state.Event{ID: "evt_short", Type: EventEncryptedV2, PayloadJSON: string(raw)}
 	if _, err := DecryptEvent(enc, wck); err == nil {
 		t.Fatalf("DecryptEvent with short ciphertext unexpectedly succeeded")
 	}

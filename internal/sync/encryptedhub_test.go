@@ -137,13 +137,13 @@ func TestEncryptedHubRoundTrip(t *testing.T) {
 	if err := hub.Push(ctx, []state.Event{original}); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
-	// The backend must store only the enc.v1 carrier, not plaintext.
+	// The backend must store only the enc.v2 carrier, not plaintext.
 	if len(back.events) != 1 {
 		t.Fatalf("backend stored %d events, want 1", len(back.events))
 	}
 	stored := back.events[0]
-	if stored.Type != EventEncryptedV1 {
-		t.Errorf("stored Type = %q, want %q", stored.Type, EventEncryptedV1)
+	if stored.Type != EventEncryptedV2 {
+		t.Errorf("stored Type = %q, want %q", stored.Type, EventEncryptedV2)
 	}
 	if stringContains(stored.PayloadJSON, "work/nclh/foc-models") || stringContains(stored.PayloadJSON, "github.com/org/foc-models") {
 		t.Errorf("backend stored plaintext payload: %s", stored.PayloadJSON)
@@ -389,10 +389,10 @@ func TestEncryptedHubUnknownVersion(t *testing.T) {
 	kr := newFakeKeyring(t, 1)
 	wck1, _ := NewWCK()
 	enc, _ := EncryptEvent(state.Event{ID: "ev", DeviceID: "dev_a", HLC: 1, Type: EventProjectAdded, PayloadJSON: `{}`, ContentHash: state.ContentHash(`{}`)}, wck1, 1)
-	// Forge version 2.
+	// Forge an unsupported version (the retired v1): rejected fail-closed.
 	var env encryptedEnvelope
 	_ = json.Unmarshal([]byte(enc.PayloadJSON), &env)
-	env.Version = 2
+	env.Version = 1
 	raw, _ := json.Marshal(env)
 	enc.PayloadJSON = string(raw)
 	back := &recordingHub{events: []state.Event{enc}}
@@ -411,10 +411,11 @@ func TestEncryptedHubUnknownVersion(t *testing.T) {
 }
 
 // TestEncryptedHubPoisonEventDoesNotWedge is the core regression for the wedge
-// bug: an event whose envelope names a key this device holds but that cannot
-// authenticate (corruption or a forged kid) is skipped with the good events on
-// either side still delivered — one bad object can no longer brick a device's
-// sync by aborting the whole batch forever.
+// bug, updated for P6-SYNC-04: an event whose envelope names a key this device
+// holds but that cannot authenticate (corruption or a forged kid) is FORWARDED
+// as its still-encrypted carrier — so ApplyEvents can quarantine it visibly —
+// while the good events on either side still decrypt. One bad object can
+// neither brick a device's sync nor vanish silently.
 func TestEncryptedHubPoisonEventDoesNotWedge(t *testing.T) {
 	ctx := context.Background()
 	kr := newFakeKeyring(t, 1)
@@ -426,26 +427,61 @@ func TestEncryptedHubPoisonEventDoesNotWedge(t *testing.T) {
 	otherWCK1, _ := NewWCK()
 	poison, _ := EncryptEvent(state.Event{ID: "poison", DeviceID: "dev_b", HLC: 2, Type: EventProjectAdded, PayloadJSON: `{"path":"work/poison"}`, ContentHash: state.ContentHash(`{"path":"work/poison"}`)}, otherWCK1, 1)
 	poison = rewriteEnvelopeKID(t, poison, KIDForWCK(wck1))
-	// Legacy poison: same wrong-key ciphertext with the kid stripped (a pre-kid
-	// envelope), so every held key at the epoch is tried and all fail.
-	legacyPoison, _ := EncryptEvent(state.Event{ID: "legacy_poison", DeviceID: "dev_b", HLC: 3, Type: EventProjectAdded, PayloadJSON: `{"path":"work/poison2"}`, ContentHash: state.ContentHash(`{"path":"work/poison2"}`)}, otherWCK1, 1)
-	legacyPoison = rewriteEnvelopeKID(t, legacyPoison, "")
+	// Kid-less poison: same wrong-key ciphertext with the kid stripped, so
+	// every held key at the epoch is tried and all fail.
+	kidlessPoison, _ := EncryptEvent(state.Event{ID: "kidless_poison", DeviceID: "dev_b", HLC: 3, Type: EventProjectAdded, PayloadJSON: `{"path":"work/poison2"}`, ContentHash: state.ContentHash(`{"path":"work/poison2"}`)}, otherWCK1, 1)
+	kidlessPoison = rewriteEnvelopeKID(t, kidlessPoison, "")
 	after, _ := EncryptEvent(state.Event{ID: "after", DeviceID: "dev_a", HLC: 4, Type: EventProjectAdded, PayloadJSON: `{"path":"work/after"}`, ContentHash: state.ContentHash(`{"path":"work/after"}`)}, wck1, 1)
-	back := &recordingHub{events: []state.Event{before, poison, legacyPoison, after}}
-	hub := EncryptedHub{Hub: back, Keyring: kr}
+	back := &recordingHub{events: []state.Event{before, poison, kidlessPoison, after}}
+	hub := EncryptedHub{Hub: back, Keyring: kr, Stats: &PullStats{}}
 	got, err := hub.Pull(ctx, 0)
 	if err != nil {
 		t.Fatalf("Pull with poison event: unexpected error %v", err)
 	}
-	if len(got) != 2 || got[0].ID != "before" || got[1].ID != "after" {
-		t.Fatalf("Pull returned %+v, want [before, after] with both poisons skipped", got)
+	if len(got) != 4 || got[0].ID != "before" || got[1].ID != "poison" || got[2].ID != "kidless_poison" || got[3].ID != "after" {
+		t.Fatalf("Pull returned %+v, want [before, poison(carrier), kidless_poison(carrier), after]", got)
+	}
+	// The good events decrypt; the poisons stay encrypted carriers for
+	// ApplyEvents to quarantine (never applied as plaintext).
+	if got[0].Type != EventProjectAdded || got[3].Type != EventProjectAdded {
+		t.Fatalf("good events not decrypted: %+v", got)
+	}
+	if got[1].Type != EventEncryptedV2 || got[2].Type != EventEncryptedV2 {
+		t.Fatalf("poison events must be forwarded as enc.v2 carriers, got types %q/%q", got[1].Type, got[2].Type)
+	}
+	if hub.Stats.Undecryptable != 2 || hub.Stats.Skipped != 0 || hub.Stats.Truncated != 0 {
+		t.Fatalf("Stats = %+v, want Undecryptable=2 Skipped=0 Truncated=0", *hub.Stats)
 	}
 }
 
-// rewriteEnvelopeKID rewrites an enc.v1 carrier's envelope kid in place —
-// forging a kid (or stripping it to simulate a legacy pre-kid envelope). The
-// kid is outside the AAD, so this is exactly what an attacker or an old client
-// can produce.
+// TestEncryptedHubRetiredV1Skipped proves retired enc.v1 traffic (written
+// before the P6-SYNC-04 wire break) is refused loudly but skipped, not fatal:
+// the remedy is re-founding the hub, and the surrounding enc.v2 events still
+// come through.
+func TestEncryptedHubRetiredV1Skipped(t *testing.T) {
+	ctx := context.Background()
+	kr := newFakeKeyring(t, 1)
+	wck1, _ := kr.WCK(1)
+	good, _ := EncryptEvent(state.Event{ID: "good", DeviceID: "dev_a", HLC: 2, Type: EventProjectAdded, PayloadJSON: `{"path":"work/ok"}`, ContentHash: state.ContentHash(`{"path":"work/ok"}`)}, wck1, 1)
+	legacy := state.Event{ID: "legacy", DeviceID: "dev_a", HLC: 1, Type: EventEncryptedV1, PayloadJSON: `{"v":1,"epoch":1,"ct":"aGVsbG8="}`}
+	back := &recordingHub{events: []state.Event{legacy, good}}
+	hub := EncryptedHub{Hub: back, Keyring: kr, Stats: &PullStats{}}
+	got, err := hub.Pull(ctx, 0)
+	if err != nil {
+		t.Fatalf("Pull with retired v1 event: unexpected error %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "good" {
+		t.Fatalf("Pull returned %+v, want only the enc.v2 'good' event (v1 skipped)", got)
+	}
+	if hub.Stats.Skipped != 1 || hub.Stats.Undecryptable != 0 {
+		t.Fatalf("Stats = %+v, want Skipped=1 Undecryptable=0", *hub.Stats)
+	}
+}
+
+// rewriteEnvelopeKID rewrites a carrier's envelope kid in place — forging a
+// kid (or stripping it). The kid FIELD is outside the AAD (the sealing key's
+// kid is bound via the candidate on decrypt), so this is exactly what a
+// hostile hub can produce.
 func rewriteEnvelopeKID(t *testing.T, carrier state.Event, kid string) state.Event {
 	t.Helper()
 	var env encryptedEnvelope

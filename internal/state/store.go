@@ -2354,7 +2354,7 @@ func (tx *Tx) ensureLocalEventSignature(ctx context.Context, keyDir string, even
 	if err := tx.setDeviceSigningPublicKey(ctx, event.DeviceID, signing.Public); err != nil {
 		return err
 	}
-	signature, err := devicekeys.Sign(signing.Private, eventSignatureDomain, EventSignaturePayload(*event))
+	signature, err := devicekeys.Sign(signing.Private, eventSignatureDomainV2, EventSignaturePayloadV2(*event))
 	if err != nil {
 		return fmt.Errorf("sign event: %w", err)
 	}
@@ -2552,7 +2552,19 @@ LIMIT 1;
 	return hash, true, nil
 }
 
-const eventSignatureDomain = "devstrap:event:v1"
+// Event-signature domains. v2 (P6-SYNC-04) adds DeviceID and Seq to the
+// signed payload so those carrier fields are signature-bound end-to-end (the
+// enc.v2 AAD binds them on the encrypted hub plane; the signature extends the
+// binding to plaintext-era grant carriers and any future plaintext plane).
+// New signatures are always v2; verification accepts v2 then falls back to v1
+// because historical events in existing local DBs were signed under v1 and are
+// re-pushed verbatim when a hub is re-founded (ensureLocalEventSignature only
+// signs when DeviceSig is empty). The bounded residual — v1-signed legacy
+// events lack DeviceID/Seq signature binding — is documented in spec/15.
+const (
+	eventSignatureDomain   = "devstrap:event:v1"
+	eventSignatureDomainV2 = "devstrap:event:v2"
+)
 
 type eventSignaturePayload struct {
 	ContentHash   string `json:"content_hash"`
@@ -2563,6 +2575,20 @@ type eventSignaturePayload struct {
 	Type          string `json:"type"`
 }
 
+type eventSignaturePayloadV2 struct {
+	ContentHash   string `json:"content_hash"`
+	DeviceID      string `json:"device_id"`
+	HLC           int64  `json:"hlc"`
+	ID            string `json:"id"`
+	PayloadJSON   string `json:"payload_json"`
+	PrevEventHash string `json:"prev_event_hash"`
+	Seq           int64  `json:"seq"`
+	Type          string `json:"type"`
+}
+
+// EventSignaturePayload is the LEGACY v1 signed payload (no DeviceID/Seq).
+// It is retained only so verification can fall back to v1 for historical
+// events; new signatures use EventSignaturePayloadV2.
 func EventSignaturePayload(event Event) []byte {
 	raw, err := json.Marshal(eventSignaturePayload{
 		ContentHash:   event.ContentHash,
@@ -2570,6 +2596,25 @@ func EventSignaturePayload(event Event) []byte {
 		ID:            event.ID,
 		PayloadJSON:   event.PayloadJSON,
 		PrevEventHash: event.PrevEventHash,
+		Type:          event.Type,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return raw
+}
+
+// EventSignaturePayloadV2 is the v2 signed payload: the v1 tuple plus
+// DeviceID and Seq (P6-SYNC-04), keys in alphabetical order.
+func EventSignaturePayloadV2(event Event) []byte {
+	raw, err := json.Marshal(eventSignaturePayloadV2{
+		ContentHash:   event.ContentHash,
+		DeviceID:      event.DeviceID,
+		HLC:           event.HLC,
+		ID:            event.ID,
+		PayloadJSON:   event.PayloadJSON,
+		PrevEventHash: event.PrevEventHash,
+		Seq:           event.Seq,
 		Type:          event.Type,
 	})
 	if err != nil {
@@ -2645,8 +2690,14 @@ WHERE id = ?;
 	if !isLocal && trustState != "approved" && (mustVerifyEvent(event.Type) || enrolled) {
 		return fmt.Errorf("event %s of type %s requires a signature from an approved device (current: %s): %w", event.ID, event.Type, trustState, ErrEventVerification)
 	}
-	if err := devicekeys.Verify(signingPublicKey, event.DeviceSig, eventSignatureDomain, EventSignaturePayload(event)); err != nil {
-		return fmt.Errorf("event %s device signature invalid: %w: %w", event.ID, err, ErrEventVerification)
+	if err := devicekeys.Verify(signingPublicKey, event.DeviceSig, eventSignatureDomainV2, EventSignaturePayloadV2(event)); err != nil {
+		// v1 fallback (P6-SYNC-04): historical events were signed under the
+		// v1 domain/payload (no DeviceID/Seq) and are re-pushed verbatim when
+		// a hub is re-founded. Accepting v1 keeps them verifiable; the enc.v2
+		// AAD still binds DeviceID/Seq for everything on the encrypted plane.
+		if v1Err := devicekeys.Verify(signingPublicKey, event.DeviceSig, eventSignatureDomain, EventSignaturePayload(event)); v1Err != nil {
+			return fmt.Errorf("event %s device signature invalid: %w: %w", event.ID, err, ErrEventVerification)
+		}
 	}
 	return nil
 }

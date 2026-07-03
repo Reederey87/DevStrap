@@ -915,3 +915,82 @@ func TestApplyResolvesSkewConflictOnLateApply(t *testing.T) {
 		t.Fatalf("conflicts = %+v, want the skew quarantine auto-resolved after the event applied", conflicts)
 	}
 }
+
+// TestApplyEventsQuarantinesUndecryptableCarrier is the apply half of the
+// P6-SYNC-04 no-silent-loss contract: an enc.v2 carrier forwarded by
+// EncryptedHub.Pull (AEAD authentication failed on every held key) is recorded
+// as a permanent "undecryptable" event_verification_failure conflict, is never
+// inserted into the event log, and does NOT hold the cursor — the surrounding
+// good events apply and the batch converges. A re-delivery dedups onto the
+// same conflict row instead of opening a second one.
+func TestApplyEventsQuarantinesUndecryptableCarrier(t *testing.T) {
+	ctx := context.Background()
+	st, device := newSyncStore(t)
+
+	otherWCK, _ := NewWCK()
+	carrier, err := EncryptEvent(state.Event{
+		ID: "evt_poison", DeviceID: "dev_remote", Seq: 1, HLC: 20 << hlcLogicalBits,
+		Type:        EventProjectAdded,
+		PayloadJSON: `{"path":"work/poison"}`,
+		ContentHash: state.ContentHash(`{"path":"work/poison"}`),
+	}, otherWCK, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate what Pull forwards: the receiving device does not hold
+	// otherWCK, so the carrier reaches ApplyEvents still encrypted.
+	good := projEvent(t, device.ID, EventProjectAdded, 30, "work/good", "github.com/org/good")
+
+	safe, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{carrier, good})
+	if err != nil {
+		t.Fatalf("ApplyEventsWithStats: %v", err)
+	}
+	if stats.Quarantined != 1 {
+		t.Fatalf("Quarantined = %d, want 1", stats.Quarantined)
+	}
+	if safe != 30<<hlcLogicalBits {
+		t.Fatalf("safeAdvanceHLC = %d, want %d (cursor advances past the permanent quarantine)", safe, int64(30)<<hlcLogicalBits)
+	}
+	if projection := projectionOf(t, st); projection["work/good"] == "" {
+		t.Fatalf("good event did not apply: %+v", projection)
+	}
+	conflicts, err := st.OpenConflicts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, c := range conflicts {
+		if c.Type != ConflictEventVerification {
+			continue
+		}
+		var d eventVerificationConflictDetails
+		if json.Unmarshal([]byte(c.DetailsJSON), &d) != nil || d.EventID != "evt_poison" {
+			continue
+		}
+		found = true
+		if d.Kind != EventConflictKindUndecryptable {
+			t.Fatalf("conflict kind = %q, want %q", d.Kind, EventConflictKindUndecryptable)
+		}
+		if d.Type != EventEncryptedV2 {
+			t.Fatalf("conflict event type = %q, want %q", d.Type, EventEncryptedV2)
+		}
+	}
+	if !found {
+		t.Fatalf("no undecryptable conflict recorded; conflicts = %+v", conflicts)
+	}
+	// The carrier must never enter the event log.
+	if _, err := st.EventByID(ctx, "evt_poison"); err == nil {
+		t.Fatal("undecryptable carrier was inserted into the event log")
+	}
+	// Re-delivery dedups onto the same conflict row.
+	if _, _, err := ApplyEventsWithStats(ctx, st, []state.Event{carrier}); err != nil {
+		t.Fatalf("re-delivery: %v", err)
+	}
+	conflicts, err = st.OpenConflicts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := countConflictType(conflicts, ConflictEventVerification); n != 1 {
+		t.Fatalf("conflict rows after re-delivery = %d, want 1 (dedup)", n)
+	}
+}
