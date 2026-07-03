@@ -1050,3 +1050,25 @@ func runGitOutput(t *testing.T, dir string, args ...string) string {
 	}
 	return string(out)
 }
+
+// P6-GIT-01 review (CodeRabbit): a malformed clone_timeout must fall back to
+// the default, never silently become "no timeout"; an explicit "0" stays the
+// documented unbounded opt-out.
+func TestGitRunnerCloneTimeoutValidation(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want time.Duration
+	}{
+		{"3 hours", 30 * time.Minute}, // malformed → default, not unbounded
+		{"-5m", 30 * time.Minute},     // negative → default
+		{"0", 0},                      // explicit unbounded opt-out
+		{"45m", 45 * time.Minute},
+	}
+	for _, tc := range cases {
+		v := viper.New()
+		v.Set("materialization.clone_timeout", tc.raw)
+		if got := gitRunner(&options{v: v}).LongTimeout; got != tc.want {
+			t.Fatalf("clone_timeout %q: LongTimeout = %s, want %s", tc.raw, got, tc.want)
+		}
+	}
+}
