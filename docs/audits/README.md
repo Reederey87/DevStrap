@@ -48,12 +48,13 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P6-SYNC-03 | P2 | PR #38 (2026-07-03) | Sticky fail-closed enrollment: `hasEnrolledDevices` counts `trust_state IN ('approved','revoked','lost')`, so revoking/losing the last approved device keeps verification fail-closed instead of reopening the pre-enrollment window; post-revoke traffic (revoked or unknown devices) quarantines per `P6-SYNC-01`. Pending placeholders still don't count; the never-enrolled bootstrap window (`P4-SEC-04`) is unchanged. Pinned by `TestHasEnrolledDevicesStickyAfterRevoke` + `TestApplyEventsRevokedLastDeviceStaysFailClosed`. Residual: synced `device.revoked` trust propagation. |
 | P6-DATA-02 | P2 | `fix/p6-data-02` (2026-07-03) | `ClearRotationForProject` now filters via `namespace_entries.env_profile_id` instead of the non-existent `env_profiles.namespace_id`; store coverage proves per-project isolation and CLI coverage proves one-arg `env rotate <path>` succeeds. |
 | P6-CLI-02 | P2 | `fix/p6-cli-02` (2026-07-03) | `scan <dir> --adopt` is gated on the scanned root naming the same directory as the workspace root (`sameResolvedDir`: byte-exact after `EvalSymlinks`, no case-folding; refusal is `exitUsage`), so one command can no longer rewrite the fleet namespace with out-of-tree repos; adoption proceeds under the canonical root spelling and read-only scans of arbitrary directories keep working. Pinned by `TestScanAdoptRefusesNonWorkspaceRoot`/`...ExplicitWorkspaceRootSucceeds`/`...AcceptsSymlinkedWorkspaceRoot`/`...ReadOnlyAllowsNonWorkspaceRoot`. |
+| P6-GIT-05 | P2 | `fix/p6-git-05` (2026-07-03) | `createFreshWorktree` failures after `git worktree add` (LFS pull, current-device lookup, DB insert) now remove the just-created checkout and delete its `agent/...` branch under a detached bounded context (`context.WithoutCancel` + 2m cap, so a Ctrl-C that caused the failure cannot no-op the cleanup); the `agent run` file-policy-denial cleanup deletes the branch too, and the LFS error names the worktree path. Pinned by `TestCreateFreshWorktreeCleansUpAfterLFSPullFailure`/`...AfterInsertWorktreeFailure`. Doctor orphan-worktree check deliberately out of scope. |
 | P6-DOC-02 | P2 | audit PR #28 | Ledger P4-SEC-05 contradiction + convention-#3 violation reconciled in the PR that landed the audit. Fully applied. |
 | P6-DOC-03 | P3 | audit PR #28 | spec/00 re-drift (planned-sync comment, command/test inventories) fixed in the PR that landed the audit. Fully applied. |
 
-### Pass 6 (2026-07-01) — 32 open of 43; **all five P1s shipped**; P2 quick-win wave underway
+### Pass 6 (2026-07-01) — 31 open of 43; **all five P1s shipped**; **P2 quick-win wave complete**
 
-> The header count equals the rows in the table below (CodeRabbit, PR #39): 43 findings − 8 shipped − 2 fully-applied doc fixes (`P6-DOC-02`/`P6-DOC-03`, now in *Recently shipped*) = 32 with `P6-CLI-02` also shipped. `P6-DOC-01`/`P6-DOC-04` stay listed because their test-hardening residuals are open even though their doc portions were applied in the audit PR. `P6-SYNC-01`, `P6-SEC-01`, `P6-SEC-02` (PRs #30–#34), `P6-DATA-01` (PR #35), `P6-HUB-01` (PR #36), `P6-GIT-01` (PR #37), `P6-SYNC-03` (PR #38), `P6-DATA-02` (PR #39), and `P6-CLI-02` moved to *Recently shipped* above per convention #3.
+> The header count equals the rows in the table below (CodeRabbit, PR #39): 43 findings − 8 shipped − 2 fully-applied doc fixes (`P6-DOC-02`/`P6-DOC-03`, now in *Recently shipped*) = 31 with `P6-CLI-02` and `P6-GIT-05` also shipped. `P6-DOC-01`/`P6-DOC-04` stay listed because their test-hardening residuals are open even though their doc portions were applied in the audit PR. `P6-SYNC-01`, `P6-SEC-01`, `P6-SEC-02` (PRs #30–#34), `P6-DATA-01` (PR #35), `P6-HUB-01` (PR #36), `P6-GIT-01` (PR #37), `P6-SYNC-03` (PR #38), `P6-DATA-02` (PR #39), `P6-CLI-02` (PR #40), and `P6-GIT-05` moved to *Recently shipped* above per convention #3.
 
 | ID | Sev | Effort | Finding |
 |---|---|---|---|
@@ -64,7 +65,6 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P6-GIT-02 | P2 | S | Diff `agent` runs against the recorded base SHA, not just the working tree |
 | P6-GIT-03 | P2 | S | Run dependency rebuild before `.env` hydrate; capture a 0600 log |
 | P6-GIT-04 | P2 | M | Honor the stored `lfs_policy` on materialize/hydrate (mirror the worktree path) |
-| P6-GIT-05 | P2 | S | Clean up the worktree+branch on any failure after `git worktree add` |
 | P6-HUB-02 | P2 | M | Implement the promised keychain/`op://`/age-blob S3 credential resolution |
 | P6-QUAL-01 | P2 | S | Exclude catch-all specs (`**`) from the mapped-spec drift check |
 | P6-QUAL-02 | P2 | S | Add a `verify` job gating release on tests + vuln + main-ancestry |

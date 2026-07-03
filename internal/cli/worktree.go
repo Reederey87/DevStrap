@@ -171,11 +171,18 @@ func createFreshWorktree(ctx context.Context, stdout io.Writer, opts *options, s
 	if err != nil {
 		return state.Worktree{}, err
 	}
+	// P6-GIT-05: a failure after `git worktree add` must not leak a
+	// DB-invisible checkout + branch.
+	cleanupOrphan := func() {
+		removeOrphanWorktree(ctx, stdout, r, localPath, wtPath, branch)
+	}
 	if err := applyWorktreeLFSPolicy(ctx, stdout, r, project, wtPath); err != nil {
+		cleanupOrphan()
 		return state.Worktree{}, err
 	}
 	device, err := store.CurrentDevice(ctx)
 	if err != nil {
+		cleanupOrphan()
 		return state.Worktree{}, err
 	}
 	wt, err := store.InsertWorktree(ctx, state.Worktree{
@@ -189,6 +196,7 @@ func createFreshWorktree(ctx context.Context, stdout io.Writer, opts *options, s
 		DirtyState:  "clean",
 	})
 	if err != nil {
+		cleanupOrphan()
 		return state.Worktree{}, err
 	}
 	return wt, nil
@@ -229,7 +237,7 @@ func applyWorktreeLFSPolicy(ctx context.Context, stdout io.Writer, r dsgit.Runne
 	switch policy {
 	case "always", "agent":
 		if err := r.LFSPull(ctx, wtPath); err != nil {
-			return appError{code: exitGit, err: fmt.Errorf("worktree created but LFS pull failed; objects may remain pointer files: %w", err)}
+			return appError{code: exitGit, err: fmt.Errorf("worktree created at %s but LFS pull failed; objects may remain pointer files: %w", wtPath, err)}
 		}
 	case "auto", "never":
 		_, _ = fmt.Fprintf(stdout, "warning: %s uses Git LFS; worktree %s may contain pointer files (lfs_policy=%s)\n", project.Path, wtPath, policy)
@@ -598,4 +606,23 @@ func slugify(value string) string {
 		value = strings.Trim(value[:40], "-")
 	}
 	return value
+}
+
+// removeOrphanWorktree force-removes a just-created worktree checkout and
+// deletes its branch (in that order — git refuses to delete a branch that is
+// still checked out in a live worktree). The cleanup context is detached from
+// the caller's ctx with its own bound, because the failure being cleaned up
+// may BE a cancellation (Ctrl-C mid-LFS-pull) — running cleanup under the
+// same cancelled ctx would no-op and leak the exact orphan this exists to
+// remove. Failures are surfaced as warnings (not swallowed) so an operator
+// knows manual cleanup is needed (P6-GIT-05).
+func removeOrphanWorktree(ctx context.Context, warn io.Writer, r dsgit.Runner, repoPath, wtPath, branch string) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	defer cancel()
+	if err := r.WorktreeRemove(cctx, repoPath, wtPath, true); err != nil {
+		_, _ = fmt.Fprintf(warn, "warning: failed to remove orphaned worktree %s: %v (remove it manually, then 'git worktree prune')\n", wtPath, err)
+	}
+	if _, err := r.Run(cctx, repoPath, "branch", "-D", branch); err != nil {
+		_, _ = fmt.Fprintf(warn, "warning: failed to delete orphaned branch %s in %s: %v\n", branch, repoPath, err)
+	}
 }
