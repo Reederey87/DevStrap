@@ -38,7 +38,7 @@ Changed:
 - Specs: `spec/00`, `spec/07`, `spec/13`, `spec/15`, `spec/19`, and the audit ledger text updated for the shipped part-2 pairing code.
 
 Validated:
-- Pending final gate run in this worktree.
+- `gofmt -w cmd internal`; `golangci-lint run` (0 issues); `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOCACHE=/tmp/devstrap-gocache go test -race ./...` incl. the rewritten `sync_join_flow` e2e (re-run in the main session after the line-by-line diff review).
 
 Follow-ups:
 - None for `P4-SEC-04` local pairing; authenticated snapshot exchange, synced trust propagation, and broader automation remain separate backlog items.

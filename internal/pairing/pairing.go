@@ -123,6 +123,17 @@ func validate(c Code) (Code, error) {
 	if c.Arch == "" {
 		return Code{}, fmt.Errorf("pairing code carries an empty device arch")
 	}
+	// The blob rides an untrusted channel and name/os/arch later reach
+	// terminal output (`devices list`), so reject control characters here —
+	// an embedded newline or escape sequence must never survive decode
+	// (post-#57 opus review, M2).
+	for field, value := range map[string]string{"name": c.Name, "os": c.OS, "arch": c.Arch} {
+		for _, r := range value {
+			if r < 0x20 || r == 0x7f {
+				return Code{}, fmt.Errorf("pairing code carries a control character in the device %s", field)
+			}
+		}
+	}
 	if _, err := age.ParseX25519Recipient(c.AgeRecipient); err != nil {
 		return Code{}, fmt.Errorf("pairing code carries an invalid age recipient: %w", err)
 	}

@@ -230,3 +230,27 @@ func TestDecodeTrimsWhitespace(t *testing.T) {
 		t.Fatalf("Decode whitespace = %#v, want %#v", got, code)
 	}
 }
+
+// Post-#57 opus review (M2): the blob is an untrusted ingestion path and its
+// free-text fields later reach terminal output — control characters must die
+// at decode.
+func TestDecodeRejectsControlCharacters(t *testing.T) {
+	base := validCode(t)
+	cases := []struct {
+		name   string
+		mutate func(*Code)
+	}{
+		{"newline in name", func(c *Code) { c.Name = "lap\ntop" }},
+		{"escape in os", func(c *Code) { c.OS = "lin\x1bux" }},
+		{"delete in arch", func(c *Code) { c.Arch = "arm\x7f64" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code := base
+			tc.mutate(&code)
+			if _, err := Encode(code); err == nil {
+				t.Fatal("Encode accepted a control character, want error")
+			}
+		})
+	}
+}

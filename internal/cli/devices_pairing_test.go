@@ -219,3 +219,18 @@ func testPairingCodeValue(t *testing.T, workspaceID, deviceID string) pairing.Co
 		SigningPublicKey: signing.Public,
 	}
 }
+
+// Post-#57 opus review (M1): --fingerprint without --code must be a usage
+// error, never silently ignored (the operator would believe something was
+// verified).
+func TestInitFingerprintWithoutCodeRefuses(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	_, stderr, err := executeForTest("--home", home, "--root", root, "init", "--join", "--fingerprint", "AAAA-BBBB")
+	if err == nil {
+		t.Fatal("init --fingerprint without --code succeeded, want usage error")
+	}
+	if !strings.Contains(stderr, "--fingerprint requires --code") {
+		t.Fatalf("stderr = %q, want the flag-dependency refusal", stderr)
+	}
+}
