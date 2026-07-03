@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-01
+last_reviewed: 2026-07-03
 tracks_code: [internal/childenv/**, internal/cli/devices.go, internal/cli/env.go, internal/cli/run.go, internal/devicekeys/**, internal/envbundle/**, internal/envfile/**, internal/platform/**, internal/workspacekeys/**]
 ---
 # Secrets and Environment Design
@@ -216,7 +216,7 @@ Approval requires out-of-band fingerprint verification. The approving device sho
 
 Device add, revoke, lost, or rotate events trigger re-encryption of affected bundles to the current approved-recipient set. Re-encryption removes future access to stored bundle ciphertext but does not make previously exposed secret values safe; revocation workflows must also mark affected values as requiring provider-side or service-side value rotation. At least one approved device must retain recoverable plaintext for every bundle before revocation completes.
 
-`devstrap env rotate <path> <env-file>` re-captures and re-encrypts a profile to the current approved recipient set and clears its `needs_rotation` flags; `devstrap env rotate --all` clears flags workspace-wide. **Known defect (P6-DATA-02, open):** the one-argument flag-clear-only form (`devstrap env rotate <path>`) is currently broken — it filters on a phantom `env_profiles.namespace_id` column and fails with a SQL logic error; only `env rotate --all` is exercised today (see the P6-DATA-02 section below).
+`devstrap env rotate <path> <env-file>` re-captures and re-encrypts a profile to the current approved recipient set and clears its `needs_rotation` flags; `devstrap env rotate <path>` clears the flags for that project without re-capturing, and `devstrap env rotate --all` clears flags workspace-wide. The per-project flag-clear path now joins through `namespace_entries.env_profile_id` (`P6-DATA-02`, shipped 2026-07-03) so it does not depend on a phantom `env_profiles.namespace_id` column.
 
 ## Secret redaction
 
@@ -373,14 +373,13 @@ if err := rebuildDependencies(ctx, dir); err != nil { /* logged to 0600 log */ }
 if err := hydrateProjectEnv(ctx, project, dir); err != nil { return err }
 ```
 
-### P6-DATA-02 — `ClearRotationForProject` filters on a non-existent `env_profiles.namespace_id`
+### P6-DATA-02 — `ClearRotationForProject` filters on a non-existent `env_profiles.namespace_id` — **shipped (2026-07-03)**
 
-**Problem.** The one-arg `devstrap env rotate <path>` (flag-clear-only) runs a subquery `SELECT id FROM env_profiles WHERE namespace_id = ?`, but `env_profiles` has no `namespace_id` column (`internal/state/store.go:1632-1637`); the link is `namespace_entries.env_profile_id`. Every invocation fails with `no such column: namespace_id` → "clear rotation for project: SQL logic error"; only `env rotate --all` is tested.
+**Was.** The one-arg `devstrap env rotate <path>` (flag-clear-only) ran a subquery `SELECT id FROM env_profiles WHERE namespace_id = ?`, but `env_profiles` has no `namespace_id` column; the link is `namespace_entries.env_profile_id`. Every invocation failed with `no such column: namespace_id` → "clear rotation for project: SQL logic error"; only `env rotate --all` was tested.
 
-**Actionable steps.**
-1. Join through `namespace_entries` instead of the phantom column.
-2. Add a per-project store test (capture → `MarkEncryptedBindingsNeedingRotation` → `ClearRotationForProject` → assert cleared).
-3. Add a CI lint that `db.Prepare`s every static query in `store.go` against a migrated in-memory DB.
+**Shipped fix.** `ClearRotationForProject` now filters `secret_bindings` by `namespace_entries.env_profile_id` for the requested namespace entry. `TestClearRotationForProject` covers two projects with encrypted profiles and proves clearing one project leaves the other flagged; `TestEnvRotateProjectClearsRotationFlag` covers the one-arg CLI form and its success message.
+
+**Remaining follow-up.** Add a CI lint that `db.Prepare`s every static query in `store.go` against a migrated in-memory DB.
 
 **Example.**
 ```sql

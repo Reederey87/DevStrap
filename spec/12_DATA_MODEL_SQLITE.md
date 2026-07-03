@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-01
+last_reviewed: 2026-07-03
 tracks_code: [internal/state/**, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md]
 ---
 # SQLite Data Model
@@ -628,13 +628,13 @@ From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.m
 
 **Shipped fix.** `Store.InsertLocalEvent`'s stamping body is extracted into `Store.InsertLocalEventTx(ctx, tx, event)`; `draft snapshot create` and the revoke-rewrap `emitSupersedingDraftSnapshot` now run `InsertLocalEventTx` + `tx.RecordDraftSnapshotTx` inside one `WithTx`, so event and row commit atomically. `DraftSnapshotRef` carries `NamespaceID` so the rewrap path can record the superseding row. Pinned by `TestInsertLocalEventTxMatchesInsertLocalEvent`, `TestDraftSnapshotCreateRecordsOriginSnapshotRow`, `TestRewrapDraftBlobRecordsOriginSupersedingSnapshot`, and the e2e `draft_snapshot_gc_retains_origin.txtar` (create → sync → `hub gc` on the origin → blob survives locally and on the hub).
 
-### P6-DATA-02 — `ClearRotationForProject` filters on a non-existent `env_profiles.namespace_id` column
+### P6-DATA-02 — `ClearRotationForProject` filters on a non-existent `env_profiles.namespace_id` column — **shipped (2026-07-03)**
 
-**Problem.** The one-arg `env rotate <path>` (flag-clear-only) subquery in `store.go:1632-1637` references `env_profiles.namespace_id`, which does not exist (the link is `namespace_entries.env_profile_id`), so it fails on every call with `no such column: namespace_id`. Only `env rotate --all` is tested.
+**Was.** The one-arg `env rotate <path>` (flag-clear-only) subquery in `store.go` referenced `env_profiles.namespace_id`, which does not exist (the link is `namespace_entries.env_profile_id`), so it failed on every call with `no such column: namespace_id`. Only `env rotate --all` was tested.
 
-**Actionable steps.**
-1. Rewrite the subquery to join through `namespace_entries` and add a per-project store test.
-2. Add a CI lint that `db.Prepare`s every static query in `store.go` against a migrated in-memory DB.
+**Shipped fix.** `ClearRotationForProject` now joins through `namespace_entries`, and regression coverage verifies both store-level per-project isolation and the one-arg CLI success path.
+
+**Remaining follow-up.** Add a CI lint that `db.Prepare`s every static query in `store.go` against a migrated in-memory DB.
 
 ```sql
 UPDATE secret_bindings SET needs_rotation = 0, updated_at = ?

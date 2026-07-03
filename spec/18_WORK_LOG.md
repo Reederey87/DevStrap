@@ -27,6 +27,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — P6-DATA-02: per-project env rotation clear (P2 quick-win wave)
+
+Changed:
+- Fixed `Store.ClearRotationForProject` to clear `secret_bindings.needs_rotation` through `namespace_entries.env_profile_id` instead of the non-existent `env_profiles.namespace_id` column — the one-arg `devstrap env rotate <path>` form failed on every invocation with `no such column: namespace_id`; only `--all` worked.
+- Added store coverage proving per-project clearing returns the selected project's binding count and leaves other projects flagged (`TestClearRotationForProject`).
+- Added CLI coverage for one-arg `devstrap env rotate <path>` succeeding and printing the per-project cleared-binding count (`TestEnvRotateProjectClearsRotationFlag`).
+- Updated the P6-DATA-02 spec notes in `spec/09_SECRETS_AND_ENVIRONMENT.md` and `spec/12_DATA_MODEL_SQLITE.md` from open defect to shipped fix, and moved the audit-ledger row out of the open backlog.
+- Model policy note (CLAUDE.md): implementation + tests delegated to gpt-5.5 (Codex) against a written line-level spec; the diff (including the unrequested-but-convention-consistent spec/ledger updates) was reviewed line-by-line in the main loop and accepted.
+- Ledger arithmetic reconciliation (CodeRabbit on PR #39): the Pass 6 header count and the open-table rows used different semantics (fully-applied `P6-DOC-02`/`P6-DOC-03` still sat in the open table while the header excluded them). The fully-applied doc rows moved to *Recently shipped*, and the header now equals the row count by construction (33 open of 43 = 43 − 8 shipped − 2 fully-applied doc fixes; `P6-DOC-01`/`P6-DOC-04` stay open for their test-hardening residuals).
+
+Validated:
+- `gofmt -w cmd internal`, `golangci-lint run`, `go run ./cmd/spec-drift --base origin/main --head HEAD`, `GOCACHE=/tmp/devstrap-gocache go test -race ./...`.
+
+Follow-ups:
+- Add a CI lint that prepares static store queries against a migrated in-memory database (the audit's stretch item; deferred to keep this PR minimal).
+
 ## 2026-07-03 — P6-SYNC-03: sticky fail-closed enrollment window (P2 quick-win wave)
 
 Changed:
