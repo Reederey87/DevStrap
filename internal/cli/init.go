@@ -364,6 +364,13 @@ func ensureLocalDeviceIdentity(ctx context.Context, paths config.Paths, store *s
 	return nil
 }
 
+// keychainBackend returns the OS keychain adapter used for device/workspace key
+// custody. It is a package-level seam (P6-XP-04) so tests can inject a fake
+// backend and stay hermetic — the host keychain differs across CI runners
+// (dead session bus on Linux, interaction-not-allowed on macOS), so tests must
+// never depend on it. Production always returns the detected platform keychain.
+var keychainBackend = func() devicekeys.SecretBackend { return platform.Detect().Keychain }
+
 // resolveKeyStore builds the device key custody store stamped with this
 // machine's recorded custody backend (P6-XP-04). It is side-effect-free: it
 // reads the recorded decision and applies the DEVSTRAP_NO_KEYCHAIN override, but
@@ -373,7 +380,7 @@ func ensureLocalDeviceIdentity(ctx context.Context, paths config.Paths, store *s
 // protects. Every path that mints, reads, or reports device/workspace keys goes
 // through this so custody is honored consistently process-wide.
 func resolveKeyStore(ctx context.Context, paths config.Paths, store *state.Store) (devicekeys.HybridStore, error) {
-	base := devicekeys.NewHybridStore(paths.KeyDir(), platform.Detect().Keychain)
+	base := devicekeys.NewHybridStore(paths.KeyDir(), keychainBackend())
 	custody, err := store.KeyCustody(ctx)
 	if err != nil {
 		return devicekeys.HybridStore{}, err
@@ -408,7 +415,7 @@ func recordKeyCustodyAtInit(ctx context.Context, paths config.Paths, store *stat
 	if os.Getenv(platform.NoKeychainEnv) == "1" {
 		return store.RecordKeyCustody(ctx, devicekeys.CustodyFile)
 	}
-	base := devicekeys.NewHybridStore(paths.KeyDir(), platform.Detect().Keychain)
+	base := devicekeys.NewHybridStore(paths.KeyDir(), keychainBackend())
 	switch base.Probe(ctx) {
 	case devicekeys.CustodyKeychain:
 		return store.RecordKeyCustody(ctx, devicekeys.CustodyKeychain)

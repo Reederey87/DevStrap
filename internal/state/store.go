@@ -2464,7 +2464,7 @@ func (tx *Tx) ensureLocalEventSignature(ctx context.Context, keyDir string, even
 	if err != nil {
 		return err
 	}
-	keyStore := devicekeys.NewHybridStore(keyDir, platform.Detect().Keychain).
+	keyStore := devicekeys.NewHybridStore(keyDir, keychainBackend()).
 		WithCustody(EffectiveKeyCustody(custody))
 	signing, _, err := keyStore.EnsureSigning(ctx, event.DeviceID, publishedPub)
 	if err != nil {
@@ -2570,6 +2570,12 @@ ON CONFLICT(key) DO NOTHING;
 	}
 	return nil
 }
+
+// keychainBackend returns the OS keychain adapter used when signing local
+// events. It is a package-level seam (P6-XP-04) so tests can inject a fake
+// backend and stay hermetic — the host keychain differs across CI runners — and
+// production always returns the detected platform keychain.
+var keychainBackend = func() devicekeys.SecretBackend { return platform.Detect().Keychain }
 
 // EffectiveKeyCustody applies the DEVSTRAP_NO_KEYCHAIN override to a recorded
 // custody decision: when set, file custody is forced regardless of what was

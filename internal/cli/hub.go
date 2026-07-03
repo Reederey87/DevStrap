@@ -18,7 +18,6 @@ import (
 	"github.com/Reederey87/DevStrap/internal/config"
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/hub"
-	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/redact"
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
@@ -80,7 +79,7 @@ func hubFromOptions(ctx context.Context, opts *options, store *state.Store, hubF
 // Reading the recorded decision is best-effort (an unreadable decision leaves
 // legacy hybrid custody); DEVSTRAP_NO_KEYCHAIN still forces file custody.
 func hubCredStore(ctx context.Context, opts *options, store *state.Store) devicekeys.HybridStore {
-	base := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain)
+	base := devicekeys.NewHybridStore(opts.paths().KeyDir(), keychainBackend())
 	var custody devicekeys.Custody
 	if store != nil {
 		custody, _ = store.KeyCustody(ctx)
@@ -95,7 +94,7 @@ func hubCredStore(ctx context.Context, opts *options, store *state.Store) device
 // (P6-XP-04) is best-effort: an unreadable decision leaves the store in the
 // legacy hybrid mode, and DEVSTRAP_NO_KEYCHAIN still forces file custody.
 func buildKeyring(ctx context.Context, opts *options, store *state.Store) *workspacekeys.Keyring {
-	base := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain)
+	base := devicekeys.NewHybridStore(opts.paths().KeyDir(), keychainBackend())
 	custody, _ := store.KeyCustody(ctx)
 	return workspacekeys.New(store, base.WithCustody(state.EffectiveKeyCustody(custody)))
 }

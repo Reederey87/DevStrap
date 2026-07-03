@@ -448,7 +448,7 @@ func checkDeviceKeys(ctx context.Context, paths config.Paths, store *state.Store
 	if err != nil {
 		return []checkResult{{Name: "key custody", Status: checkError, Detail: err.Error()}}
 	}
-	keyStore := devicekeys.NewHybridStore(paths.KeyDir(), platform.Detect().Keychain).
+	keyStore := devicekeys.NewHybridStore(paths.KeyDir(), keychainBackend()).
 		WithCustody(state.EffectiveKeyCustody(recorded))
 	var out []checkResult
 	out = append(out, keyCustodyStatus(ctx, keyStore, recorded))
