@@ -165,12 +165,18 @@ func TestInitStatusAndDBCommands(t *testing.T) {
 	if !strings.Contains(stdout, "schema version: 14") || !strings.Contains(stdout, "sqlite quick_check: ok") || !strings.Contains(stdout, "sqlite foreign_key_check: ok") {
 		t.Fatalf("stdout = %q, want db status", stdout)
 	}
-	stdout, stderr, err = executeForTest("--home", home, "sync", "--hub-file", filepath.Join(t.TempDir(), "hub.json"), "--dry-run")
+	syncHubPath := filepath.Join(t.TempDir(), "hub.json")
+	stdout, stderr, err = executeForTest("--home", home, "sync", "--hub-file", syncHubPath, "--dry-run")
 	if err != nil {
 		t.Fatalf("sync dry-run stdout = %q stderr = %q err = %v", stdout, stderr, err)
 	}
 	if !strings.Contains(stdout, "Would push") {
 		t.Fatalf("sync dry-run stdout = %q, want dry-run summary", stdout)
+	}
+	// P6-CLI-05: the dry-run line names the resolved hub ID (file:<path>), not
+	// an empty target — proving the hubFile→hubID fix.
+	if !strings.Contains(stdout, "file:"+syncHubPath) {
+		t.Fatalf("sync dry-run stdout = %q, want resolved hub ID file:%s", stdout, syncHubPath)
 	}
 
 	store, err := state.Open(context.Background(), filepath.Join(home, "state.db"))

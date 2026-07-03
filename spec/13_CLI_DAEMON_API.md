@@ -81,7 +81,7 @@ Options:
 --join   # join an existing workspace: do not found one; wait to be approved (P6-SEC-02)
 ```
 
-`init` normalizes the root to an absolute clean path, creates `~/.devstrap/config.yaml` with mode `0600` if missing, and does not overwrite an existing config file. It records `role: founder` (default) or `role: joiner` (`--join`) in the config and, per `P6-SEC-02`, **no longer mints a workspace key** — founding is deferred to the first `devstrap sync` and happens only against an empty hub (see `sync` below). `--join` prints approval-first next steps (share `devices recipient` / `--signing`, get approved on an existing device, then sync); default init prints the usual `devstrap status • devstrap scan --adopt • devstrap sync --hub-file <path>` hint. `--scan` (`PROD-03`) runs the existing `scan --adopt` path inline after workspace creation so a populated root is adopted on the first command and prints the adopted count. Per `P6-CLI-05`, the hint is slated to change to teach the shipped production path (`hub: r2://<bucket>` in `~/.devstrap/config.yaml`) rather than the file-backed `--hub-file` test hub — see the P6-CLI-05 section below.
+`init` normalizes the root to an absolute clean path, creates `~/.devstrap/config.yaml` with mode `0600` if missing, and does not overwrite an existing config file. It records `role: founder` (default) or `role: joiner` (`--join`) in the config and, per `P6-SEC-02`, **no longer mints a workspace key** — founding is deferred to the first `devstrap sync` and happens only against an empty hub (see `sync` below). `--join` prints approval-first next steps (share `devices recipient` / `--signing`, get approved on an existing device, then sync); default init prints the `devstrap status • devstrap scan --adopt • set 'hub: r2://<bucket>' in ~/.devstrap/config.yaml then devstrap sync` hint. `--scan` (`PROD-03`) runs the existing `scan --adopt` path inline after workspace creation so a populated root is adopted on the first command and prints the adopted count. Per `P6-CLI-05` (resolved), both hint forms teach the shipped production path (`hub: r2://<bucket>` in `~/.devstrap/config.yaml`) rather than the file-backed `--hub-file` test hub — see the P6-CLI-05 section below.
 
 ### db
 
@@ -592,13 +592,15 @@ func (o *options) progressf(w io.Writer, format string, a ...any) {
 }
 ```
 
-### P6-CLI-05 — README/init hint steer users to the test-only file hub; shipped `r2://` undocumented
+### P6-CLI-05 — README/init hint steer users to the test-only file hub; shipped `r2://` undocumented — RESOLVED (`fix/p6-cli-05`, 2026-07-03)
 
-**Problem.** README (project-status/roadmap/quickstart) still calls the R2 backend "wired but not switched on" and shows only `sync --hub-file`, `init.go:126` hardcodes the `--hub-file` hint, and `sync.go:65`'s dry-run prints an empty target when the hub comes from config — even though PR #24 shipped `hub: r2://<bucket>` with `DEVSTRAP_HUB_S3_*` credentials.
+**Problem.** README (project-status/roadmap/quickstart) still called the R2 backend "wired but not switched on" and showed only `sync --hub-file`, `init.go` hardcoded the `--hub-file` next-steps hint, and `sync.go`'s dry-run printed an empty target when the hub came from config — even though PR #24 shipped `hub: r2://<bucket>` with `DEVSTRAP_HUB_S3_*` credentials.
 
-**Actionable steps.**
-1. Flip README project-status + roadmap to "R2/S3 backend shipped (`hub: r2://<bucket>` + `DEVSTRAP_HUB_S3_*`)" and add a quickstart step showing the config line + env vars (link `spec/19`).
-2. Change the `init` next-steps hint to mention configuring a hub instead of `--hub-file`, and fix the dry-run to print the resolved hub ID rather than the raw `--hub-file` flag; optionally add `devstrap init --hub <uri>`.
+**Resolution.**
+1. README project-status/features/roadmap now describe the R2/S3 backend as shipped (`hub: r2://<bucket>` + `DEVSTRAP_HUB_S3_*`), the quickstart step 6 shows the config line + credential env vars and links `spec/19`, and the command-reference `sync` row names the config hub with `--hub-file` as the local-test override.
+2. The `init` next-steps hint (both the default and `--join` forms) now points at configuring `hub: r2://<bucket>` in `~/.devstrap/config.yaml` then plain `devstrap sync` (`--hub-file <path>` still noted for local tests), and the `sync --dry-run` line prints the resolved hub ID (`file:<path>` / `r2:<ws…>`) instead of the raw `--hub-file` flag.
+
+Explicit non-goal: no `devstrap init --hub <uri>` flag was added — the hub is configured in `config.yaml`, keeping one source of truth.
 
 ```yaml
 # ~/.devstrap/config.yaml

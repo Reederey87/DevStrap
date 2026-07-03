@@ -134,11 +134,11 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 					"  1. devstrap devices recipient            # copy this device's age recipient\n"+
 					"  2. devstrap devices recipient --signing  # and its signing key\n"+
 					"  3. on an approved device: devstrap devices enroll <id> --age-recipient <rec> --signing-public-key <sig> --approve\n"+
-					"  4. devstrap sync --hub-file <path>        # ingests the grant, then pushes your projects\n"); err != nil {
+					"  4. set 'hub: r2://<bucket>' in ~/.devstrap/config.yaml, then devstrap sync  # ingests the grant, then pushes your projects\n"); err != nil {
 					return err
 				}
 			} else {
-				if _, err := fmt.Fprintf(stdout, "Next: devstrap status • devstrap scan --adopt • devstrap sync --hub-file <path>\n"); err != nil {
+				if _, err := fmt.Fprintf(stdout, "Next: devstrap status • devstrap scan --adopt • set 'hub: r2://<bucket>' in ~/.devstrap/config.yaml then devstrap sync\n"); err != nil {
 					return err
 				}
 			}

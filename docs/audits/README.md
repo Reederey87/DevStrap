@@ -52,12 +52,13 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P6-SYNC-04 | P2 | PR #44 (2026-07-03) | Hard cut to `enc.v2`: the AEAD AAD binds the full carrier tuple (ID, DeviceID, sealing-key kid, Seq, HLC, epoch), the signature domain moves to `devstrap:event:v2` (+`device_id`/`seq`, v1 verify fallback for re-pushed history), and a held-key AEAD failure forwards the carrier to an `undecryptable` quarantine conflict that the per-pull replay auto-recovers once its grant arrives. v1 is dead (loud skip + re-found guidance). |
 | P6-QUAL-03 | P2 | `fix/p6-qual-03` (2026-07-03) | A `minio-conformance` ubuntu CI job boots a digest-pinned `minio/minio` via `docker run` (checkout with `persist-credentials: false`) and runs `TestR2MinIOConformance` against it on every push/PR, so the production `aws-sdk-go-v2` S3 adapter is now exercised against a real backend in CI instead of only the in-memory `memS3` fake; `go test ./...` stays hermetic by default. |
 | P6-HUB-02 | P2 | `fix/p6-hub-02` (2026-07-03) | Hub S3 credentials resolve env/config (`op://` refs via `op read`, 60s-bounded) → `AWS_*` → per-workspace keychain slot written by new `devstrap hub login`/`logout` (0600 file fallback under `DEVSTRAP_NO_KEYCHAIN`); resolved secret rides `redact.Secret` (with struct-level Stringer guards); auth failures map to `ErrS3Auth` with a hint. spec/13/15/19 reconciled (age-blob variant deliberately not built). |
+| P6-CLI-05 | P3 | `fix/p6-cli-05` (2026-07-03) | README project-status/features/quickstart/roadmap now document the shipped `hub: r2://<bucket>` + `DEVSTRAP_HUB_S3_*` path (with `hub login`/`op://` custody and a spec/19 link); both `init` next-steps hints teach configuring the hub in config.yaml; `sync --dry-run` prints the resolved hub ID instead of an empty target. Non-goal: no `init --hub` flag. |
 | P6-DOC-02 | P2 | audit PR #28 | Ledger P4-SEC-05 contradiction + convention-#3 violation reconciled in the PR that landed the audit. Fully applied. |
 | P6-DOC-03 | P3 | audit PR #28 | spec/00 re-drift (planned-sync comment, command/test inventories) fixed in the PR that landed the audit. Fully applied. |
 
-### Pass 6 (2026-07-01) — 28 open of 43; **all five P1s shipped**; **P2 quick-win wave complete**
+### Pass 6 (2026-07-01) — 27 open of 43; **all five P1s shipped**; **P2 quick-win wave complete**
 
-> The header count equals the rows in the table below (CodeRabbit, PR #39): 43 findings − 15 rows in *Recently shipped* (including the 2 fully-applied doc fixes `P6-DOC-02`/`P6-DOC-03`) = 28. `P6-DOC-01`/`P6-DOC-04` stay listed because their test-hardening residuals are open even though their doc portions were applied in the audit PR. `P6-SYNC-01`, `P6-SEC-01`, `P6-SEC-02` (PRs #30–#34), `P6-DATA-01` (PR #35), `P6-HUB-01` (PR #36), `P6-GIT-01` (PR #37), `P6-SYNC-03` (PR #38), `P6-DATA-02` (PR #39), `P6-CLI-02` (PR #40), `P6-GIT-05`, `P6-SYNC-04` (PR #44), and `P6-QUAL-03` (`fix/p6-qual-03`) moved to *Recently shipped* above per convention #3.
+> The header count equals the rows in the table below (CodeRabbit, PR #39): 43 findings − 16 rows in *Recently shipped* (including the 2 fully-applied doc fixes `P6-DOC-02`/`P6-DOC-03`) = 27. `P6-DOC-01`/`P6-DOC-04` stay listed because their test-hardening residuals are open even though their doc portions were applied in the audit PR. `P6-SYNC-01`, `P6-SEC-01`, `P6-SEC-02` (PRs #30–#34), `P6-DATA-01` (PR #35), `P6-HUB-01` (PR #36), `P6-GIT-01` (PR #37), `P6-SYNC-03` (PR #38), `P6-DATA-02` (PR #39), `P6-CLI-02` (PR #40), `P6-GIT-05`, `P6-SYNC-04` (PR #44), and `P6-QUAL-03` (`fix/p6-qual-03`) moved to *Recently shipped* above per convention #3.
 
 | ID | Sev | Effort | Finding |
 |---|---|---|---|
@@ -79,7 +80,6 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P6-XP-05 | P2 | M | Keep `scan` offline; defer `set-head --auto` to materialization |
 | P6-CLI-03 | P3 | S | Wire Cobra usage errors to `exitUsage=10`; fix the spec table |
 | P6-CLI-04 | P3 | S | Make `--quiet` actually suppress progress chatter (or fix its help) |
-| P6-CLI-05 | P3 | S | Document the shipped `r2://` hub path; stop steering users to the file hub |
 | P6-DATA-05 | P3 | S | Add `idx_events_device_hlc` to serve the hot push/doctor query |
 | P6-DATA-06 | P3 | S | Add a single-`local`-device partial unique index + race-tolerant `EnsureDevice` |
 | P6-DOC-04 | P3 | S | Add `internal/workspacekeys/**` to the spec/07/09/15 `tracks_code` frontmatter _(applied this PR; new-package mapping gate test open)_ |
