@@ -511,7 +511,9 @@ func agentPRBody(run state.AgentRun) string {
 }
 
 func pushAgentBranch(ctx context.Context, opts *options, dir, branch string) error {
-	if _, err := gitRunner(opts).Run(ctx, dir, "push", "-u", "origin", branch); err != nil {
+	// P6-GIT-01: a large agent branch push is a network transfer like clone,
+	// so it gets the long deadline, not the 2m default.
+	if err := gitRunner(opts).PushBranch(ctx, dir, "origin", branch); err != nil {
 		return appError{code: exitGit, err: err}
 	}
 	return nil

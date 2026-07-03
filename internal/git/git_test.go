@@ -329,6 +329,11 @@ func TestRunTimesOutAndReportsTimeoutError(t *testing.T) {
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("Run err = %v, want timeout message", err)
 	}
+	// A short-class timeout must not misdirect the user at a knob that only
+	// governs the transfer class (P6-GIT-01 review).
+	if strings.Contains(err.Error(), "clone_timeout") {
+		t.Fatalf("Run err = %v, want NO clone_timeout hint on a non-transfer command", err)
+	}
 	if elapsed > 3*time.Second {
 		t.Fatalf("Run took %s, want it to return near the 100ms timeout", elapsed)
 	}
@@ -659,5 +664,36 @@ func TestCloneWithOptionsInitializesSubmodules(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dest, "vendor", "sub", "README.md")); err != nil {
 		t.Fatalf("submodule not materialized: %v", err)
+	}
+}
+
+// P6-GIT-01 review: push is the same transfer class as clone — it gets the
+// long deadline, a terminal timeout, and the config hint.
+func TestPushBranchTimeoutIsTerminalWithHint(t *testing.T) {
+	countPath := filepath.Join(t.TempDir(), "count")
+	script := writeFakeGit(t, fmt.Sprintf(`#!/bin/sh
+echo attempt >> %[1]q
+exec sleep 1
+`, countPath))
+	r := Runner{Bin: script, Timeout: 5 * time.Second, LongTimeout: 500 * time.Millisecond}
+	err := r.PushBranch(context.Background(), "", "origin", "agent/x")
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("PushBranch err = %v, want ErrTimeout", err)
+	}
+	if !strings.Contains(err.Error(), "clone_timeout") {
+		t.Fatalf("PushBranch err = %v, want the clone_timeout hint on a transfer-class timeout", err)
+	}
+	if got := attemptCount(t, countPath); got != 1 {
+		t.Fatalf("attempt count = %d, want 1", got)
+	}
+}
+
+// P6-GIT-01 review: LongTimeout <= 0 means the transfer class is explicitly
+// unbounded — it must NOT silently fall back to the short 2m-class cap.
+func TestZeroLongTimeoutMeansUnboundedTransfer(t *testing.T) {
+	script := writeFakeGit(t, "#!/bin/sh\nsleep 0.2\nexit 0\n")
+	r := Runner{Bin: script, Timeout: 50 * time.Millisecond, LongTimeout: 0, RetryAttempts: 1}
+	if err := r.CloneWithOptions(context.Background(), "https://example.test/org/repo.git", filepath.Join(t.TempDir(), "repo"), CloneOptions{Partial: true}); err != nil {
+		t.Fatalf("CloneWithOptions err = %v, want success with unbounded transfer class", err)
 	}
 }

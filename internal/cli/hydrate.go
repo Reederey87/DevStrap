@@ -75,11 +75,18 @@ func maintenanceEnabled(opts *options) bool {
 
 const defaultCloneTimeout = 30 * time.Minute
 
+// cloneTimeout resolves materialization.clone_timeout (P6-GIT-01): the
+// per-attempt deadline for the network-transfer command class. An explicit 0
+// means the transfer class runs unbounded (Runner.LongTimeout <= 0), not a
+// fallback to the short 2m cap.
 func cloneTimeout(opts *options) time.Duration {
 	if opts == nil || opts.v == nil {
 		return defaultCloneTimeout
 	}
 	d := opts.v.GetDuration("materialization.clone_timeout")
+	// Belt-and-suspenders for harnesses built without root.go's SetDefault
+	// (production always has it, so IsSet is true there and an explicit 0
+	// flows through the plain return below).
 	if d == 0 && !opts.v.IsSet("materialization.clone_timeout") {
 		return defaultCloneTimeout
 	}

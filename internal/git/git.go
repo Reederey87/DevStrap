@@ -83,13 +83,16 @@ func (r Runner) Run(ctx context.Context, dir string, args ...string) (string, er
 	if timeout == 0 {
 		timeout = 2 * time.Minute
 	}
+	longClass := ctx.Value(longTransferMarker{}) != nil
 	timeoutLabel := timeout
 	if deadline, ok := ctx.Deadline(); ok {
 		timeoutLabel = time.Until(deadline)
 		if timeoutLabel < 0 {
 			timeoutLabel = 0
 		}
-	} else if timeout > 0 {
+	} else if timeout > 0 && !longClass {
+		// A marked transfer-class ctx with no deadline is explicitly
+		// unbounded (LongTimeout <= 0); everything else gets the short cap.
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
@@ -125,8 +128,17 @@ func (r Runner) Run(ctx context.Context, dir string, args ...string) (string, er
 		argText := redactGitText(strings.Join(args, " "))
 		msg = redactGitText(msg)
 		kind := classifyGitError(msg)
+		// Any deadline expiry — the runner's own or a caller-supplied one —
+		// is terminal ErrTimeout and never retried; caller CANCELLATION
+		// (context.Canceled) still routes through classifyGitError below.
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return "", CommandError{Kind: ErrTimeout, Args: argText, Message: fmt.Sprintf("timed out after %s (raise materialization.clone_timeout for large repos)", timeoutLabel)}
+			msg := fmt.Sprintf("timed out after %s", timeoutLabel)
+			if longClass {
+				// Only transfer-class commands honor the config knob; a hint
+				// on a 2m rev-parse/push-metadata timeout would misdirect.
+				msg += " (raise materialization.clone_timeout for large repos)"
+			}
+			return "", CommandError{Kind: ErrTimeout, Args: argText, Message: msg}
 		}
 		return "", CommandError{Kind: kind, Args: argText, Message: msg}
 	}
@@ -237,14 +249,35 @@ func (r Runner) Fetch(ctx context.Context, dir, remote, branch string) error {
 	return r.runWithNetworkRetry(ctx, dir, args...)
 }
 
+// longTransferMarker tags a context as belonging to the network-transfer
+// command class (clone/fetch/push/LFS), so Run can scope the
+// materialization.clone_timeout hint to commands that actually honor it and
+// skip its short default when the class is explicitly unbounded.
+type longTransferMarker struct{}
+
 func (r Runner) longTransferContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	ctx = context.WithValue(ctx, longTransferMarker{}, true)
 	if r.LongTimeout <= 0 {
+		// Explicit no-ceiling: the transfer runs unbounded (Run skips its
+		// short default for the marked class) instead of silently falling
+		// back to the 2m cap this fix removed.
 		return ctx, func() {}
 	}
 	if _, ok := ctx.Deadline(); ok {
 		return ctx, func() {}
 	}
 	return context.WithTimeout(ctx, r.LongTimeout)
+}
+
+// PushBranch pushes branch to remote with -u under the long transfer deadline
+// (P6-GIT-01): a large branch push is the same network-transfer class as
+// clone/fetch. No retry loop — the wrapper cannot know a failed push is safe
+// to repeat, so the caller decides.
+func (r Runner) PushBranch(ctx context.Context, dir, remote, branch string) error {
+	ctx, cancel := r.longTransferContext(ctx)
+	defer cancel()
+	_, err := r.Run(ctx, dir, "push", "-u", remote, branch)
+	return err
 }
 
 // MaintenanceRun runs a one-time `git maintenance run --auto` (commit-graph +
