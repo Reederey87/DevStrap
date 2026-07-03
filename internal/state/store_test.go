@@ -964,6 +964,56 @@ func addApprovedDeviceForVerifierTest(t *testing.T, ctx context.Context, st *Sto
 	}
 }
 
+// P6-SYNC-03: enrollment is sticky. Revoked/lost rows prove an enrollment
+// happened, so the fail-closed verification regime must survive revoking the
+// last approved device; pending placeholders alone must not close the window.
+func TestHasEnrolledDevicesStickyAfterRevoke(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newVerifyRemoteEventTestStore(t, ctx)
+
+	assertEnrolled := func(want bool, step string) {
+		t.Helper()
+		got, err := hasEnrolledDevices(ctx, st.db)
+		if err != nil {
+			t.Fatalf("%s: %v", step, err)
+		}
+		if got != want {
+			t.Fatalf("%s: hasEnrolledDevices = %t, want %t", step, got, want)
+		}
+	}
+
+	// Only the local device: the bootstrap window is open.
+	assertEnrolled(false, "local only")
+
+	// An auto-created pending placeholder (EnsureRemoteDeviceTx) must not count.
+	if err := st.UpsertDevice(ctx, Device{
+		ID: "dev_pending", Name: "pending", OS: "linux", Arch: "arm64", TrustState: "pending",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertEnrolled(false, "pending placeholder")
+
+	// Approving a device closes the window.
+	if err := st.UpsertDevice(ctx, Device{
+		ID: "dev_b", Name: "b", OS: "linux", Arch: "arm64", TrustState: "approved",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertEnrolled(true, "approved")
+
+	// Revoking the LAST approved device keeps it closed (sticky).
+	if err := st.SetDeviceTrustState(ctx, "dev_b", "revoked"); err != nil {
+		t.Fatal(err)
+	}
+	assertEnrolled(true, "revoked last approved")
+
+	// Lost counts the same way.
+	if err := st.SetDeviceTrustState(ctx, "dev_b", "lost"); err != nil {
+		t.Fatal(err)
+	}
+	assertEnrolled(true, "lost last approved")
+}
+
 func signedGrantEvent(t *testing.T, deviceID, privateSigningKey, eventID string) Event {
 	t.Helper()
 	event := Event{

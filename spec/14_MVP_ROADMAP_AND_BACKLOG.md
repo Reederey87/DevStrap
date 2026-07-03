@@ -549,6 +549,8 @@ The sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`; i
 
 P6-DOC-02's audit-ledger reconciliation was applied this cycle (the `docs/audits/` status ledger and cross-references were brought back in line with shipped state).
 
+The P2 quick-win wave is now underway: **P6-SYNC-03** (sticky fail-closed enrollment — `hasEnrolledDevices` counts `trust_state IN ('approved','revoked','lost')`, so revoking the last approved device no longer reopens the bootstrap window) is **shipped**; `P6-DATA-02`, `P6-GIT-05`, and `P6-CLI-02` ride the same wave.
+
 ### Pass 6 direction (2026-07-01) — forward-looking, not yet built
 
 These are validated forward-direction decisions from the sixth-pass viability review. They are recorded here as roadmap direction and backlog intent, not as shipped work.

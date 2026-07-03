@@ -311,7 +311,7 @@ The HLC int64 is simultaneously the ordering key, the resume cursor, and the SSE
 
 - a persisted `sync_skipped_events` quarantine table (see the P6-SYNC-02 section) surfaced in `status`/`doctor` and replayable via `sync --replay-skipped`;
 - **record-and-continue** for permanent causes (bad signature, divergent, revoked origin) — shipped for `ApplyEvents` as `event_verification_failure` conflicts with full replay payloads — plus **bounded hold** for possibly-transient causes (pending grant, skew);
-- **sticky enrollment** — count `trust_state IN ('approved','revoked','lost')` so revoking the last peer cannot reopen the bootstrap window (`P6-SYNC-03`);
+- **sticky enrollment** — count `trust_state IN ('approved','revoked','lost')` so revoking the last peer cannot reopen the bootstrap window (`P6-SYNC-03`) — **shipped**;
 - a real applied `device.revoked` path so revoked traffic is rejected by trust, not by an aborting signature check;
 - **chaos-style multi-device tests** (hostile hub reorder/omit/substitute, mid-rotation approval, revoked-device traffic) in `16_TEST_PLAN.md`.
 
@@ -691,17 +691,17 @@ if errors.Is(err, state.ErrEventVerification) { insertVerificationConflict(...);
 sync_skipped_events(id, device_id, hlc, epoch, reason)   -- surfaced in status/doctor
 ```
 
-### P6-SYNC-03 — Revoking the last approved device reopens the bootstrap window; revoked-device events are accepted again
+### P6-SYNC-03 — Sticky fail-closed enrollment window (SHIPPED)
 
-**Problem.** `hasEnrolledDevices` counts only `trust_state = 'approved'` rows (`internal/state/store.go:2593-2608`). After revoking the only other device the count is 0, so `enrolled=false` and the final gate (`:2581`) lets non-destructive events from the revoked device — even unknown/unsigned ones — fall through to `Verify` and apply, silently disengaging fail-closed HUB-03.
+**Was.** `hasEnrolledDevices` counted only `trust_state = 'approved'` rows, so revoking the only other device dropped the count to 0, `enrolled=false`, and the final verification gate let non-destructive events from the revoked device — even unknown/unsigned ones — fall through and apply, silently disengaging fail-closed HUB-03.
 
-**Actionable steps.**
-1. Make the closed window sticky: count `trust_state IN ('approved','revoked','lost')` (a revoked/lost row proves enrollment completed, excluding auto-created `pending` placeholders), or persist a monotonic `enrollment_closed` flag OR'd into `hasEnrolledDevices`.
-2. Test: approve B, revoke B, then a signed `project.added` from B must be rejected (and, with P6-SYNC-01, recorded as a conflict).
+**Shipped.** Enrollment is sticky: `hasEnrolledDevices` counts
 
 ```sql
-SELECT COUNT(*) FROM devices WHERE trust_state IN ('approved','revoked','lost');
+SELECT COUNT(*) FROM devices WHERE trust_state IN ('approved', 'revoked', 'lost');
 ```
+
+A revoked/lost row proves a deliberate local operator trust decision happened (revoking a never-approved `pending` device also closes the window — the safe, more-fail-closed direction, since no sync/remote path can inject a revoked/lost row), so revoking (or losing) the last approved device keeps verification fail-closed; auto-created `pending` placeholders from `EnsureRemoteDeviceTx` deliberately do not count, and the genuinely-never-enrolled bootstrap window (`P4-SEC-04`) is unchanged. Post-revoke events from the revoked device or any unknown device land in the `P6-SYNC-01` per-event quarantine (`event_verification_failure` conflicts) instead of applying or aborting the batch. Pinned by `TestHasEnrolledDevicesStickyAfterRevoke` (`internal/state`) and `TestApplyEventsRevokedLastDeviceStaysFailClosed` (`internal/sync`). The deeper fix — synced `device.revoked` trust propagation so *other* devices also learn of the revocation — remains open (tracked with the `P6-SYNC-01` residuals).
 
 ### P6-XP-03 — `run-loop` never runs its advertised scan stage, so new local projects never reach the hub
 

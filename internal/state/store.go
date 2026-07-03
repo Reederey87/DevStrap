@@ -2648,13 +2648,20 @@ WHERE id = ?;
 	return nil
 }
 
-// hasEnrolledDevices reports whether the workspace has any approved, non-local
-// device (HUB-03). Once true, event verification fails closed for all non-local
-// event types.
+// hasEnrolledDevices reports whether the workspace has ever completed
+// enrollment (HUB-03). Once true, event verification fails closed for all
+// non-local event types. Revoked/lost rows count too (P6-SYNC-03): a device
+// only reaches those states through a deliberate local operator trust decision
+// (SetDeviceTrustState also permits pending -> revoked/lost directly, which is
+// the safe, more-fail-closed direction), so their presence proves an operator
+// trust decision happened — revoking the last approved device must
+// keep the window closed, not silently reopen the pre-enrollment fail-open
+// regime for the revoked (or any unknown) device. Auto-created 'pending'
+// placeholders from EnsureRemoteDeviceTx deliberately do not count.
 func hasEnrolledDevices(ctx context.Context, exec sqlExecutor) (bool, error) {
 	var count int
 	if err := exec.QueryRowContext(ctx, `
-SELECT COUNT(*) FROM devices WHERE trust_state = 'approved';
+SELECT COUNT(*) FROM devices WHERE trust_state IN ('approved', 'revoked', 'lost');
 `).Scan(&count); err != nil {
 		// The devices table may not exist yet during early bootstrap (before
 		// migration 00004); treat only that specific error as "not enrolled".
