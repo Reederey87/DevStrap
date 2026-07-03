@@ -101,3 +101,31 @@ jobs:
           cache: true
       - name: Vulnerability check
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+  minio-conformance:
+    name: MinIO hub conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Start MinIO
+        run: docker run -d --name minio -p 9000:9000 minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e server /data # RELEASE.2025-09-07T16-13-09Z
+      - name: Wait for MinIO
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:9000/minio/health/live >/dev/null; then exit 0; fi
+            sleep 2
+          done
+          docker logs minio
+          exit 1
+      - name: Run conformance test
+        env:
+          DEVSTRAP_HUB_S3_ENDPOINT: http://localhost:9000
+          DEVSTRAP_HUB_S3_ACCESS_KEY_ID: minioadmin
+          DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY: minioadmin
+          DEVSTRAP_HUB_S3_BUCKET: devstrap-test
+        run: go test ./internal/hub/ -run TestR2MinIOConformance -v

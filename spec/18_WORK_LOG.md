@@ -27,6 +27,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — P6-QUAL-03: run the MinIO hub conformance test in CI (R2 go-live wave)
+
+Changed:
+- Added a `minio-conformance` job to `.github/workflows/ci.yml`: boots a digest-pinned `minio/minio` (RELEASE.<tag>) via `docker run -d ... server /data` (GitHub `services:` cannot pass the required command), curl health-waits on `/minio/health/live` (dumping `docker logs` on timeout), and runs `go test ./internal/hub/ -run TestR2MinIOConformance -v` with `DEVSTRAP_HUB_S3_*` pointed at `http://localhost:9000` (`minioadmin` credentials, bucket `devstrap-test` — the test creates its own bucket). The default `go test` invocation stays hermetic; the job is intentionally not a required branch-protection check yet (promote after it proves stable).
+- `spec/16_TEST_PLAN.md`: conformance-test paragraph + P6-QUAL-03 block updated to the shipped state.
+
+Validated:
+- `gofmt -l cmd internal` (no output).
+- `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12 run`.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` (uncommitted worktree changes; re-verify after commit).
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/hub/ ./internal/specdrift/`.
+
+Follow-ups:
+- Promote `minio-conformance` to a required check once it proves stable; MinIO ≠ R2, so live-R2 dogfooding still applies (`P6-HUB-02` wave close-out).
 ## 2026-07-03 — P6-SYNC-04: enc.v2 — bind the full carrier tuple into the AEAD AAD (R2 go-live wave)
 
 Changed:

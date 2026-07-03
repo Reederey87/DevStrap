@@ -352,7 +352,7 @@ Proves the "Dropbox experience for code" round trip: one `devstrap sync` on Devi
 
 The cloud hub is pluggable behind one `Hub` interface with two planes — a signed HLC-ordered namespace-map event log and a content-addressed encrypted blob store (`age_blob:<sha256>`). The same conformance suite must pass against every backend: a file-backed local backend retained ONLY for tests, and Cloudflare R2 (S3 API) as the production backend.
 
-Shipped conformance (`P5-HUB-01`): `internal/hub`'s shared `assertHubRoundTrip` runs the contract below against both the in-memory `memS3` double (`TestR2ConformanceMemS3`) and the production `aws-sdk-go-v2` `S3Adapter` against a live bucket (`TestR2MinIOConformance` in `internal/hub/r2_minio_test.go`). The MinIO/R2 test is **env-gated** (not a build tag): it skips unless `DEVSTRAP_HUB_S3_ENDPOINT` (plus `DEVSTRAP_HUB_S3_ACCESS_KEY_ID`/`DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY`) is set, so the file always compiles (a refactor cannot silently break it and `go mod tidy` keeps the SDK a stable direct require) while CI stays hermetic. The `mapS3Error` sentinel translation is hermetically unit-tested in `s3client_awssdk_test.go` to protect the coverage floor while the gated test is skipped in CI. Run the live test against a 2024+ MinIO image (for `If-None-Match: *` conditional-put support): `docker run -p 9000:9000 minio/minio server /data`, then `DEVSTRAP_HUB_S3_ENDPOINT=http://localhost:9000 DEVSTRAP_HUB_S3_ACCESS_KEY_ID=minioadmin DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY=minioadmin go test -run TestR2MinIOConformance ./internal/hub`.
+Shipped conformance (`P5-HUB-01`): `internal/hub`'s shared `assertHubRoundTrip` runs the contract below against both the in-memory `memS3` double (`TestR2ConformanceMemS3`) and the production `aws-sdk-go-v2` `S3Adapter` against a live bucket (`TestR2MinIOConformance` in `internal/hub/r2_minio_test.go`). The MinIO/R2 test is **env-gated** (not a build tag): it skips unless `DEVSTRAP_HUB_S3_ENDPOINT` (plus `DEVSTRAP_HUB_S3_ACCESS_KEY_ID`/`DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY`) is set, so the file always compiles (a refactor cannot silently break it and `go mod tidy` keeps the SDK a stable direct require) while `go test ./...` stays hermetic by default. A dedicated `minio-conformance` ubuntu CI job (`.github/workflows/ci.yml`) now boots a digest-pinned MinIO via `docker run` and sets the `DEVSTRAP_HUB_S3_*` env so this test runs against a real S3-API backend on every push/PR (`P6-QUAL-03`). The `mapS3Error` sentinel translation is also hermetically unit-tested in `s3client_awssdk_test.go` to protect the coverage floor independent of the gated job. Run the live test locally against a 2024+ MinIO image (for `If-None-Match: *` conditional-put support): `docker run -p 9000:9000 minio/minio server /data`, then `DEVSTRAP_HUB_S3_ENDPOINT=http://localhost:9000 DEVSTRAP_HUB_S3_ACCESS_KEY_ID=minioadmin DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY=minioadmin go test -run TestR2MinIOConformance ./internal/hub`.
 
 ### Hub interface conformance (both backends)
 
@@ -565,20 +565,9 @@ release:
   needs: verify
 ```
 
-### P6-QUAL-03 — The S3/R2 adapter's only real-backend integration test never runs in CI
+### P6-QUAL-03 — The S3/R2 adapter's only real-backend integration test never runs in CI — SHIPPED
 
-**Problem.** `TestR2MinIOConformance` (`internal/hub/r2_minio_test.go:31-38`) skips unless `DEVSTRAP_HUB_S3_ENDPOINT` is set; `ci.yml` sets no `DEVSTRAP_HUB_S3_*` and boots no MinIO, so the production `aws-sdk-go-v2` adapter is only ever exercised against the in-memory `memS3` fake — conditional-put/`If-None-Match`, pagination, `mapS3Error`, and checksum regressions pass CI.
-
-**Actionable steps.**
-1. Add a Linux CI job that boots MinIO via `docker run` (a `services:` block can't pass the `server` command), digest-pinned to a 2024+ image (`If-None-Match: *` support), and runs the test unmodified with `DEVSTRAP_HUB_S3_*` set. `go test` stays hermetic, satisfying the "default CI hermetic" constraint.
-2. Run non-required first (Docker flakiness); promote to a required check once stable.
-
-```bash
-docker run -d -p 9000:9000 minio/minio@sha256:<pinned> server /data
-DEVSTRAP_HUB_S3_ENDPOINT=http://localhost:9000 \
-DEVSTRAP_HUB_S3_ACCESS_KEY_ID=minioadmin DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY=minioadmin \
-  go test -run TestR2MinIOConformance ./internal/hub
-```
+**Resolved.** A `minio-conformance` ubuntu job in `.github/workflows/ci.yml` boots a digest-pinned `minio/minio` via `docker run -d ... server /data` (a `services:` block can't pass the `server` command), curl health-waits on `/minio/health/live`, then runs `TestR2MinIOConformance` unmodified with `DEVSTRAP_HUB_S3_*` pointed at it. `go test ./...` stays hermetic by default; the job is intentionally not yet a required branch-protection check (promote once it proves stable).
 
 ### P6-QUAL-04 — SSH-alias forge tests shell out to the real `ssh -G`, so the preferred branch is never deterministically tested
 
