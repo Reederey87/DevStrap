@@ -27,6 +27,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — P6-CLI-02: gate `scan --adopt` on the workspace root (P2 quick-win wave)
+
+Changed:
+- `internal/cli/scan.go`: when `--adopt` is set, the scanned root must equal the workspace root — otherwise the command refuses with `exitUsage` and an actionable message ("scan without --adopt to inspect, or use 'devstrap add' for a single repo"). Adoption emits signed fleet-wide `project.added` events that every device joins to its own managed root, so `devstrap scan ~/Downloads --adopt` could silently rewrite the fleet namespace and make every peer eagerly blobless-clone out-of-tree repos on its next sync. Read-only scans of arbitrary directories are unchanged.
+- Model policy note (CLAUDE.md): implementation + tests delegated to gpt-5.5 (Codex) against a written line-level spec; diff reviewed line-by-line and accepted. Docs/ledger authored directly.
+- Specs: 13 (scan contract line + P6-CLI-02 section → shipped), 16 (test inventory), 18 (this entry); ledger `docs/audits/README.md` (P6-CLI-02 → *Recently shipped*).
+
+Validated:
+- `gofmt -w cmd internal`, `golangci-lint run`, `go run ./cmd/spec-drift --base origin/main --head HEAD`, `GOCACHE=/tmp/devstrap-gocache go test -race ./...`.
+- New tests: `TestScanAdoptRefusesNonWorkspaceRoot` (exitUsage appError, zero projects adopted afterwards), `TestScanAdoptExplicitWorkspaceRootSucceeds` (positional root equal to the workspace root still adopts), `TestScanReadOnlyAllowsNonWorkspaceRoot` (inspection of foreign directories keeps working).
+
+Follow-ups:
+- `P6-CLI-01` (re-init root-change split-brain) is the sibling guard, deferred to the next cycle; subtree adoption (rebasing `finding.Path` against the workspace root) remains a documented future option.
+
 ## 2026-07-03 — P6-DATA-02: per-project env rotation clear (P2 quick-win wave)
 
 Changed:

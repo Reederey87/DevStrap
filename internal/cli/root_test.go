@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -314,6 +315,84 @@ func TestScanDryRunAndAdoptStatus(t *testing.T) {
 	}
 	if len(adopted.Projects) != 1 || adopted.Projects[0].Path != "work/acme/api" {
 		t.Fatalf("status projects = %+v, want adopted work/acme/api", adopted.Projects)
+	}
+}
+
+func TestScanAdoptRefusesNonWorkspaceRoot(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init", "--workspace-name", "personal"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+
+	other := filepath.Join(t.TempDir(), "Downloads")
+	repo := filepath.Join(other, "stray")
+	runGit(t, repo, "init")
+	runGit(t, repo, "remote", "add", "origin", "git@github.com:acme/stray.git")
+
+	stdout, stderr, err := executeForTest("--home", home, "scan", other, "--adopt")
+	if err == nil {
+		t.Fatalf("scan stdout = %q stderr = %q, want error", stdout, stderr)
+	}
+	var app appError
+	if !errors.As(err, &app) || app.code != exitUsage {
+		t.Fatalf("scan err = %v, want exitUsage appError", err)
+	}
+	if !strings.Contains(err.Error(), "--adopt only adopts from the workspace root") {
+		t.Fatalf("scan err = %v, want workspace-root adoption refusal", err)
+	}
+
+	stdout, stderr, err = executeForTest("--home", home, "status", "--json")
+	if err != nil {
+		t.Fatalf("status stdout = %q stderr = %q err = %v", stdout, stderr, err)
+	}
+	var summary state.Summary
+	if err := json.Unmarshal([]byte(stdout), &summary); err != nil {
+		t.Fatalf("status --json is not valid JSON: %v\n%s", err, stdout)
+	}
+	if summary.ProjectCount != 0 {
+		t.Fatalf("project_count = %d, want 0", summary.ProjectCount)
+	}
+}
+
+func TestScanAdoptExplicitWorkspaceRootSucceeds(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init", "--workspace-name", "personal"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+
+	repo := filepath.Join(root, "work", "acme", "api")
+	runGit(t, repo, "init")
+	runGit(t, repo, "remote", "add", "origin", "git@github.com:acme/api.git")
+
+	stdout, stderr, err := executeForTest("--home", home, "scan", root, "--adopt")
+	if err != nil {
+		t.Fatalf("adopt stdout = %q stderr = %q err = %v", stdout, stderr, err)
+	}
+	if !strings.Contains(stdout, "Adopted 1 projects") {
+		t.Fatalf("adopt stdout = %q", stdout)
+	}
+}
+
+func TestScanReadOnlyAllowsNonWorkspaceRoot(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init", "--workspace-name", "personal"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+
+	other := filepath.Join(t.TempDir(), "Downloads")
+	repo := filepath.Join(other, "stray")
+	runGit(t, repo, "init")
+	runGit(t, repo, "remote", "add", "origin", "git@github.com:acme/stray.git")
+
+	stdout, stderr, err := executeForTest("--home", home, "scan", other)
+	if err != nil {
+		t.Fatalf("scan stdout = %q stderr = %q err = %v", stdout, stderr, err)
+	}
+	if !strings.Contains(stdout, "stray\tgit_repo") {
+		t.Fatalf("scan stdout = %q, want read-only finding", stdout)
 	}
 }
 

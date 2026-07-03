@@ -123,7 +123,7 @@ Current implementation:
 - records secret-looking filename warnings but never file values;
 - only persists a discovered git remote after it passes validation, so an unvalidated/dangerous origin (e.g. `ext::`) is never stored for a later materialization step;
 - normalizes SSH, HTTPS, `ssh://`, absolute, and `file://` remotes;
-- `--adopt` writes namespace, git repo, draft project, and device project state rows;
+- `--adopt` writes namespace, git repo, draft project, and device project state rows, and is gated on the scanned root matching the workspace root (`P6-CLI-02`, shipped): `scan <other-dir> --adopt` refuses with `exitUsage` ("--adopt only adopts from the workspace root ..."), because adoption emits signed fleet-wide `project.added` events; read-only scans of arbitrary directories keep working, and `devstrap add` remains the single-repo path;
 - escaping symlinks are hard-excluded (never adopted) and surfaced as conflict rows; dangling/IO symlink errors are advisory warnings only;
 - `--quarantine` moves secret-looking files out of the managed tree into a dated `~/.devstrap/quarantine/<YYYYMMDD>/` directory (mode `0600`) instead of leaving them in place.
 
@@ -540,13 +540,11 @@ if oldRoot != "" && oldRoot != effectiveRoot && !moveRoot {
 }
 ```
 
-### P6-CLI-02 — `scan <dir> --adopt` adopts out-of-tree repos into the shared namespace
+### P6-CLI-02 — `scan <dir> --adopt` adopts out-of-tree repos into the shared namespace — **shipped (2026-07-03)**
 
-**Problem.** `scan` accepts any positional root (`internal/cli/scan.go:28-31`) and `adoptFindings` emits signed `project.added` events with no check that the scanned root is the workspace root, so `devstrap scan ~/Downloads --adopt` turns every repo there into a fleet-wide namespace event that other devices eagerly blobless-clone into `~/Code`.
+**Was.** `scan` accepted any positional root and `adoptFindings` emitted signed `project.added` events with no check that the scanned root was the workspace root, so `devstrap scan ~/Downloads --adopt` turned every repo there into a fleet-wide namespace event that other devices eagerly blobless-clone into `~/Code`.
 
-**Actionable steps.**
-1. After resolving `rootAbs`, gate `--adopt` on `rootAbs == wsRoot`; refuse otherwise with `exitUsage`, keeping read-only scans of arbitrary directories working.
-2. Add a CLI test asserting the refusal for an out-of-root `--adopt`; if subtree adoption is wanted later, rebase `finding.Path` against `wsRoot`.
+**Shipped fix.** After resolving `rootAbs`, `--adopt` is gated on `rootAbs == wsRoot` and refuses otherwise with `exitUsage`; read-only scans of arbitrary directories keep working. Pinned by `TestScanAdoptRefusesNonWorkspaceRoot` (refusal + zero projects adopted), `TestScanAdoptExplicitWorkspaceRootSucceeds`, and `TestScanReadOnlyAllowsNonWorkspaceRoot`. If subtree adoption is wanted later, rebase `finding.Path` against `wsRoot`.
 
 ```go
 if adopt && rootAbs != wsRoot {

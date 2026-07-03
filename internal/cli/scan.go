@@ -33,6 +33,15 @@ func newScanCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return appError{code: exitInvalidConfig, err: err}
 			}
+			if adopt {
+				wsRoot, err := cleanAbsPath(opts.paths().Root)
+				if err != nil {
+					return appError{code: exitInvalidConfig, err: err}
+				}
+				if rootAbs != wsRoot {
+					return appError{code: exitUsage, err: fmt.Errorf("--adopt only adopts from the workspace root %s (scanned %s); scan without --adopt to inspect, or use 'devstrap add' for a single repo", wsRoot, rootAbs)}
+				}
+			}
 			result, err := scan.Walk(cmd.Context(), rootAbs, scan.Options{IncludePlainFolders: true})
 			if err != nil {
 				return err
