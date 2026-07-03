@@ -163,6 +163,16 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 			}
 			pinnedFounder := false
 			if founderCode.DeviceID != "" {
+				// The fingerprint binds ONLY the two keys (it must match part
+				// 1's `devices recipient --fingerprint`), so the other carried
+				// fields are shown here for the operator to eyeball: a
+				// tampered workspace/device id cannot forge trust (signatures
+				// from the fingerprinted keys won't match a fake device id,
+				// and a wrong workspace id is doctor-detected), but it CAN
+				// break convergence visibly — surface it at decision time.
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+					"Pairing code carries: workspace %s, founder device %s (%q, %s/%s).\nCross-check the workspace id against `devstrap status` on the founding device.\n",
+					founderCode.WorkspaceID, founderCode.DeviceID, founderCode.Name, founderCode.OS, founderCode.Arch)
 				approved, err := confirmFounderFromPairingCode(cmd, founderCode, founderFingerprint, fingerprint)
 				if err != nil {
 					return err

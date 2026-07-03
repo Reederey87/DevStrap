@@ -566,10 +566,14 @@ devstrap devices recipient --fingerprint   # same founder fingerprint, useful fo
 Share the **non-secret** `devstrap-pair1:` blob with the second device, and read the
 fingerprint over a trusted channel. THE BLOB IS UNAUTHENTICATED BY DESIGN: it carries the
 workspace id, device id, display name, OS, arch, age recipient, and signing public key, but
-it carries no fingerprint and has no MAC/signature. Integrity comes from the fingerprint
-ceremony: the receiver derives the fingerprint from the carried keys and must compare it
-out-of-band before approval. Tampering with the carried keys changes the derived fingerprint
-and fails the ceremony.
+it carries no fingerprint and has no MAC/signature. Integrity of the KEYS comes from the
+fingerprint ceremony: the receiver derives the fingerprint from the carried keys and must
+compare it out-of-band before approval — tampering with either key changes the derived
+fingerprint and fails the ceremony. The non-key fields (workspace id, device id, name, os,
+arch) are NOT fingerprint-bound: tampering with them cannot forge trust, but it can break
+convergence visibly (quarantined events / a doctor-detected wrong hub prefix) until the
+ceremony is re-run — `init --join --code` prints every carried field at the confirmation
+prompt; cross-check the workspace id against `devstrap status` on the founder.
 
 ### E.2 Joiner — adopt the id, then pin the founder before the first sync
 
