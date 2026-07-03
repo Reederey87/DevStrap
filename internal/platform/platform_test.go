@@ -118,3 +118,30 @@ func TestMapKeyringErrorClassification(t *testing.T) {
 		t.Fatalf("hard failure %v was misclassified as a typed sentinel", hard)
 	}
 }
+
+// TestSecretServiceUnreachableRejectsLiveServiceErrors (CodeRabbit, PR #62):
+// errors a LIVE Secret Service can produce — timeouts, dismissed prompts,
+// generic dbus-prefixed failures — must NOT classify as backend-unavailable;
+// only the missing-bus/missing-service signatures may.
+func TestSecretServiceUnreachableRejectsLiveServiceErrors(t *testing.T) {
+	live := []string{
+		"dbus: operation timed out",
+		"org.freedesktop.secrets: prompt dismissed",
+		"dbus call failed: org.freedesktop.DBus.Error.NoReply",
+	}
+	for _, msg := range live {
+		if secretServiceUnreachable(errors.New(msg)) {
+			t.Errorf("live-service error %q misclassified as unreachable", msg)
+		}
+	}
+	dead := []string{
+		"dbus: couldn't determine address of the session bus",
+		"dial unix /run/user/1000/bus: connect: connection refused",
+		"The name org.freedesktop.secrets was not provided by any .service files",
+	}
+	for _, msg := range dead {
+		if !secretServiceUnreachable(errors.New(msg)) {
+			t.Errorf("dead-bus error %q not classified as unreachable", msg)
+		}
+	}
+}

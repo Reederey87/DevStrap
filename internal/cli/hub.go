@@ -376,7 +376,7 @@ func newHubLoginCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var accessKeyID string
 	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Store the hub S3/R2 credentials in the OS keychain (P6-HUB-02)",
+		Short: "Store the hub S3/R2 credentials in the recorded custody backend (OS keychain, or the 0600 file store under file custody) (P6-HUB-02/P6-XP-04)",
 		Long: `Store the hub S3/R2 access key id and secret access key in the OS keychain
 (0600 file fallback when no keychain is available), so sync needs no plaintext
 credential env vars. The secret is read from an interactive no-echo prompt, or

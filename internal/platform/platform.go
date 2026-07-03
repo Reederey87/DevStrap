@@ -235,14 +235,18 @@ func secretServiceUnreachable(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
+	// Deliberately NARROW (CodeRabbit, PR #62): only the missing-session-bus /
+	// missing-service signatures qualify. A bare "dbus" or the interface name
+	// alone also appears in errors from a LIVE Secret Service (timeouts,
+	// dismissed prompts), and classifying those as unavailable would let a
+	// transient failure record file custody at first init or divert
+	// custody-unset reads to the file store.
 	for _, needle := range []string{
-		"dbus",
-		"session bus",
-		"connection refused",
-		"org.freedesktop.secrets",
-		"no such interface",
+		"session bus",         // godbus: couldn't determine address of session bus
+		"connection refused",  // dialing the session-bus socket
 		"was not provided",    // dbus: org.freedesktop.secrets was not provided
 		"not provided by any", // "...not provided by any .service files"
+		"no such interface",   // service object missing the Secret Service interface
 		"dial unix",           // dead session-bus socket: "dial unix <path>: connect: ..."
 	} {
 		if strings.Contains(msg, needle) {
