@@ -450,25 +450,36 @@ func TestApplyEventsChainedRevokedEventsDoNotWedgeCursor(t *testing.T) {
 // P6-SYNC-03: revoking the LAST approved device must not reopen the
 // pre-enrollment bootstrap window. With only a revoked device on record (the
 // post-revoke two-device state — no approved device left), a validly-signed
-// non-destructive event from the revoked device, and any event from an
-// unknown device, must be quarantined rather than applied.
+// non-destructive event from the revoked device, any event from an unknown
+// device, a signed event from a known-but-pending device, and an unsigned
+// event from a known device with no signing key must all be quarantined
+// rather than applied — every fail-open branch of the pre-enrollment regime
+// stays closed.
 func TestApplyEventsRevokedLastDeviceStaysFailClosed(t *testing.T) {
 	ctx := context.Background()
 	st, _ := newSyncStore(t)
 	bSigning := addRemoteDeviceForApplyTest(t, st, "device-b", "revoked")
+	pSigning := addRemoteDeviceForApplyTest(t, st, "device-p", "pending")
+	if err := st.UpsertDevice(ctx, state.Device{
+		ID: "device-n", Name: "device-n", OS: "linux", Arch: "arm64", TrustState: "pending",
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	revokedB := signedProjectEvent(t, bSigning, "device-b", 1, 10<<hlcLogicalBits, "work/acme/b1", "github.com/acme/b1")
 	unknown := projEvent(t, "device-x", EventProjectAdded, 20, "work/acme/x1", "github.com/acme/x1")
+	pendingP := signedProjectEvent(t, pSigning, "device-p", 1, 30<<hlcLogicalBits, "work/acme/p1", "github.com/acme/p1")
+	noKeyN := projEvent(t, "device-n", EventProjectAdded, 40, "work/acme/n1", "github.com/acme/n1")
 
-	safeCursor, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{revokedB, unknown})
+	safeCursor, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{revokedB, unknown, pendingP, noKeyN})
 	if err != nil {
 		t.Fatalf("ApplyEvents should quarantine post-revoke events, not abort: %v", err)
 	}
-	if safeCursor != 20<<hlcLogicalBits {
-		t.Fatalf("safeCursor = %d, want %d", safeCursor, 20<<hlcLogicalBits)
+	if safeCursor != 40<<hlcLogicalBits {
+		t.Fatalf("safeCursor = %d, want %d", safeCursor, 40<<hlcLogicalBits)
 	}
-	if stats.Quarantined != 2 || stats.CursorHeld {
-		t.Fatalf("stats = %+v, want Quarantined=2 CursorHeld=false", stats)
+	if stats.Quarantined != 4 || stats.CursorHeld {
+		t.Fatalf("stats = %+v, want Quarantined=4 CursorHeld=false", stats)
 	}
 	if projection := projectionOf(t, st); len(projection) != 0 {
 		t.Fatalf("no event may apply after the last approved device is revoked, got %+v", projection)
@@ -477,8 +488,8 @@ func TestApplyEventsRevokedLastDeviceStaysFailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := countConflictType(conflicts, ConflictEventVerification); got != 2 {
-		t.Fatalf("event verification conflicts = %d, want 2: %+v", got, conflicts)
+	if got := countConflictType(conflicts, ConflictEventVerification); got != 4 {
+		t.Fatalf("event verification conflicts = %d, want 4: %+v", got, conflicts)
 	}
 }
 
