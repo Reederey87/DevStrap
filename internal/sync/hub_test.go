@@ -80,6 +80,31 @@ func TestFileHubDeleteBlobLeavesEventLogUntouched(t *testing.T) {
 	}
 }
 
+func TestFileHubHasEvents(t *testing.T) {
+	ctx := context.Background()
+	hub := FileHub{Path: filepath.Join(t.TempDir(), "hub.json")}
+
+	hasEvents, err := hub.HasEvents(ctx)
+	if err != nil {
+		t.Fatalf("HasEvents fresh: %v", err)
+	}
+	if hasEvents {
+		t.Fatal("HasEvents fresh = true, want false")
+	}
+
+	event := state.Event{ID: "evt-a", DeviceID: "dev-a", HLC: 100, Type: "project.added", PayloadJSON: "{}", ContentHash: "sha256:a"}
+	if err := hub.Push(ctx, []state.Event{event}); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	hasEvents, err = hub.HasEvents(ctx)
+	if err != nil {
+		t.Fatalf("HasEvents populated: %v", err)
+	}
+	if !hasEvents {
+		t.Fatal("HasEvents populated = false, want true")
+	}
+}
+
 // TestFileHubPullInclusiveBoundaryDeliversSameHLC (HUB-13): the pull boundary
 // is inclusive (>=) so a same-HLC event from another device that arrives AFTER
 // the cursor was advanced to that HLC is still delivered on the next pull. With

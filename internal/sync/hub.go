@@ -136,6 +136,19 @@ func (h FileHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, error
 	return out, nil
 }
 
+// HasEvents reports whether any event has ever been recorded on this hub
+// (P4-SEC-07 doctor mismatch check).
+func (h FileHub) HasEvents(ctx context.Context) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	all, err := h.read()
+	if err != nil {
+		return false, err
+	}
+	return len(all) > 0, nil
+}
+
 // PutBlob stores an encrypted blob keyed by its sha256 hex digest. The blob is
 // content-addressed: writing the same digest twice is a no-op.
 func (h FileHub) PutBlob(ctx context.Context, sha256Hex string, r io.Reader) error {

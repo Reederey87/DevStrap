@@ -14,6 +14,7 @@ import (
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/state"
+	dssync "github.com/Reederey87/DevStrap/internal/sync"
 	"github.com/spf13/cobra"
 )
 
@@ -81,8 +82,9 @@ func newDoctorCommand(stdout io.Writer, opts *options) *cobra.Command {
 }
 
 // checkHubHealth probes the sync hub for --remote (P5-PROD-05): reachability,
-// pending-push backlog, queued hub-deletes, and a device-trust summary. It is a
-// thin observability layer over the existing event log + cursors.
+// workspace-id visibility, pending-push backlog, queued hub-deletes, and a
+// device-trust summary. It is a thin observability layer over the existing
+// event log + cursors.
 func checkHubHealth(ctx context.Context, opts *options, hubFile string) []checkResult {
 	if _, err := os.Stat(opts.paths().StateDB()); err != nil {
 		return []checkResult{{Name: "hub", Status: checkWarn, Detail: "no state database; run `devstrap init`"}}
@@ -92,11 +94,16 @@ func checkHubHealth(ctx context.Context, opts *options, hubFile string) []checkR
 		return []checkResult{{Name: "hub", Status: checkError, Detail: err.Error()}}
 	}
 	defer closeStore(store)
+	var out []checkResult
+	if wsID, werr := store.WorkspaceID(ctx); werr == nil {
+		out = append(out, checkResult{Name: "workspace id", Status: checkOK, Detail: wsID})
+	} else {
+		out = append(out, checkResult{Name: "workspace id", Status: checkWarn, Detail: werr.Error()})
+	}
 	hub, hubID, err := hubFromOptions(ctx, opts, store, hubFile)
 	if err != nil {
-		return []checkResult{{Name: "hub", Status: checkError, Detail: err.Error(), Remedy: "pass --hub-file or set 'hub' in config"}}
+		return append(out, checkResult{Name: "hub", Status: checkError, Detail: err.Error(), Remedy: "pass --hub-file or set 'hub' in config"})
 	}
-	var out []checkResult
 	if _, err := hub.ListBlobs(ctx); err != nil {
 		return append(out, checkResult{Name: "hub reachable", Status: checkError, Detail: err.Error()})
 	}
@@ -108,6 +115,38 @@ func checkHubHealth(ctx context.Context, opts *options, hubFile string) []checkR
 			out = append(out, checkResult{Name: "pending push", Status: checkWarn, Detail: fmt.Sprintf("%d local event(s) not yet pushed", len(pending)), Remedy: "run `devstrap sync`"})
 		} else {
 			out = append(out, checkResult{Name: "pending push", Status: checkOK, Detail: "0"})
+		}
+	}
+	if isRemoteHubID(hubID) {
+		// Probe the RAW backend for prefix emptiness — never through the
+		// EncryptedHub (a diagnostic must not run grant ingestion). The
+		// backend is unwrapped from the hub already built above so doctor
+		// does not resolve hub credentials (keychain / `op read`) twice.
+		var rawBackend dssync.Hub
+		if enc, ok := hub.(dssync.EncryptedHub); ok {
+			rawBackend = enc.Hub
+		}
+		if rawBackend != nil {
+			type hasEventsCapable interface {
+				HasEvents(ctx context.Context) (bool, error)
+			}
+			if hec, ok := rawBackend.(hasEventsCapable); ok {
+				hasEvents, herr := hec.HasEvents(ctx)
+				// A HubCursor read error degrades to cursor 0, biasing toward
+				// the warning; acceptable because HasEvents==false (a probe
+				// that SUCCEEDED against a genuinely empty prefix) must also
+				// hold, matching the pushCursor convention above.
+				pullCursor, _ := store.HubCursor(ctx, hubID)
+				role := opts.v.GetString("role")
+				if herr == nil && shouldWarnWorkspaceIDMismatch(role, hubID, pullCursor, hasEvents) {
+					out = append(out, checkResult{
+						Name:   "workspace id match",
+						Status: checkWarn,
+						Detail: "this device joined an existing workspace but sees zero hub events under its own workspace id; it may not share the founder's workspace id",
+						Remedy: "confirm the founder's workspace id via `devstrap doctor` on the founding device, then re-init this device with `devstrap init --join --workspace-id <founder workspace id>`",
+					})
+				}
+			}
 		}
 	}
 	if queued, qerr := store.PendingHubDeletes(ctx); qerr == nil && len(queued) > 0 {
@@ -128,6 +167,19 @@ func checkHubHealth(ctx context.Context, opts *options, hubFile string) []checkR
 		out = append(out, checkResult{Name: "device trust", Status: checkOK, Detail: fmt.Sprintf("%d approved, %d revoked/lost, %d pending", approved, revoked, other)})
 	}
 	return out
+}
+
+// shouldWarnWorkspaceIDMismatch reports whether doctor's --remote probe should
+// warn that this device's locally-minted workspace id may not match the
+// founder's. It is deliberately pure so the heuristic can be table-tested
+// without state or hub I/O (P4-SEC-07 pairing wave).
+func shouldWarnWorkspaceIDMismatch(role string, hubID string, pullCursor int64, hasEvents bool) bool {
+	isJoinerRole := strings.EqualFold(strings.TrimSpace(role), "joiner")
+	return isJoinerRole && isRemoteHubID(hubID) && pullCursor == 0 && !hasEvents
+}
+
+func isRemoteHubID(hubID string) bool {
+	return strings.HasPrefix(hubID, "r2:") || strings.HasPrefix(hubID, "s3:")
 }
 
 // runDoctorChecks collects all health checks into a graded result list (PROD-02).
