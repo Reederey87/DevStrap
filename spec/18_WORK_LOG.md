@@ -27,6 +27,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — feat(devices): one-paste pairing codes (P4-SEC-04 part 2)
+
+Changed:
+- Added `internal/pairing`: `devstrap-pair1:` compact JSON/base64url codes carrying workspace id, device id, display name, OS, arch, age recipient, and signing public key. Decode is deliberately unauthenticated and ignores unknown JSON fields; validators reuse `id.Valid`, `age.ParseX25519Recipient`, and `devicekeys.Fingerprint` parsing.
+- Added `devstrap devices pairing-code`: stdout is exactly the blob plus newline; stderr prints the local fingerprint and the two command forms to run on the other device.
+- Added `devices enroll --code`: rejects positional ids and manual identity/key flags, checks workspace id, then falls through to the existing epoch-contiguity, fingerprint-confirm, upsert, grant, and quarantine-replay flow. Composition target: `devices enroll --code "$CODE" --approve --fingerprint "$FP"`.
+- Added `init --join --code` + `--fingerprint`: decodes and verifies before filesystem writes, adopts the founder workspace id, pins the founder as approved with a matching fingerprint, prompts on a TTY, or stores the founder pending with a warning/follow-up command in non-TTY use.
+- Tests: pairing unit round-trip/error/unknown-field/whitespace coverage, CLI pairing-code/enroll/init coverage, and `sync_join_flow.txtar` rewritten to the two-paste code ceremony.
+- Specs: `spec/00`, `spec/07`, `spec/13`, `spec/15`, `spec/19`, and the audit ledger text updated for the shipped part-2 pairing code.
+
+Validated:
+- `gofmt -w cmd internal`; `golangci-lint run` (0 issues); `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOCACHE=/tmp/devstrap-gocache go test -race ./...` incl. the rewritten `sync_join_flow` e2e (re-run in the main session after the line-by-line diff review).
+
+Follow-ups:
+- None for `P4-SEC-04` local pairing; authenticated snapshot exchange, synced trust propagation, and broader automation remain separate backlog items.
+
 ## 2026-07-03 — feat(devices): device-key fingerprint + compare-and-confirm on approve (P4-SEC-04 part 1)
 
 Changed:

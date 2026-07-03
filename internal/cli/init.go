@@ -1,20 +1,24 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/Reederey87/DevStrap/internal/config"
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/id"
+	"github.com/Reederey87/DevStrap/internal/pairing"
 	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/scan"
 	"github.com/Reederey87/DevStrap/internal/state"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
@@ -23,12 +27,44 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var scanAdopt bool
 	var join bool
 	var workspaceID string
+	var codeBlob string
+	var fingerprint string
 
 	cmd := &cobra.Command{
 		Use:   "init [root]",
 		Short: "Initialize a DevStrap workspace",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			var founderCode pairing.Code
+			var founderFingerprint string
+			// --fingerprint only means anything alongside --code (it confirms
+			// the code's carried founder keys); silently ignoring it without
+			// --code would let an operator believe something was verified.
+			if strings.TrimSpace(fingerprint) != "" && strings.TrimSpace(codeBlob) == "" {
+				return appError{code: exitUsage, err: fmt.Errorf("--fingerprint requires --code (it confirms the pairing code's founder keys)")}
+			}
+			if strings.TrimSpace(codeBlob) != "" {
+				if workspaceID != "" {
+					return appError{code: exitUsage, err: fmt.Errorf("--code is mutually exclusive with --workspace-id")}
+				}
+				decoded, err := pairing.Decode(codeBlob)
+				if err != nil {
+					return appError{code: exitInvalidConfig, err: err}
+				}
+				fp, err := devicekeys.Fingerprint(decoded.SigningPublicKey, decoded.AgeRecipient)
+				if err != nil {
+					return appError{code: exitInvalidConfig, err: fmt.Errorf("cannot compute founder fingerprint from pairing code: %w", err)}
+				}
+				if strings.TrimSpace(fingerprint) != "" && !devicekeys.FingerprintEqual(fingerprint, fp) {
+					return appError{code: exitInvalidConfig, err: fmt.Errorf(
+						"fingerprint mismatch for device %s: the value you passed does not match the pairing code's keys.\n  expected: %s\nCompare the full value out-of-band (e.g. over a call) before approving; no changes were made",
+						decoded.DeviceID, fp)}
+				}
+				founderCode = decoded
+				founderFingerprint = fp
+				workspaceID = decoded.WorkspaceID
+				join = true
+			}
 			// P4-SEC-07 pairing: validate the supplied workspace id shape
 			// before touching the filesystem so a bad paste never creates a
 			// half-initialized state home. Supplying an id IS joining.
@@ -125,6 +161,44 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := ensureLocalDeviceIdentity(cmd.Context(), paths, store, device); err != nil {
 				return err
 			}
+			pinnedFounder := false
+			if founderCode.DeviceID != "" {
+				// The fingerprint binds ONLY the two keys (it must match part
+				// 1's `devices recipient --fingerprint`), so the other carried
+				// fields are shown here for the operator to eyeball: a
+				// tampered workspace/device id cannot forge trust (signatures
+				// from the fingerprinted keys won't match a fake device id,
+				// and a wrong workspace id is doctor-detected), but it CAN
+				// break convergence visibly — surface it at decision time.
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+					"Pairing code carries: workspace %s, founder device %s (%q, %s/%s).\nCross-check the workspace id against `devstrap status` on the founding device.\n",
+					founderCode.WorkspaceID, founderCode.DeviceID, founderCode.Name, founderCode.OS, founderCode.Arch)
+				approved, err := confirmFounderFromPairingCode(cmd, founderCode, founderFingerprint, fingerprint)
+				if err != nil {
+					return err
+				}
+				trustState := "pending"
+				if approved {
+					trustState = "approved"
+				}
+				if err := store.UpsertDevice(cmd.Context(), state.Device{
+					ID:               founderCode.DeviceID,
+					Name:             founderCode.Name,
+					OS:               founderCode.OS,
+					Arch:             founderCode.Arch,
+					PublicKey:        founderCode.AgeRecipient,
+					SigningPublicKey: founderCode.SigningPublicKey,
+					TrustState:       trustState,
+				}); err != nil {
+					return err
+				}
+				if approved {
+					replayQuarantinedEvents(cmd.Context(), cmd.ErrOrStderr(), opts, store, founderCode.DeviceID)
+					pinnedFounder = true
+				} else {
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: founder not pinned (no TTY for fingerprint confirmation). Verify the fingerprint out-of-band, then run: devstrap devices approve %s --fingerprint %s\n", founderCode.DeviceID, founderFingerprint)
+				}
+			}
 			// P6-SEC-02: init no longer mints the WCK epoch-1 key. Founding is
 			// deferred to the first `devstrap sync` and happens only when the
 			// hub is confirmed empty (see runSyncCycle's founder/join gate), so
@@ -175,13 +249,27 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: r2/s3 hubs key events by workspace id; without --workspace-id this device minted its own id and will not see the founder's hub data (file hubs are unaffected)\n")
 				}
 				hint := "Joining an existing workspace. Next:\n"
-				steps := []string{
-					"pin the founder — and every other existing device — BEFORE your first sync: devstrap devices enroll <device-id> --name <n> --os <os> --arch <arch> --age-recipient <rec> --signing-public-key <sig> --approve --fingerprint <fp>  # closes the TOFU window (P4-SEC-04); events from devices you have not pinned yet quarantine and replay once approved",
-					"devstrap devices recipient              # copy this device's age recipient",
-					"devstrap devices recipient --signing    # and its signing key",
-					"devstrap devices recipient --fingerprint  # and its fingerprint to compare out-of-band during approval",
-					"on an approved device: devstrap devices enroll <id> --age-recipient <rec> --signing-public-key <sig> --approve --fingerprint <fp>  # compare the fingerprint against 'devstrap devices recipient --fingerprint' here before approving",
-					"set 'hub: r2://<bucket>' in ~/.devstrap/config.yaml, then devstrap sync  # ingests the grant, then pushes your projects",
+				var steps []string
+				if founderCode.DeviceID != "" {
+					steps = []string{
+						"on the founding device: devstrap devices pairing-code           # copy the code + read its fingerprint aloud",
+						"(this init already adopted the workspace id and pinned the founder when you passed --code)",
+						"devstrap devices pairing-code                                   # now generate THIS device's code; paste it on the founder",
+						"on the founding device: devstrap devices enroll --code '<code>' --approve --fingerprint <this device's fingerprint>",
+						"set 'hub: r2://<bucket>' in ~/.devstrap/config.yaml, then devstrap sync",
+					}
+					if !pinnedFounder {
+						steps[1] = "(this init already adopted the workspace id; pin the founder with the warning command before your first sync)"
+					}
+				} else {
+					steps = []string{
+						"pin the founder — and every other existing device — BEFORE your first sync: devstrap devices enroll <device-id> --name <n> --os <os> --arch <arch> --age-recipient <rec> --signing-public-key <sig> --approve --fingerprint <fp>  # closes the TOFU window (P4-SEC-04); events from devices you have not pinned yet quarantine and replay once approved",
+						"devstrap devices recipient              # copy this device's age recipient",
+						"devstrap devices recipient --signing    # and its signing key",
+						"devstrap devices recipient --fingerprint  # and its fingerprint to compare out-of-band during approval",
+						"on an approved device: devstrap devices enroll <id> --age-recipient <rec> --signing-public-key <sig> --approve --fingerprint <fp>  # compare the fingerprint against 'devstrap devices recipient --fingerprint' here before approving",
+						"set 'hub: r2://<bucket>' in ~/.devstrap/config.yaml, then devstrap sync  # ingests the grant, then pushes your projects",
+					}
 				}
 				if workspaceID == "" {
 					// This init already minted a local id, so a plain re-run
@@ -213,7 +301,27 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().BoolVar(&scanAdopt, "scan", false, "scan the root and adopt existing repos on init")
 	cmd.Flags().BoolVar(&join, "join", false, "join an existing workspace: do not found a new one; wait to be approved from an existing device (P6-SEC-02)")
 	cmd.Flags().StringVar(&workspaceID, "workspace-id", "", "adopt the founding device's workspace id (copy it from `devstrap status` there); implies --join (P4-SEC-07)")
+	cmd.Flags().StringVar(&codeBlob, "code", "", "one-paste pairing code from the founding device; implies --join")
+	cmd.Flags().StringVar(&fingerprint, "fingerprint", "", "with --code: the founding device fingerprint confirmed out-of-band; skips the interactive prompt")
 	return cmd
+}
+
+func confirmFounderFromPairingCode(cmd *cobra.Command, code pairing.Code, expected, flagFP string) (bool, error) {
+	if strings.TrimSpace(flagFP) != "" {
+		return true, nil
+	}
+	stderr := cmd.ErrOrStderr()
+	if f, ok := cmd.InOrStdin().(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		_, _ = fmt.Fprintf(stderr, "Founding device %s fingerprint:\n  %s\n\n", code.DeviceID, expected)
+		_, _ = fmt.Fprint(stderr, "Type 'yes' to approve: ")
+		reader := bufio.NewReader(cmd.InOrStdin())
+		line, _ := reader.ReadString('\n')
+		if strings.TrimSpace(line) != "yes" {
+			return false, appError{code: exitInvalidConfig, err: fmt.Errorf("approval of founding device %s refused: fingerprint not confirmed", code.DeviceID)}
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 func ensureLocalDeviceIdentity(ctx context.Context, paths config.Paths, store *state.Store, device state.Device) error {
