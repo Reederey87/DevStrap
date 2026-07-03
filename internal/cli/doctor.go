@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"time"
 
@@ -219,6 +220,8 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 			results = append(results, checkSecretsRotation(ctx, store)...)
 			results = append(results, checkDeviceKeys(ctx, paths, store)...)
 			results = append(results, checkKeyGrantWaits(ctx, store)...)
+
+			results = append(results, checkSkippedEvents(ctx, store)...)
 			results = append(results, checkWorkspaceKeyAge(ctx, opts, store)...)
 			results = append(results, checkForgeCLIs(ctx, opts, store)...)
 			results = append(results, checkBloblessCaveat(ctx, store)...)
@@ -381,6 +384,34 @@ func gradeWorkspaceKeyAge(epoch int64, created time.Time, maxAge time.Duration, 
 		}
 	}
 	return checkResult{Name: "workspace key age", Status: checkOK, Detail: detail}
+}
+
+// checkSkippedEvents surfaces the durable P6-SYNC-02 skip records: hub
+// objects this device's pulls keep dropping, each holding its origin device's
+// cursor at a seq gap until it applies. The remedy depends on the reason.
+func checkSkippedEvents(ctx context.Context, store *state.Store) []checkResult {
+	skipped, err := store.OpenSkippedEvents(ctx)
+	if err != nil {
+		return nil
+	}
+	if len(skipped) == 0 {
+		return []checkResult{{Name: "skipped hub events", Status: checkOK, Detail: "0"}}
+	}
+	byReason := map[string]int{}
+	for _, rec := range skipped {
+		byReason[rec.Reason]++
+	}
+	parts := make([]string, 0, len(byReason))
+	for reason, n := range byReason {
+		parts = append(parts, fmt.Sprintf("%s: %d", reason, n))
+	}
+	sort.Strings(parts)
+	return []checkResult{{
+		Name:   "skipped hub events",
+		Status: checkWarn,
+		Detail: strings.Join(parts, ", "),
+		Remedy: "unknown-envelope-version: upgrade devstrap on this device; retired-enc-v1: re-found the workspace on a fresh hub; plaintext-anti-downgrade: the hub is serving plaintext where ciphertext is required — investigate the hub",
+	}}
 }
 
 func checkKeyGrantWaits(ctx context.Context, store *state.Store) []checkResult {

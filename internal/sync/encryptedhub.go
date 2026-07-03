@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -93,8 +94,18 @@ type EncryptedHub struct {
 	// treated as permanent-until-regrant: the still-encrypted carrier is
 	// forwarded, ApplyEvents quarantines it, and a later grant recovers it via
 	// ReplayUndecryptableConflicts. Zero means expire immediately (quarantine
-	// on first sight); only meaningful when MissingKeyWait is non-nil.
+	// on first sight); only meaningful when MissingKeyWait is non-nil. The
+	// same window bounds the unknown-envelope-version defer (P6-SYNC-02),
+	// clocked by NoteSkipped's stable first-seen.
 	GraceWindow time.Duration
+	// NoteSkipped durably records an event Pull drops from the batch
+	// (P6-SYNC-02: unknown envelope version, retired enc.v1, anti-downgrade
+	// plaintext) and returns the STABLE first-seen time of the (event,
+	// reason) — the grace clock for the recoverable unknown-version class.
+	// hubFromOptions wires it to (*state.Store).NoteSkippedEvent; the rows
+	// surface in status/doctor, gate hub gc, and clear when the event
+	// finally applies. nil keeps skips log-only (unit tests).
+	NoteSkipped func(ctx context.Context, ev state.Event, reason string) (time.Time, error)
 }
 
 // PullStats reports what a single EncryptedHub.Pull observed. Fields are set
@@ -260,21 +271,72 @@ func (h EncryptedHub) Pull(ctx context.Context, after Cursor) ([]state.Event, er
 			// workspace on a fresh hub (or fresh bucket/prefix).
 			logging.Logger(ctx).Warn("encrypted hub pull: skipping retired enc.v1 event; this hub predates the enc.v2 wire break — re-found the workspace on a fresh hub",
 				"event_id", event.ID)
+			h.noteSkip(ctx, event, SkipReasonRetiredV1)
 			if h.Stats != nil {
 				h.Stats.Skipped++
 			}
 			continue
 		case EventEncryptedV2:
 			env, err := ParseEncryptedEnvelope(event)
+			if errors.Is(err, ErrUnknownEnvelopeVersion) {
+				// A newer client wrote an envelope version this build cannot
+				// read: DECRYPTABLE AFTER UPGRADE, so treat it like a missing
+				// key grant (P6-SYNC-02) — defer this origin device's tail
+				// within the grace window (the seq gap holds its cursor; the
+				// post-upgrade pull consumes it and clears the record), and
+				// past the window hand the carrier to the undecryptable
+				// quarantine so one abandoned old client cannot wedge on a
+				// permanently-newer fleet (the replay recovers it after the
+				// upgrade). The grace clock is NoteSkipped's stable
+				// first-seen; a nil seam defers forever (legacy behavior).
+				version, _ := EnvelopeVersion(event)
+				if version <= envelopeVersion {
+					// A claimed version at or below OURS is not "a newer
+					// client" — it is malformed hub data wearing the
+					// unknown-version error ({} decodes to version 0; v1
+					// inside an enc.v2-typed event is a forgery). No upgrade
+					// will ever make it readable, so it must not buy the
+					// grace-window defer a hostile hub could use to hold this
+					// device's cursor with junk (post-#63 Codex review, P2):
+					// forward it for the undecryptable quarantine now.
+					logging.Logger(ctx).Warn("encrypted hub pull: forwarding undecodable event for quarantine (implausible envelope version)",
+						"event_id", event.ID, "envelope_version", version)
+					if h.Stats != nil {
+						h.Stats.Undecryptable++
+					}
+					out = append(out, event)
+					continue
+				}
+				if h.skipGraceExpired(ctx, event, SkipReasonUnknownVersion) {
+					logging.Logger(ctx).Warn("encrypted hub pull: unknown-envelope-version grace expired; forwarding event for quarantine",
+						"event_id", event.ID, "envelope_version", version)
+					if h.Stats != nil {
+						h.Stats.Undecryptable++
+					}
+					out = append(out, event)
+					continue
+				}
+				logging.Logger(ctx).Warn("encrypted hub pull: event from a newer client (unknown envelope version); deferring this origin device's remaining events — upgrade devstrap to consume it",
+					"event_id", event.ID, "device_id", event.DeviceID, "envelope_version", version)
+				deferredDevs[event.DeviceID] = true
+				if h.Stats != nil {
+					h.Stats.Truncated++
+				}
+				continue
+			}
 			if err != nil {
-				// Malformed envelope or unknown version: an untrusted hub can
-				// serve junk, and a newer client may write a version this build
-				// cannot read. Refuse it, but skip rather than wedge.
-				logging.Logger(ctx).Warn("encrypted hub pull: skipping undecodable event",
+				// Malformed envelope: junk from an untrusted hub, permanently
+				// unreadable by anyone. FORWARD it so ApplyEvents records the
+				// durable undecryptable quarantine conflict (visible, blocks
+				// hub gc, dedups) and the slot is consumed — silently dropping
+				// it would leave only a log line, and holding on it would let
+				// one corrupt object wedge its device forever (P6-SYNC-02).
+				logging.Logger(ctx).Warn("encrypted hub pull: forwarding undecodable event for quarantine",
 					"event_id", event.ID, "err", err.Error())
 				if h.Stats != nil {
-					h.Stats.Skipped++
+					h.Stats.Undecryptable++
 				}
+				out = append(out, event)
 				continue
 			}
 			// The envelope kid FIELD is an unauthenticated routing hint (the
@@ -415,6 +477,7 @@ func (h EncryptedHub) Pull(ctx context.Context, after Cursor) ([]state.Event, er
 			// cannot wedge sync.
 			logging.Logger(ctx).Warn("encrypted hub pull: skipping non-encrypted event (anti-downgrade)",
 				"event_id", event.ID, "type", event.Type)
+			h.noteSkip(ctx, event, SkipReasonPlaintext)
 			if h.Stats != nil {
 				h.Stats.Skipped++
 			}
@@ -454,6 +517,44 @@ func (h EncryptedHub) missingKeyGraceExpired(ctx context.Context, epoch int64, k
 	if err != nil {
 		logging.Logger(ctx).Warn("encrypted hub pull: could not record missing key grant wait; deferring instead",
 			"epoch", epoch, "kid", kid, "err", err.Error())
+		return false
+	}
+	return time.Since(firstSeen) >= h.GraceWindow
+}
+
+// Skip reasons persisted through the NoteSkipped seam (P6-SYNC-02).
+const (
+	SkipReasonUnknownVersion = "unknown-envelope-version"
+	SkipReasonRetiredV1      = "retired-enc-v1"
+	SkipReasonPlaintext      = "plaintext-anti-downgrade"
+)
+
+// noteSkip records a durable skip through the NoteSkipped seam, tolerating a
+// nil seam and store errors (the skip itself must never fail the pull).
+func (h EncryptedHub) noteSkip(ctx context.Context, ev state.Event, reason string) {
+	if h.NoteSkipped == nil {
+		return
+	}
+	if _, err := h.NoteSkipped(ctx, ev, reason); err != nil {
+		logging.Logger(ctx).Warn("encrypted hub pull: could not record skipped event",
+			"event_id", ev.ID, "reason", reason, "err", err.Error())
+	}
+}
+
+// skipGraceExpired reports whether the grace window for a recoverable skip
+// (unknown envelope version) has run out, clocked by the stable first-seen
+// the NoteSkipped seam returns. Any error — and a nil seam — degrades to
+// "not expired" (defer forever), matching missingKeyGraceExpired: failing
+// toward the defer is safe (nothing quarantined), just unbounded until the
+// store recovers.
+func (h EncryptedHub) skipGraceExpired(ctx context.Context, ev state.Event, reason string) bool {
+	if h.NoteSkipped == nil {
+		return false
+	}
+	firstSeen, err := h.NoteSkipped(ctx, ev, reason)
+	if err != nil {
+		logging.Logger(ctx).Warn("encrypted hub pull: could not record skipped event; deferring instead",
+			"event_id", ev.ID, "reason", reason, "err", err.Error())
 		return false
 	}
 	return time.Since(firstSeen) >= h.GraceWindow

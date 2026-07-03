@@ -93,6 +93,12 @@ func renderStatus(ctx context.Context, stdout io.Writer, opts *options) error {
 	if n, err := store.CountOpenConflicts(ctx); err == nil && n > 0 {
 		_, _ = fmt.Fprintf(stdout, "Open conflicts: %d (run `devstrap conflicts` to inspect)\n", n)
 	}
+	// P6-SYNC-02: surface skipped hub events — objects this device's pulls
+	// keep dropping (unknown envelope version, retired enc.v1, anti-downgrade
+	// plaintext); each holds its origin device's cursor until it applies.
+	if skipped, err := store.OpenSkippedEvents(ctx); err == nil && len(skipped) > 0 {
+		_, _ = fmt.Fprintf(stdout, "Skipped hub events: %d (run `devstrap doctor` for reasons)\n", len(skipped))
+	}
 	if len(summary.Projects) > 0 {
 		_, _ = fmt.Fprintln(stdout, "\nProject\tType\tStatus\tDirty")
 		for _, project := range summary.Projects {

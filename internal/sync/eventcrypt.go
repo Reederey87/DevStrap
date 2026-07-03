@@ -294,3 +294,17 @@ func appendLenPrefixed(dst []byte, s string) []byte {
 	dst = append(dst, lb[:]...)
 	return append(dst, s...)
 }
+
+// EnvelopeVersion extracts the claimed envelope version from an enc.v2-typed
+// event's payload without validating it (P6-SYNC-02): the unknown-version
+// classifier needs the claimed version to log/record it, distinguishing "a
+// newer client wrote v3" (defer — recoverable by upgrading this binary) from
+// malformed junk (quarantine). ok is false when the payload is not parseable
+// envelope JSON at all.
+func EnvelopeVersion(event state.Event) (int, bool) {
+	var env encryptedEnvelope
+	if json.Unmarshal([]byte(event.PayloadJSON), &env) != nil {
+		return 0, false
+	}
+	return env.Version, true
+}
