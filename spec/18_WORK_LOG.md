@@ -27,6 +27,17 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — docs(claude): report-only nudge rule for delegated workers (pairing-wave field note)
+
+Changed:
+- `CLAUDE.md` model-picker field notes: nudges to worker subagents must be report-only ("post your report; make no further edits") — a nudged worker may run another pass and silently overwrite main-session fixes in its worktree; generic check added: re-diff a delegated worktree immediately before committing. Also updated the line-by-line-review note (it has now caught real issues from Codex diffs).
+
+Validated:
+- Docs only; `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+- None.
+
 ## 2026-07-03 — docs: spec-accuracy sweep (4 stale claims vs shipped code)
 
 Changed (docs only — findings from a full spec-folder validation pass against `d0b696a`):

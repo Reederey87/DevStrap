@@ -45,8 +45,9 @@ Using gpt-5.5 inside workflows and subagents by using Codex plugin for Claude Co
 - Spawn a thin Claude wrapper agent with 'model: 'sonnet', effort: "low"' whose prompt instructs it to write a self-contained codex prompt, run 'codex exec' via Bash, and return
 - Exception: for ordinary (non-Workflow) delegation, the `codex:codex-rescue` subagent IS the wrapper — spawn it directly with the task spec; no sonnet shim needed.
 
-- gpt-5.5 via `codex:codex-rescue` went 3/3 clean on clear-spec fixes when the prompt contained a **written line-level spec** (defect + exact fix + named tests + "commit nothing"). It also did convention-consistent spec/ledger updates unprompted. The line-by-line diff review remains mandatory and has caught nothing from Codex yet — keep it anyway.
+- gpt-5.5 via `codex:codex-rescue` went 3/3 clean on clear-spec fixes when the prompt contained a **written line-level spec** (defect + exact fix + named tests + "commit nothing"). It also did convention-consistent spec/ledger updates unprompted. The line-by-line diff review remains mandatory — it has since caught real issues (an out-of-spec test drive-by, placeholder finding IDs).
 - Dual review (opus-4.8/fable-5 + Codex) on small PRs surfaces 1–2 real Minors per PR that the implementer missed (symlink over-refusal, cleanup no-op under the cancelling ctx). Worth the cost even for S-effort fixes; skip only for pure-docs PRs (single reviewer).
 - Reviewer/worker subagents sometimes go idle without posting their result — a SendMessage nudge reliably shakes the report loose; don't respawn.
+- Nudges to workers must be **report-only** ("post your report; make no further edits") — a nudged worker may run another pass and silently overwrite your fixes in its worktree. Generic check: after any delegated-worktree interaction, re-diff immediately before committing; never commit on the assumption the tree still matches your last review.
 - Give each parallel Codex job its own git worktree; they collide otherwise.
 
