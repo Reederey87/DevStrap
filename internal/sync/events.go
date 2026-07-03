@@ -517,11 +517,14 @@ func insertUndecryptableEventConflict(ctx context.Context, st *state.Store, even
 }
 
 // insertEventConflictOnce records an event_verification_failure conflict,
-// dedupping on event ID rather than exact details: the same event
-// re-quarantined for a different reason (e.g. an approve-time replay that
-// fails the signature check where the original failure was pending trust)
-// must not open a second conflict row — the error string is volatile, the
-// event is not.
+// dedupping on (event ID, kind) rather than exact details: the same event
+// re-quarantined for the same class of reason (e.g. an approve-time replay
+// that fails the signature check where the original failure was pending
+// trust — both kind "verification") must not open a second conflict row (the
+// error string is volatile, the event is not). The kind IS part of the key so
+// the undecryptable replay can apply-then-resolve: a restored carrier that
+// fails signature verification records a FRESH "verification" row even while
+// its "undecryptable" row is still open (post-#44 review residual, gpt-5.5).
 func insertEventConflictOnce(ctx context.Context, st *state.Store, event state.Event, kind, cause string) error {
 	existing, err := st.OpenConflictsByType(ctx, ConflictEventVerification)
 	if err != nil {
@@ -529,7 +532,7 @@ func insertEventConflictOnce(ctx context.Context, st *state.Store, event state.E
 	}
 	for _, c := range existing {
 		var d eventVerificationConflictDetails
-		if json.Unmarshal([]byte(c.DetailsJSON), &d) == nil && d.EventID == event.ID {
+		if json.Unmarshal([]byte(c.DetailsJSON), &d) == nil && d.EventID == event.ID && d.Kind == kind {
 			return nil
 		}
 	}

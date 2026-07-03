@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/Reederey87/DevStrap/internal/logging"
 	"github.com/Reederey87/DevStrap/internal/state"
@@ -382,10 +383,15 @@ func (h EncryptedHub) TryDecrypt(ctx context.Context, event state.Event) (state.
 // loss this fix closes (post-#44 dual-review analysis). A hopeless carrier
 // just fails decryption again — cheap, bounded by open conflicts.
 //
-// The conflict is resolved BEFORE the apply: if the restored event then fails
-// signature verification, ApplyEvents records a FRESH verification conflict
-// (the open-conflict dedup would otherwise swallow it into the row being
-// resolved and lose the signal).
+// The conflict is resolved AFTER a successful apply, so a transient failure
+// (DB error) between decrypt and apply leaves the conflict open and the next
+// cycle retries — the resolve-then-apply window would have been a narrow
+// silent-loss path (post-#44 verify, gpt-5.5). A restored event that fails
+// signature verification still records a FRESH "verification" conflict while
+// the "undecryptable" row is open, because the conflict dedup keys on
+// (event ID, kind). A restored event whose HLC is still beyond the trusted
+// receive skew is left for a later cycle (applying it would land in the
+// transient skew quarantine with no carrier left to retry).
 func ReplayUndecryptableConflicts(ctx context.Context, st *state.Store, h EncryptedHub) (int, error) {
 	conflicts, err := st.OpenConflictsByType(ctx, ConflictEventVerification)
 	if err != nil {
@@ -407,10 +413,19 @@ func ReplayUndecryptableConflicts(ctx context.Context, st *state.Store, h Encryp
 		if decErr != nil {
 			continue // still undecryptable; leave the conflict open for the next cycle
 		}
-		if err := st.ResolveConflict(ctx, c.ID, `{"action":"auto","reason":"carrier decrypted after a later key grant (P6-SYNC-04 replay)"}`); err != nil {
-			return replayed, err
+		// Skew guard: a restored HLC still beyond the trusted skew would be
+		// TRANSIENTLY skew-quarantined by ApplyEvents — but with the
+		// undecryptable row resolved there would be no carrier left to
+		// retry. Defer the whole replay to a later cycle instead.
+		if physical := restored.HLC >> hlcLogicalBits; physical-time.Now().UnixMilli() > defaultReceiveMaxSkew.Milliseconds() {
+			logging.Logger(ctx).Warn("undecryptable replay: restored event's clock is still beyond trusted skew; deferring",
+				"event_id", details.EventID, "hlc", restored.HLC)
+			continue
 		}
 		if _, _, err := ApplyEventsWithStats(ctx, st, []state.Event{restored}); err != nil {
+			return replayed, err // conflict stays open; retried next cycle
+		}
+		if err := st.ResolveConflict(ctx, c.ID, `{"action":"auto","reason":"carrier decrypted after a later key grant (P6-SYNC-04 replay)"}`); err != nil {
 			return replayed, err
 		}
 		logging.Logger(ctx).Info("undecryptable replay: quarantined carrier recovered after key grant",
