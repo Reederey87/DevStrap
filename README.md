@@ -200,45 +200,42 @@ never sees the founder's content. The workspace id is a non‑secret prefix sele
 from event signatures); it is exchanged out‑of‑band alongside the founder's public keys, and
 authorization comes from the key exchange, not the id.
 
+Pairing is a **two‑paste ceremony** (founder code → joiner, joiner code → founder) plus one
+out‑of‑band fingerprint read in each direction — the `devstrap-pair1:` code is non‑secret, but
+the fingerprint (read aloud over a trusted channel) is what authorizes the keys.
+
 ```bash
-# Founder — found the workspace and read the pairing material
+# Founder — found the workspace and print the pairing code
 devstrap init ~/Code
 # set `hub: r2://<bucket>` in ~/.devstrap/config.yaml (+ DEVSTRAP_HUB_S3_ENDPOINT) — step 6 above
 devstrap hub login                          # store the R2/S3 secret (do this AFTER init)
 devstrap sync                               # founds the workspace, pushes the namespace map
-devstrap status                             # copy the `Workspace ID:` line
-devstrap devices recipient                  # founder age recipient (public)
-devstrap devices recipient --signing        # founder signing public key
-devstrap devices recipient --fingerprint    # founder fingerprint — compare it out-of-band at approval
-devstrap devices list                       # the `local` row is the founder device id
+devstrap devices pairing-code               # stdout: devstrap-pair1:...  stderr: founder fingerprint
 
-# Joiner — adopt the id FIRST, then pin the founder BEFORE the first sync
+# Joiner — adopt the id and pin the founder in one step, then log in to the hub
 # (fleets >2 devices: pin every existing device the same way — unpinned signers'
 #  events quarantine and replay once approved)
-devstrap init ~/Code --join --workspace-id <workspace-id>   # born-correct; keychain slot keys on the id
-devstrap devices enroll <founder-device-id> \
-  --name founder --os macos --arch arm64 \
-  --age-recipient <founder-age-recipient> \
-  --signing-public-key <founder-signing-public-key> \
-  --approve --fingerprint <founder-fingerprint>   # from `devices recipient --fingerprint` on the founder; on a TTY you may omit the flag and confirm interactively
+devstrap init ~/Code --join --code '<founder-code>' --fingerprint <founder-fingerprint>
 devstrap hub login                          # AFTER the id-adopting init (the credential slot keys on the workspace id)
 # joiner needs the same `hub: r2://<bucket>` config.yaml entry as the founder
+devstrap devices pairing-code               # the joiner's own code + fingerprint, sent back to the founder
 
-# Founder — approve the joiner (shares its id/recipient/signing key back), then both sync
-devstrap devices enroll <joiner-device-id> \
-  --name laptop --os macos --arch arm64 \
-  --age-recipient <joiner-age-recipient> \
-  --signing-public-key <joiner-signing-public-key> \
-  --approve --fingerprint <joiner-fingerprint>    # from `devices recipient --fingerprint` on the joiner
+# Founder — approve the joiner in one command, then both sync
+devstrap devices enroll --code '<joiner-code>' --approve --fingerprint <joiner-fingerprint>
 devstrap sync                               # pushes the key grants
 
 # Joiner — sync once more; the whole tree materializes
 devstrap sync
 ```
 
+The workspace key rotates automatically during `sync` once its active epoch is older than
+`keys.rotate_max_age` (default 90 days); `devstrap keys rotate` forces it, and `devstrap
+devices revoke` is the response to a *known* key compromise.
+
 > The workspace id **cannot** be changed on an already‑initialized store — remove the DevStrap
-> home (`~/.devstrap`) and re‑run `init --join --workspace-id <id>`. This is safe: no repo
-> content lives there. See [`spec/19_CLOUD_PROVISIONING_GUIDE.md`](spec/19_CLOUD_PROVISIONING_GUIDE.md) §E for the full runbook.
+> home (`~/.devstrap`) and re‑run `init --join --code`. This is safe: no repo content lives
+> there. See [`spec/19_CLOUD_PROVISIONING_GUIDE.md`](spec/19_CLOUD_PROVISIONING_GUIDE.md) §E for
+> the full runbook, including rotation cadence and wedge recovery.
 
 ## Command reference
 

@@ -27,6 +27,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — docs: pairing + rotation runbook close-out (P4-SEC-04 / P4-SEC-07 shipped)
+
+Changed:
+- `spec/19` §E rewritten to the final two-paste ceremony (E.1 founder pairing-code → E.2 `init --join --code --fingerprint` adopt+pin in one step → E.3 hub-login ordering trap → E.4 `enroll --code --approve --fingerprint` + sync both), plus new §E.5 rotation cadence (90d auto-rotate, `keys rotate`, forward-exposure-only, revoke-for-compromise, doctor rows) and §E.6 wedge recovery (grace-bounded quarantine symptom → re-approve from a complete device → automatic replay; `--allow-epoch-gap` semantics incl. the hub-gc refusal).
+- README two-device quickstart rewritten to the 2-paste ceremony + one rotation-cadence line, deep-linking §E.
+- Staleness sweep: spec/09 (3×) and spec/15 (1×) no longer claim fingerprint confirmation / pairing UX "remain future work" — parts 1+2 shipped; remaining work is authenticated snapshot exchange + remote trust propagation.
+- Ledger: `P4-SEC-04` (PRs #54/#57) and `P4-SEC-07 (rotation)` (PR #56) rows added to *Recently shipped*; the open Pass-4 rows now point there. Pass-6 header unchanged (**26 open of 43** — Pass-4 findings never counted toward the 43); open-table rows re-counted: 26.
+
+Validated:
+- Docs only. `go run ./cmd/spec-drift --base origin/main --head HEAD`; `TestEveryCommandIsDocumented` + `TestMigrationsDocumented`.
+
+Follow-ups:
+- None for this wave. Deferred (documented-not-built): old-epoch containment, keychain-slot growth, authenticated snapshot exchange, remote trust propagation.
+
 ## 2026-07-03 — feat(keys): periodic WCK rotation — manual command + age-triggered auto-rotate (P4-SEC-07 remainder)
 
 Changed:
