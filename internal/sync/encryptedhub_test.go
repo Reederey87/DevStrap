@@ -780,8 +780,43 @@ func TestEncryptedHubMissingEpochWithinGraceTruncates(t *testing.T) {
 	if hub.Stats.Truncated != 1 || hub.Stats.Undecryptable != 0 {
 		t.Fatalf("Stats = %+v, want Truncated=1 Undecryptable=0", *hub.Stats)
 	}
-	if len(rec.sightings) != 1 || rec.sightings[0][0].(int64) != 5 {
-		t.Fatalf("sightings = %+v, want one epoch-5 sighting", rec.sightings)
+	// The wait must be recorded EPOCH-LEVEL: with no key at the epoch the
+	// envelope kid is an unauthenticated hint, and persisting it would leave a
+	// phantom kid-specific row the real grant never clears (post-#55 review).
+	if len(rec.sightings) != 1 || rec.sightings[0][0].(int64) != 5 || rec.sightings[0][1].(string) != "" {
+		t.Fatalf("sightings = %+v, want one epoch-5 sighting with kid \"\"", rec.sightings)
+	}
+}
+
+// TestEncryptedHubMalformedKidQuarantinesImmediately: a kid that is not shaped
+// like hex(sha256) can never be granted, so at a held epoch it skips the grace
+// wait entirely — immediate quarantine, and NO wait row for a hostile hub to
+// pin a phantom "awaiting key grants" warning with.
+func TestEncryptedHubMalformedKidQuarantinesImmediately(t *testing.T) {
+	ctx := context.Background()
+	kr := newFakeKeyring(t, 1)
+	wck1, _ := kr.WCK(1)
+	prefix, _ := EncryptEvent(state.Event{ID: "mine", DeviceID: "dev_a", HLC: 1, Type: EventProjectAdded, PayloadJSON: `{"path":"work/mine"}`, ContentHash: state.ContentHash(`{"path":"work/mine"}`)}, wck1, 1)
+	otherWCK, _ := NewWCK()
+	garbage, _ := EncryptEvent(state.Event{ID: "garbage", DeviceID: "dev_b", HLC: 2, Type: EventProjectAdded, PayloadJSON: `{}`, ContentHash: state.ContentHash(`{}`)}, otherWCK, 1)
+	garbage = rewriteEnvelopeKID(t, garbage, "ab") // hostile short label
+	rec := &grantWaitRecorder{firstSeen: time.Now()}
+	hub := EncryptedHub{
+		Hub: &recordingHub{events: []state.Event{prefix, garbage}}, Keyring: kr,
+		Stats: &PullStats{}, MissingKeyWait: rec.note, GraceWindow: time.Hour,
+	}
+	got, err := hub.Pull(ctx, 0)
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	if len(got) != 2 || got[1].ID != "garbage" || got[1].Type != EventEncryptedV2 {
+		t.Fatalf("Pull returned %+v, want the malformed-kid event forwarded as a carrier immediately", got)
+	}
+	if hub.Stats.Undecryptable != 1 || hub.Stats.Truncated != 0 {
+		t.Fatalf("Stats = %+v, want Undecryptable=1 Truncated=0", *hub.Stats)
+	}
+	if len(rec.sightings) != 0 {
+		t.Fatalf("sightings = %+v, want none (never-grantable kid must not open a wait)", rec.sightings)
 	}
 }
 

@@ -284,7 +284,14 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 				// then advance and later held-epoch events still apply, and a
 				// grant that eventually arrives recovers the carrier via
 				// ReplayUndecryptableConflicts.
-				if h.missingKeyGraceExpired(ctx, env.Epoch, env.KID) {
+				//
+				// The wait is recorded EPOCH-LEVEL (kid ""), never under the
+				// envelope's kid: with no key at the epoch the kid field is a
+				// useless unauthenticated hub hint, and persisting it would
+				// let a relabeled event leave a phantom kid-specific wait row
+				// that the real grant's RecordKeyEpoch never clears (post-#55
+				// Codex review, P2).
+				if h.missingKeyGraceExpired(ctx, env.Epoch, "") {
 					logging.Logger(ctx).Warn("encrypted hub pull: key grant grace expired; forwarding never-granted event for quarantine",
 						"epoch", env.Epoch, "kid", env.KID, "event_id", event.ID)
 					if h.Stats != nil {
@@ -325,6 +332,22 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 					// delay. The wait clock is keyed per EPOCH (the store MINs
 					// first-seen across kids), so relabeling the
 					// unauthenticated kid hint on every pull cannot restart it.
+					//
+					// A kid that is not even SHAPED like one (kids are
+					// hex(sha256(wck)) by construction) can never be granted,
+					// so there is nothing to wait for: quarantine immediately
+					// without persisting a wait row a hostile hub could use to
+					// pin a phantom "awaiting key grants" warning (post-#55
+					// Codex review hardening).
+					if !isCanonicalKID(env.KID) {
+						logging.Logger(ctx).Warn("encrypted hub pull: malformed kid at a held epoch can never be granted; forwarding event for quarantine",
+							"epoch", env.Epoch, "kid", env.KID, "event_id", event.ID)
+						if h.Stats != nil {
+							h.Stats.Undecryptable++
+						}
+						out = append(out, event)
+						continue
+					}
 					if h.missingKeyGraceExpired(ctx, env.Epoch, env.KID) {
 						logging.Logger(ctx).Warn("encrypted hub pull: key grant grace expired; forwarding never-granted event for quarantine",
 							"epoch", env.Epoch, "kid", env.KID, "event_id", event.ID)
@@ -375,6 +398,22 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 		}
 	}
 	return out, nil
+}
+
+// isCanonicalKID reports whether s has the only shape a real kid can have:
+// hex(sha256(wck)) — 64 lowercase hex characters (KIDForWCK). Envelope kid
+// fields are unauthenticated hub-writable hints, so anything else is provably
+// never-grantable garbage, not a key to wait for.
+func isCanonicalKID(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // missingKeyGraceExpired reports whether the grace window for a missing

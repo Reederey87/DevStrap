@@ -138,6 +138,30 @@ func TestApproveRefusesOpenKeyGrantWait(t *testing.T) {
 	}
 }
 
+// A wait row whose kid is shorter than the display prefix must not panic the
+// guard's refusal formatting (the kid rode an unauthenticated hub envelope, so
+// its length is hostile input — post-#55 Codex review).
+func TestApproveGuardShortKidLabelDoesNotPanic(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	home, root := initGuardHome(t)
+	enrollPendingDevice(t, home, root, "dev_short_kid")
+	withGuardStore(t, home, func(ctx context.Context, st *state.Store) {
+		if err := st.RecordKeyEpoch(ctx, 1, "kid1", "self"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.NoteMissingKeyGrant(ctx, 1, "ab"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	_, stderr, err := executeForTest("--home", home, "--root", root, "devices", "approve", "dev_short_kid")
+	if err == nil {
+		t.Fatal("approve with an open short-kid wait succeeded, want refusal")
+	}
+	if !strings.Contains(stderr, "kid ab") {
+		t.Fatalf("stderr = %q, want the short kid named without panicking", stderr)
+	}
+}
+
 func TestKeylessApproveSkipsGuard(t *testing.T) {
 	t.Setenv(platform.NoKeychainEnv, "1")
 	home, root := initGuardHome(t)

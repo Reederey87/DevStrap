@@ -265,7 +265,9 @@ func checkEpochContiguity(ctx context.Context, store *state.Store) error {
 	for _, w := range waits {
 		label := strconv.FormatInt(w.Epoch, 10)
 		if w.KID != "" {
-			label += " (kid " + w.KID[:8] + "…)"
+			// %.8s: the kid rode an unauthenticated hub envelope, so its
+			// length is hostile input — never slice it directly.
+			label += fmt.Sprintf(" (kid %.8s…)", w.KID)
 		}
 		waiting = append(waiting, label)
 	}
