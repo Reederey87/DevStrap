@@ -133,6 +133,10 @@ func TestStatusBeforeInitIsFriendly(t *testing.T) {
 }
 
 func TestInitStatusAndDBCommands(t *testing.T) {
+	// P6-XP-04: pin key custody deterministically on every host — CI runners have
+	// no reachable/interactive keychain, so control the env explicitly rather than
+	// inheriting it. DEVSTRAP_NO_KEYCHAIN=1 makes init record `file` custody.
+	t.Setenv(platform.NoKeychainEnv, "1")
 	home := filepath.Join(t.TempDir(), ".devstrap")
 	root := filepath.Join(t.TempDir(), "Code")
 	stdout, stderr, err := executeForTest("--home", home, "--root", root, "init", "--workspace-name", "personal")
@@ -162,7 +166,7 @@ func TestInitStatusAndDBCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stdout = %q stderr = %q err = %v", stdout, stderr, err)
 	}
-	if !strings.Contains(stdout, "schema version: 18") || !strings.Contains(stdout, "sqlite quick_check: ok") || !strings.Contains(stdout, "sqlite foreign_key_check: ok") {
+	if !strings.Contains(stdout, "schema version: 19") || !strings.Contains(stdout, "sqlite quick_check: ok") || !strings.Contains(stdout, "sqlite foreign_key_check: ok") {
 		t.Fatalf("stdout = %q, want db status", stdout)
 	}
 	syncHubPath := filepath.Join(t.TempDir(), "hub.json")
@@ -245,6 +249,12 @@ func TestInitStatusAndDBCommands(t *testing.T) {
 	// device-key and DB-integrity checks present and zero errors.
 	if !strings.Contains(stdout, "foreign_key_check") || !strings.Contains(stdout, "device key") || !strings.Contains(stdout, "device signing key") {
 		t.Fatalf("doctor stdout = %q, want device key + db checks present", stdout)
+	}
+	// P6-XP-04: doctor reports the recorded key-custody backend. With
+	// DEVSTRAP_NO_KEYCHAIN=1 (set above) init records file custody, deterministic
+	// on every host.
+	if !strings.Contains(stdout, "key custody") || !strings.Contains(stdout, "file") {
+		t.Fatalf("doctor stdout = %q, want a key custody row reporting file", stdout)
 	}
 	if !strings.Contains(stdout, "0 error(s)") {
 		t.Fatalf("doctor stdout = %q, want 0 errors on a healthy workspace", stdout)

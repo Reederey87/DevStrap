@@ -444,11 +444,47 @@ func checkDeviceKeys(ctx context.Context, paths config.Paths, store *state.Store
 	if err != nil {
 		return []checkResult{{Name: "device key", Status: checkWarn, Detail: "no current device"}}
 	}
-	keyStore := devicekeys.NewHybridStore(paths.KeyDir(), platform.Detect().Keychain)
+	recorded, err := store.KeyCustody(ctx)
+	if err != nil {
+		return []checkResult{{Name: "key custody", Status: checkError, Detail: err.Error()}}
+	}
+	keyStore := devicekeys.NewHybridStore(paths.KeyDir(), keychainBackend()).
+		WithCustody(state.EffectiveKeyCustody(recorded))
 	var out []checkResult
+	out = append(out, keyCustodyStatus(ctx, keyStore, recorded))
 	out = append(out, gradedKeyStatus("device key", deviceKeyStatus(ctx, keyStore, device.ID, device.PublicKey)))
 	out = append(out, gradedKeyStatus("device signing key", deviceSigningKeyStatus(ctx, keyStore, device.ID, device.SigningPublicKey)))
 	return out
+}
+
+// keyCustodyStatus reports the recorded key-custody backend and warns when the
+// recorded backend is currently unreachable or is being overridden this run
+// (P6-XP-04).
+func keyCustodyStatus(ctx context.Context, keyStore devicekeys.HybridStore, recorded devicekeys.Custody) checkResult {
+	if recorded == devicekeys.CustodyUnset {
+		return checkResult{
+			Name:   "key custody",
+			Status: checkWarn,
+			Detail: "not recorded (pre-P6-XP-04 store)",
+			Remedy: "run `devstrap init` to record the custody backend",
+		}
+	}
+	if state.EffectiveKeyCustody(recorded) != recorded {
+		return checkResult{
+			Name:   "key custody",
+			Status: checkWarn,
+			Detail: fmt.Sprintf("recorded %s; %s is forcing file custody this run", recorded, platform.NoKeychainEnv),
+		}
+	}
+	if recorded == devicekeys.CustodyKeychain && keyStore.Probe(ctx) != devicekeys.CustodyKeychain {
+		return checkResult{
+			Name:   "key custody",
+			Status: checkWarn,
+			Detail: "keychain (currently unreachable)",
+			Remedy: fmt.Sprintf("run from your desktop session, or set %s=1 and migrate the key files", platform.NoKeychainEnv),
+		}
+	}
+	return checkResult{Name: "key custody", Status: checkOK, Detail: string(recorded)}
 }
 
 func gradedKeyStatus(name, status string) checkResult {

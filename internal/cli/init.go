@@ -325,7 +325,13 @@ func confirmFounderFromPairingCode(cmd *cobra.Command, code pairing.Code, expect
 }
 
 func ensureLocalDeviceIdentity(ctx context.Context, paths config.Paths, store *state.Store, device state.Device) error {
-	keyStore := devicekeys.NewHybridStore(paths.KeyDir(), platform.Detect().Keychain)
+	if err := recordKeyCustodyAtInit(ctx, paths, store, device); err != nil {
+		return err
+	}
+	keyStore, err := resolveKeyStore(ctx, paths, store)
+	if err != nil {
+		return err
+	}
 	if device.PublicKey != "" {
 		identity, err := keyStore.Read(ctx, device.ID)
 		if err != nil {
@@ -335,7 +341,7 @@ func ensureLocalDeviceIdentity(ctx context.Context, paths config.Paths, store *s
 			return fmt.Errorf("local device identity does not match stored public key")
 		}
 	} else {
-		identity, _, err := keyStore.Ensure(ctx, device.ID)
+		identity, _, err := keyStore.Ensure(ctx, device.ID, device.PublicKey)
 		if err != nil {
 			return fmt.Errorf("ensure local device identity: %w", err)
 		}
@@ -343,7 +349,7 @@ func ensureLocalDeviceIdentity(ctx context.Context, paths config.Paths, store *s
 			return err
 		}
 	}
-	signingIdentity, _, err := keyStore.EnsureSigning(ctx, device.ID)
+	signingIdentity, _, err := keyStore.EnsureSigning(ctx, device.ID, device.SigningPublicKey)
 	if err != nil {
 		return fmt.Errorf("ensure local device signing identity: %w", err)
 	}
@@ -356,6 +362,73 @@ func ensureLocalDeviceIdentity(ctx context.Context, paths config.Paths, store *s
 		}
 	}
 	return nil
+}
+
+// keychainBackend returns the OS keychain adapter used for device/workspace key
+// custody. It is a package-level seam (P6-XP-04) so tests can inject a fake
+// backend and stay hermetic — the host keychain differs across CI runners
+// (dead session bus on Linux, interaction-not-allowed on macOS), so tests must
+// never depend on it. Production always returns the detected platform keychain.
+var keychainBackend = func() devicekeys.SecretBackend { return platform.Detect().Keychain }
+
+// resolveKeyStore builds the device key custody store stamped with this
+// machine's recorded custody backend (P6-XP-04). It is side-effect-free: it
+// reads the recorded decision and applies the DEVSTRAP_NO_KEYCHAIN override, but
+// never probes or records — recording is done exactly once, at init, by
+// recordKeyCustodyAtInit. An unrecorded (pre-P6-XP-04) store resolves to
+// CustodyUnset, i.e. legacy hybrid behavior, which the mint guard still
+// protects. Every path that mints, reads, or reports device/workspace keys goes
+// through this so custody is honored consistently process-wide.
+func resolveKeyStore(ctx context.Context, paths config.Paths, store *state.Store) (devicekeys.HybridStore, error) {
+	base := devicekeys.NewHybridStore(paths.KeyDir(), keychainBackend())
+	custody, err := store.KeyCustody(ctx)
+	if err != nil {
+		return devicekeys.HybridStore{}, err
+	}
+	return base.WithCustody(state.EffectiveKeyCustody(custody)), nil
+}
+
+// recordKeyCustodyAtInit records the key-custody decision exactly once, at init,
+// and only from safe evidence (P6-XP-04). A recorded decision is never
+// rewritten. When none is recorded yet, it records:
+//
+//   - file, if DEVSTRAP_NO_KEYCHAIN=1 (explicit operator choice); else
+//   - keychain, if the probe positively finds the keychain reachable (safe
+//     regardless of whether secrets already exist); else
+//   - file, ONLY for a genuine first init — a brand-new device with no
+//     already-published keys, so there are no keychain secrets to strand.
+//
+// Crucially, it does NOT record file from a merely-unreachable probe on an
+// already-initialized store (a pre-00016 store whose secrets live only in the
+// keychain, first run headless after upgrade): that would permanently route
+// later desktop runs away from the keychain where the real secrets are. Such a
+// store stays CustodyUnset (legacy hybrid + the mint guard) until the keychain
+// is seen reachable or the operator sets DEVSTRAP_NO_KEYCHAIN=1.
+func recordKeyCustodyAtInit(ctx context.Context, paths config.Paths, store *state.Store, device state.Device) error {
+	recorded, err := store.KeyCustody(ctx)
+	if err != nil {
+		return err
+	}
+	if recorded != devicekeys.CustodyUnset {
+		return nil // already decided; honored, never rewritten
+	}
+	if os.Getenv(platform.NoKeychainEnv) == "1" {
+		return store.RecordKeyCustody(ctx, devicekeys.CustodyFile)
+	}
+	base := devicekeys.NewHybridStore(paths.KeyDir(), keychainBackend())
+	switch base.Probe(ctx) {
+	case devicekeys.CustodyKeychain:
+		return store.RecordKeyCustody(ctx, devicekeys.CustodyKeychain)
+	case devicekeys.CustodyFile:
+		// Keychain unreachable: only safe to record file for a genuine first
+		// init (no already-published keys to strand).
+		if device.PublicKey == "" && device.SigningPublicKey == "" {
+			return store.RecordKeyCustody(ctx, devicekeys.CustodyFile)
+		}
+		return nil
+	default:
+		return nil
+	}
 }
 
 func cleanAbsPath(path string) (string, error) {

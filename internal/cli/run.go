@@ -12,10 +12,8 @@ import (
 	"strings"
 
 	"github.com/Reederey87/DevStrap/internal/childenv"
-	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/envbundle"
 	"github.com/Reederey87/DevStrap/internal/envfile"
-	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/state"
 	"github.com/spf13/cobra"
 )
@@ -47,7 +45,7 @@ func newRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			env, runArgs, cleanup, err := runtimeEnvCommand(cmd.Context(), opts, device.ID, profile, bindings, args[1:])
+			env, runArgs, cleanup, err := runtimeEnvCommand(cmd.Context(), opts, store, device.ID, profile, bindings, args[1:])
 			if cleanup != nil {
 				defer cleanup()
 			}
@@ -62,10 +60,10 @@ func newRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 	}
 }
 
-func runtimeEnvCommand(ctx context.Context, opts *options, deviceID string, profile state.EnvProfile, bindings []state.SecretBinding, command []string) ([]string, []string, func(), error) {
+func runtimeEnvCommand(ctx context.Context, opts *options, store *state.Store, deviceID string, profile state.EnvProfile, bindings []state.SecretBinding, command []string) ([]string, []string, func(), error) {
 	switch profile.Provider {
 	case "devstrap_encrypted":
-		set, err := decryptEnvProfile(ctx, opts, deviceID, bindings)
+		set, err := decryptEnvProfile(ctx, opts, store, deviceID, bindings)
 		if err != nil {
 			return nil, nil, nil, err
 		}
@@ -88,7 +86,7 @@ func runtimeEnvCommand(ctx context.Context, opts *options, deviceID string, prof
 	}
 }
 
-func decryptEnvProfile(ctx context.Context, opts *options, deviceID string, bindings []state.SecretBinding) (map[string]string, error) {
+func decryptEnvProfile(ctx context.Context, opts *options, store *state.Store, deviceID string, bindings []state.SecretBinding) (map[string]string, error) {
 	ref, err := sharedEncryptedRef(bindings)
 	if err != nil {
 		return nil, err
@@ -97,7 +95,13 @@ func decryptEnvProfile(ctx context.Context, opts *options, deviceID string, bind
 	if err != nil {
 		return nil, err
 	}
-	identity, err := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain).Read(ctx, deviceID)
+	// Honor the recorded custody backend (P6-XP-04) so a stale keychain entry
+	// cannot shadow the authoritative file key on a file-custody machine.
+	keyStore, err := resolveKeyStore(ctx, opts.paths(), store)
+	if err != nil {
+		return nil, err
+	}
+	identity, err := keyStore.Read(ctx, deviceID)
 	if err != nil {
 		return nil, fmt.Errorf("read local device identity: %w", err)
 	}

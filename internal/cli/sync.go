@@ -302,7 +302,7 @@ func maybeRotateWorkspaceKey(ctx context.Context, stdout io.Writer, opts *option
 	if epoch == 0 || time.Since(created) < maxAge {
 		return false, nil
 	}
-	kr := buildKeyring(opts, store)
+	kr := buildKeyring(ctx, opts, store)
 	newEpoch, grants, rerr := kr.Rotate(ctx)
 	if rerr != nil {
 		// FATAL for the cycle (post-#56 Codex review, P1): Rotate wraps every
@@ -338,7 +338,7 @@ func maybeRotateWorkspaceKey(ctx context.Context, stdout io.Writer, opts *option
 // Returns the number of events actually pushed and whether the push was
 // deferred (mutually exclusive: deferred implies pushed == 0).
 func pushLocalEventsGated(ctx context.Context, stdout io.Writer, opts *options, store *state.Store, hub dssync.Hub, hubID string, localEvents []state.Event, rawSeen int) (pushed int, deferred bool, err error) {
-	kr := buildKeyring(opts, store)
+	kr := buildKeyring(ctx, opts, store)
 	epoch, err := kr.CurrentEpoch(ctx)
 	if err != nil {
 		return 0, false, err

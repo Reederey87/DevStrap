@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/zalando/go-keyring"
@@ -203,11 +204,54 @@ func (k SystemKeychain) Delete(_ context.Context, service, account string) error
 }
 
 func mapKeyringError(err error, name string) error {
-	if errors.Is(err, keyring.ErrUnsupportedPlatform) {
+	switch {
+	case errors.Is(err, keyring.ErrUnsupportedPlatform):
 		return fmt.Errorf("%w: %s keychain is not available: %w", ErrUnsupported, name, err)
-	}
-	if errors.Is(err, keyring.ErrNotFound) {
+	case errors.Is(err, keyring.ErrNotFound):
 		return fmt.Errorf("%w: %s/%w", ErrSecretNotFound, name, err)
+	case secretServiceUnreachable(err):
+		// The Linux Secret Service is reached over the D-Bus session bus, which
+		// go-keyring surfaces as an untyped godbus error (not ErrUnsupportedPlatform)
+		// when the session bus is missing — the common headless/CI/systemd-unit
+		// case. Classify it as backend-unavailable here, at the layer closest to
+		// the library, so callers can rely on errors.Is(err, ErrUnsupported)
+		// instead of re-deriving it from the error string. This is what lets
+		// device-key custody fail closed (never mint a divergent key) rather than
+		// silently downgrade to the file store (P6-XP-04).
+		return fmt.Errorf("%w: %s Secret Service unreachable: %w", ErrUnsupported, name, err)
+	default:
+		return fmt.Errorf("%s keychain: %w", name, err)
 	}
-	return fmt.Errorf("%s keychain: %w", name, err)
+}
+
+// secretServiceUnreachable reports whether a go-keyring error means the Linux
+// Secret Service / D-Bus session bus could not be reached (as opposed to a
+// genuine store/lookup failure against a live service). go-keyring returns
+// these as untyped godbus errors, so string inspection is unavoidable — but it
+// belongs here, at the platform seam, not in higher-level custody code
+// (P6-XP-04).
+func secretServiceUnreachable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	// Deliberately NARROW (CodeRabbit, PR #62): only the missing-session-bus /
+	// missing-service signatures qualify. A bare "dbus" or the interface name
+	// alone also appears in errors from a LIVE Secret Service (timeouts,
+	// dismissed prompts), and classifying those as unavailable would let a
+	// transient failure record file custody at first init or divert
+	// custody-unset reads to the file store.
+	for _, needle := range []string{
+		"session bus",         // godbus: couldn't determine address of session bus
+		"connection refused",  // dialing the session-bus socket
+		"was not provided",    // dbus: org.freedesktop.secrets was not provided
+		"not provided by any", // "...not provided by any .service files"
+		"no such interface",   // service object missing the Secret Service interface
+		"dial unix",           // dead session-bus socket: "dial unix <path>: connect: ..."
+	} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
 }

@@ -69,7 +69,7 @@ func setupKeyringWithDBPath(t *testing.T, name string) (*state.Store, *Keyring, 
 		t.Fatal(err)
 	}
 	keyStore := devicekeys.NewHybridStore(t.TempDir(), &memSecret{})
-	identity, _, err := keyStore.Ensure(ctx, device.ID)
+	identity, _, err := keyStore.Ensure(ctx, device.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}

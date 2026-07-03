@@ -123,7 +123,7 @@ func TestResolveHubS3CredentialsOpRef(t *testing.T) {
 	opts.v.Set("hub_s3_access_key_id", "AKIALITERAL")
 	opts.v.Set("hub_s3_secret_access_key", "op://vault/item/secret-key")
 
-	creds, err := resolveHubS3Credentials(context.Background(), opts, "ws_test")
+	creds, err := resolveHubS3Credentials(context.Background(), opts, nil, "ws_test")
 	if err != nil {
 		t.Fatalf("resolveHubS3Credentials: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestResolveHubS3CredentialsOpMissing(t *testing.T) {
 	opts := newHubCredOptions(t)
 	opts.v.Set("hub_s3_access_key_id", "AKIALITERAL")
 	opts.v.Set("hub_s3_secret_access_key", "op://vault/item/secret-key")
-	_, err := resolveHubS3Credentials(context.Background(), opts, "ws_test")
+	_, err := resolveHubS3Credentials(context.Background(), opts, nil, "ws_test")
 	if err == nil || !strings.Contains(err.Error(), "1Password CLI") {
 		t.Fatalf("err = %v, want 1Password CLI hint", err)
 	}
@@ -180,7 +180,7 @@ func TestResolveHubS3CredentialsStoredPair(t *testing.T) {
 	if location != "file" {
 		t.Fatalf("location = %q, want file (DEVSTRAP_NO_KEYCHAIN)", location)
 	}
-	creds, err := resolveHubS3Credentials(context.Background(), opts, "ws_test")
+	creds, err := resolveHubS3Credentials(context.Background(), opts, nil, "ws_test")
 	if err != nil {
 		t.Fatalf("resolveHubS3Credentials: %v", err)
 	}
@@ -204,7 +204,7 @@ func TestResolveHubS3CredentialsEnvOverridesStored(t *testing.T) {
 	}
 	opts.v.Set("hub_s3_access_key_id", "AKIAENV")
 	opts.v.Set("hub_s3_secret_access_key", "env-secret")
-	creds, err := resolveHubS3Credentials(context.Background(), opts, "ws_test")
+	creds, err := resolveHubS3Credentials(context.Background(), opts, nil, "ws_test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestResolveHubS3CredentialsNothingConfigured(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
 	opts := newHubCredOptions(t)
-	_, err := resolveHubS3Credentials(context.Background(), opts, "ws_test")
+	_, err := resolveHubS3Credentials(context.Background(), opts, nil, "ws_test")
 	if err == nil || !strings.Contains(err.Error(), "devstrap hub login") || !strings.Contains(err.Error(), "DEVSTRAP_HUB_S3_ACCESS_KEY_ID") {
 		t.Fatalf("err = %v, want both remedies named", err)
 	}
@@ -258,12 +258,12 @@ func TestHubLoginLogoutRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer closeStore(st)
 	ws, err := st.WorkspaceID(context.Background())
-	closeStore(st)
 	if err != nil {
 		t.Fatal(err)
 	}
-	creds, err := resolveHubS3Credentials(context.Background(), opts, ws)
+	creds, err := resolveHubS3Credentials(context.Background(), opts, st, ws)
 	if err != nil {
 		t.Fatalf("resolve after login: %v", err)
 	}
@@ -277,7 +277,7 @@ func TestHubLoginLogoutRoundTrip(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("hub logout: %v (%s)", err, stderr.String())
 	}
-	if _, err := resolveHubS3Credentials(context.Background(), opts, ws); err == nil {
+	if _, err := resolveHubS3Credentials(context.Background(), opts, st, ws); err == nil {
 		t.Fatal("resolve after logout: want error, got credentials")
 	}
 }
@@ -319,7 +319,7 @@ func TestResolveHubS3CredentialsOpSecretWithStoredKeyID(t *testing.T) {
 	}
 	opts.v.Set("hub_s3_secret_access_key", "op://vault/item/rotated")
 
-	creds, err := resolveHubS3Credentials(context.Background(), opts, "ws_test")
+	creds, err := resolveHubS3Credentials(context.Background(), opts, nil, "ws_test")
 	if err != nil {
 		t.Fatalf("resolveHubS3Credentials: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestResolveHubS3CredentialsOpSecretMissingKeyID(t *testing.T) {
 	opts := newHubCredOptions(t)
 	opts.v.Set("hub_s3_secret_access_key", "op://vault/item/secret-key")
 
-	_, err := resolveHubS3Credentials(context.Background(), opts, "ws_test")
+	_, err := resolveHubS3Credentials(context.Background(), opts, nil, "ws_test")
 	if err == nil || !strings.Contains(err.Error(), "DEVSTRAP_HUB_S3_ACCESS_KEY_ID") || !strings.Contains(err.Error(), "devstrap hub login") {
 		t.Fatalf("err = %v, want the two-remedy no-credentials error", err)
 	}

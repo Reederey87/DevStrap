@@ -13,11 +13,9 @@ import (
 	"sync"
 
 	"github.com/Reederey87/DevStrap/internal/childenv"
-	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/draftbundle"
 	"github.com/Reederey87/DevStrap/internal/logging"
 	"github.com/Reederey87/DevStrap/internal/pathkey"
-	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/state"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
@@ -305,7 +303,11 @@ func extractDraftBundle(ctx context.Context, store *state.Store, opts *options, 
 	if err != nil {
 		return err
 	}
-	identity, err := devicekeys.NewHybridStore(opts.paths().KeyDir(), platform.Detect().Keychain).Read(ctx, device.ID)
+	keyStore, err := resolveKeyStore(ctx, opts.paths(), store)
+	if err != nil {
+		return err
+	}
+	identity, err := keyStore.Read(ctx, device.ID)
 	if err != nil {
 		return fmt.Errorf("read local device identity: %w", err)
 	}

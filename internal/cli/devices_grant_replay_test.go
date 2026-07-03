@@ -134,7 +134,7 @@ func TestReplayIngestsQuarantinedGrant(t *testing.T) {
 	if epoch, err := store.CurrentKeyEpoch(ctx); err != nil || epoch != 1 {
 		t.Fatalf("epoch after replay = %d/%v (stderr %q), want 1/nil", epoch, err, replayErr.String())
 	}
-	kr := buildKeyring(opts, store)
+	kr := buildKeyring(ctx, opts, store)
 	if err := kr.Prime(ctx); err != nil {
 		t.Fatalf("Prime after replay: %v", err)
 	}
