@@ -27,6 +27,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — Pairing wave (docs): founder-minted / joiner-adopted workspace id + pairing runbook
+
+Changed (docs only — no code, no migration this cycle):
+- `spec/19_CLOUD_PROVISIONING_GUIDE.md`: §A.2 corrected — the `workspace_id` is minted on the **founder** and adopted by a joiner via `init --join --workspace-id <id>`, not "minted during init" on every device. Added a new **§E "Pair a second device"** runbook: founder founds + `hub login` + `sync` + `status` (copy the id) + shares the id/device-id/age-recipient/signing-key out-of-band; joiner runs the id-adopting `init --join --workspace-id <id>` **first**, pins the founder (`devices enroll … --approve`) **before** first sync, then `hub login` (keychain-ordering trap called out: the `hub-s3.<workspace_id>` slot keys on the id); founder enrolls+approves the joiner and syncs; joiner syncs and the tree materializes. Includes the "Not supported: changing the workspace id on an initialized store" note with the remove-`~/.devstrap`-and-reinit remedy.
+- `spec/07_NAMESPACE_AND_SYNC_MODEL.md`: the identity prose (~:213) and the WCK Init-lifecycle bullet now say the workspace id is founder-minted / joiner-adopted (born-correct, mismatch refused), pointing at `spec/19` §E.
+- `spec/15_SECURITY_THREAT_MODEL.md`: new threat subsection — `workspace_id` is a prefix selector excluded from signatures by design (re-stamped empty on apply), exchanged out-of-band alongside the key exchange; a wrong id yields an empty prefix and a hostile id yields only quarantined ciphertext, never accepted content. Residual = the `P4-SEC-04` pre-enrollment window.
+- `README.md`: added a concise **"Pair a second device"** quickstart mirroring the §E runbook.
+- `docs/audits/README.md` (ledger): added a `P4-SEC-07 (pairing)` row to *Recently shipped*; trimmed the open `P4-SEC-07` row to "periodic (non-revoke) rotation (see `P6-SEC-03`)" (kept open); narrowed the open `P4-SEC-04` row to the founder-side-automation + fingerprint-UX residual (kept open, joiner half closed). The pairing-wave rows are Pass-4 findings and do not count toward Pass 6's 43, so the Pass-6 header stays **27 open of 43** (open-table rows re-counted: 27); the header-count note now says so explicitly.
+
+Validated:
+- Docs-only; no code touched. `spec/18` (this file) is touched so the spec-drift gate is satisfied on commit. `GOCACHE=/tmp/devstrap-gocache go test ./internal/cli/ -run 'TestEveryCommandIsDocumented|TestMigrationsDocumented'` stays green — no command or migration changed; this wave's flags land in PRs A–C, whose own PRs update `spec/13`/`spec/12`.
+
+Follow-ups:
+- Founder-side automation of the pairing exchange + an in-band fingerprint-confirmation UX (`P4-SEC-04` residual); periodic (non-revoke) WCK rotation (`P4-SEC-07` residual, `P6-SEC-03`).
+
 ## 2026-07-03 — doctor: workspace-id mismatch detection + hub prefix-isolation regression test
 
 Changed:
