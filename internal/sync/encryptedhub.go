@@ -290,6 +290,23 @@ func (h EncryptedHub) Pull(ctx context.Context, after Cursor) ([]state.Event, er
 				// upgrade). The grace clock is NoteSkipped's stable
 				// first-seen; a nil seam defers forever (legacy behavior).
 				version, _ := EnvelopeVersion(event)
+				if version <= envelopeVersion {
+					// A claimed version at or below OURS is not "a newer
+					// client" — it is malformed hub data wearing the
+					// unknown-version error ({} decodes to version 0; v1
+					// inside an enc.v2-typed event is a forgery). No upgrade
+					// will ever make it readable, so it must not buy the
+					// grace-window defer a hostile hub could use to hold this
+					// device's cursor with junk (post-#63 Codex review, P2):
+					// forward it for the undecryptable quarantine now.
+					logging.Logger(ctx).Warn("encrypted hub pull: forwarding undecodable event for quarantine (implausible envelope version)",
+						"event_id", event.ID, "envelope_version", version)
+					if h.Stats != nil {
+						h.Stats.Undecryptable++
+					}
+					out = append(out, event)
+					continue
+				}
 				if h.skipGraceExpired(ctx, event, SkipReasonUnknownVersion) {
 					logging.Logger(ctx).Warn("encrypted hub pull: unknown-envelope-version grace expired; forwarding event for quarantine",
 						"event_id", event.ID, "envelope_version", version)

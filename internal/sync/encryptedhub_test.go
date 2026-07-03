@@ -1013,3 +1013,30 @@ func TestEncryptedHubNilWaitSeamTruncatesForever(t *testing.T) {
 		}
 	}
 }
+
+// TestEncryptedHubImplausibleVersionQuarantinesImmediately (post-#63 Codex
+// review, P2): parseable-JSON junk whose claimed version is at or below OURS
+// ({} decodes to version 0) is not "a newer client" and must never buy the
+// grace-window defer — it forwards for quarantine immediately, even with a
+// seam and a wide-open grace window.
+func TestEncryptedHubImplausibleVersionQuarantinesImmediately(t *testing.T) {
+	ctx := context.Background()
+	kr := newFakeKeyring(t, 1)
+	junk := state.Event{ID: "ev_v0", DeviceID: "dev_a", Seq: 1, HLC: 1, Type: EventEncryptedV2, PayloadJSON: `{}`, ContentHash: "sha256:v0"}
+	rec := &skipRecorder{firstSeen: time.Now()}
+	back := &recordingHub{events: []state.Event{junk}}
+	hub := EncryptedHub{Hub: back, Keyring: kr, Stats: &PullStats{}, NoteSkipped: rec.note, GraceWindow: time.Hour}
+	got, err := hub.Pull(ctx, nil)
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "ev_v0" {
+		t.Fatalf("Pull returned %+v, want the junk carrier forwarded immediately", got)
+	}
+	if hub.Stats.Undecryptable != 1 || hub.Stats.Truncated != 0 {
+		t.Fatalf("Stats = %+v, want Undecryptable=1 Truncated=0 (no grace defer for junk)", *hub.Stats)
+	}
+	if len(rec.sightings) != 0 {
+		t.Fatalf("sightings = %v, want none (no wait row for never-readable junk)", rec.sightings)
+	}
+}
