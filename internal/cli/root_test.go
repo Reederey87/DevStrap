@@ -162,7 +162,7 @@ func TestInitStatusAndDBCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stdout = %q stderr = %q err = %v", stdout, stderr, err)
 	}
-	if !strings.Contains(stdout, "schema version: 16") || !strings.Contains(stdout, "sqlite quick_check: ok") || !strings.Contains(stdout, "sqlite foreign_key_check: ok") {
+	if !strings.Contains(stdout, "schema version: 17") || !strings.Contains(stdout, "sqlite quick_check: ok") || !strings.Contains(stdout, "sqlite foreign_key_check: ok") {
 		t.Fatalf("stdout = %q, want db status", stdout)
 	}
 	syncHubPath := filepath.Join(t.TempDir(), "hub.json")

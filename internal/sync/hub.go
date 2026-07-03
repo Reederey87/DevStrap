@@ -21,6 +21,26 @@ import (
 // exchange (import) before continuing with incremental pulls.
 var ErrSnapshotRequired = errors.New("full snapshot required")
 
+// Cursor is the sync transport cursor (P5-SYNC-01): for each origin device on
+// the hub, the highest per-device sequence number such that every event with
+// Seq <= it has been pulled AND consumed (applied, deduped, or permanently
+// quarantined). It is deliberately decoupled from the HLC, which remains the
+// apply-ordering key only: every device's own event stream is gapless in Seq
+// (UNIQUE events(device_id, seq), assigned in the same transaction as the HLC),
+// so a per-device Seq cursor can never skip an event no matter how late it
+// lands on the hub — the "offline device forgot to push, syncs late" scenario
+// an HLC watermark permanently stranded. A device absent from the map has
+// cursor 0 (pull from the beginning).
+type Cursor map[string]int64
+
+// After returns the cursor position for one origin device (0 when unknown).
+func (c Cursor) After(deviceID string) int64 {
+	if c == nil {
+		return 0
+	}
+	return c[deviceID]
+}
+
 // ErrBlobNotFound signals that a requested content-addressed blob is not
 // present on the hub. It wraps os.ErrNotExist so callers can test with
 // errors.Is(err, os.ErrNotExist).
@@ -50,14 +70,18 @@ type BlobInfo struct {
 // Event plane:
 //   - Push appends locally-originated events. Duplicate event IDs are ignored
 //     (idempotent), so re-pushing already-delivered events is safe.
-//   - Pull returns events with HLC greater than or equal to afterHLC in
-//     deterministic order (HLC, device_id, id). The inclusive boundary (HUB-13)
-//     means a same-HLC event from another device that arrives after the cursor
-//     was advanced to that HLC is still delivered on the next pull; ApplyEvents
-//     dedups by event ID, so re-delivering the boundary is a no-op for already-
-//     applied events. If afterHLC falls below the retention horizon, Pull
-//     returns ErrSnapshotRequired so the caller performs a full-state snapshot
-//     exchange before resuming incremental pulls.
+//   - Pull returns, for EVERY origin device present on the hub (device
+//     discovery is the hub's job, so a brand-new device's stream is picked up
+//     with no cursor entry), every event with Seq > after[DeviceID], in
+//     deterministic apply order (HLC, device_id, id). The per-device Seq
+//     boundary is exact — Seq is unique per device — so the old inclusive-HLC
+//     boundary re-delivery (HUB-13) is retired; no boundary overlap exists.
+//     Events with Seq <= 0 (pre-sequence legacy objects) are always returned:
+//     they cannot be cursored and rely on event-ID dedup. If any device's
+//     cursor has fallen behind the hub's retention horizon (after[dev]+1 <
+//     minRetainedSeq[dev]), Pull returns ErrSnapshotRequired so the caller
+//     performs a full-state snapshot exchange before resuming incremental
+//     pulls.
 //
 // Blob plane:
 //   - PutBlob stores a content-addressed encrypted blob keyed by its sha256 hex
@@ -74,7 +98,7 @@ type BlobInfo struct {
 // place (HUB-06).
 type Hub interface {
 	Push(ctx context.Context, events []state.Event) error
-	Pull(ctx context.Context, afterHLC int64) ([]state.Event, error)
+	Pull(ctx context.Context, after Cursor) ([]state.Event, error)
 	PutBlob(ctx context.Context, sha256Hex string, r io.Reader) error
 	GetBlob(ctx context.Context, sha256Hex string) (io.ReadCloser, error)
 	DeleteBlob(ctx context.Context, sha256Hex string) error
@@ -89,8 +113,15 @@ type Hub interface {
 // is retained ONLY for tests and the --hub-file spike; the production backend
 // is the R2/S3 implementation (HUB-02).
 type FileHub struct {
-	Path         string
-	RetentionHLC int64
+	Path string
+	// RetentionSeqs is the hub's per-device retention horizon (P5-HUB-03,
+	// re-based on the Seq transport cursor): for each origin device, the
+	// minimum Seq still retained. A Pull whose cursor would leave a gap below
+	// a device's floor (after[dev]+1 < RetentionSeqs[dev]) returns
+	// ErrSnapshotRequired. Empty means "no compaction yet" (everything
+	// retained). Test-only plumbing until snapshot exchange lands
+	// (P4-SYNC-02/P4-HUB-11).
+	RetentionSeqs map[string]int64
 }
 
 func (h FileHub) Push(ctx context.Context, events []state.Event) error {
@@ -115,9 +146,13 @@ func (h FileHub) Push(ctx context.Context, events []state.Event) error {
 	return h.write(all)
 }
 
-func (h FileHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, error) {
-	if h.RetentionHLC > 0 && afterHLC < h.RetentionHLC {
-		return nil, ErrSnapshotRequired
+func (h FileHub) Pull(ctx context.Context, after Cursor) ([]state.Event, error) {
+	// P5-HUB-03 (Seq-re-based): a cursor below any device's retention floor
+	// means the incremental log has a gap only a snapshot can fill.
+	for dev, minRetained := range h.RetentionSeqs {
+		if minRetained > 0 && after.After(dev)+1 < minRetained {
+			return nil, ErrSnapshotRequired
+		}
 	}
 	all, err := h.read()
 	if err != nil {
@@ -128,7 +163,10 @@ func (h FileHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, error
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if event.HLC >= afterHLC {
+		// Seq <= 0 (pre-sequence legacy) cannot be cursored: always deliver,
+		// rely on event-ID dedup. Otherwise the per-device Seq boundary is
+		// exact (Seq is unique per device) — no HUB-13 overlap re-delivery.
+		if event.Seq <= 0 || event.Seq > after.After(event.DeviceID) {
 			out = append(out, event)
 		}
 	}

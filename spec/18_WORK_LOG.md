@@ -27,6 +27,25 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — feat(sync): transport cursor decoupled from HLC — per-device Seq pull plane (P5-SYNC-01)
+
+Changed:
+- `internal/sync/hub.go`: `Cursor` type (origin device -> last contiguous Seq pulled+consumed); `Hub.Pull(ctx, after Cursor)` replaces `Pull(ctx, afterHLC)`; FileHub filters by per-device Seq (Seq<=0 legacy events always delivered, dedup by ID) with per-device `RetentionSeqs`.
+- `internal/hub/r2.go`: Push writes the per-device seq-ordered layout `workspaces/<ws>/eventlog/<device_id>/<seq pad20>_<event_id>.json` (refuses Seq<=0); Pull discovers device streams via delimiter listing (`S3Client.ListCommonPrefixes`, implemented in the aws-sdk adapter + memS3 double), resumes each with an exact StartAfter boundary, DUAL-READS the retired HLC-keyed `events/` prefix (parsed (device, seq) pruned by the cursor; unparseable keys fail open toward the GET), dedups by event ID across layouts, and re-bases the retention floor per device. `HasEvents` checks both prefixes. No bucket wipe needed; `hub migrate-events` is a follow-up (dual-read is O(1) on an empty prefix).
+- `internal/sync/events.go`: `ApplyEventsWithStats(ctx, st, events, after)` returns the per-device safe cursor — the contiguous CONSUMED run from `after[dev]+1` (consumed = applied / deduped / permanently quarantined; deliberate change: dedup now advances, ending the founder's eternal self-re-pull). Transient holds (skew, hash-chain) stop only the offending device's run (per-device fault isolation); a hub-side seq gap stops it loudly; at a contested slot held dominates consumed (a forged carrier — every field of an undecryptable envelope is hub-writable — can never advance past a real held event, superseding the PR #44 implausible-HLC guard).
+- `internal/sync/encryptedhub.go`: within-grace missing-key truncate becomes a PER-DEVICE defer — the ungranted origin device's batch tail is dropped (counted in `Truncated`) while other devices' events keep flowing; contiguity holds the deferred device's cursor with no extra plumbing. Skip classes unchanged in behavior but their failure mode improves for free: a skipped object now leaves a seq gap that HOLDS its device's cursor (retry every pull) instead of being silently passed forever (P6-SYNC-02 re-based; durable record + surfacing still open).
+- Migration `00017_hub_device_cursors.sql` + store: `HubDeviceCursors`/`AdvanceHubDeviceCursor` (forward-only), `PushSeqCursor`/`AdvancePushSeqCursor` (push watermark by gapless Seq, one-time backfill from the legacy HLC watermark — the retired `hlc >` selection could strand events behind an HLC regression), `HasHubDeviceCursors`, `LocalPendingEventsBySeq`. `hub_cursors` (00008) frozen read-only.
+- `internal/cli/sync.go`: per-device cursor wiring in `pullAndApplyEvents`; push by Seq; founder gate now requires zero rows in BOTH cursor tables (a pre-migration device that ever synced must never self-found, P6-SEC-02). `doctor` pending-push and the joiner-mismatch probe read the new cursors.
+- Tests: R2 late-push/dual-read/discovery/retention + FileHub mirrors, ApplyEvents per-device matrix incl. the forged-carrier contested-slot case, EncryptedHub per-device defer, store cursor/backfill/HLC-regression coverage, founder-gate per-device-cursor case; e2e `sync_late_push.txtar` (3 devices — verified FAILING on origin/main, the negative control); `sync_materialize.txtar` no-op pull expectation 1 -> 0 (HUB-13 overlap retired); schema pins 15 -> 17 (goose Down lands on 15 pending the sibling 00016 — re-derive at rebase).
+- Specs: 07 (cursor sections rewritten; P5-SYNC-01 flipped to shipped; P6-SYNC-02 re-based to the retry-wedge residual), 12 (hub_device_cursors DDL + migration list + version 17 + hub_cursors frozen + gitstate reservation -> 00019), 13 (sync/hub-plane cursor text), 16 (test inventory).
+
+Validated:
+- `gofmt -w cmd internal`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOCACHE=/tmp/devstrap-gocache go test -race ./...` (incl. all existing sync/join/gc/wedge txtars + the new late-push e2e).
+
+Follow-ups:
+- PR 2 of this wave (P6-SYNC-02 residual): durable `sync_skipped_events` + status/doctor surfacing + `sync --replay-skipped`; unknown-envelope-version defer classification.
+- `hub migrate-events` (legacy-prefix re-key + delete); per-device retention markers with the snapshot-exchange work (P4-SYNC-02/P4-HUB-11); revoked-device prefix/cursor cleanup alongside compaction.
+
 ## 2026-07-03 — fix(data): atomic local event/state writes + device HLC indexes (P6-DATA-03/05/06)
 
 Changed:

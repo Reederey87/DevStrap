@@ -140,12 +140,12 @@ func TestSyncQuarantinesNeverGrantedEpochThenRecovers(t *testing.T) {
 	if hub.Stats.Undecryptable != 1 || hub.Stats.Truncated != 0 {
 		t.Fatalf("Stats after cycle 1 = %+v, want Undecryptable=1 Truncated=0", *hub.Stats)
 	}
-	cursor, err := store.HubCursor(ctx, hubID)
+	cursors, err := store.HubDeviceCursors(ctx, hubID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cursor < sealed.HLC {
-		t.Fatalf("cursor = %d, want advanced past the quarantined event's HLC %d (the un-wedge)", cursor, sealed.HLC)
+	if cursors[sealed.DeviceID] < sealed.Seq {
+		t.Fatalf("cursor = %v, want %s advanced past the quarantined event's seq %d (the un-wedge)", cursors, sealed.DeviceID, sealed.Seq)
 	}
 	open, err := store.OpenConflictsByType(ctx, dssync.ConflictEventVerification)
 	if err != nil {

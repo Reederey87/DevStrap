@@ -1,0 +1,80 @@
+# P5-SYNC-01: an event PUSHED LATE — carrying an HLC far below the point other
+# devices' views have already moved past — must still be delivered. This is the
+# "offline device forgot to push, syncs late" scenario DevStrap exists to
+# solve; under the retired HLC-watermark cursor it was permanently stranded
+# (Pull only returned HLC >= cursor, and a third device's newer applied event
+# had advanced the founder's cursor past the queued one). The per-device Seq
+# cursor cannot skip it: device B's stream resumes at B's own sequence.
+#
+# Fleet: A founds; B joins and QUEUES a project while unapproved (its event is
+# stamped now, at t_B); C joins, is approved FIRST, and pushes a newer event
+# (t_C > t_B) that A applies — advancing A's view past t_B; only THEN is B
+# approved and its old-stamped event finally pushed. A must still receive it.
+
+env DEVSTRAP_NO_KEYCHAIN=1
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+# Three bare remotes, one per project.
+exec git init --bare -b main $WORK/remoteA.git
+exec git clone $WORK/remoteA.git $WORK/srcA
+exec sh -c 'echo hello-a > $WORK/srcA/README.md'
+exec sh -c 'cd $WORK/srcA && git add README.md && git commit -m init && git branch -M main && git push origin main'
+exec git init --bare -b main $WORK/remoteB.git
+exec git clone $WORK/remoteB.git $WORK/srcB
+exec sh -c 'echo hello-b > $WORK/srcB/README.md'
+exec sh -c 'cd $WORK/srcB && git add README.md && git commit -m init && git branch -M main && git push origin main'
+exec git init --bare -b main $WORK/remoteC.git
+exec git clone $WORK/remoteC.git $WORK/srcC
+exec sh -c 'echo hello-c > $WORK/srcC/README.md'
+exec sh -c 'cd $WORK/srcC && git add README.md && git commit -m init && git branch -M main && git push origin main'
+
+# Device A (founder): init, add a project, sync (founds epoch 1, pushes).
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA init
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/a-proj $WORK/remoteA.git
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+stdout 'pushed 1'
+
+# Device B (joiner): adopt the workspace via A's one-paste code, then QUEUE
+# b-proj — its project.added event is stamped NOW (t_B) — and defer the push
+# (unapproved, no key).
+exec sh -c 'CODE=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices pairing-code 2>/dev/null); AFP=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --fingerprint); devstrap --home=$WORK/homeB --root=$WORK/CodeB init --join --code "$CODE" --fingerprint "$AFP"'
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB add --path work/b-proj $WORK/remoteB.git
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
+stdout 'Awaiting workspace key grant: 1 local event'
+stdout 'pushed 0'
+
+# Device C (joiner): adopt the workspace, get approved FIRST, and push c-proj —
+# stamped strictly LATER than B's queued event.
+exec sh -c 'CODE=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices pairing-code 2>/dev/null); AFP=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --fingerprint); devstrap --home=$WORK/homeC --root=$WORK/CodeC init --join --code "$CODE" --fingerprint "$AFP"'
+exec sh -c 'CCODE=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices pairing-code 2>/dev/null); CFP=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices recipient --fingerprint); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll --code "$CCODE" --approve --fingerprint "$CFP"'
+stdout 'enrolled as approved'
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+exec devstrap --home=$WORK/homeC --root=$WORK/CodeC sync --hub-file=$WORK/hub.json
+exec devstrap --home=$WORK/homeC --root=$WORK/CodeC add --path work/c-proj $WORK/remoteC.git
+exec devstrap --home=$WORK/homeC --root=$WORK/CodeC sync --hub-file=$WORK/hub.json
+stdout 'pushed'
+
+# A applies C's newer event: A's view is now PAST t_B. Under the HLC-watermark
+# cursor this is the poisoned step — the next pull would start above t_B and
+# B's queued event could never be delivered.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+exec sh -c 'test -d $WORK/CodeA/work/c-proj/.git'
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+
+# NOW approve B and let it push its old-stamped, pre-approval event.
+exec sh -c 'BCODE=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices pairing-code 2>/dev/null); BFP=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --fingerprint); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll --code "$BCODE" --approve --fingerprint "$BFP"'
+stdout 'enrolled as approved'
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
+stdout 'pushed'
+
+# THE ASSERTION: A's next sync must deliver and materialize B's late-pushed,
+# old-HLC project. Fails on the HLC-watermark cursor; passes with per-device
+# Seq cursors.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+exec sh -c 'test -d $WORK/CodeA/work/b-proj/.git'
+exec sh -c 'cat $WORK/CodeA/work/b-proj/README.md'
+stdout 'hello-b'

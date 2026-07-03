@@ -111,7 +111,7 @@ func TestSyncRejectsForgedGrantBeforeWCKIngest(t *testing.T) {
 		Keyring: keyring,
 		Verify:  store.VerifyRemoteEvent,
 	}
-	pulled, err := hub.Pull(ctx, 0)
+	pulled, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
 	}

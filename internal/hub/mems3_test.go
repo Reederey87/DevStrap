@@ -98,6 +98,31 @@ func (m *memS3) ListObjectsV2(_ context.Context, prefix, startAfter string, maxK
 	return objs, next, nil
 }
 
+// ListCommonPrefixes groups keys under prefix at the first delimiter after it
+// (P5-SYNC-01 device-stream discovery), mirroring ListObjectsV2 CommonPrefixes.
+func (m *memS3) ListCommonPrefixes(_ context.Context, prefix, delimiter string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	set := map[string]bool{}
+	for k := range m.objects {
+		if !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(k, prefix)
+		idx := strings.Index(rest, delimiter)
+		if idx < 0 {
+			continue
+		}
+		set[prefix+rest[:idx+len(delimiter)]] = true
+	}
+	out := make([]string, 0, len(set))
+	for p := range set {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 // TestEvent constructs a state.Event for conformance tests.
 func makeEvent(id, deviceID string, hlc int64, seq int64, typ, payload string) state.Event {
 	return state.Event{

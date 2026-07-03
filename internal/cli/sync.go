@@ -69,16 +69,18 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 	if err != nil {
 		return appError{code: exitInvalidConfig, err: err}
 	}
-	// SYNC-04: push cursor bounds the push side so a sync cycle re-uploads
-	// only new local-origin events (HLC > push cursor), not the entire event
-	// log including remote-origin events the hub already holds from their
-	// origin device. The push cursor is a per-hub "push:<hubID>" row in
-	// hub_cursors.
-	pushCursor, err := store.HubCursor(ctx, "push:"+hubID)
+	// SYNC-04/P5-SYNC-01: the push watermark bounds the push side so a sync
+	// cycle re-uploads only new local-origin events (Seq > push watermark),
+	// not the entire event log including remote-origin events the hub already
+	// holds from their origin device. Keyed by the gapless local Seq (a
+	// "push:<hubID>" row in hub_device_cursors, backfilled once from the
+	// legacy HLC watermark) so an HLC regression can never strand an event
+	// behind the watermark.
+	pushCursor, err := store.PushSeqCursor(ctx, hubID)
 	if err != nil {
 		return err
 	}
-	localEvents, err := store.LocalPendingEvents(ctx, pushCursor)
+	localEvents, err := store.LocalPendingEventsBySeq(ctx, pushCursor)
 	if err != nil {
 		return err
 	}
@@ -122,7 +124,7 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 	} else if rotated {
 		// The localEvents snapshot above predates the mint; re-read so the
 		// just-minted grant events are pushed in this same cycle.
-		localEvents, err = store.LocalPendingEvents(ctx, pushCursor)
+		localEvents, err = store.LocalPendingEventsBySeq(ctx, pushCursor)
 		if err != nil {
 			return err
 		}
@@ -172,19 +174,21 @@ type pullApplyOutcome struct {
 	stats  dssync.ApplyStats
 }
 
-// pullAndApplyEvents runs the pull half of a sync cycle: cursor-based
-// incremental pull, apply, and low-water-mark cursor advance. It is shared by
-// runSyncCycle and hub gc's pre-GC sync gate (P6-HUB-01).
+// pullAndApplyEvents runs the pull half of a sync cycle: per-device
+// cursor-based incremental pull, apply, and safe cursor advance. It is shared
+// by runSyncCycle and hub gc's pre-GC sync gate (P6-HUB-01).
 //
-// SYNC-01: ApplyEvents returns a low-water-mark safe cursor — the highest HLC
-// safe to advance to, never past a transiently-skipped (quarantined or
-// hash-chain-broken) event in this batch. Advancing past such an event would
-// permanently strand it, since Pull only returns HLC > cursor.
+// SYNC-01/P5-SYNC-01: ApplyEvents returns a per-origin-device safe cursor —
+// for each device, the end of the contiguous consumed run — never past a
+// transiently-skipped (quarantined or hash-chain-broken) event or a seq gap.
+// Advancing past such an event would permanently strand it, since Pull only
+// returns Seq > cursor per device.
 func pullAndApplyEvents(ctx context.Context, store *state.Store, hub dssync.Hub, hubID string) (pullApplyOutcome, error) {
-	cursor, err := store.HubCursor(ctx, hubID)
+	cursorMap, err := store.HubDeviceCursors(ctx, hubID)
 	if err != nil {
 		return pullApplyOutcome{}, err
 	}
+	cursor := dssync.Cursor(cursorMap)
 	remoteEvents, err := hub.Pull(ctx, cursor)
 	if err != nil {
 		return pullApplyOutcome{}, err
@@ -207,13 +211,15 @@ func pullAndApplyEvents(ctx context.Context, store *state.Store, hub dssync.Hub,
 			return pullApplyOutcome{}, err
 		}
 	}
-	safeCursor, stats, err := dssync.ApplyEventsWithStats(ctx, store, remoteEvents)
+	safeCursor, stats, err := dssync.ApplyEventsWithStats(ctx, store, remoteEvents, cursor)
 	if err != nil {
 		return pullApplyOutcome{}, err
 	}
-	if safeCursor > cursor {
-		if err := store.AdvanceHubCursor(ctx, hubID, safeCursor); err != nil {
-			return pullApplyOutcome{}, err
+	for dev, seq := range safeCursor {
+		if seq > cursor.After(dev) {
+			if err := store.AdvanceHubDeviceCursor(ctx, hubID, dev, seq); err != nil {
+				return pullApplyOutcome{}, err
+			}
 		}
 	}
 	return pullApplyOutcome{events: remoteEvents, stats: stats}, nil
@@ -338,21 +344,30 @@ func pushLocalEventsGated(ctx context.Context, stdout io.Writer, opts *options, 
 		return 0, false, err
 	}
 	if epoch == 0 {
-		pushCursor, cerr := store.HubCursor(ctx, "push:"+hubID)
+		// The cursors must be untouched too: rawSeen only counts objects
+		// returned AFTER the current pull cursor, so on its own it proves
+		// "nothing new", not "hub empty". A keyless device that previously
+		// advanced any cursor (e.g. past events that all quarantined as
+		// permanent verification failures) would otherwise see rawSeen == 0 on
+		// a populated hub and wrongly found a divergent epoch-1 key.
+		// P5-SYNC-01: check BOTH cursor tables — the per-device rows AND the
+		// frozen legacy hub_cursors rows. A device that synced before the
+		// per-device-cursor migration has no new-table rows; skipping the
+		// legacy check would let it self-found and re-open the P6-SEC-02
+		// split-brain.
+		hasDeviceCursors, cerr := store.HasHubDeviceCursors(ctx, hubID)
 		if cerr != nil {
 			return 0, false, cerr
 		}
-		// The pull cursor must be 0 too: rawSeen only counts objects returned
-		// AFTER the current pull cursor, so on its own it proves "nothing new",
-		// not "hub empty". A keyless device that previously advanced its pull
-		// cursor (e.g. past events that all quarantined as permanent
-		// verification failures) would otherwise see rawSeen == 0 on a
-		// populated hub and wrongly found a divergent epoch-1 key.
-		pullCursor, cerr := store.HubCursor(ctx, hubID)
+		legacyPushCursor, cerr := store.HubCursor(ctx, "push:"+hubID)
 		if cerr != nil {
 			return 0, false, cerr
 		}
-		neverSynced := pushCursor == 0 && pullCursor == 0 && rawSeen == 0
+		legacyPullCursor, cerr := store.HubCursor(ctx, hubID)
+		if cerr != nil {
+			return 0, false, cerr
+		}
+		neverSynced := !hasDeviceCursors && legacyPushCursor == 0 && legacyPullCursor == 0 && rawSeen == 0
 		if neverSynced && !isJoiner(opts) {
 			// Founder's first sync to an empty hub: mint epoch 1, then push.
 			if _, berr := kr.EnsureBootstrap(ctx); berr != nil {
@@ -374,16 +389,16 @@ func pushLocalEventsGated(ctx context.Context, stdout io.Writer, opts *options, 
 	if err := hub.Push(ctx, localEvents); err != nil {
 		return 0, false, appError{code: exitNetwork, err: err}
 	}
-	// SYNC-04: advance the push cursor to the highest pushed local HLC so the
-	// next cycle only pushes newly-originated events.
+	// SYNC-04/P5-SYNC-01: advance the push watermark to the highest pushed
+	// local Seq so the next cycle only pushes newly-originated events.
 	if len(localEvents) > 0 {
-		var maxPushHLC int64
+		var maxPushSeq int64
 		for _, e := range localEvents {
-			if e.HLC > maxPushHLC {
-				maxPushHLC = e.HLC
+			if e.Seq > maxPushSeq {
+				maxPushSeq = e.Seq
 			}
 		}
-		if err := store.AdvanceHubCursor(ctx, "push:"+hubID, maxPushHLC); err != nil {
+		if err := store.AdvancePushSeqCursor(ctx, hubID, maxPushSeq); err != nil {
 			return 0, false, err
 		}
 	}

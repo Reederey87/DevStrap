@@ -104,9 +104,12 @@ type PullStats struct {
 	// RawSeen is the count of objects the backend returned for this pull,
 	// before decryption, grant ingestion, skipping, or truncation.
 	RawSeen int
-	// Truncated is the count of raw events deferred by an epoch/kid truncate
-	// (grant not yet held): the tail of the batch this device could not read
-	// yet. Non-zero means this device's view of the log is INCOMPLETE, so
+	// Truncated is the count of raw events deferred because a workspace key
+	// grant is not yet held: since P5-SYNC-01 the defer is PER ORIGIN DEVICE —
+	// the deferred device's batch tail is dropped (its per-device cursor
+	// holds automatically at the last consumed Seq), while other devices'
+	// events keep flowing. Truncated sums the dropped per-device tails.
+	// Non-zero means this device's view of the log is INCOMPLETE, so
 	// consumers deriving a mark set from local state (hub gc, P6-HUB-01) must
 	// refuse to sweep.
 	Truncated int
@@ -166,12 +169,17 @@ func (h EncryptedHub) Push(ctx context.Context, events []state.Event) error {
 //
 //   - Missing (epoch, kid) key: the grant for this event's key has not
 //     propagated yet (a missing epoch, or a kid at a held epoch that this
-//     device does not hold — the P6-SEC-02 collision case). Pull TRUNCATES the
-//     batch here — it returns the decryptable prefix so it applies and the
-//     caller advances the cursor up to (but not past) this event, then retries
-//     from here on the next sync once the grant arrives.
-//     Truncating (not skipping) is required so a legitimately-decryptable-later
-//     event is never permanently stranded by the cursor jumping over it.
+//     device does not hold — the P6-SEC-02 collision case). Pull DEFERS the
+//     origin device here (P5-SYNC-01): this and every later event from the
+//     same origin device in the batch are dropped, so that device's
+//     per-device Seq cursor holds at the last consumed slot and the next sync
+//     retries from there once the grant arrives — while OTHER devices' events
+//     keep flowing (the old whole-batch truncate held the entire fleet behind
+//     one ungranted stream). Deferring (not skipping) is required so a
+//     legitimately-decryptable-later event is never permanently stranded by
+//     the cursor jumping over it; dropping the deferred device's TAIL (not
+//     just the one event) avoids churning hash-chain-break conflicts on its
+//     successors, which could not chain-apply anyway.
 //   - Held-epoch AEAD failure (corruption, forgery, or a hub-side carrier
 //     mutation — P6-SYNC-04): the event can never be decrypted by this device,
 //     but silently skipping it would be silent permanent loss with no operator
@@ -185,8 +193,8 @@ func (h EncryptedHub) Push(ctx context.Context, events []state.Event) error {
 //     promoting these skip classes to first-class signals). The event is never
 //     applied — no unauthenticated data enters the log — but one bad object
 //     cannot brick the device.
-func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, error) {
-	raw, err := h.Hub.Pull(ctx, afterHLC)
+func (h EncryptedHub) Pull(ctx context.Context, after Cursor) ([]state.Event, error) {
+	raw, err := h.Hub.Pull(ctx, after)
 	if err != nil {
 		return nil, err
 	}
@@ -225,10 +233,22 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 		}
 	}
 	// Second pass: decrypt enc.v2, passthrough grants, forward undecryptable
-	// carriers for quarantine, skip retired/malformed traffic, and truncate at
-	// the first not-yet-granted epoch.
+	// carriers for quarantine, skip retired/malformed traffic, and defer a
+	// not-yet-granted origin device's tail (P5-SYNC-01 per-device defer).
 	out := make([]state.Event, 0, len(raw))
-	for i, event := range raw {
+	deferredDevs := map[string]bool{}
+	for _, event := range raw {
+		if deferredDevs[event.DeviceID] {
+			// This origin device hit a missing-grant defer earlier in the
+			// batch: drop its remaining events (grants included — their key
+			// material was already ingested in the first pass) so its Seq
+			// cursor holds and its successors don't churn hash-chain-break
+			// conflicts they could never chain onto.
+			if h.Stats != nil {
+				h.Stats.Truncated++
+			}
+			continue
+		}
 		switch event.Type {
 		case EventDeviceKeyGranted:
 			out = append(out, event)
@@ -302,12 +322,13 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 					out = append(out, event)
 					continue
 				}
-				logging.Logger(ctx).Info("encrypted hub pull: awaiting workspace key grant; deferring remaining events",
-					"epoch", env.Epoch, "kid_hint", env.KID, "event_id", event.ID)
+				logging.Logger(ctx).Info("encrypted hub pull: awaiting workspace key grant; deferring this origin device's remaining events",
+					"epoch", env.Epoch, "kid_hint", env.KID, "event_id", event.ID, "device_id", event.DeviceID)
+				deferredDevs[event.DeviceID] = true
 				if h.Stats != nil {
-					h.Stats.Truncated = len(raw) - i
+					h.Stats.Truncated++
 				}
-				return out, nil
+				continue
 			}
 			var restored state.Event
 			decErr := error(nil)
@@ -359,12 +380,13 @@ func (h EncryptedHub) Pull(ctx context.Context, afterHLC int64) ([]state.Event, 
 						out = append(out, event)
 						continue
 					}
-					logging.Logger(ctx).Info("encrypted hub pull: awaiting workspace key grant; deferring remaining events",
-						"epoch", env.Epoch, "kid", env.KID, "event_id", event.ID)
+					logging.Logger(ctx).Info("encrypted hub pull: awaiting workspace key grant; deferring this origin device's remaining events",
+						"epoch", env.Epoch, "kid", env.KID, "event_id", event.ID, "device_id", event.DeviceID)
+					deferredDevs[event.DeviceID] = true
 					if h.Stats != nil {
-						h.Stats.Truncated = len(raw) - i
+						h.Stats.Truncated++
 					}
-					return out, nil
+					continue
 				}
 				// The envelope names a key we hold (or is a kid-less envelope)
 				// and authentication failed on every held key: corruption,
@@ -529,7 +551,7 @@ func ReplayUndecryptableConflicts(ctx context.Context, st *state.Store, h Encryp
 				"event_id", details.EventID, "hlc", restored.HLC)
 			continue
 		}
-		if _, _, err := ApplyEventsWithStats(ctx, st, []state.Event{restored}); err != nil {
+		if _, _, err := ApplyEventsWithStats(ctx, st, []state.Event{restored}, nil); err != nil {
 			return replayed, err // conflict stays open; retried next cycle
 		}
 		if err := st.ResolveConflict(ctx, c.ID, `{"action":"auto","reason":"carrier decrypted after a later key grant (P6-SYNC-04 replay)"}`); err != nil {

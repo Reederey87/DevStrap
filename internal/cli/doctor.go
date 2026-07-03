@@ -110,8 +110,10 @@ func checkHubHealth(ctx context.Context, opts *options, hubFile string) []checkR
 	}
 	out = append(out, checkResult{Name: "hub reachable", Status: checkOK, Detail: hubID})
 
-	pushCursor, _ := store.HubCursor(ctx, "push:"+hubID)
-	if pending, perr := store.LocalPendingEvents(ctx, pushCursor); perr == nil {
+	// P5-SYNC-01: the push watermark is the Seq-keyed row (with its one-time
+	// legacy-HLC backfill), so doctor counts the same pending set sync pushes.
+	pushCursor, _ := store.PushSeqCursor(ctx, hubID)
+	if pending, perr := store.LocalPendingEventsBySeq(ctx, pushCursor); perr == nil {
 		if len(pending) > 0 {
 			out = append(out, checkResult{Name: "pending push", Status: checkWarn, Detail: fmt.Sprintf("%d local event(s) not yet pushed", len(pending)), Remedy: "run `devstrap sync`"})
 		} else {
@@ -133,11 +135,19 @@ func checkHubHealth(ctx context.Context, opts *options, hubFile string) []checkR
 			}
 			if hec, ok := rawBackend.(hasEventsCapable); ok {
 				hasEvents, herr := hec.HasEvents(ctx)
-				// A HubCursor read error degrades to cursor 0, biasing toward
-				// the warning; acceptable because HasEvents==false (a probe
-				// that SUCCEEDED against a genuinely empty prefix) must also
-				// hold, matching the pushCursor convention above.
-				pullCursor, _ := store.HubCursor(ctx, hubID)
+				// A cursor read error degrades to "never pulled", biasing
+				// toward the warning; acceptable because HasEvents==false (a
+				// probe that SUCCEEDED against a genuinely empty prefix) must
+				// also hold, matching the pushCursor convention above.
+				// P5-SYNC-01: "has this device ever pulled" is now answered by
+				// the per-device cursor table, with the frozen legacy HLC row
+				// still honored for pre-migration stores.
+				var pullCursor int64
+				if hasCursors, cerr := store.HasHubDeviceCursors(ctx, hubID); cerr == nil && hasCursors {
+					pullCursor = 1
+				} else if legacy, lerr := store.HubCursor(ctx, hubID); lerr == nil {
+					pullCursor = legacy
+				}
 				role := opts.v.GetString("role")
 				if herr == nil && shouldWarnWorkspaceIDMismatch(role, hubID, pullCursor, hasEvents) {
 					out = append(out, checkResult{

@@ -201,7 +201,7 @@ CREATE TABLE device_gitstate (
 );
 ```
 
-Status: planned. No `device_gitstate` migration exists yet; add it as `00019_gitstate_mirror.sql` when the Layer A working-state validation plane lands (00010–00016 are now taken; 00017/00018 are claimed by the in-flight transport-cursor and skip-quarantine PRs — see the migration list below). `sync_cursors` and `event_delivery` are defined; `hub_cursors` (00008) is wired for cursor-based incremental pull (EAGER-02); `pending_hub_deletes` (00011) backs the revoke-rewrap cleanup queue (`P5-PROD-02`). `device_sync_state` and `jobs` remain unwired.
+Status: planned. No `device_gitstate` migration exists yet; add it as `00019_gitstate_mirror.sql` when the Layer A working-state validation plane lands (00010–00017 are now taken; 00018 is claimed by the in-flight skip-quarantine PR — see the migration list below). `sync_cursors` and `event_delivery` are defined; `hub_cursors` (00008) is frozen legacy since 00017 (see its section below); `pending_hub_deletes` (00011) backs the revoke-rewrap cleanup queue (`P5-PROD-02`). `device_sync_state` and `jobs` remain unwired.
 
 ### env_profiles
 
@@ -341,9 +341,9 @@ CREATE TABLE sync_cursors (
 );
 ```
 
-`sync_cursors` is the planned (`DATA-02`, `HUB-*`) per-peer resume point for cursor-based incremental sync: one row per remote peer (or hub) holding the highest applied HLC/seq so a pull requests only events after `last_hlc_applied` instead of replaying full history from HLC 0. The cloud hub exposes the same shape as an opaque `cursor=<HLC>` over its event-log plane (`410 -> snapshot` when the cursor is too old, see `07_NAMESPACE_AND_SYNC_MODEL.md`). `sync_cursors` itself is still unwired, but cursor-based incremental pull IS shipped through the simpler `hub_cursors` table (00008): sync pulls with `afterHLC = hub_cursors.last_hlc_applied` and never replays from 0 (`ARCH2-02` resolved). `sync_cursors`/`event_delivery` remain the planned richer per-peer shape.
+`sync_cursors` was the planned (`DATA-02`, `HUB-*`) per-peer resume point for cursor-based incremental sync. That role is now filled by the shipped `hub_device_cursors` (00017, below): per-origin-device Seq cursors — the cloud hub exposes the same shape as an opaque per-device cursor over its event-log plane (`410 -> snapshot` when a device's cursor falls below its retention floor, see `07_NAMESPACE_AND_SYNC_MODEL.md`). `sync_cursors`/`event_delivery` remain unwired legacy shapes.
 
-### hub_cursors (shipped — per-hub resume cursor)
+### hub_cursors (legacy — frozen since 00017)
 
 ```sql
 CREATE TABLE hub_cursors (
@@ -356,7 +356,24 @@ CREATE TABLE hub_cursors (
 );
 ```
 
-`hub_cursors` (migration 00008) is the wired cursor for cursor-based incremental pull (`EAGER-02`): `devstrap sync` reads `last_hlc_applied` before `Pull`, passes it as `afterHLC`, and advances it after `ApplyEvents`. A separate `push:<hubID>` synthetic `hub_id` row holds the push watermark so only local-origin events past it are pushed (`SYNC-04`).
+`hub_cursors` (migration 00008) was the HLC-watermark cursor for cursor-based incremental pull (`EAGER-02`). Since `P5-SYNC-01` (00017) it is **retained frozen, read-only**: the founder/join gate still consults it (a pre-migration device that ever synced must never self-found, `P6-SEC-02`), and the push watermark backfills from its `push:<hubID>` row once. It is never advanced again.
+
+### hub_device_cursors (shipped — per-origin-device transport cursor, P5-SYNC-01)
+
+```sql
+CREATE TABLE hub_device_cursors (
+  workspace_id TEXT NOT NULL,
+  hub_id TEXT NOT NULL,
+  device_id TEXT NOT NULL,
+  last_seq_pulled INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (workspace_id, hub_id, device_id),
+  FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+);
+CREATE INDEX idx_hub_device_cursors_hub ON hub_device_cursors(workspace_id, hub_id);
+```
+
+`hub_device_cursors` (migration `00017_hub_device_cursors.sql`, `P5-SYNC-01`) decouples the sync transport cursor from the logical HLC clock: for each origin device on the hub, `last_seq_pulled` is the highest **contiguous** per-device sequence number pulled and consumed (applied, deduped, or permanently quarantined). Every device's own stream is gapless in Seq (UNIQUE `events(device_id, seq)`), so an event pushed late — with an HLC far below every peer's old watermark, the "offline device forgot to push" case — can never be skipped: its device's cursor simply hasn't passed its seq. `ApplyEvents` computes the per-device safe cursor (a transient skew/hash-chain hold or a hub-side seq gap stops only that device's advance — per-device fault isolation); `devstrap sync` advances one row per device, forward-only. `device_id` deliberately has **no FK to `devices`**: a cursor may advance for a device whose events all quarantined and that was never enrolled. The push watermark is the `(hub_id = 'push:<hubID>', device_id = <local device>)` row, keyed by the gapless local Seq (the retired `hlc >` selection could strand events behind an HLC regression) and backfilled once from the legacy `hub_cursors` row.
 
 ```sql
 CREATE TABLE event_delivery (
@@ -577,6 +594,7 @@ internal/state/migrations/
   00014_workspace_key_kids.sql
   00015_key_grant_waits.sql
   00016_device_hlc_index_single_local.sql
+  00017_hub_device_cursors.sql
 ```
 
 CLI:
@@ -606,9 +624,10 @@ internal/state/migrations/00013_workspace_keys.sql
 internal/state/migrations/00014_workspace_key_kids.sql
 internal/state/migrations/00015_key_grant_waits.sql
 internal/state/migrations/00016_device_hlc_index_single_local.sql
+internal/state/migrations/00017_hub_device_cursors.sql
 ```
 
-The current schema version is **16**. `00010_repo_forge_kind.sql` adds the per-project forge override (`GIT-05`); `00011_pending_hub_deletes.sql` queues blobs orphaned by a local-only revoke for deletion on the next hub-enabled sync (`P5-PROD-02`/`P5-SEC-01`); `00012_draft_snapshot_idempotency.sql` adds a partial `UNIQUE` index on `draft_snapshots(namespace_id, source_event_id)` so idempotency is enforced by the DB, not only the SELECT-then-INSERT guard (`P5-DATA-02`); `00013_workspace_keys.sql` adds the `workspace_keys` and `workspace_key_grants` tables backing the WCK epoch keyring for envelope encryption of the event log (`P4-SEC-02`/`P4-SEC-07`) — `workspace_keys(workspace_id, epoch, created_at)` records which epochs this device holds, and `workspace_key_grants(workspace_id, epoch, recipient, source_event_id, source_event_hlc, source_event_device_id, created_at)` is a membership audit of device.key.granted events (the wrapped WCK itself rides the event payload, never SQLite); `00014_workspace_key_kids.sql` re-keys `workspace_keys` by `(workspace_id, epoch, kid)` and adds `origin` (`P6-SEC-02`/`P6-SEC-01b` — same-epoch keys coexist under content-derived kids instead of overwriting; pre-kid rows backfill as `kid=''`/`origin='legacy'`) and adds the nullable audit `kid` column to `workspace_key_grants`; `00015_key_grant_waits.sql` adds the `key_grant_waits` grace-window table for never-granted workspace keys (`P6-SEC-03`, see its section above); `00016_device_hlc_index_single_local.sql` adds `idx_events_device_hlc` for device-scoped HLC event scans (`P6-DATA-05`) and `idx_devices_single_local` to enforce exactly one local device row (`P6-DATA-06`). Migrations can be applied by `devstrap init` or explicitly with `devstrap db migrate`.
+The current schema version is **17**. `00010_repo_forge_kind.sql` adds the per-project forge override (`GIT-05`); `00011_pending_hub_deletes.sql` queues blobs orphaned by a local-only revoke for deletion on the next hub-enabled sync (`P5-PROD-02`/`P5-SEC-01`); `00012_draft_snapshot_idempotency.sql` adds a partial `UNIQUE` index on `draft_snapshots(namespace_id, source_event_id)` so idempotency is enforced by the DB, not only the SELECT-then-INSERT guard (`P5-DATA-02`); `00013_workspace_keys.sql` adds the `workspace_keys` and `workspace_key_grants` tables backing the WCK epoch keyring for envelope encryption of the event log (`P4-SEC-02`/`P4-SEC-07`) — `workspace_keys(workspace_id, epoch, created_at)` records which epochs this device holds, and `workspace_key_grants(workspace_id, epoch, recipient, source_event_id, source_event_hlc, source_event_device_id, created_at)` is a membership audit of device.key.granted events (the wrapped WCK itself rides the event payload, never SQLite); `00014_workspace_key_kids.sql` re-keys `workspace_keys` by `(workspace_id, epoch, kid)` and adds `origin` (`P6-SEC-02`/`P6-SEC-01b` — same-epoch keys coexist under content-derived kids instead of overwriting; pre-kid rows backfill as `kid=''`/`origin='legacy'`) and adds the nullable audit `kid` column to `workspace_key_grants`; `00015_key_grant_waits.sql` adds the `key_grant_waits` grace-window table for never-granted workspace keys (`P6-SEC-03`, see its section above); `00016_device_hlc_index_single_local.sql` adds `idx_events_device_hlc` for device-scoped HLC event scans (`P6-DATA-05`) and `idx_devices_single_local` to enforce exactly one local device row (`P6-DATA-06`); `00017_hub_device_cursors.sql` adds the per-origin-device Seq transport cursor table (`P5-SYNC-01`, see its section above) and freezes `hub_cursors` as a read-only legacy row set. Migrations can be applied by `devstrap init` or explicitly with `devstrap db migrate`.
 
 ## Backup
 

@@ -24,10 +24,10 @@ func (r *recordingHub) Push(_ context.Context, events []state.Event) error {
 	return nil
 }
 
-func (r *recordingHub) Pull(_ context.Context, afterHLC int64) ([]state.Event, error) {
+func (r *recordingHub) Pull(_ context.Context, after Cursor) ([]state.Event, error) {
 	var out []state.Event
 	for _, e := range r.events {
-		if e.HLC >= afterHLC {
+		if e.Seq <= 0 || e.Seq > after.After(e.DeviceID) {
 			out = append(out, e)
 		}
 	}
@@ -167,7 +167,7 @@ func TestEncryptedHubRoundTrip(t *testing.T) {
 		t.Errorf("carrier changed ID/Sig/HLC")
 	}
 
-	got, err := hub.Pull(ctx, 0)
+	got, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestEncryptedHubGrantPassthrough(t *testing.T) {
 	if back.events[0].Type != EventDeviceKeyGranted {
 		t.Fatalf("grant was envelope-encrypted on the wire: %q", back.events[0].Type)
 	}
-	got, err := hub.Pull(ctx, 0)
+	got, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestPullRefusesUnverifiedGrant(t *testing.T) {
 		},
 	}
 
-	got, err := hub.Pull(ctx, 0)
+	got, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestPullIngestsVerifiedGrant(t *testing.T) {
 		},
 	}
 
-	got, err := hub.Pull(ctx, 0)
+	got, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestPullNilVerifierBackcompat(t *testing.T) {
 	}
 	hub := EncryptedHub{Hub: &recordingHub{events: []state.Event{grant}}, Keyring: kr}
 
-	got, err := hub.Pull(ctx, 0)
+	got, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
@@ -319,7 +319,7 @@ func TestEncryptedHubIngestThenDecrypt(t *testing.T) {
 	back := &recordingHub{events: []state.Event{enc1, grant, enc2}}
 	hub := EncryptedHub{Hub: back, Keyring: kr}
 
-	got, err := hub.Pull(ctx, 0)
+	got, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
@@ -353,7 +353,7 @@ func TestEncryptedHubAntiDowngrade(t *testing.T) {
 	plain := state.Event{ID: "plain", DeviceID: "dev_a", HLC: 1, Type: EventProjectAdded, PayloadJSON: `{"path":"work/attacker"}`}
 	back := &recordingHub{events: []state.Event{plain, good}}
 	hub := EncryptedHub{Hub: back, Keyring: kr}
-	got, err := hub.Pull(ctx, 0)
+	got, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull plaintext: unexpected error %v", err)
 	}
@@ -380,7 +380,7 @@ func TestEncryptedHubMissingEpoch(t *testing.T) {
 	future, _ := EncryptEvent(state.Event{ID: "e5", DeviceID: "dev_a", HLC: 2, Type: EventProjectAdded, PayloadJSON: `{}`, ContentHash: state.ContentHash(`{}`)}, wck5, 5)
 	back := &recordingHub{events: []state.Event{prefix, future}}
 	hub := EncryptedHub{Hub: back, Keyring: kr, Stats: &PullStats{}}
-	got, err := hub.Pull(ctx, 0)
+	got, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull missing epoch: unexpected error %v", err)
 	}
@@ -409,7 +409,7 @@ func TestEncryptedHubUnknownVersion(t *testing.T) {
 	enc.PayloadJSON = string(raw)
 	back := &recordingHub{events: []state.Event{enc}}
 	hub := EncryptedHub{Hub: back, Keyring: kr, Stats: &PullStats{}}
-	got, err := hub.Pull(ctx, 0)
+	got, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull unknown version: unexpected error %v", err)
 	}
@@ -446,7 +446,7 @@ func TestEncryptedHubPoisonEventDoesNotWedge(t *testing.T) {
 	after, _ := EncryptEvent(state.Event{ID: "after", DeviceID: "dev_a", HLC: 4, Type: EventProjectAdded, PayloadJSON: `{"path":"work/after"}`, ContentHash: state.ContentHash(`{"path":"work/after"}`)}, wck1, 1)
 	back := &recordingHub{events: []state.Event{before, poison, kidlessPoison, after}}
 	hub := EncryptedHub{Hub: back, Keyring: kr, Stats: &PullStats{}}
-	got, err := hub.Pull(ctx, 0)
+	got, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull with poison event: unexpected error %v", err)
 	}
@@ -478,7 +478,7 @@ func TestEncryptedHubRetiredV1Skipped(t *testing.T) {
 	legacy := state.Event{ID: "legacy", DeviceID: "dev_a", HLC: 1, Type: EventEncryptedV1, PayloadJSON: `{"v":1,"epoch":1,"ct":"aGVsbG8="}`}
 	back := &recordingHub{events: []state.Event{legacy, good}}
 	hub := EncryptedHub{Hub: back, Keyring: kr, Stats: &PullStats{}}
-	got, err := hub.Pull(ctx, 0)
+	got, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull with retired v1 event: unexpected error %v", err)
 	}
@@ -509,29 +509,36 @@ func rewriteEnvelopeKID(t *testing.T, carrier state.Event, kid string) state.Eve
 	return carrier
 }
 
-// TestEncryptedHubUnheldKidTruncates pins the P6-SEC-02 durability behavior: an
-// event encrypted under a kid this device does NOT hold at an epoch it DOES
-// hold (the fleet key vs. a legacy self-mint collision) must TRUNCATE the batch
-// — defer, never skip — so the event is retried once its grant arrives instead
-// of being permanently jumped by the cursor.
-func TestEncryptedHubUnheldKidTruncates(t *testing.T) {
+// TestEncryptedHubUnheldKidDefersOnlyThatDevice pins the P6-SEC-02 durability
+// behavior under the P5-SYNC-01 per-device defer: an event encrypted under a
+// kid this device does NOT hold at an epoch it DOES hold (the fleet key vs. a
+// legacy self-mint collision) must DEFER — never skip — so the event is
+// retried once its grant arrives instead of being permanently jumped by the
+// cursor. The defer is scoped to the offending ORIGIN device: its batch tail
+// (grants' key material was already ingested in the first pass) is dropped so
+// its Seq cursor holds, while other devices' later events keep flowing.
+func TestEncryptedHubUnheldKidDefersOnlyThatDevice(t *testing.T) {
 	ctx := context.Background()
 	kr := newFakeKeyring(t, 1) // holds one key at epoch 1
 	wck1, _ := kr.WCK(1)
-	prefix, _ := EncryptEvent(state.Event{ID: "mine", DeviceID: "dev_a", HLC: 1, Type: EventProjectAdded, PayloadJSON: `{"path":"work/mine"}`, ContentHash: state.ContentHash(`{"path":"work/mine"}`)}, wck1, 1)
+	prefix, _ := EncryptEvent(state.Event{ID: "mine", DeviceID: "dev_a", Seq: 1, HLC: 1, Type: EventProjectAdded, PayloadJSON: `{"path":"work/mine"}`, ContentHash: state.ContentHash(`{"path":"work/mine"}`)}, wck1, 1)
 	fleetWCK, _ := NewWCK() // the founder's key at the SAME epoch, not yet granted
-	fleet, _ := EncryptEvent(state.Event{ID: "fleet", DeviceID: "dev_b", HLC: 2, Type: EventProjectAdded, PayloadJSON: `{"path":"work/fleet"}`, ContentHash: state.ContentHash(`{"path":"work/fleet"}`)}, fleetWCK, 1)
-	trailing, _ := EncryptEvent(state.Event{ID: "trailing", DeviceID: "dev_a", HLC: 3, Type: EventProjectAdded, PayloadJSON: `{"path":"work/trailing"}`, ContentHash: state.ContentHash(`{"path":"work/trailing"}`)}, wck1, 1)
-	back := &recordingHub{events: []state.Event{prefix, fleet, trailing}}
+	fleet, _ := EncryptEvent(state.Event{ID: "fleet", DeviceID: "dev_b", Seq: 1, HLC: 2, Type: EventProjectAdded, PayloadJSON: `{"path":"work/fleet"}`, ContentHash: state.ContentHash(`{"path":"work/fleet"}`)}, fleetWCK, 1)
+	// dev_b's SUCCESSOR (also decryptable) must ride the defer with it — it
+	// could not chain-apply and would only churn hash-chain conflicts.
+	fleetNext, _ := EncryptEvent(state.Event{ID: "fleet_next", DeviceID: "dev_b", Seq: 2, HLC: 4, Type: EventProjectAdded, PayloadJSON: `{"path":"work/fleet2"}`, ContentHash: state.ContentHash(`{"path":"work/fleet2"}`)}, wck1, 1)
+	// dev_a's later event keeps flowing (the old whole-batch truncate held it).
+	trailing, _ := EncryptEvent(state.Event{ID: "trailing", DeviceID: "dev_a", Seq: 2, HLC: 3, Type: EventProjectAdded, PayloadJSON: `{"path":"work/trailing"}`, ContentHash: state.ContentHash(`{"path":"work/trailing"}`)}, wck1, 1)
+	back := &recordingHub{events: []state.Event{prefix, fleet, trailing, fleetNext}}
 	hub := EncryptedHub{Hub: back, Keyring: kr, Stats: &PullStats{}}
-	got, err := hub.Pull(ctx, 0)
+	got, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull with unheld kid: unexpected error %v", err)
 	}
-	if len(got) != 1 || got[0].ID != "mine" {
-		t.Fatalf("Pull returned %+v, want only the prefix (fleet-kid event and everything after deferred)", got)
+	if len(got) != 2 || got[0].ID != "mine" || got[1].ID != "trailing" {
+		t.Fatalf("Pull returned %+v, want [mine trailing] (dev_b deferred, dev_a unaffected)", got)
 	}
-	// P6-HUB-01: both deferred events (fleet + trailing) count as truncated.
+	// P6-HUB-01: both deferred dev_b events count as truncated (gc refusal).
 	if hub.Stats.Truncated != 2 || hub.Stats.Skipped != 0 {
 		t.Fatalf("Stats = %+v, want Truncated=2 Skipped=0", *hub.Stats)
 	}
@@ -583,7 +590,7 @@ func TestEncryptedHubRelabeledKidStillDecrypts(t *testing.T) {
 	trailing, _ := EncryptEvent(state.Event{ID: "trailing", DeviceID: "dev_a", HLC: 2, Type: EventProjectAdded, PayloadJSON: `{"path":"work/trailing"}`, ContentHash: state.ContentHash(`{"path":"work/trailing"}`)}, wck1, 1)
 	back := &recordingHub{events: []state.Event{relabeled, trailing}}
 	hub := EncryptedHub{Hub: back, Keyring: kr}
-	got, err := hub.Pull(ctx, 0)
+	got, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull with relabeled kid: unexpected error %v", err)
 	}
@@ -627,14 +634,14 @@ func TestReplayRecoversKidStrippedEventAfterGrant(t *testing.T) {
 
 	// Pull: the kid-stripped carrier cannot be classified as deferrable, so it
 	// is forwarded and quarantined permanently by ApplyEvents.
-	pulled, err := hub.Pull(ctx, 0)
+	pulled, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(pulled) != 1 || pulled[0].Type != EventEncryptedV2 {
 		t.Fatalf("Pull = %+v, want the forwarded carrier", pulled)
 	}
-	if _, stats, err := ApplyEventsWithStats(ctx, st, pulled); err != nil || stats.Quarantined != 1 {
+	if _, stats, err := ApplyEventsWithStats(ctx, st, pulled, nil); err != nil || stats.Quarantined != 1 {
 		t.Fatalf("apply: stats=%+v err=%v, want Quarantined=1", stats, err)
 	}
 
@@ -704,21 +711,22 @@ func TestReplayRecoveryUnblocksHashChainSuccessor(t *testing.T) {
 	back := &recordingHub{events: []state.Event{stripped1, sealed2}}
 	hub := EncryptedHub{Hub: back, Keyring: kr, Stats: &PullStats{}}
 
-	pulled, err := hub.Pull(ctx, 0)
+	pulled, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	safe, stats, err := ApplyEventsWithStats(ctx, st, pulled)
+	safe, stats, err := ApplyEventsWithStats(ctx, st, pulled, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// E1 is quarantined (permanent class), E2 is hash-chain-held (transient):
-	// the cursor stays below E2 so it will be re-delivered.
+	// E1 is quarantined (permanent class — consumes seq 1); E2 is
+	// hash-chain-held (transient — stops the contiguous run at seq 2): dev's
+	// cursor lands on 1, below E2, so E2 will be re-delivered.
 	if stats.Quarantined != 2 || !stats.CursorHeld {
 		t.Fatalf("stats = %+v, want Quarantined=2 CursorHeld=true", stats)
 	}
-	if safe >= e2.HLC {
-		t.Fatalf("safe cursor %d advanced past the held successor %d", safe, e2.HLC)
+	if safe.After(dev) != 1 {
+		t.Fatalf("safe = %v, want %s:1 (past the consumed E1, below the held E2)", safe, dev)
 	}
 
 	// The grant arrives; the replay recovers E1.
@@ -728,11 +736,11 @@ func TestReplayRecoveryUnblocksHashChainSuccessor(t *testing.T) {
 	}
 	// The next pull re-delivers E2 (cursor was held below it); it now chains
 	// onto the recovered E1 and applies.
-	pulled, err = hub.Pull(ctx, safe+1)
+	pulled, err = hub.Pull(ctx, safe)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := ApplyEventsWithStats(ctx, st, pulled); err != nil {
+	if _, _, err := ApplyEventsWithStats(ctx, st, pulled, nil); err != nil {
 		t.Fatal(err)
 	}
 	projection := projectionOf(t, st)
@@ -770,7 +778,7 @@ func TestEncryptedHubMissingEpochWithinGraceTruncates(t *testing.T) {
 		Hub: &recordingHub{events: []state.Event{prefix, future}}, Keyring: kr,
 		Stats: &PullStats{}, MissingKeyWait: rec.note, GraceWindow: time.Hour,
 	}
-	got, err := hub.Pull(ctx, 0)
+	got, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
@@ -805,7 +813,7 @@ func TestEncryptedHubMalformedKidQuarantinesImmediately(t *testing.T) {
 		Hub: &recordingHub{events: []state.Event{prefix, garbage}}, Keyring: kr,
 		Stats: &PullStats{}, MissingKeyWait: rec.note, GraceWindow: time.Hour,
 	}
-	got, err := hub.Pull(ctx, 0)
+	got, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
@@ -838,7 +846,7 @@ func TestEncryptedHubMissingEpochGraceExpiredQuarantines(t *testing.T) {
 		Hub: &recordingHub{events: []state.Event{prefix, sealed, trailing}}, Keyring: kr,
 		Stats: &PullStats{}, MissingKeyWait: rec.note, GraceWindow: time.Hour,
 	}
-	got, err := hub.Pull(ctx, 0)
+	got, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
@@ -873,7 +881,7 @@ func TestEncryptedHubUnheldKidGraceExpiredQuarantines(t *testing.T) {
 		Hub: &recordingHub{events: []state.Event{prefix, fleet, trailing}}, Keyring: kr,
 		Stats: &PullStats{}, MissingKeyWait: rec.note, GraceWindow: time.Hour,
 	}
-	got, err := hub.Pull(ctx, 0)
+	got, err := hub.Pull(ctx, nil)
 	if err != nil {
 		t.Fatalf("Pull: %v", err)
 	}
@@ -901,7 +909,7 @@ func TestEncryptedHubNilWaitSeamTruncatesForever(t *testing.T) {
 	sealed, _ := EncryptEvent(state.Event{ID: "e5", DeviceID: "dev_b", HLC: 2, Type: EventProjectAdded, PayloadJSON: `{}`, ContentHash: state.ContentHash(`{}`)}, wck5, 5)
 	hub := EncryptedHub{Hub: &recordingHub{events: []state.Event{sealed}}, Keyring: kr, Stats: &PullStats{}, GraceWindow: 0}
 	for i := 0; i < 2; i++ {
-		got, err := hub.Pull(ctx, 0)
+		got, err := hub.Pull(ctx, nil)
 		if err != nil {
 			t.Fatalf("Pull #%d: %v", i, err)
 		}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"sort"
 	"time"
 
@@ -285,24 +284,31 @@ func createConflictResolvedEvent(ctx context.Context, st *state.Store, tx *state
 	return st.InsertLocalEvent(ctx, event)
 }
 
-// ApplyEvents sorts and applies a batch of remote events. It returns
-// safeAdvanceHLC: the highest HLC value that is safe to advance the hub pull
-// cursor to (SYNC-01 low-water mark). The cursor must never advance past an
-// event that was skipped (quarantined or hash-chain-broken) within this batch,
-// otherwise that event is never re-delivered and the gap is permanent.
+// ApplyEvents sorts and applies a batch of remote events. It returns the safe
+// per-device transport cursor (P5-SYNC-01): for each origin device, the
+// highest Seq such that every slot from after[dev]+1 up to it was CONSUMED by
+// this batch. The cursor must never advance past an event that was transiently
+// skipped within this batch, otherwise that event is never re-delivered and
+// the gap is permanent.
 //
-// safeAdvanceHLC = min(maxAppliedHLC, lowestUnappliedHLC-1). When no event was
-// skipped, lowestUnappliedHLC is +Inf and safeAdvanceHLC equals maxAppliedHLC.
+// Per origin device, the safe cursor is the end of the contiguous consumed run
+// starting at after[dev]+1. An event is CONSUMED when it was applied, deduped
+// (already inserted — deduplication is consumption, so a device re-pulling its
+// own events advances past them instead of re-fetching forever), or
+// permanently quarantined (implausible HLC, verification/divergence failure,
+// undecryptable enc.v2 carrier): re-delivery of those would fail identically
+// forever. Only TRANSIENTLY-skipped events HOLD a device's cursor: skew-ahead
+// quarantine (valid once local time catches up) and hash-chain breaks (a
+// re-delivery may carry the correct prev_event_hash). The hold is scoped to
+// the offending origin device — other devices' cursors keep advancing
+// (per-device fault isolation the old global HLC low-water mark never had). A
+// Seq gap in the batch (an object missing from the hub) also stops the run,
+// loudly: advancing over it would permanently strand the missing event.
 //
-// Only TRANSIENTLY-skipped events hold back the cursor: skew-ahead quarantine
-// (a remote clock a few minutes ahead; it becomes valid once local time
-// catches up) and hash-chain breaks (a re-delivery may eventually carry the
-// correct prev_event_hash). Permanently-invalid events (HLC <= 0 or below the
-// epoch floor), verification failures (signature/trust/content-hash), and
-// divergent duplicate event IDs are recorded as conflicts and do NOT hold the
-// cursor, since re-delivery would fail identically forever and would wedge sync.
-func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) (int64, error) {
-	safe, _, err := ApplyEventsWithStats(ctx, st, events)
+// Events with Seq <= 0 (pre-sequence legacy) apply or quarantine as normal but
+// never touch the cursor; they are re-delivered each pull and dedup by ID.
+func ApplyEvents(ctx context.Context, st *state.Store, events []state.Event) (Cursor, error) {
+	safe, _, err := ApplyEventsWithStats(ctx, st, events, nil)
 	return safe, err
 }
 
@@ -314,14 +320,27 @@ type ApplyStats struct {
 	// Quarantined counts events recorded as conflicts instead of applied
 	// (skew quarantine, hash-chain break, verification/divergence failure).
 	Quarantined int
-	// CursorHeld is true when a transiently-skipped event held the safe
-	// cursor below the batch maximum (the event will be re-delivered).
+	// CursorHeld is true when at least one device's safe cursor stopped short
+	// of that device's highest batch Seq — either a transiently-held event
+	// (skew/hash-chain, re-delivered next pull) or a Seq gap on the hub.
 	CursorHeld bool
 }
 
+// seqOutcome tracks how the events at one (device, seq) slot were disposed.
+// held dominates consumed: a hub can serve a forged duplicate carrier at a
+// real event's slot (the carrier fields of an undecryptable envelope are
+// unauthenticated), and a consumed forgery must never advance the cursor past
+// the real, transiently-held occupant of the same slot.
+type seqOutcome struct {
+	held     bool
+	consumed bool
+}
+
 // ApplyEventsWithStats is ApplyEvents plus an ApplyStats report; see
-// ApplyEvents for the cursor semantics.
-func ApplyEventsWithStats(ctx context.Context, st *state.Store, events []state.Event) (int64, ApplyStats, error) {
+// ApplyEvents for the cursor semantics. after is the transport cursor the
+// batch was pulled with (nil means "from the beginning", e.g. single-event
+// replays that ignore the returned cursor).
+func ApplyEventsWithStats(ctx context.Context, st *state.Store, events []state.Event, after Cursor) (Cursor, ApplyStats, error) {
 	var stats ApplyStats
 	sort.Slice(events, func(i, j int) bool {
 		if events[i].HLC == events[j].HLC {
@@ -334,8 +353,27 @@ func ApplyEventsWithStats(ctx context.Context, st *state.Store, events []state.E
 	})
 	now := time.Now().UnixMilli()
 	maxSkewMS := defaultReceiveMaxSkew.Milliseconds()
-	var maxAppliedHLC int64
-	lowestUnapplied := int64(math.MaxInt64)
+	outcomes := map[string]map[int64]*seqOutcome{}
+	record := func(event state.Event, consumed bool) {
+		if event.Seq <= 0 {
+			return // legacy pre-sequence event: never touches the cursor
+		}
+		slots := outcomes[event.DeviceID]
+		if slots == nil {
+			slots = map[int64]*seqOutcome{}
+			outcomes[event.DeviceID] = slots
+		}
+		o := slots[event.Seq]
+		if o == nil {
+			o = &seqOutcome{}
+			slots[event.Seq] = o
+		}
+		if consumed {
+			o.consumed = true
+		} else {
+			o.held = true
+		}
+	}
 	for _, event := range events {
 		// P6-SYNC-04: an enc.v2 carrier reaching the apply path is one
 		// EncryptedHub.Pull forwarded because AEAD authentication failed on
@@ -349,19 +387,19 @@ func ApplyEventsWithStats(ctx context.Context, st *state.Store, events []state.E
 		// one poisoned object forever).
 		if event.Type == EventEncryptedV2 {
 			if err := insertUndecryptableEventConflict(ctx, st, event); err != nil {
-				return 0, stats, err
+				return nil, stats, err
 			}
 			stats.Quarantined++
-			// Consume the carrier's HLC for the cursor ONLY when it is
-			// plausible (positive, not beyond the trusted skew). The carrier
-			// HLC is hub-writable — the mutation that made it undecryptable
-			// may BE an HLC rewrite — so an implausible value must never drag
-			// the cursor past real events (CodeRabbit, PR #44). An implausible
-			// carrier is simply re-delivered and re-deduped on later pulls; it
-			// neither advances nor holds the cursor.
-			if physical := event.HLC >> hlcLogicalBits; event.HLC > 0 && physical-now <= maxSkewMS && event.HLC > maxAppliedHLC {
-				maxAppliedHLC = event.HLC
-			}
+			// The carrier's Seq slot counts as consumed: the quarantine is a
+			// durable, replayable record (ReplayUndecryptableConflicts), so
+			// re-delivery would change nothing. Every carrier field, Seq
+			// included, is hub-writable (AEAD failed, nothing authenticated) —
+			// but a forged Seq cannot advance the cursor past a real event,
+			// because held dominates consumed at a contested slot and a slot
+			// whose real occupant the hub withheld entirely stops the
+			// contiguous run at the successor's hash-chain hold instead
+			// (see seqOutcome).
+			record(event, true)
 			continue
 		}
 		// SYNC-03: quarantine remote events with implausible HLC values
@@ -371,27 +409,28 @@ func ApplyEventsWithStats(ctx context.Context, st *state.Store, events []state.E
 		physical := event.HLC >> hlcLogicalBits
 		if event.HLC <= 0 || physical < epochFloorMS {
 			if err := quarantineSkewedEvent(ctx, st, event, physical-now); err != nil {
-				return 0, stats, err
+				return nil, stats, err
 			}
 			stats.Quarantined++
+			// Permanently invalid (SYNC-03): consumed — re-delivery would fail
+			// identically forever.
+			record(event, true)
 			continue
 		}
 		// SYNC-3: quarantine remote events whose physical timestamp is beyond
 		// the trusted skew so one bad/malicious peer cannot poison ordering.
 		// Skipping (not aborting) keeps the rest of the batch converging. This
-		// is TRANSIENT (bounded by maxSkew) so it holds back the cursor
-		// (SYNC-01) until local time catches up and the event is re-delivered.
+		// is TRANSIENT (bounded by maxSkew) so it HOLDS this device's cursor
+		// (SYNC-01, per-device since P5-SYNC-01) until local time catches up
+		// and the event is re-delivered.
 		if offset := physical - now; offset > maxSkewMS {
 			if err := quarantineSkewedEvent(ctx, st, event, offset); err != nil {
-				return 0, stats, err
+				return nil, stats, err
 			}
 			stats.Quarantined++
-			if event.HLC < lowestUnapplied {
-				lowestUnapplied = event.HLC
-			}
+			record(event, false)
 			continue
 		}
-		var inserted bool
 		if err := st.WithTx(ctx, func(tx *state.Tx) error {
 			// Re-stamp the workspace_id with the local workspace so the events
 			// FK constraint is satisfied. Remote events carry the origin
@@ -406,8 +445,7 @@ func ApplyEventsWithStats(ctx context.Context, st *state.Store, events []state.E
 			if err := tx.EnsureRemoteDeviceTx(ctx, event.DeviceID); err != nil {
 				return err
 			}
-			var err error
-			inserted, err = tx.InsertEvent(ctx, event)
+			inserted, err := tx.InsertEvent(ctx, event)
 			if err != nil {
 				return err
 			}
@@ -453,54 +491,76 @@ func ApplyEventsWithStats(ctx context.Context, st *state.Store, events []state.E
 		}); err != nil {
 			if errors.Is(err, state.ErrEventHashChain) {
 				if conflictErr := insertEventHashChainConflict(ctx, st, event, err); conflictErr != nil {
-					return 0, stats, errors.Join(err, conflictErr)
+					return nil, stats, errors.Join(err, conflictErr)
 				}
 				stats.Quarantined++
 				// SYNC-05/CODE-01: record the conflict and continue so the
 				// rest of the batch (and other devices' events) still apply,
 				// mirroring the skew-quarantine path. The broken event is
-				// never inserted. SYNC-01: hold the cursor below it so it is
-				// re-delivered next pull (a re-delivery may carry the correct
-				// prev_event_hash); insertConflict dedups on stable details so
-				// no unbounded growth results.
-				if event.HLC < lowestUnapplied {
-					lowestUnapplied = event.HLC
-				}
+				// never inserted. SYNC-01: HOLD this device's cursor below it
+				// so it is re-delivered next pull (a re-delivery may carry the
+				// correct prev_event_hash); insertConflict dedups on stable
+				// details so no unbounded growth results.
+				record(event, false)
 				continue
 			}
 			if errors.Is(err, state.ErrEventVerification) || errors.Is(err, state.ErrDivergentEvent) {
 				if conflictErr := insertEventVerificationConflict(ctx, st, event, err); conflictErr != nil {
-					return 0, stats, errors.Join(err, conflictErr)
+					return nil, stats, errors.Join(err, conflictErr)
 				}
 				stats.Quarantined++
 				// Permanent verification/divergence failures are quarantined
 				// and counted as consumed for the cursor: re-delivery would
 				// fail identically forever (the full event is preserved in the
-				// conflict for approval replay), and without advancing here a
-				// batch ENDING in a quarantined event would be re-delivered by
-				// the inclusive pull boundary on every subsequent sync.
-				if event.HLC > maxAppliedHLC {
-					maxAppliedHLC = event.HLC
-				}
+				// conflict for approval replay).
+				record(event, true)
 				continue
 			}
-			return 0, stats, err
+			return nil, stats, err
 		}
-		if inserted && event.HLC > maxAppliedHLC {
-			maxAppliedHLC = event.HLC
+		// Applied, or deduped (already inserted): both consume the slot.
+		// Deduplication-as-consumption is deliberate (P5-SYNC-01): a device
+		// re-pulling events it already holds (its own pushed events, or a
+		// pre-migration full re-pull) advances past them instead of
+		// re-fetching the same objects on every sync forever.
+		record(event, true)
+	}
+	// P5-SYNC-01: per origin device, advance to the end of the contiguous
+	// consumed run starting at after[dev]+1. A held slot (transient skew /
+	// hash-chain quarantine) or a Seq gap (an object missing from the hub)
+	// stops the run — never advance over either, or the event is permanently
+	// stranded (Pull only returns Seq > cursor).
+	safe := Cursor{}
+	for dev, slots := range outcomes {
+		start := after.After(dev)
+		last := start
+		next := start + 1
+		for {
+			o, ok := slots[next]
+			if !ok || o.held {
+				break
+			}
+			last = next
+			next++
 		}
-	}
-	// SYNC-01: advance the cursor only to the low-water mark — never past a
-	// transiently-skipped event — so skipped events are re-delivered next pull
-	// instead of being permanently stranded.
-	safe := maxAppliedHLC
-	if lowestUnapplied != math.MaxInt64 && lowestUnapplied-1 < safe {
-		safe = lowestUnapplied - 1
-	}
-	if lowestUnapplied != math.MaxInt64 {
-		stats.CursorHeld = true
-		logging.Logger(ctx).Warn("sync cursor held back by unapplied event",
-			"lowest_unapplied_hlc", lowestUnapplied, "safe_advance_hlc", safe, "max_applied_hlc", maxAppliedHLC)
+		if last > start {
+			safe[dev] = last
+		}
+		var maxSeq int64
+		for seq := range slots {
+			if seq > maxSeq {
+				maxSeq = seq
+			}
+		}
+		if maxSeq > last {
+			stats.CursorHeld = true
+			reason := "transiently held event"
+			if o, ok := slots[next]; !ok || (o != nil && !o.held) {
+				reason = "per-device seq gap on hub (missing object?)"
+			}
+			logging.Logger(ctx).Warn("sync cursor held back for device",
+				"device_id", dev, "safe_seq", last, "max_batch_seq", maxSeq, "reason", reason)
+		}
 	}
 	return safe, stats, nil
 }

@@ -204,6 +204,41 @@ func (a *S3Adapter) ListObjectsV2(ctx context.Context, prefix, startAfter string
 	return objs, next, nil
 }
 
+// ListCommonPrefixes returns the distinct sub-prefixes directly under prefix,
+// grouped at delimiter (P5-SYNC-01 device-stream discovery). It pages through
+// ListObjectsV2 CommonPrefixes with the same start-after resume contract as
+// ListObjectsV2 above.
+func (a *S3Adapter) ListCommonPrefixes(ctx context.Context, prefix, delimiter string) ([]string, error) {
+	var out []string
+	startAfter := ""
+	for {
+		in := &s3.ListObjectsV2Input{
+			Bucket:    aws.String(a.bucket),
+			Prefix:    aws.String(prefix),
+			Delimiter: aws.String(delimiter),
+			MaxKeys:   aws.Int32(1000),
+		}
+		if startAfter != "" {
+			in.StartAfter = aws.String(startAfter)
+		}
+		resp, err := a.client.ListObjectsV2(ctx, in)
+		if err != nil {
+			return nil, mapS3Error(err)
+		}
+		last := ""
+		for _, cp := range resp.CommonPrefixes {
+			if cp.Prefix != nil {
+				out = append(out, *cp.Prefix)
+				last = *cp.Prefix
+			}
+		}
+		if resp.IsTruncated == nil || !*resp.IsTruncated || last == "" {
+			return out, nil
+		}
+		startAfter = last
+	}
+}
+
 // mapS3Error is the pure, load-bearing translation from aws-sdk-go-v2 errors
 // into the hub sentinels (P5-HUB-01 / HUB-10 / P6-HUB-02). Classification:
 //
