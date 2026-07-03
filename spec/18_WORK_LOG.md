@@ -27,6 +27,23 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — docs: sync-convergence wave close-out (P5-SYNC-01 + 7 Pass-6 findings shipped)
+
+Changed:
+- Ledger: `P5-SYNC-01` (PR #59), `P6-SYNC-02` (PR #63), `P6-DATA-03`/`P6-DATA-05`/`P6-DATA-06` (PR #61), `P6-XP-04` (PR #62), `P6-QUAL-01`/`P6-QUAL-02` (PR #60) moved to *Recently shipped*; Pass-6 header **26 → 19 open of 43** (open-table rows re-counted: 19); Pass-5 line 4 → 3 open (`P5-CLI-01`, `P5-ARCH-01` partial, `contextcheck`); dated wave note added.
+- Pass-6 audit doc: dated SHIPPED stamps on the seven closed sections; a premise-correction note on `P6-SYNC-02` (the cursor half was superseded by the P5-SYNC-01 per-device cursor before the fix; PR #63 closed the records/surfacing residual, and no `--replay-skipped` was built); the stale Appendix A closing note about P4-SEC-02/P4-SEC-07 ledger status resolved as historical.
+- spec/00 + spec/14: the AD-2 multi-device hardening freeze is **COMPLETE** — all four named criticals shipped; new capability planes unblocked; compaction/snapshot exchange (`P4-SYNC-02`/`P4-HUB-11`) called out as the highest-leverage next core-engine item (also the recovery path for the documented byzantine-hub residuals).
+- spec/00 current-state bullet refreshed (per-device Seq cursors + durable pull-drop records).
+- spec/16 AD-6: status flipped to largely-shipped with the honest remainder (applied `device.revoked` propagation; randomized chaos reordering).
+
+- Post-review (opus): spec/03's AD-2 block flipped to COMPLETE too (it still framed the freeze as pending with `P5-SYNC-01` open); the passes-index Pass-5 row updated to 33 shipped / 3 open (it contradicted its own detail section); the Pass-6 header-note parenthetical now names all six non-P6 *Recently shipped* rows.
+
+Validated:
+- Docs only. `go run ./cmd/spec-drift --base origin/main --head HEAD`; `TestEveryCommandIsDocumented` + `TestMigrationsDocumented`; ledger header count re-derived from the table (19 == 19).
+
+Follow-ups:
+- None for this wave. Next core-engine candidate: `P4-SYNC-02`/`P4-HUB-11` compaction + snapshot exchange.
+
 ## 2026-07-03 — typed keychain custody + never mint over a published identity (P6-XP-04)
 
 Changed:
