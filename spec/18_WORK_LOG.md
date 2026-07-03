@@ -27,6 +27,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — docs: spec-accuracy sweep (4 stale claims vs shipped code)
+
+Changed (docs only — findings from a full spec-folder validation pass against `d0b696a`):
+- `spec/00_START_HERE.md`: the command inventory now lists `hub gc/login/logout` (login/logout shipped with `P6-HUB-02` but the hand-maintained list only had `hub gc`; the `TestEveryCommandIsDocumented` gate checks only `spec/13`, so nothing auto-catches this list).
+- `spec/03_SYSTEM_ARCHITECTURE.md`: the `P6-HUB-02` section rewritten from an open "Problem./Actionable steps." to the file's "Was./Shipped fix." convention — keychain/`op://` credential custody, `hub login`/`logout`, and the `ErrS3Auth` branch all shipped 2026-07-03 (PR #45).
+- `spec/08_GIT_MATERIALIZATION_AND_WORKTREES.md`: the `P6-GIT-05` section likewise rewritten as shipped (`removeOrphanWorktree` under a detached bounded context; the same file's line ~187 already described the shipped behavior, so the section also self-contradicted); the doctor orphan-worktree check is noted as deliberately out of scope.
+- `spec/13_CLI_DAEMON_API.md`: dropped `--no-bootstrap` from the `hydrate` flag list — the flag does not exist in `internal/cli/hydrate.go` and was listed with no "planned" marker.
+
+Validated:
+- Docs only; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOCACHE=/tmp/devstrap-gocache go test ./internal/cli/ -run 'TestEveryCommandIsDocumented|TestMigrationsDocumented'`.
+
+Follow-ups:
+- None. The sweep's other spot-checks (command/flag inventories, migrations 00001–00014, exit codes, testscript references, shipped/planned event-type split) all matched the code.
+
 ## 2026-07-03 — Pairing wave (docs): founder-minted / joiner-adopted workspace id + pairing runbook
 
 Changed (docs only — no code, no migration this cycle):
