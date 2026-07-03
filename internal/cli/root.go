@@ -97,6 +97,7 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newWorktreeCommand(stdout, opts))
 	cmd.AddCommand(newSyncCommand(stdout, opts))
 	cmd.AddCommand(newHubCommand(stdout, opts))
+	cmd.AddCommand(newKeysCommand(stdout, opts))
 	cmd.AddCommand(newMaterializeCommand(stdout, opts))
 	cmd.AddCommand(newDraftCommand(stdout, opts))
 	cmd.AddCommand(newEnvCommand(stdout, opts))
@@ -155,6 +156,7 @@ func initConfig(opts *options) error {
 	opts.v.SetDefault("root", defaults.Root)
 	opts.v.SetDefault("materialization.clone_timeout", "30m")
 	opts.v.SetDefault("sync.key_grant_grace", "72h")
+	opts.v.SetDefault("keys.rotate_max_age", "2160h")
 
 	if opts.cfgFile != "" {
 		opts.v.SetConfigFile(opts.cfgFile)

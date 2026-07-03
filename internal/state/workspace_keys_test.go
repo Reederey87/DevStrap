@@ -207,3 +207,48 @@ func TestRecordKeyGrantTxAcceptsKidAndIsIdempotent(t *testing.T) {
 		t.Fatalf("stored kid = %q, want 2222222222222222", kid)
 	}
 }
+
+// P4-SEC-07 periodic rotation: ActiveKeyEpochAge reports the HIGHEST epoch and
+// the EARLIEST created_at among its kids (conservative — coexisting kids can
+// only make a rotation earlier, never suppress it). Epoch 0 = zero time, nil.
+func TestActiveKeyEpochAge(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStoreWithWorkspace(t)
+
+	epoch, created, err := st.ActiveKeyEpochAge(ctx)
+	if err != nil || epoch != 0 || !created.IsZero() {
+		t.Fatalf("empty store: ActiveKeyEpochAge = %d, %v, %v; want 0, zero, nil", epoch, created, err)
+	}
+
+	if err := st.RecordKeyEpoch(ctx, 1, "kid-e1", "self"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordKeyEpoch(ctx, 2, "kid-e2a", "grant"); err != nil {
+		t.Fatal(err)
+	}
+	epoch, created, err = st.ActiveKeyEpochAge(ctx)
+	if err != nil || epoch != 2 || created.IsZero() {
+		t.Fatalf("ActiveKeyEpochAge = %d, %v, %v; want the highest epoch 2 with a real timestamp", epoch, created, err)
+	}
+
+	// A second kid at the active epoch with an EARLIER created_at must win
+	// (MIN across kids). Backdate it directly — RecordKeyEpoch stamps now.
+	if err := st.RecordKeyEpoch(ctx, 2, "kid-e2b", "self"); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := st.WorkspaceID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backdated := "2020-01-01T00:00:00.000000000Z"
+	if _, err := st.db.ExecContext(ctx, `UPDATE workspace_keys SET created_at = ? WHERE workspace_id = ? AND epoch = 2 AND kid = 'kid-e2b';`, backdated, ws); err != nil {
+		t.Fatal(err)
+	}
+	epoch, created, err = st.ActiveKeyEpochAge(ctx)
+	if err != nil || epoch != 2 {
+		t.Fatalf("ActiveKeyEpochAge = %d, %v; want epoch 2", epoch, err)
+	}
+	if created.Year() != 2020 {
+		t.Fatalf("created = %v, want the EARLIEST kid's created_at (2020 backdate)", created)
+	}
+}

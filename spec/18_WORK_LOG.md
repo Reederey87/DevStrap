@@ -27,6 +27,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — feat(keys): periodic WCK rotation — manual command + age-triggered auto-rotate (P4-SEC-07 remainder)
+
+Changed:
+- `internal/cli/keys.go`: new `devstrap keys rotate` — calls `Keyring.Rotate` directly (pure rotation: no secret-rotation flags, no blob rewrap, no queued hub deletes — those are revoke semantics); refuses at epoch 0.
+- `internal/state/store.go`: `ActiveKeyEpochAge` — highest epoch, EARLIEST created_at across its kids (conservative; coexisting kids can only make a rotation earlier).
+- `internal/cli/sync.go`: `maybeRotateWorkspaceKey` in `runSyncCycle` — AFTER `pullAndApplyEvents` (a freshly ingested grant resets the local age; suppresses fleet rotation storms), BEFORE `pushLocalEventsGated` (grants ride this cycle), followed by a `LocalPendingEvents` RE-READ so the mint's grant events are pushed same-cycle. Config `keys.rotate_max_age` (default 2160h = 90d, `0` disables, strict parse) + `sync --key-max-age` per-run override (validated as a usage error). Skips epoch 0; at most one rotation per cycle; a failed rotation warns and never aborts the sync.
+- `internal/cli/doctor.go`: `workspace key age` check (pure `gradeWorkspaceKeyAge`: ok at epoch 0 / ok with age / warn past `keys.rotate_max_age` with the rotate remedy).
+- Tests: `ActiveKeyEpochAge` (empty/highest/MIN-across-kids), `keys rotate` mints+grants and pins the no-revoke-side-effects contract against a real captured binding / refuses keyless, sync auto-rotates a backdated epoch with the grant ON THE HUB in the same cycle (the re-read assertion) / disabled at 0 / keyless joiner never rotates / malformed `--key-max-age` is a usage error, doctor grade table, e2e `sync_rotate_converge.txtar` (rotation mid-sync; grant + epoch-2-sealed project ride one push; B converges in one pull; doctor clean).
+- Specs: 13 (`keys` section, `--key-max-age`, config, doctor row) + 00 command inventory, 07 (Periodic-rotation lifecycle bullet incl. the harmless concurrent-mint push-key non-convergence note), 09 (WCK vs secret rotation distinction), 15 (forward-exposure-only threat section; old-epoch containment + keychain-slot growth documented-not-built); ledger: open `P4-SEC-07` row narrowed to shipped (row moves in the wave's docs close-out PR).
+
+Validated:
+- `gofmt -w cmd internal`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOCACHE=/tmp/devstrap-gocache go test -race ./...` (incl. the new e2e).
+
+Follow-ups:
+- Docs close-out PR: spec/19 §E ceremony+rotation runbook rewrite; ledger row moves (P4-SEC-04, P4-SEC-07 → Recently shipped).
+- Documented-not-built: old-epoch containment; keychain-slot growth (one 32-byte key per epoch).
 ## 2026-07-03 — feat(devices): one-paste pairing codes (P4-SEC-04 part 2)
 
 Changed:
