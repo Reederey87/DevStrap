@@ -151,11 +151,17 @@ func Walk(ctx context.Context, root string, opts Options) (Result, error) {
 				f.Type = TypeLocalGit
 				f.Warnings = append(f.Warnings, "git repo has no remote; add one with 'git remote add origin <url>'")
 			}
-			if branch, err := opts.Git.DefaultBranch(ctx, path, "main"); err == nil {
+			// P6-XP-05: scan stays offline — resolve the default branch from
+			// local refs only. Authoritative set-head --auto repair happens at
+			// materialization (hydrate/worktree), not during the walk.
+			if branch, src, err := opts.Git.LocalDefaultBranch(ctx, path, "main"); err == nil {
 				f.DefaultBranch = branch
+				if src == dsgit.DefaultBranchStored {
+					f.Warnings = append(f.Warnings, "default branch not set locally (origin/HEAD missing); using \"main\" — will be resolved authoritatively at materialization")
+				}
 			} else {
 				f.DefaultBranch = "main"
-				f.Warnings = append(f.Warnings, err.Error())
+				f.Warnings = append(f.Warnings, "default branch unresolved offline; using \"main\" — will be resolved authoritatively at materialization")
 			}
 			result.Findings = append(result.Findings, f)
 			return filepath.SkipDir

@@ -61,6 +61,8 @@ working tree bytes, .git internals, dependencies
 
 **Requirement:** a `git_repo` entry MUST have a non-empty, validated `remote_key`. A git repository with no usable remote is classified `local_git` (below) — never adopted as a clonable `git_repo`. Adopting a no-remote repo as `git_repo` silently breaks hydration on every other device (`NOVCS-01`). `scan --adopt` applies the same remote validation `add` does.
 
+**Scan stays offline (`P6-XP-05`).** `scan.Walk` (and first-run `devstrap init`) resolve each repo's default branch from **local refs only** via `Runner.LocalDefaultBranch` — never a per-repo `git remote set-head origin --auto` network round-trip inside the walk. An unresolved default branch records `main` with a non-authoritative warning; authoritative resolution is deferred to materialization (see `08_GIT_MATERIALIZATION_AND_WORKTREES.md`). This keeps onboarding a many-repo tree filesystem-fast and usable offline.
+
 ### `local_git`
 
 A git repository with **no usable remote** (just ran `git init`, or the remote is not added yet). Tracked so the path appears everywhere, but its content syncs via an encrypted bundle (like `draft_project`), never via clone. Promote to `git_repo` once a remote is added (planned command: `devstrap promote <path> --git-remote <url>`; not yet implemented — today re-adopt via `devstrap add` after adding the remote).

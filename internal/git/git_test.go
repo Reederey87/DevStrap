@@ -488,6 +488,49 @@ esac
 	}
 }
 
+func TestLocalDefaultBranchReadsLocalSymbolicRefWithoutNetwork(t *testing.T) {
+	repo, r := initLocalDefaultBranchRepo(t)
+	runRealGit(t, r.Bin, repo, "update-ref", "refs/remotes/origin/trunk", "HEAD")
+	runRealGit(t, r.Bin, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk")
+
+	start := time.Now()
+	branch, source, err := r.LocalDefaultBranch(context.Background(), repo, "main")
+	if err != nil {
+		t.Fatalf("LocalDefaultBranch err = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("LocalDefaultBranch took %s, want local-only prompt return", elapsed)
+	}
+	if branch != "trunk" || source != DefaultBranchRemote {
+		t.Fatalf("got (%q,%q), want (trunk, remote)", branch, source)
+	}
+}
+
+func TestLocalDefaultBranchFallsBackToStoredRefOffline(t *testing.T) {
+	repo, r := initLocalDefaultBranchRepo(t)
+	runRealGit(t, r.Bin, repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+	branch, source, err := r.LocalDefaultBranch(context.Background(), repo, "main")
+	if err != nil {
+		t.Fatalf("LocalDefaultBranch err = %v", err)
+	}
+	if branch != "main" || source != DefaultBranchStored {
+		t.Fatalf("got (%q,%q), want (main, stored)", branch, source)
+	}
+}
+
+func TestLocalDefaultBranchErrorsWhenNoLocalRefOffline(t *testing.T) {
+	repo, r := initLocalDefaultBranchRepo(t)
+
+	branch, source, err := r.LocalDefaultBranch(context.Background(), repo, "main")
+	if err == nil {
+		t.Fatal("LocalDefaultBranch succeeded, want offline error")
+	}
+	if branch != "" || source != "" {
+		t.Fatalf("got (%q,%q), want empty branch and source", branch, source)
+	}
+}
+
 func TestRemoteDefaultBranchParsesSymref(t *testing.T) {
 	script := writeFakeGit(t, "#!/bin/sh\nprintf 'ref: refs/heads/develop\\tHEAD\\nabc123\\tHEAD\\n'\nexit 0\n")
 	r := Runner{Bin: script, Timeout: 5 * time.Second}
@@ -664,6 +707,47 @@ func TestCloneWithOptionsInitializesSubmodules(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dest, "vendor", "sub", "README.md")); err != nil {
 		t.Fatalf("submodule not materialized: %v", err)
+	}
+}
+
+func initLocalDefaultBranchRepo(t *testing.T) (string, Runner) {
+	t.Helper()
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runRealGit(t, gitBin, repo, "init")
+	runRealGit(t, gitBin, repo, "config", "user.name", "t")
+	runRealGit(t, gitBin, repo, "config", "user.email", "t@example.com")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("repo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runRealGit(t, gitBin, repo, "add", "README.md")
+	runRealGit(t, gitBin, repo, "commit", "-m", "init")
+	// Blackhole remote (RFC 5737 TEST-NET-1, non-routable): any accidental
+	// network call (a reintroduced set-head --auto / ls-remote) HANGS until the
+	// runner Timeout rather than failing fast, so it trips the sub-second
+	// elapsed budget the no-network tests assert. The correct local-only path
+	// (symbolic-ref / rev-parse) returns in milliseconds.
+	runRealGit(t, gitBin, repo, "remote", "add", "origin", "https://192.0.2.1/none.git")
+	return repo, Runner{Bin: gitBin, Timeout: 5 * time.Second}
+}
+
+func runRealGit(t *testing.T, gitBin, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(gitBin, args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_NOSYSTEM=true",
+		"GIT_TERMINAL_PROMPT=0",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
 }
 
