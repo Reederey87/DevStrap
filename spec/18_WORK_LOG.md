@@ -27,6 +27,17 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — hermetic SSH alias forge tests (P6-QUAL-04)
+
+Changed:
+- `internal/cli/forge_test.go`: added a temp `ssh` executable PATH shim that emits canned `ssh -G` output by hostname case; existing alias/forge tests now use the stub and no longer depend on the machine's OpenSSH config. Added `TestSSHAliasResolutionUsesStub` to prove the marker hostname comes from the stub.
+- Specs/audits: `spec/16_TEST_PLAN.md` marks the P6-QUAL-04 inventory shipped; `docs/audits/README.md` moves `P6-QUAL-04` to *Recently shipped* and reconciles Pass-6 to 18 open rows.
+
+Validated:
+- `gofmt -w cmd internal`
+- `GOCACHE=/tmp/devstrap-gocache-qual04 go test -race ./internal/cli/ ./...`
+- Pass-6 open-table rows recounted: 18.
+
 ## 2026-07-03 — fix(materialize): rebuild before env hydrate (P6-GIT-03)
 
 Changed:
