@@ -31,6 +31,43 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — docs(quickstart): git carrier is the documented default hub; r2:// demoted to scale-up (AD-1 swap)
+
+Changed:
+- `README.md`: quickstart step 6 now teaches the zero-infrastructure git carrier first (create an
+  empty private repo, set `hub: "git@github.com:you/devstrap-hub.git"`, `devstrap sync` — no bucket,
+  no token plane, no `hub login`) with the operational caveats (run `hub compact` periodically —
+  deleting files never shrinks a git repo; GitHub hard limits: 100 MB/object, ~2 GiB/push); the R2/S3
+  block moved to a new "Scaling up: S3-compatible hubs (R2/S3)" subsection; the pair-a-second-device
+  runbook generalizes "R2/S3 hub" → "remote hubs", uses the git-carrier config line, and demotes both
+  `hub login` steps to one R2/S3-only parenthetical (keeping the keychain-ordering trap); feature
+  bullet, alpha status note, and the `sync` command-reference row lead with the carrier.
+- `internal/cli/init.go` (hint strings only, no behavior): all three next-step hints teach
+  `set 'hub: git@github.com:<you>/<hub-repo>.git' (any private repo; or r2://<bucket>)`; the bare
+  `--join` warning and the copy-id recovery hint say "remote hubs (git carrier, r2/s3)" / "remote
+  hubs only" instead of "r2/s3 hubs".
+- `spec/13`: command inventory, init-hint paragraph (verbatim-matched to the new strings, P6-CLI-05
+  note extended with the AD-1 swap), sync examples/options reordered git-first, backend-selection
+  paragraph leads with the carrier, `hub login` marked R2/S3-only. Also corrected an inaccurate
+  claim: no `ssh-add` remedy hint is emitted on auth failures (none exists in code — confirmed by
+  the §F.2 live dogfood); recorded as a polish follow-up instead.
+- `spec/19`: header callout flips "remaining AD-1 slice" → shipped (with the forge object-limit
+  caveat); §E.1/§E.3 teach the carrier config and mark `hub login` R2/S3-only.
+- `spec/14` AD-1 row: dogfood + quickstart-default-swap slices flipped to `[x]` (2026-07-04);
+  `spec/00` (current position + product-promise sync comment) and `spec/02` (AD-1 success-metric
+  status) updated to match. `docs/audits/README.md` unchanged (AD-1 is a spec/14 direction item).
+
+Validated:
+- `gofmt -l cmd internal` (clean); `golangci-lint run`; `GOCACHE=/tmp/devstrap-gocache go test -race ./...`;
+  `go run ./cmd/spec-drift --base origin/main --head HEAD`; manual `devstrap init` in a temp home to
+  eyeball all three new hint forms.
+
+Follow-ups:
+- Remaining AD-1 slices (spec/14): `devstrap hub init <git-url>` bootstrap (in flight), local-folder /
+  cloud-drive-folder carrier, partial-clone cache optimization.
+- Polish: emit an `ssh-add`/access remedy hint for auth-class git-carrier failures (spec/13 no longer
+  overclaims it).
+
 ## 2026-07-04 — fix(doctor): probe git-carrier hubs in the --remote workspace-id check
 
 Changed:

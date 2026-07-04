@@ -8,8 +8,10 @@ tracks_code: [internal/hub/**, internal/cli/hub.go]
 > SaaS direction (`SCALE-*`, Fly.io compute, managed Postgres control plane) remains
 > FUTURE.** This guide is the provisioning runbook for both: it doubles as a single-owner
 > deployment recipe usable today and the SaaS hosting direction for later. The shipped sync
-> transport is `devstrap sync` with `hub: r2://<bucket>` (the `aws-sdk-go-v2` S3 adapter;
-> `--hub-file <path>` stays for tests). Env/config keys below marked *shipped* are live;
+> transport is `devstrap sync` with `hub: git+ssh://…` / `git@host:path.git` (the
+> zero-infrastructure git carrier — the documented default quickstart) or `hub: r2://<bucket>`
+> (the `aws-sdk-go-v2` S3 adapter — this guide's scale/power path; `--hub-file <path>`
+> stays for tests). Env/config keys below marked *shipped* are live;
 > those marked *planned* name the intended SaaS surface and are provisional until `SCALE-*`
 > ships. See `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` (decisions 5 and 6) and
 > `14_MVP_ROADMAP_AND_BACKLOG.md`.
@@ -32,9 +34,12 @@ tracks_code: [internal/hub/**, internal/cli/hub.go]
 > **private** repo (contents are ciphertext, but repo metadata/sizes are visible to the
 > host). `?branch=<name>` selects a carrier branch (default `main`). Run `hub compact`
 > periodically — it is what bounds the carrier repo's history (a squashed rewrite the host
-> then garbage-collects). The rest of this guide (provisioned R2/S3) is the
-> *scale/power / self-hosting* path; making the git carrier the documented default
-> quickstart is the remaining `AD-1` slice tracked in `14_MVP_ROADMAP_AND_BACKLOG.md`.
+> then garbage-collects) — and mind forge object limits (GitHub: 100 MB/object hard cap,
+> so larger env/draft blobs need an S3-compatible hub, and ~2 GiB/push). The git carrier
+> **is the documented default quickstart** since the `AD-1` swap (2026-07-04, README +
+> `init` hints; forge-proven by the §F.2 live dogfood); the rest of this guide (provisioned
+> R2/S3) is the *scale/power / self-hosting* path. Remaining `AD-1` slices
+> (`hub init <git-url>` bootstrap, folder carrier) are tracked in `14_MVP_ROADMAP_AND_BACKLOG.md`.
 
 ## Scope
 
@@ -622,9 +627,10 @@ or quarantined ciphertext, never someone else's plaintext.
 
 ```bash
 devstrap init ~/Code                 # mints the workspace id; does NOT self-mint a WCK yet
-# point sync at the hub: `hub: r2://<bucket>` in ~/.devstrap/config.yaml, plus
-# DEVSTRAP_HUB_S3_ENDPOINT (or `?endpoint=` on the URI) — see section A.4/B
-devstrap hub login                   # store the R2/S3 secret in the keychain slot
+# point sync at the hub in ~/.devstrap/config.yaml — the zero-infra default is an empty
+# private git repo (`hub: "git@github.com:you/devstrap-hub.git"`, no login needed).
+# For R2/S3 use `hub: r2://<bucket>` plus DEVSTRAP_HUB_S3_ENDPOINT (or `?endpoint=`)
+# and run `devstrap hub login` to store the secret in the keychain slot — see A.4/B and E.3.
 devstrap sync                        # founds epoch 1 against the empty hub and pushes the namespace map
 devstrap status                      # the `Workspace ID:` line (also `--json` → workspace_id)
 
@@ -671,12 +677,13 @@ one.
 > `event_verification_failure` conflicts and replay automatically once you enroll + approve
 > that device (`conflicts list` shows them; nothing is lost).
 
-### E.3 Joiner — log in to the hub (order matters)
+### E.3 Joiner — log in to the hub (order matters; R2/S3 only)
 
 ```bash
-# same hub config as the founder: `hub: r2://<bucket>` in ~/.devstrap/config.yaml
-# plus DEVSTRAP_HUB_S3_ENDPOINT — `hub login` stores only the credential pair
-devstrap hub login   # store the R2/S3 secret — AFTER the id-adopting init in E.2
+# same hub config as the founder in ~/.devstrap/config.yaml — git carrier
+# (`hub: "git@github.com:you/devstrap-hub.git"`) needs no login at all; for R2/S3
+# (`hub: r2://<bucket>` plus DEVSTRAP_HUB_S3_ENDPOINT) `hub login` stores the credential pair
+devstrap hub login   # R2/S3 only: store the secret — AFTER the id-adopting init in E.2
 
 devstrap devices pairing-code   # the joiner's own code + fingerprint, to send back to the founder
 ```

@@ -252,7 +252,7 @@ failed       last job failed
 For personal/MVP use:
 
 - new machine from zero to visible `~/Code` tree in under 5 minutes;
-- **`AD-1` (first slice shipped 2026-07-04):** first run on a new machine succeeds with zero cloud provisioning — the private-git-repo hub carrier (`hub: git+ssh://…`, safe because the hub only holds ciphertext + signed events) needs no bucket, only a private repo the user can already push to. Remaining direction: make it the documented quickstart default (the README/`spec/19` quickstart still teaches provisioned R2 first, `P6-CLI-05`) and add a local/cloud-drive-folder carrier; `r2://` stays the scale/power option;
+- **`AD-1` (first slice shipped 2026-07-04):** first run on a new machine succeeds with zero cloud provisioning — the private-git-repo hub carrier (`hub: git+ssh://…`, safe because the hub only holds ciphertext + signed events) needs no bucket, only a private repo the user can already push to. The quickstart-default swap shipped 2026-07-04: README/`init` hints/`spec/19` now teach the git carrier first and `r2://` is the documented scale/power option (forge-proven by the `spec/19` §F.2 live dogfood). Remaining direction: `devstrap hub init <git-url>` bootstrap and a local/cloud-drive-folder carrier;
 - materialize average repo in under 2 minutes, excluding dependency install;
 - after `devstrap sync` completes, the full `~/Code` namespace tree is present on the device with every clonable repo eagerly materialized via blobless clone — no skeleton placeholders left behind (eager-clone target, workstream `EAGER-*`);
 - the same namespace tree appears automatically on every enrolled device in the fleet, with no manual file copying;

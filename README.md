@@ -95,11 +95,11 @@ Materialization is **eager**: after `devstrap sync`, the whole `~/Code` tree is 
 - 🔐 **Secrets mapping** — repo‑specific env profiles, age‑encrypted at rest or referenced from 1Password; subprocesses get a sanitized, no‑secret‑leak environment.
 - 🤖 **Agent worktrees** — every agent task runs in an isolated worktree off the fetched remote default branch, with a wrapper‑level command/file policy and forge‑aware PR/MR creation (`gh`/`glab`/`tea`).
 - 🧰 **Mac‑first, Linux‑compatible** — one portable Go binary; platform behavior sits behind adapters.
-- 🛰️ **Zero‑knowledge sync hub** — a two‑plane hub (signed event log + content‑addressed encrypted blob store) on Cloudflare R2/S3, behind one pluggable `Hub` interface.
+- 🛰️ **Zero‑knowledge sync hub** — a two‑plane hub (signed event log + content‑addressed encrypted blob store) through **any private git repo you can already push to** (zero infrastructure) or Cloudflare R2/S3, behind one pluggable `Hub` interface.
 
 ## Project status
 
-> **Alpha.** The local engine and the agent loop are shipped and tested; the cloud‑sync layer has landed and the R2/S3 hub backend is shipped — point `hub: r2://<bucket>` at a bucket, supply `DEVSTRAP_HUB_S3_*` credentials, and `devstrap sync` talks to it.
+> **Alpha.** The local engine and the agent loop are shipped and tested; the cloud‑sync layer has landed with two shipped hub backends — the zero‑infrastructure **git carrier** (point `hub:` at any private git repo, e.g. `git@github.com:you/devstrap-hub.git`; no bucket, no credentials plane) and **R2/S3** (`hub: r2://<bucket>` + `DEVSTRAP_HUB_S3_*` credentials) — and `devstrap sync` talks to either.
 
 **Shipped**
 
@@ -175,25 +175,50 @@ devstrap agent run work/acme/api --engine generic --task "run tests" -- npm test
 devstrap agent pr <run-id> --dry-run
 
 # 6. Point at a hub, then sync the namespace map + materialize the tree.
-#    Configure the hub once in ~/.devstrap/config.yaml:
-#      hub: r2://<bucket>
-#    and supply S3/R2 credentials via the environment:
-#      export DEVSTRAP_HUB_S3_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
-#      export DEVSTRAP_HUB_S3_ACCESS_KEY_ID=…   # falls back to AWS_ACCESS_KEY_ID
-#      export DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY=…  # falls back to AWS_SECRET_ACCESS_KEY
-#    (credentials can also be stored via `devstrap hub login` or a 1Password `op://` ref).
-#    See spec/19_CLOUD_PROVISIONING_GUIDE.md for the full R2 setup.
+#    Zero infrastructure: any private git repo you can push to IS the hub.
+#    Create an empty private repo:
+gh repo create you/devstrap-hub --private
+#    then configure it once in ~/.devstrap/config.yaml:
+#      hub: "git@github.com:you/devstrap-hub.git"
+#    Auth is your existing ssh key / git credential helper, running non-interactively
+#    (load the key with `ssh-add`). No bucket, no token plane, no `hub login`.
 devstrap sync
 
-# For local testing without a bucket, a file-backed hub still works:
+# Run `devstrap hub compact` periodically: deleting files never shrinks a git repo —
+# compact squashes the carrier to a single commit so the host can GC old history.
+# GitHub hard limits apply to the carrier: 100 MB/object (large env/draft blobs need
+# an S3-compatible hub — see "Scaling up" below) and ~2 GiB/push.
+
+# For local testing without any remote, a file-backed hub still works:
 #   devstrap sync --hub-file /tmp/devstrap-hub/events.json
 ```
 
 Prefer not to install? Every command also works via `go run ./cmd/devstrap <cmd> …`.
 
+### Scaling up: S3-compatible hubs (R2/S3)
+
+The git carrier is the recommended default — the hub only ever holds ciphertext plus signed
+events, so a plain private repo is a safe zero-knowledge boundary. Reach for an S3-compatible
+bucket instead when you need blobs over GitHub's 100 MB object limit, higher push rates, or
+object-storage economics:
+
+```bash
+# ~/.devstrap/config.yaml
+#   hub: r2://<bucket>
+export DEVSTRAP_HUB_S3_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+export DEVSTRAP_HUB_S3_ACCESS_KEY_ID=…      # falls back to AWS_ACCESS_KEY_ID
+export DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY=…  # falls back to AWS_SECRET_ACCESS_KEY
+# (credentials can also be stored via `devstrap hub login` or a 1Password `op://` ref)
+devstrap sync
+```
+
+See [`spec/19_CLOUD_PROVISIONING_GUIDE.md`](spec/19_CLOUD_PROVISIONING_GUIDE.md) for the full
+R2 setup, credential custody options, and the multi-device runbook.
+
 ### Pair a second device
 
-The R2/S3 hub keys everything under `workspaces/<workspace_id>/`, so devices converge only when
+Remote hubs (the git carrier and R2/S3) key everything under `workspaces/<workspace_id>/`,
+so devices converge only when
 they share **one** workspace id. The **founder** mints it at `init`; every later device
 **adopts** it — a bare `devstrap init` mints a *fresh* id and keys a disjoint prefix, so it
 never sees the founder's content. The workspace id is a non‑secret prefix selector (excluded
@@ -207,17 +232,17 @@ the fingerprint (read aloud over a trusted channel) is what authorizes the keys.
 ```bash
 # Founder — found the workspace and print the pairing code
 devstrap init ~/Code
-# set `hub: r2://<bucket>` in ~/.devstrap/config.yaml (+ DEVSTRAP_HUB_S3_ENDPOINT) — step 6 above
-devstrap hub login                          # store the R2/S3 secret (do this AFTER init)
+# set `hub: "git@github.com:you/devstrap-hub.git"` in ~/.devstrap/config.yaml — step 6 above
 devstrap sync                               # founds the workspace, pushes the namespace map
 devstrap devices pairing-code               # stdout: devstrap-pair1:...  stderr: founder fingerprint
 
-# Joiner — adopt the id and pin the founder in one step, then log in to the hub
+# Joiner — adopt the id and pin the founder in one step
 # (fleets >2 devices: pin every existing device the same way — unpinned signers'
 #  events quarantine and replay once approved)
 devstrap init ~/Code --join --code '<founder-code>' --fingerprint <founder-fingerprint>
-devstrap hub login                          # AFTER the id-adopting init (the credential slot keys on the workspace id)
-# joiner needs the same `hub: r2://<bucket>` config.yaml entry as the founder
+# joiner needs the same `hub:` config.yaml entry as the founder
+# (R2/S3 hubs only: run `devstrap hub login` on each device AFTER its id-adopting init —
+#  the credential slot keys on the workspace id. The git carrier needs no login.)
 devstrap devices pairing-code               # the joiner's own code + fingerprint, sent back to the founder
 
 # Founder — approve the joiner in one command, then both sync
@@ -250,7 +275,7 @@ devices revoke` is the response to a *known* key compromise.
 | `devstrap hydrate` | Clone a skeleton Git repository |
 | `devstrap open` | Hydrate and open a namespace path in an editor (`--cursor`/`--code`) |
 | `devstrap materialize` | Eagerly materialize skeleton projects (clone repos, hydrate env) |
-| `devstrap sync` | Push/pull namespace events and materialize the tree (hub from config, e.g. `hub: r2://<bucket>`; `--hub-file <path>` overrides for local tests) |
+| `devstrap sync` | Push/pull namespace events and materialize the tree (hub from config: `hub: git@github.com:you/hub.git` — any private git repo, the zero-infra default — or `hub: r2://<bucket>`; `--hub-file <path>` overrides for local tests) |
 | `devstrap run-loop` | Run scan + sync + materialize on an interval (portable, no daemon) |
 | `devstrap worktree` | Manage isolated worktrees (`new`/`status`/`finalize`/`list`/`remove`/`cleanup`/`unlock`) |
 | `devstrap agent` | Run agents in isolated fresh worktrees (`run`/`list`/`show`/`pr`) |
@@ -282,7 +307,7 @@ Components:
 
 - **`devstrap`** — the CLI for workspace setup, status, hydration, worktrees, env, sync, and agents (shipped).
 - **`devstrapd`** — a local daemon for reconciliation, watchers, and a local API (planned).
-- **DevStrap Hub** — a two‑plane zero‑knowledge sync service: a signed HLC namespace‑map event log plus a content‑addressed encrypted blob store, on Cloudflare R2/S3 behind one pluggable `Hub` interface (shipped; a hosted control plane for device enrollment is still planned).
+- **DevStrap Hub** — a two‑plane zero‑knowledge sync service: a signed HLC namespace‑map event log plus a content‑addressed encrypted blob store, through any private git repo (the zero‑infra carrier) or Cloudflare R2/S3, behind one pluggable `Hub` interface (shipped; a hosted control plane for device enrollment is still planned).
 
 The full design corpus lives under [`spec/`](spec/) — start with [`spec/00_START_HERE.md`](spec/00_START_HERE.md).
 
@@ -292,7 +317,7 @@ Capability layers (see [`spec/14_MVP_ROADMAP_AND_BACKLOG.md`](spec/14_MVP_ROADMA
 
 1. **Local CLI proof** — scan, register, hydrate, fresh worktrees, env profiles. ✅
 2. **Agent workspaces** — one worktree per task, fresh remote base, logs, forge‑agnostic PR/MR. ✅
-3. **Multi‑device sync** — eager materialization, encrypted draft/env blobs, the R2 zero‑knowledge hub. 🚧
+3. **Multi‑device sync** — eager materialization, encrypted draft/env blobs, the zero‑knowledge hub (git carrier + R2/S3). 🚧
 4. **Mac daemon** — LaunchAgent, FSEvents watcher, shell/editor integration. ⏳
 5. **Optional StrapFS** — File Provider / FUSE evaluation. ⏳ (deliberately deferred)
 
