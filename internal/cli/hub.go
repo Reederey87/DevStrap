@@ -521,7 +521,9 @@ func newHubInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 					return nil
 				}
 				if !force {
-					return appError{code: exitConflict, err: fmt.Errorf("hub already configured as %s; refusing to replace with %s (use --force to overwrite)", current, hubURI)}
+					// The current value is hand-editable config and could carry
+					// embedded credentials; strip userinfo before echoing it.
+					return appError{code: exitConflict, err: fmt.Errorf("hub already configured as %s; refusing to replace with %s (use --force to overwrite)", redact.URL(current), hubURI)}
 				}
 			}
 
