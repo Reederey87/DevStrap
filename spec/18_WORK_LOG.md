@@ -27,6 +27,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — fix(ignore): ShouldPruneDir bare-name fallback defeated anchored/negation patterns (P6-XP-01)
+
+Changed:
+- `internal/ignore/ignore.go`: `ShouldPruneDir` no longer re-evaluates patterns against the directory's bare name as a fallback when the full-path match misses. `relSlash` is now the sole match target; the empty-path guard (`relSlash == "" -> name`) is kept only for a caller with no path at all. Audited both live callers (`internal/scan/scan.go`, `internal/draftbundle/draftbundle.go`) — both already compute `relSlash`/`rel` via `filepath.Rel` against their walk root for every non-root directory, so no caller changes were required.
+- `internal/ignore/ignore_test.go`: added `TestShouldPruneDirAnchoredPatternDoesNotPruneNested` (`/dist/` must not prune `packages/app/dist`), `TestShouldPruneDirNegationReincludes` (`build/` + `!keep/build/` keeps `keep/build`), `TestShouldPruneDirRootLevelStillPruned` (`/dist/` still prunes top-level `dist`).
+- Ledger: `docs/audits/README.md` — `P6-XP-01` moved to *Recently shipped*; Pass-6 header **19 → 18 open of 43** (open-table rows re-counted: 18).
+- `spec/11_IGNORE_AND_LOCAL_GARBAGE.md`: the `P6-XP-01` section rewritten from problem/actionable-steps to a `SHIPPED`/`**Resolved.**` writeup matching the ledger convention.
+
+Validated:
+- `gofmt -w cmd internal`
+- `GOCACHE=/tmp/devstrap-gocache-xp01 go test -race ./internal/ignore/... ./internal/scan/...` — pass
+- `GOCACHE=/tmp/devstrap-gocache-xp01 go test -race ./...` — full suite pass, including `internal/draftbundle`
+
+Follow-ups:
+- None for this finding. `P6-XP-02` (gitignore-semantics divergence) and `P6-XP-06` (scanner hardwires the defaults-only matcher) remain separately tracked, open Pass-6 findings.
+
 ## 2026-07-03 — fix(agent): diff committed work against recorded base (P6-GIT-02)
 
 Changed:
