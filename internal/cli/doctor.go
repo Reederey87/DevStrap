@@ -226,6 +226,7 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 			results = append(results, checkSkippedEvents(ctx, store)...)
 			results = append(results, checkWorkspaceKeyAge(ctx, opts, store)...)
 			results = append(results, checkForgeCLIs(ctx, opts, store)...)
+			results = append(results, checkAgentRunSweep(ctx, opts, store)...)
 			results = append(results, checkBloblessCaveat(ctx, store)...)
 		}
 	} else if os.IsNotExist(err) {
@@ -235,6 +236,27 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 	}
 	results = append(results, checkRepoLocks(paths.Home)...)
 	return results
+}
+
+func checkAgentRunSweep(ctx context.Context, opts *options, store *state.Store) []checkResult {
+	_ = opts
+	reconciled, stillRunning, err := sweepStaleAgentRuns(ctx, store)
+	if err != nil {
+		return []checkResult{{Name: "agent run sweep", Status: checkWarn, Detail: err.Error()}}
+	}
+	status := checkOK
+	if reconciled > 0 {
+		status = checkWarn
+	}
+	result := checkResult{
+		Name:   "agent run sweep",
+		Status: status,
+		Detail: fmt.Sprintf("%d reconciled to interrupted; %d still running", reconciled, stillRunning),
+	}
+	if reconciled > 0 {
+		result.Remedy = "review interrupted runs with `devstrap agent show`; rerun the agent before PR unless using --allow-incomplete"
+	}
+	return []checkResult{result}
 }
 
 func checkTool(name string, required bool) checkResult {

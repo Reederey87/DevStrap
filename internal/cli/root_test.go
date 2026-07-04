@@ -243,7 +243,7 @@ func TestInitStatusAndDBCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stdout = %q stderr = %q err = %v", stdout, stderr, err)
 	}
-	if !strings.Contains(stdout, "schema version: 20") || !strings.Contains(stdout, "sqlite quick_check: ok") || !strings.Contains(stdout, "sqlite foreign_key_check: ok") {
+	if !strings.Contains(stdout, "schema version: 21") || !strings.Contains(stdout, "sqlite quick_check: ok") || !strings.Contains(stdout, "sqlite foreign_key_check: ok") {
 		t.Fatalf("stdout = %q, want db status", stdout)
 	}
 	syncHubPath := filepath.Join(t.TempDir(), "hub.json")
@@ -1159,6 +1159,51 @@ func TestAgentRunRecordsLogsDiffAndPRStaleGate(t *testing.T) {
 		t.Fatalf("agent log leaked provider env: %s", logRaw)
 	}
 
+	_, _, err = executeForTest("--home", home, "agent", "run", "work/acme/agent-repo", "--engine", "generic", "--task", "failing command", "--", "false")
+	if err == nil {
+		t.Fatal("expected failing agent command")
+	}
+	stdout, stderr, err = executeForTest("--home", home, "agent", "list", "--json")
+	if err != nil {
+		t.Fatalf("agent list after failed run stdout = %q stderr = %q err = %v", stdout, stderr, err)
+	}
+	var afterFailed []state.AgentRun
+	if err := json.Unmarshal([]byte(stdout), &afterFailed); err != nil {
+		t.Fatalf("agent list JSON after failed run = %q: %v", stdout, err)
+	}
+	var failedRun state.AgentRun
+	for _, run := range afterFailed {
+		if run.Status == "failed" {
+			failedRun = run
+			break
+		}
+	}
+	if failedRun.ID == "" {
+		t.Fatalf("agent runs = %+v, want failed run", afterFailed)
+	}
+	_, stderr, err = executeForTest("--home", home, "agent", "pr", failedRun.ID)
+	if err == nil {
+		t.Fatal("expected failed run to be blocked from agent pr")
+	}
+	if !strings.Contains(stderr, "status is \"failed\", not complete") {
+		t.Fatalf("agent pr failed-run stderr = %q, want status gate", stderr)
+	}
+	assertAppErrorCode(t, err, exitConflict)
+	remoteRefs := runGitOutput(t, tmp, "--git-dir", remote, "for-each-ref", "--format=%(refname:short)", "refs/heads/agent")
+	if strings.Contains(remoteRefs, failedRun.Branch) {
+		t.Fatalf("failed run branch %s was pushed despite status gate:\n%s", failedRun.Branch, remoteRefs)
+	}
+	stdout, stderr, err = executeForTest("--home", home, "agent", "pr", failedRun.ID, "--dry-run", "--allow-incomplete")
+	if err != nil {
+		t.Fatalf("agent pr failed-run override stdout = %q stderr = %q err = %v", stdout, stderr, err)
+	}
+	if !strings.Contains(stderr, "warning: agent run "+failedRun.ID+" status is \"failed\", not complete") {
+		t.Fatalf("agent pr failed-run override stderr = %q, want warning", stderr)
+	}
+	if !strings.Contains(stdout, "Would create PR") {
+		t.Fatalf("agent pr failed-run override stdout = %q, want dry-run summary", stdout)
+	}
+
 	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("advanced\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1226,6 +1271,131 @@ func TestAgentRunRecordsLogsDiffAndPRStaleGate(t *testing.T) {
 	if !strings.Contains(string(glabArgs), "mr") || !strings.Contains(string(glabArgs), "create") {
 		t.Fatalf("glab argv = %q, want mr create", glabArgs)
 	}
+}
+
+func TestAgentRunSweepReconcilesDeadRunnerPID(t *testing.T) {
+	ctx := context.Background()
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+
+	store, projectID := seedAgentSweepRuns(t, home)
+	closeStore(store)
+
+	stdout, stderr, err := executeForTest("--home", home, "agent", "list", "--json")
+	if err != nil {
+		t.Fatalf("agent list stdout = %q stderr = %q err = %v", stdout, stderr, err)
+	}
+	var runs []state.AgentRun
+	if err := json.Unmarshal([]byte(stdout), &runs); err != nil {
+		t.Fatalf("agent list JSON = %q: %v", stdout, err)
+	}
+	statusByID := agentRunStatuses(runs)
+	if got := statusByID["arun_dead"]; got != "interrupted" {
+		t.Fatalf("arun_dead status after list = %q, want interrupted", got)
+	}
+	if got := statusByID["arun_live"]; got != "running" {
+		t.Fatalf("arun_live status after list = %q, want running", got)
+	}
+	if got := statusByID["arun_null"]; got != "running" {
+		t.Fatalf("arun_null status after list = %q, want running", got)
+	}
+
+	stdout, stderr, err = executeForTest("--home", home, "agent", "show", "arun_dead")
+	if err != nil {
+		t.Fatalf("agent show dead stdout = %q stderr = %q err = %v", stdout, stderr, err)
+	}
+	if !strings.Contains(stdout, "arun_dead\tinterrupted") {
+		t.Fatalf("agent show dead stdout = %q, want interrupted", stdout)
+	}
+
+	store, err = state.Open(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.InsertAgentRun(ctx, state.AgentRun{
+		ID:          "arun_pr_dead",
+		NamespaceID: projectID,
+		Engine:      "generic",
+		Task:        "dead pr",
+		Status:      "running",
+		RunnerPID:   deadProcessPID(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	closeStore(store)
+
+	_, stderr, err = executeForTest("--home", home, "agent", "pr", "arun_pr_dead", "--dry-run")
+	if err == nil {
+		t.Fatal("expected interrupted run to be blocked from agent pr")
+	}
+	if !strings.Contains(stderr, "status is \"interrupted\", not complete") {
+		t.Fatalf("agent pr interrupted stderr = %q, want interrupted status gate", stderr)
+	}
+	assertAppErrorCode(t, err, exitConflict)
+}
+
+func assertAppErrorCode(t *testing.T, err error, want int) {
+	t.Helper()
+	var app appError
+	if !errors.As(err, &app) {
+		t.Fatalf("error = %T %[1]v, want appError", err)
+	}
+	if app.code != want {
+		t.Fatalf("appError code = %d, want %d", app.code, want)
+	}
+}
+
+func seedAgentSweepRuns(t *testing.T, home string) (*state.Store, string) {
+	t.Helper()
+	ctx := context.Background()
+	store, err := state.Open(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.UpsertProject(ctx, state.UpsertProjectParams{
+		Path:      "work/acme/sweep",
+		Type:      "plain_folder",
+		LocalPath: filepath.Join(t.TempDir(), "sweep"),
+	})
+	if err != nil {
+		closeStore(store)
+		t.Fatal(err)
+	}
+	for _, run := range []state.AgentRun{
+		{ID: "arun_dead", NamespaceID: project.ID, Engine: "generic", Task: "dead", Status: "running", RunnerPID: deadProcessPID(t)},
+		{ID: "arun_live", NamespaceID: project.ID, Engine: "generic", Task: "live", Status: "running", RunnerPID: os.Getpid()},
+		{ID: "arun_null", NamespaceID: project.ID, Engine: "generic", Task: "null", Status: "running"},
+	} {
+		if _, err := store.InsertAgentRun(ctx, run); err != nil {
+			closeStore(store)
+			t.Fatal(err)
+		}
+	}
+	return store, project.ID
+}
+
+func deadProcessPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	return pid
+}
+
+func agentRunStatuses(runs []state.AgentRun) map[string]string {
+	out := make(map[string]string, len(runs))
+	for _, run := range runs {
+		out[run.ID] = run.Status
+	}
+	return out
 }
 
 func runGit(t *testing.T, dir string, args ...string) {

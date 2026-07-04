@@ -209,6 +209,7 @@ type AgentRun struct {
 	LogPath     string `json:"log_path,omitempty"`
 	DiffSummary string `json:"diff_summary,omitempty"`
 	TestSummary string `json:"test_summary,omitempty"`
+	RunnerPID   int    `json:"runner_pid,omitempty"`
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -3812,9 +3813,9 @@ func (s *Store) InsertAgentRun(ctx context.Context, run AgentRun) (AgentRun, err
 	}
 	now := timestampNow()
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO agent_runs (id, namespace_id, worktree_id, engine, task, policy_id, status, base_ref, base_sha, branch, log_path, diff_summary, test_summary, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-`, run.ID, run.NamespaceID, nullEmpty(run.WorktreeID), run.Engine, run.Task, nullEmpty(run.PolicyID), run.Status, nullEmpty(run.BaseRef), nullEmpty(run.BaseSHA), nullEmpty(run.Branch), nullEmpty(run.LogPath), nullEmpty(run.DiffSummary), nullEmpty(run.TestSummary), now, now)
+INSERT INTO agent_runs (id, namespace_id, worktree_id, engine, task, policy_id, status, base_ref, base_sha, branch, log_path, diff_summary, test_summary, runner_pid, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+`, run.ID, run.NamespaceID, nullEmpty(run.WorktreeID), run.Engine, run.Task, nullEmpty(run.PolicyID), run.Status, nullEmpty(run.BaseRef), nullEmpty(run.BaseSHA), nullEmpty(run.Branch), nullEmpty(run.LogPath), nullEmpty(run.DiffSummary), nullEmpty(run.TestSummary), nullZero(int64(run.RunnerPID)), now, now)
 	if err != nil {
 		return AgentRun{}, fmt.Errorf("insert agent run: %w", err)
 	}
@@ -3834,15 +3835,28 @@ WHERE id = ?;
 	return nil
 }
 
+func (s *Store) UpdateAgentRunStatus(ctx context.Context, id, status string) error {
+	now := timestampNow()
+	_, err := s.db.ExecContext(ctx, `
+UPDATE agent_runs
+SET status = ?, updated_at = ?
+WHERE id = ?;
+`, status, now, id)
+	if err != nil {
+		return fmt.Errorf("update agent run status: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) AgentRunByID(ctx context.Context, id string) (AgentRun, error) {
 	var run AgentRun
 	err := s.db.QueryRowContext(ctx, `
 SELECT id, namespace_id, COALESCE(worktree_id, ''), engine, task, COALESCE(policy_id, ''), status,
        COALESCE(base_ref, ''), COALESCE(base_sha, ''), COALESCE(branch, ''), COALESCE(log_path, ''),
-       COALESCE(diff_summary, ''), COALESCE(test_summary, '')
+       COALESCE(diff_summary, ''), COALESCE(test_summary, ''), COALESCE(runner_pid, 0)
 FROM agent_runs
 WHERE id = ?;
-`, id).Scan(&run.ID, &run.NamespaceID, &run.WorktreeID, &run.Engine, &run.Task, &run.PolicyID, &run.Status, &run.BaseRef, &run.BaseSHA, &run.Branch, &run.LogPath, &run.DiffSummary, &run.TestSummary)
+`, id).Scan(&run.ID, &run.NamespaceID, &run.WorktreeID, &run.Engine, &run.Task, &run.PolicyID, &run.Status, &run.BaseRef, &run.BaseSHA, &run.Branch, &run.LogPath, &run.DiffSummary, &run.TestSummary, &run.RunnerPID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return AgentRun{}, fmt.Errorf("unknown agent run %q", id)
@@ -3856,7 +3870,7 @@ func (s *Store) ListAgentRuns(ctx context.Context) ([]AgentRun, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, namespace_id, COALESCE(worktree_id, ''), engine, task, COALESCE(policy_id, ''), status,
        COALESCE(base_ref, ''), COALESCE(base_sha, ''), COALESCE(branch, ''), COALESCE(log_path, ''),
-       COALESCE(diff_summary, ''), COALESCE(test_summary, '')
+       COALESCE(diff_summary, ''), COALESCE(test_summary, ''), COALESCE(runner_pid, 0)
 FROM agent_runs
 ORDER BY created_at DESC, id DESC;
 `)
@@ -3867,12 +3881,46 @@ ORDER BY created_at DESC, id DESC;
 	var runs []AgentRun
 	for rows.Next() {
 		var run AgentRun
-		if err := rows.Scan(&run.ID, &run.NamespaceID, &run.WorktreeID, &run.Engine, &run.Task, &run.PolicyID, &run.Status, &run.BaseRef, &run.BaseSHA, &run.Branch, &run.LogPath, &run.DiffSummary, &run.TestSummary); err != nil {
+		if err := rows.Scan(&run.ID, &run.NamespaceID, &run.WorktreeID, &run.Engine, &run.Task, &run.PolicyID, &run.Status, &run.BaseRef, &run.BaseSHA, &run.Branch, &run.LogPath, &run.DiffSummary, &run.TestSummary, &run.RunnerPID); err != nil {
 			return nil, fmt.Errorf("scan agent run: %w", err)
 		}
 		runs = append(runs, run)
 	}
 	return runs, rows.Err()
+}
+
+func (s *Store) RunningAgentRunsWithPID(ctx context.Context) ([]AgentRun, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, namespace_id, COALESCE(worktree_id, ''), engine, task, COALESCE(policy_id, ''), status,
+       COALESCE(base_ref, ''), COALESCE(base_sha, ''), COALESCE(branch, ''), COALESCE(log_path, ''),
+       COALESCE(diff_summary, ''), COALESCE(test_summary, ''), COALESCE(runner_pid, 0)
+FROM agent_runs
+WHERE status = 'running' AND runner_pid IS NOT NULL
+ORDER BY created_at DESC, id DESC;
+`)
+	if err != nil {
+		return nil, fmt.Errorf("list running agent runs with pid: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var runs []AgentRun
+	for rows.Next() {
+		var run AgentRun
+		if err := rows.Scan(&run.ID, &run.NamespaceID, &run.WorktreeID, &run.Engine, &run.Task, &run.PolicyID, &run.Status, &run.BaseRef, &run.BaseSHA, &run.Branch, &run.LogPath, &run.DiffSummary, &run.TestSummary, &run.RunnerPID); err != nil {
+			return nil, fmt.Errorf("scan running agent run: %w", err)
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
+func (s *Store) CountAgentRunsByStatus(ctx context.Context, status string) (int, error) {
+	var count int
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM agent_runs WHERE status = ?;
+`, status).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count agent runs by status: %w", err)
+	}
+	return count, nil
 }
 
 func filepathBaseSlash(path string) string {

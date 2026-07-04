@@ -97,6 +97,7 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 				Task:        taskName,
 				PolicyID:    policy,
 				Status:      "running",
+				RunnerPID:   os.Getpid(),
 				BaseRef:     wt.BaseRef,
 				BaseSHA:     wt.BaseSHA,
 				Branch:      wt.Branch,
@@ -145,6 +146,9 @@ func newAgentListCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			defer closeStore(store)
+			if _, _, err := sweepStaleAgentRuns(cmd.Context(), store); err != nil {
+				return err
+			}
 			runs, err := store.ListAgentRuns(cmd.Context())
 			if err != nil {
 				return err
@@ -173,6 +177,9 @@ func newAgentShowCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			defer closeStore(store)
+			if _, _, err := sweepStaleAgentRuns(cmd.Context(), store); err != nil {
+				return err
+			}
 			run, err := store.AgentRunByID(cmd.Context(), args[0])
 			if err != nil {
 				return err
@@ -191,6 +198,7 @@ func newAgentShowCommand(stdout io.Writer, opts *options) *cobra.Command {
 func newAgentPRCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var allowStaleBase bool
 	var dryRun bool
+	var allowIncomplete bool
 	var title string
 	var body string
 	var forgeFlag string
@@ -204,9 +212,19 @@ func newAgentPRCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			defer closeStore(store)
+			if _, _, err := sweepStaleAgentRuns(cmd.Context(), store); err != nil {
+				return err
+			}
 			run, err := store.AgentRunByID(cmd.Context(), args[0])
 			if err != nil {
 				return err
+			}
+			if run.Status != "complete" {
+				msg := fmt.Sprintf("agent run %s status is %q, not complete; rerun the agent, or pass --allow-incomplete", run.ID, run.Status)
+				if !allowIncomplete {
+					return appError{code: exitConflict, err: errors.New(msg)}
+				}
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s\n", msg)
 			}
 			if run.WorktreeID == "" {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("agent run %s has no worktree", run.ID)}
@@ -251,6 +269,7 @@ func newAgentPRCommand(stdout io.Writer, opts *options) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&allowStaleBase, "allow-stale-base", false, "allow PR creation even when the recorded base moved")
+	cmd.Flags().BoolVar(&allowIncomplete, "allow-incomplete", false, "allow PR creation when the agent run is not complete")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show the PR command without pushing or creating it")
 	cmd.Flags().StringVar(&title, "title", "", "PR title")
 	cmd.Flags().StringVar(&body, "body", "", "PR body")

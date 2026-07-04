@@ -31,6 +31,19 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — fix(agent): gate `agent pr` on run status + dead-PID sweep (P6-GIT-06)
+
+Changed:
+- `agent pr` now sweeps stale running agent rows, rejects non-`complete` runs with the same `exitConflict` class used by stale-base refusals, and supports `--allow-incomplete` as a warning-only override.
+- Migration `00021_agent_run_runner_pid.sql` adds nullable `agent_runs.runner_pid`; new runs record `os.Getpid()`, store reads use `COALESCE(runner_pid, 0)`, and the CLI sweep flips dead-PID `running` rows to `interrupted` while leaving live and pre-migration NULL-PID rows alone.
+- `agent list`, `agent show`, `agent pr`, and doctor run the sweep; doctor reports the reconciled and remaining-running counts. Specs 10/12/13 plus the audit ledger document the shipped behavior and schema version 21.
+- Tests: failed-run PR refusal/override and deterministic dead/live/NULL runner-PID sweep coverage.
+
+Validated:
+- `gofmt -l cmd internal`; `GOCACHE=$TMPDIR/gocache go test -race ./internal/cli/... ./internal/state/...`; `go build ./...`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOCACHE=$TMPDIR/gocache go test ./... -run 'TestEveryCommandIsDocumented|TestMigrationsDocumented'`.
+
+Follow-ups:
+- None for P6-GIT-06.
 ## 2026-07-04 — fix(scan): compile root .devstrapignore for scan pruning (P6-XP-06)
 
 Changed:

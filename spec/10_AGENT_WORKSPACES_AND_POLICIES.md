@@ -138,7 +138,7 @@ MVP enforcement options:
 4. terminal/session recording;
 5. later: sandbox/container.
 
-Current implementation has the shared `internal/childenv` environment sanitizer used by Git/editor/agent subprocesses. `devstrap agent run` supports the `generic` engine: it creates a fresh upstream worktree, runs explicit argv commands in that isolated cwd with a sanitized no-secret default environment, applies a wrapper-level command policy (`readonly`, `cautious`, `guarded`, or explicit `yolo-local`) plus a wrapper-level file path policy that denies explicit sensitive-path and outside-worktree references for non-`yolo-local` runs, records an `agent_runs` row, captures a `0600` log under `~/.devstrap/logs/agent-runs`, and stores a labeled Git diff summary split into `Committed since base:` (`BaseSHA..HEAD`) and `Uncommitted:` (`git status --short`) sections. If the post-create file policy denies the command, the just-created worktree is removed, its branch is deleted, and the DB row is marked removed. `devstrap agent pr` reuses the stale-base gate before pushing and creating a forge-aware PR/MR via `gh`/`glab`/`tea` when available, or a compare URL fallback for unsupported forges. OS-enforced sandboxing, project-env allowlists for agents, `agent cleanup`, and non-generic engine adapters remain future work; `doctor` now probes the matching forge CLI per adopted remote (`FORGE-04`/`GIT-05`).
+Current implementation has the shared `internal/childenv` environment sanitizer used by Git/editor/agent subprocesses. `devstrap agent run` supports the `generic` engine: it creates a fresh upstream worktree, runs explicit argv commands in that isolated cwd with a sanitized no-secret default environment, applies a wrapper-level command policy (`readonly`, `cautious`, `guarded`, or explicit `yolo-local`) plus a wrapper-level file path policy that denies explicit sensitive-path and outside-worktree references for non-`yolo-local` runs, records an `agent_runs` row with `status='running'` and the recorder PID, captures a `0600` log under `~/.devstrap/logs/agent-runs`, and stores a labeled Git diff summary split into `Committed since base:` (`BaseSHA..HEAD`) and `Uncommitted:` (`git status --short`) sections. If the post-create file policy denies the command, the just-created worktree is removed, its branch is deleted, and the DB row is marked removed. `devstrap agent list/show/pr` and `doctor` sweep `running` rows whose recorded PID is dead to `interrupted`; `devstrap agent pr` now refuses non-`complete` runs unless `--allow-incomplete` is explicit, then reuses the stale-base gate before pushing and creating a forge-aware PR/MR via `gh`/`glab`/`tea` when available, or a compare URL fallback for unsupported forges. OS-enforced sandboxing, project-env allowlists for agents, `agent cleanup`, and non-generic engine adapters remain future work; `doctor` now probes the matching forge CLI per adopted remote (`FORGE-04`/`GIT-05`).
 
 ## Enforcement reality (audit `AGEN-01..06`, `SECU-02`)
 
@@ -230,7 +230,7 @@ devstrap agent pr arun_01jz...
 Algorithm:
 
 ```text
-1. ensure agent run status is complete or reviewable
+1. sweep dead recorder PIDs to `interrupted` and require agent run status `complete` unless `--allow-incomplete` is explicit
 2. show diff summary (`Committed since base:` plus `Uncommitted:` sections)
 3. run configured validation
 4. fetch origin/<default_branch>
@@ -313,14 +313,14 @@ uncommitted, _ := r.Run(ctx, wt.Path, "status", "--short")
 // join with labeled "committed:" / "uncommitted:" sections
 ```
 
-### P6-GIT-06 — `agent pr` never checks run status
+### P6-GIT-06 — `agent pr` never checks run status — shipped 2026-07-04
 
 **Problem.** `newAgentPRCommand` (`internal/cli/agent.go:203`) proceeds through drift check, push, and PR creation (`:220-246`) without ever reading `run.Status`, so a failed run (`status='failed'`) opens a PR of broken work; a SIGKILL/crash also leaves the row stuck at `running` (`:95-99`, corrected only at `:112`) with no reconciliation, and that phantom run is also PR-able.
 
-**Actionable steps.**
-1. Reject unless `Status == "complete"` with a `--allow-incomplete` override that warns.
-2. Add an `agent_runs` runner-PID column migration (update spec/12) and have `doctor`/`agent list` sweep dead PIDs to `interrupted`.
-3. Testscript: failed run → `agent pr` exits invalid-config; `--allow-incomplete` proceeds to dry-run.
+**Shipped behavior.**
+1. `agent pr` rejects unless `Status == "complete"` with `exitConflict`, matching the stale-base refusal class; `--allow-incomplete` warns and proceeds.
+2. Migration `00021_agent_run_runner_pid.sql` records `agent_runs.runner_pid` for new runs. `agent list`, `agent show`, `agent pr`, and `doctor` sweep `running` rows whose recorder PID is dead to `interrupted`; rows with no recorded PID are left `running`.
+3. Tests cover failed-run refusal/override, dead-PID reconciliation before PR gating, live-PID preservation, and NULL-PID preservation.
 
 **Example.**
 ```sql
