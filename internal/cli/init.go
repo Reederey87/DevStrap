@@ -253,13 +253,14 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// is role-aware (P6-SEC-02): a joining device must be approved from
 			// an existing device before its events can sync.
 			if join {
-				// P4-SEC-07 pairing: r2/s3 hubs key everything under
-				// workspaces/<workspace_id>/, so a joiner that mints its own id
-				// reads an empty prefix and never sees the founder. Flat file
-				// hubs are unaffected. The hint (and warning, when the id is
-				// missing) walks the founder-status → copy-id → re-init path.
+				// P4-SEC-07 pairing: remote hubs (git carrier, r2/s3) key
+				// everything under workspaces/<workspace_id>/, so a joiner that
+				// mints its own id reads an empty prefix and never sees the
+				// founder. Flat file hubs are unaffected. The hint (and warning,
+				// when the id is missing) walks the founder-status → copy-id →
+				// re-init path.
 				if workspaceID == "" {
-					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: r2/s3 hubs key events by workspace id; without --workspace-id this device minted its own id and will not see the founder's hub data (file hubs are unaffected)\n")
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: remote hubs (git carrier, r2/s3) key events by workspace id; without --workspace-id this device minted its own id and will not see the founder's hub data (file hubs are unaffected)\n")
 				}
 				hint := "Joining an existing workspace. Next:\n"
 				var steps []string
@@ -269,7 +270,7 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 						"(this init already adopted the workspace id and pinned the founder when you passed --code)",
 						"devstrap devices pairing-code                                   # now generate THIS device's code; paste it on the founder",
 						"on the founding device: devstrap devices enroll --code '<code>' --approve --fingerprint <this device's fingerprint>",
-						"set 'hub: r2://<bucket>' in ~/.devstrap/config.yaml, then devstrap sync",
+						"set 'hub: git@github.com:<you>/<hub-repo>.git' (any private repo; or r2://<bucket>) in ~/.devstrap/config.yaml, then devstrap sync",
 					}
 					if !pinnedFounder {
 						steps[1] = "(this init already adopted the workspace id; pin the founder with the warning command before your first sync)"
@@ -281,14 +282,14 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 						"devstrap devices recipient --signing    # and its signing key",
 						"devstrap devices recipient --fingerprint  # and its fingerprint to compare out-of-band during approval",
 						"on an approved device: devstrap devices enroll <id> --age-recipient <rec> --signing-public-key <sig> --approve --fingerprint <fp>  # compare the fingerprint against 'devstrap devices recipient --fingerprint' here before approving",
-						"set 'hub: r2://<bucket>' in ~/.devstrap/config.yaml, then devstrap sync  # ingests the grant, then pushes your projects",
+						"set 'hub: git@github.com:<you>/<hub-repo>.git' (any private repo; or r2://<bucket>) in ~/.devstrap/config.yaml, then devstrap sync  # ingests the grant, then pushes your projects",
 					}
 				}
 				if workspaceID == "" {
 					// This init already minted a local id, so a plain re-run
 					// with --workspace-id would hit the mismatch refusal — the
 					// recovery hint must include removing the state home.
-					steps = append([]string{fmt.Sprintf("on the founding device: devstrap status  # copy its Workspace ID, then (r2/s3 hubs only — file hubs need no id) rm -r %s here and re-run: devstrap init --join --workspace-id <id>", paths.Home)}, steps...)
+					steps = append([]string{fmt.Sprintf("on the founding device: devstrap status  # copy its Workspace ID, then (remote hubs only — file hubs need no id) rm -r %s here and re-run: devstrap init --join --workspace-id <id>", paths.Home)}, steps...)
 				} else {
 					opts.progressf(stdout, "Adopted workspace id %s.\n", workspaceID)
 				}
@@ -297,7 +298,7 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 				}
 				opts.progressf(stdout, "%s", hint)
 			} else {
-				opts.progressf(stdout, "Next: devstrap status • devstrap scan --adopt • set 'hub: r2://<bucket>' in ~/.devstrap/config.yaml then devstrap sync\n")
+				opts.progressf(stdout, "Next: devstrap status • devstrap scan --adopt • set 'hub: git@github.com:<you>/<hub-repo>.git' (any private repo; or r2://<bucket>) in ~/.devstrap/config.yaml then devstrap sync\n")
 			}
 			return nil
 		},
