@@ -66,6 +66,30 @@ func TestShouldWarnWorkspaceIDMismatch(t *testing.T) {
 			hasEvents:  false,
 			want:       true,
 		},
+		{
+			name:       "joiner git cursor zero no events",
+			role:       "joiner",
+			hubID:      "git:ws_test",
+			pullCursor: 0,
+			hasEvents:  false,
+			want:       true,
+		},
+		{
+			name:       "founder git cursor zero no events",
+			role:       "founder",
+			hubID:      "git:ws_test",
+			pullCursor: 0,
+			hasEvents:  false,
+			want:       false,
+		},
+		{
+			name:       "joiner git cursor advanced no events",
+			role:       "joiner",
+			hubID:      "git:ws_test",
+			pullCursor: 100,
+			hasEvents:  false,
+			want:       false,
+		},
 	}
 
 	for _, tt := range tests {
