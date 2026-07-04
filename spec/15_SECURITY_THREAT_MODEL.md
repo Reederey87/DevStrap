@@ -105,6 +105,7 @@ Mitigation:
 
 - resolve the remote default branch, then fetch that upstream before worktree creation;
 - record base SHA;
+- record the agent diff summary against that base SHA (`BaseSHA..HEAD`) plus any uncommitted residue;
 - expose `devstrap worktree status <id>` to re-fetch the recorded base ref and detect drift;
 - enforce stale-base check before worktree finalization and agent PR creation;
 - never use local `main` or any other local default branch as agent base.

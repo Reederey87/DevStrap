@@ -106,7 +106,7 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			commandErr := runAgentProcess(cmd.Context(), wt, run, agentCommand, stdout)
-			diffSummary := agentDiffSummary(cmd.Context(), wt.Path)
+			diffSummary := agentDiffSummary(cmd.Context(), wt.Path, wt.BaseSHA)
 			status := "complete"
 			testSummary := "command exited 0"
 			if commandErr != nil {
@@ -478,10 +478,41 @@ func runAgentProcess(ctx context.Context, wt state.Worktree, run state.AgentRun,
 	return flushErr
 }
 
-func agentDiffSummary(ctx context.Context, worktreePath string) string {
+func agentDiffSummary(ctx context.Context, worktreePath, baseSHA string) string {
 	// P6-GIT-01: this helper only reads local status/diff state, so it does
 	// not need the materialization clone_timeout plumbing.
 	r := dsgit.NewRunner()
+	if _, err := r.Run(ctx, worktreePath, "rev-parse", "--verify", "HEAD"); err != nil {
+		return agentWorkingTreeDiffSummary(ctx, r, worktreePath)
+	}
+
+	status, statusErr := r.Run(ctx, worktreePath, "status", "--short")
+	committed := "diff unavailable: missing base SHA"
+	if strings.TrimSpace(baseSHA) != "" {
+		out, err := r.Run(ctx, worktreePath, "diff", "--stat", strings.TrimSpace(baseSHA)+"..HEAD")
+		if err != nil {
+			committed = "diff unavailable: " + err.Error()
+		} else {
+			committed = emptySummary(strings.TrimSpace(out))
+		}
+	}
+
+	uncommitted := emptySummary(strings.TrimSpace(status))
+	if statusErr != nil {
+		uncommitted = "status unavailable: " + statusErr.Error()
+	}
+
+	parts := []string{
+		"Committed since base:",
+		committed,
+		"",
+		"Uncommitted:",
+		uncommitted,
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
+func agentWorkingTreeDiffSummary(ctx context.Context, r dsgit.Runner, worktreePath string) string {
 	status, statusErr := r.Run(ctx, worktreePath, "status", "--short")
 	out, err := r.Run(ctx, worktreePath, "diff", "--stat")
 	if err != nil {

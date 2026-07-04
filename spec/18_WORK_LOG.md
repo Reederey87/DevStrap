@@ -27,6 +27,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — fix(agent): diff committed work against recorded base (P6-GIT-02)
+
+Changed:
+- `internal/cli`: `agentDiffSummary` now takes the recorded base SHA, reports `Committed since base:` from `BaseSHA..HEAD`, and reports `Uncommitted:` from `git status --short`; unborn-HEAD repositories keep the previous working-tree-only fallback. Added real-git coverage for committed agent changes, uncommitted residue, and unborn HEAD.
+- `spec/10`, `spec/13`, `spec/15`: agent diff-summary, PR-flow, CLI, and stale-base threat-model wording updated for the committed-vs-uncommitted split.
+- Audit ledger: `P6-GIT-02` moved to *Recently shipped* and the Pass-6 open count/table reconciled to 18.
+
+Validated:
+- `gofmt -w cmd internal`
+- `GOCACHE=/tmp/devstrap-gocache-git02 go test -race ./internal/cli/ ./...`
+
+Follow-ups:
+- None.
+
 ## 2026-07-03 — docs: sync-convergence wave close-out (P5-SYNC-01 + 7 Pass-6 findings shipped)
 
 Changed:
