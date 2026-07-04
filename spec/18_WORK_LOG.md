@@ -31,6 +31,18 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — fix(scan): keep `scan` offline — local default-branch resolution (P6-XP-05)
+
+Changed:
+- `internal/git/git.go`: new `Runner.LocalDefaultBranch(ctx, dir, fallback)` resolves the remote default branch from LOCAL refs only — `symbolicOriginHead` (`git symbolic-ref --short refs/remotes/origin/HEAD`) → a local `origin/<fallback>` `rev-parse` — and NEVER runs `set-head --auto`/`ls-remote`/`fetch`. Returns the `DefaultBranchSource` (remote/stored) so callers can warn. `ResolveDefaultBranch`/`DefaultBranch` (which repair via `set-head --auto`) are unchanged and still used by hydrate/worktree materialization.
+- `internal/scan/scan.go`: `Walk` now calls `LocalDefaultBranch` instead of `DefaultBranch`, so the per-repo default-branch lookup inside the `WalkDir` callback is offline. A `DefaultBranchStored`/unresolved result adds a non-authoritative warning ("… will be resolved authoritatively at materialization") rather than a network round-trip. Both scan entry points (`devstrap scan`/`scan --adopt` and first-run `devstrap init`) are now filesystem-only.
+
+Validated:
+- `gofmt -l internal/scan internal/git` (clean); `go build ./...`; `go test ./internal/scan/... ./internal/git/...` green (scan ~0.9s). Tests use an RFC-5737 blackhole remote (`192.0.2.1`) + a runner timeout larger than the sub-second elapsed budget, so a reintroduced network call would hang past the budget and trip the assertion. Reviewed by an independent opus pass (no blocking findings) + strengthened the no-network guard per its nit.
+
+Follow-ups:
+- Unblocks P6-XP-03 (an affordable per-tick `run-loop` scan stage). `--online` bounded remote repair from scan deliberately not added (deferred to materialization).
+
 ## 2026-07-04 — docs: snapshot-exchange wave close-out (P4-SYNC-02/P4-HUB-11/P4-HUB-12/P6-HUB-04 shipped + 7 quick-wins)
 
 Changed:

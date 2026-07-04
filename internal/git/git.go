@@ -427,6 +427,31 @@ func (r Runner) ResolveDefaultBranch(ctx context.Context, dir, fallback string) 
 	return "", "", fmt.Errorf("origin default branch unavailable")
 }
 
+// LocalDefaultBranch resolves the default branch using only local refs — it
+// never touches the network (no set-head/ls-remote/fetch). Scan-time onboarding
+// must stay offline (P6-XP-05); authoritative set-head --auto repair is deferred
+// to hydrate/worktree materialization, which calls ResolveDefaultBranch at use
+// time. It returns the branch and how authoritative the answer is.
+func (r Runner) LocalDefaultBranch(ctx context.Context, dir, fallback string) (string, DefaultBranchSource, error) {
+	if branch, ok := r.symbolicOriginHead(ctx, dir); ok {
+		if !safeBranchName(branch) {
+			return "", "", fmt.Errorf("invalid origin HEAD branch %q", branch)
+		}
+		return branch, DefaultBranchRemote, nil
+	}
+	if fallback != "" {
+		if !safeBranchName(fallback) {
+			return "", "", fmt.Errorf("invalid fallback branch %q", fallback)
+		}
+		// origin/<fallback> is a local remote-tracking ref check (rev-parse),
+		// not a network call.
+		if _, err := r.RevParse(ctx, dir, "origin/"+fallback); err == nil {
+			return fallback, DefaultBranchStored, nil
+		}
+	}
+	return "", "", fmt.Errorf("origin default branch unavailable offline")
+}
+
 func (r Runner) symbolicOriginHead(ctx context.Context, dir string) (string, bool) {
 	out, err := r.Run(ctx, dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWalkPrunesGeneratedDirsWarnsSecretsSymlinkEscapesAndReportsDuplicates(t *testing.T) {
@@ -92,6 +93,40 @@ func TestWalkDoesNotPersistUnvalidatedRemote(t *testing.T) {
 	}
 	if !hasWarning(evil.Warnings, "ignoring unvalidated git remote") {
 		t.Fatalf("expected unvalidated-remote warning, got %+v", evil.Warnings)
+	}
+}
+
+func TestScanResolvesDefaultBranchOfflineAndWarns(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "work", "api")
+	// Blackhole remote (RFC 5737 TEST-NET-1): a reintroduced scan-time network
+	// call would hang past the sub-second elapsed budget below rather than
+	// failing fast, making this a real no-network regression guard.
+	initRepo(t, repo, "https://192.0.2.1/none.git")
+
+	start := time.Now()
+	result, err := Walk(context.Background(), root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Walk took %s, want offline prompt return", elapsed)
+	}
+
+	var api *Finding
+	for i := range result.Findings {
+		if result.Findings[i].Path == "work/api" {
+			api = &result.Findings[i]
+		}
+	}
+	if api == nil {
+		t.Fatalf("expected api finding: %+v", result.Findings)
+	}
+	if api.DefaultBranch != "main" {
+		t.Fatalf("DefaultBranch = %q, want main", api.DefaultBranch)
+	}
+	if !hasWarning(api.Warnings, "resolved authoritatively at materialization") {
+		t.Fatalf("expected materialization warning, got %+v", api.Warnings)
 	}
 }
 
