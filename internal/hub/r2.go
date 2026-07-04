@@ -61,6 +61,11 @@ import (
 // without exhausting connections.
 const r2PullConcurrency = 8
 
+// r2PushConcurrency bounds how many event objects R2Hub.Push writes in
+// parallel (P6-HUB-03). It mirrors the pull-side fan-out so large first syncs
+// are not O(events) serial round-trips, without exhausting connections.
+const r2PushConcurrency = 8
+
 // S3Client is the minimal S3-compatible operation set the R2 backend needs
 // (HUB-02). It is abstracted so the keying scheme and Hub contract are
 // testable with an in-memory double. A production implementation wraps the
@@ -207,37 +212,51 @@ func (h R2Hub) ackKey(deviceID string) string {
 
 func (h R2Hub) Push(ctx context.Context, events []state.Event) error {
 	for _, event := range events {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
 		// P5-SYNC-01: the seq-keyed layout is meaningless for a pre-sequence
 		// event — a Seq <= 0 key would sort as seq 0 and break the per-device
 		// cursor contract. Local stamping has assigned Seq since migration
-		// 00002, so this only fires on a programming error.
+		// 00002, so this only fires on a programming error. Validate the whole
+		// batch before starting concurrent PUTs so a malformed event cannot
+		// leave a partial upload behind.
 		if event.Seq <= 0 {
 			return fmt.Errorf("refusing to push event %s with non-positive seq %d", event.ID, event.Seq)
 		}
-		key := h.eventKey(event)
-		raw, err := json.Marshal(event)
-		if err != nil {
-			return fmt.Errorf("marshal event %s: %w", event.ID, err)
-		}
-		// HUB-06/HUB-09: the conditional put (If-None-Match: *) is itself the
-		// atomic, idempotent guard for event append, so no separate
-		// ObjectExists/HEAD is needed. Dropping the HEAD halves the per-event
-		// request count on the hot push path and removes the check-then-act
-		// race a concurrent writer could win between the HEAD and the PUT. A
-		// 412 PreconditionFailed is a duplicate event and a no-op. HUB-10:
-		// throttling/transient S3 errors are retried with backoff; a 412 is
-		// terminal (not retried) and handled as a dedup hit below.
-		if err := h.retry().do(ctx, func() error { return h.S3.PutObject(ctx, key, raw, true) }); err != nil {
-			if errors.Is(err, ErrPreconditionFailed) {
-				continue // idempotent dedup hit
-			}
-			return fmt.Errorf("put event %s: %w", event.ID, err)
-		}
 	}
-	return nil
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	// P6-HUB-03: plain bounded fan-out is safe for Push. The sync caller only
+	// advances its per-device push watermark after hub.Push returns nil for the
+	// entire batch, so a mid-batch failure is retried as the same batch next
+	// cycle and duplicate successful PUTs collapse via the conditional write.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(r2PushConcurrency)
+	for _, event := range events {
+		event := event
+		g.Go(func() error {
+			key := h.eventKey(event)
+			raw, err := json.Marshal(event)
+			if err != nil {
+				return fmt.Errorf("marshal event %s: %w", event.ID, err)
+			}
+			// HUB-06/HUB-09: the conditional put (If-None-Match: *) is itself the
+			// atomic, idempotent guard for event append, so no separate
+			// ObjectExists/HEAD is needed. Dropping the HEAD halves the per-event
+			// request count on the hot push path and removes the check-then-act
+			// race a concurrent writer could win between the HEAD and the PUT. A
+			// 412 PreconditionFailed is a duplicate event and a no-op. HUB-10:
+			// throttling/transient S3 errors are retried with backoff; a 412 is
+			// terminal (not retried) and handled as a dedup hit below.
+			if err := h.retry().do(gctx, func() error { return h.S3.PutObject(gctx, key, raw, true) }); err != nil {
+				if errors.Is(err, ErrPreconditionFailed) {
+					return nil // idempotent dedup hit
+				}
+				return fmt.Errorf("put event %s: %w", event.ID, err)
+			}
+			return nil
+		})
+	}
+	return g.Wait()
 }
 
 func (h R2Hub) Pull(ctx context.Context, after dssync.Cursor) ([]state.Event, error) {

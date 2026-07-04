@@ -41,6 +41,107 @@ func TestR2PushRefusesNonPositiveSeq(t *testing.T) {
 	}
 }
 
+func TestR2PushConcurrentMidBatchFailureSurfaces(t *testing.T) {
+	ctx := context.Background()
+	mem := newMemS3()
+	base := R2Hub{S3: mem, WorkspaceID: "ws_test"}
+	events := []state.Event{
+		makeEvent("evt_001", "dev_a", 100, 1, "project.added", `{"path":"a"}`),
+		makeEvent("evt_002", "dev_a", 200, 2, "project.added", `{"path":"b"}`),
+		makeEvent("evt_fail", "dev_a", 300, 3, "project.added", `{"path":"fail"}`),
+		makeEvent("evt_004", "dev_a", 400, 4, "project.added", `{"path":"d"}`),
+	}
+	h := R2Hub{
+		S3: &failAfterOtherPutsS3{
+			S3Client:    mem,
+			failKey:     base.eventKey(events[2]),
+			err:         errors.New("forced put failure"),
+			wantSuccess: 3,
+			ready:       make(chan struct{}),
+		},
+		WorkspaceID: "ws_test",
+	}
+
+	err := h.Push(ctx, events)
+	if err == nil {
+		t.Fatal("Push: want mid-batch failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "put event evt_fail: forced put failure") {
+		t.Fatalf("Push error = %v, want failing event context", err)
+	}
+	for _, event := range []state.Event{events[0], events[1], events[3]} {
+		if _, err := mem.GetObject(ctx, base.eventKey(event)); err != nil {
+			t.Fatalf("successful concurrent put for %s did not land: %v", event.ID, err)
+		}
+	}
+	if _, err := mem.GetObject(ctx, base.eventKey(events[2])); !errors.Is(err, dssync.ErrBlobNotFound) {
+		t.Fatalf("failing event object = %v, want ErrBlobNotFound", err)
+	}
+}
+
+type failAfterOtherPutsS3 struct {
+	S3Client
+	failKey     string
+	err         error
+	wantSuccess int
+	ready       chan struct{}
+	readyOnce   sync.Once
+	mu          sync.Mutex
+	successes   int
+}
+
+func (f *failAfterOtherPutsS3) PutObject(ctx context.Context, key string, body []byte, ifNoneMatch bool) error {
+	if key == f.failKey {
+		select {
+		case <-f.ready:
+		case <-time.After(time.Second):
+		}
+		return f.err
+	}
+	err := f.S3Client.PutObject(ctx, key, body, ifNoneMatch)
+	if err == nil {
+		f.mu.Lock()
+		f.successes++
+		if f.successes >= f.wantSuccess {
+			f.readyOnce.Do(func() { close(f.ready) })
+		}
+		f.mu.Unlock()
+	}
+	return err
+}
+
+func TestR2PushConcurrentBatchLandsAllEvents(t *testing.T) {
+	ctx := context.Background()
+	h := newTestR2Hub(t)
+	events := make([]state.Event, 0, 50)
+	for i := 0; i < 50; i++ {
+		events = append(events, makeEvent(
+			fmt.Sprintf("evt_%03d", i),
+			"dev_a",
+			int64(100+i),
+			int64(i+1),
+			"project.added",
+			fmt.Sprintf(`{"path":"p%d"}`, i),
+		))
+	}
+	if err := h.Push(ctx, events); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	for _, event := range events {
+		raw, err := h.S3.GetObject(ctx, h.eventKey(event))
+		if err != nil {
+			t.Fatalf("GetObject(%s): %v", event.ID, err)
+		}
+		want, err := json.Marshal(event)
+		if err != nil {
+			t.Fatalf("Marshal(%s): %v", event.ID, err)
+		}
+		if !bytes.Equal(raw, want) {
+			t.Fatalf("object bytes for %s = %s, want %s", event.ID, raw, want)
+		}
+	}
+}
+
 // assertHubRoundTrip runs the hub conformance contract (P5-HUB-01) against any
 // R2Hub/S3Client pair: the event-log plane (push/pull order, HLC cursor with
 // inclusive boundary, conditional-put idempotency) and the blob plane

@@ -18,7 +18,13 @@ import (
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 )
+
+// blobPushConcurrency bounds how many referenced encrypted blobs sync uploads
+// in parallel. Blobs are content-addressed and unordered, so the event-log
+// ordering constraints do not apply to this fan-out (P6-HUB-03).
+const blobPushConcurrency = 8
 
 func newSyncCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var hubFile string
@@ -446,20 +452,26 @@ func isJoiner(opts *options) bool {
 // pushReferencedBlobs pushes locally-cached blobs referenced by events to the
 // hub (DRAFT-02 blob plane).
 func pushReferencedBlobs(ctx context.Context, hub dssync.Hub, events []state.Event, paths config.Paths) error {
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(blobPushConcurrency)
 	for _, event := range events {
 		ref, ok := blobRefFromEvent(event)
 		if !ok {
 			continue
 		}
-		cached, err := readEnvBlob(paths, ref)
-		if err != nil {
-			return fmt.Errorf("push blob %s: cannot read local cache: %w", ref, err)
-		}
-		if err := hub.PutBlob(ctx, blobHashHex(ref), bytes.NewReader(cached)); err != nil {
-			return fmt.Errorf("push blob %s: %w", ref, err)
-		}
+		refCopy := ref
+		g.Go(func() error {
+			cached, err := readEnvBlob(paths, refCopy)
+			if err != nil {
+				return fmt.Errorf("push blob %s: cannot read local cache: %w", refCopy, err)
+			}
+			if err := hub.PutBlob(gctx, blobHashHex(refCopy), bytes.NewReader(cached)); err != nil {
+				return fmt.Errorf("push blob %s: %w", refCopy, err)
+			}
+			return nil
+		})
 	}
-	return nil
+	return g.Wait()
 }
 
 // pullReferencedBlobs fetches blobs referenced by remote events from the hub and
