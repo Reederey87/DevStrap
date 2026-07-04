@@ -14,10 +14,13 @@ import (
 )
 
 // newBareCarrier creates a local bare repository to act as the carrier remote.
+// --initial-branch pins HEAD to main regardless of the machine's git config:
+// the carrier itself never reads remote HEAD (it names refs/heads/<branch>
+// explicitly), but the tests' verification clones check out HEAD.
 func newBareCarrier(t *testing.T) string {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "hub.git")
-	cmd := exec.Command("git", "init", "--quiet", "--bare", dir)
+	cmd := exec.Command("git", "init", "--quiet", "--bare", "--initial-branch=main", dir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("init bare carrier: %v: %s", err, out)
 	}
