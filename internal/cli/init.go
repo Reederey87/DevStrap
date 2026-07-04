@@ -29,6 +29,7 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var workspaceID string
 	var codeBlob string
 	var fingerprint string
+	var moveRoot bool
 
 	cmd := &cobra.Command{
 		Use:   "init [root]",
@@ -114,14 +115,6 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := os.MkdirAll(paths.LogDir(), 0o700); err != nil {
 				return fmt.Errorf("create log dir: %w", err)
 			}
-			role := "founder"
-			if join {
-				role = "joiner"
-			}
-			wroteConfig, err := writeDefaultConfig(paths, workspaceName, role)
-			if err != nil {
-				return err
-			}
 			store, err := state.Open(cmd.Context(), paths.StateDB())
 			if err != nil {
 				return err
@@ -129,6 +122,25 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 			defer closeStore(store)
 
 			if err := store.Migrate(); err != nil {
+				return err
+			}
+			movingRoot := false
+			existingRoot, err := existingWorkspaceRoot(cmd.Context(), store)
+			if err != nil {
+				return err
+			}
+			if existingRoot != "" && existingRoot != paths.Root {
+				if !moveRoot {
+					return appError{code: exitConflict, err: fmt.Errorf("workspace already rooted at %s; requested root %s; re-run with --move-root to relocate", existingRoot, paths.Root)}
+				}
+				movingRoot = true
+			}
+			role := "founder"
+			if join {
+				role = "joiner"
+			}
+			wroteConfig, err := writeDefaultConfig(paths, workspaceName, role)
+			if err != nil {
 				return err
 			}
 			if workspaceID != "" {
@@ -144,6 +156,11 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 					return appError{code: exitInvalidConfig, err: fmt.Errorf("%w; this store was initialized under a different workspace id — remove %s and re-run devstrap init --join --workspace-id %s", err, paths.Home, workspaceID)}
 				}
 				return err
+			}
+			if movingRoot {
+				if err := rewriteConfigRoot(paths); err != nil {
+					return err
+				}
 			}
 			// Printed only after the workspace ensure succeeded so a refused
 			// re-init reports the id mismatch alone, without role noise.
@@ -303,6 +320,7 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&workspaceID, "workspace-id", "", "adopt the founding device's workspace id (copy it from `devstrap status` there); implies --join (P4-SEC-07)")
 	cmd.Flags().StringVar(&codeBlob, "code", "", "one-paste pairing code from the founding device; implies --join")
 	cmd.Flags().StringVar(&fingerprint, "fingerprint", "", "with --code: the founding device fingerprint confirmed out-of-band; skips the interactive prompt")
+	cmd.Flags().BoolVar(&moveRoot, "move-root", false, "relocate an initialized workspace root and rewrite config.yaml")
 	return cmd
 }
 
@@ -438,6 +456,17 @@ func cleanAbsPath(path string) (string, error) {
 	return filepath.Abs(filepath.Clean(path))
 }
 
+func existingWorkspaceRoot(ctx context.Context, store *state.Store) (string, error) {
+	summary, err := store.Summary(ctx)
+	if err == nil {
+		return summary.RootPath, nil
+	}
+	if errors.Is(err, state.ErrNotInitialized) {
+		return "", nil
+	}
+	return "", err
+}
+
 // writeDefaultConfig writes config.yaml if missing and reports whether it
 // wrote (false = a pre-existing config was left untouched).
 func writeDefaultConfig(paths config.Paths, workspaceName, role string) (bool, error) {
@@ -447,11 +476,74 @@ func writeDefaultConfig(paths config.Paths, workspaceName, role string) (bool, e
 	} else if !os.IsNotExist(err) {
 		return false, fmt.Errorf("stat config: %w", err)
 	}
+	if err := rewriteConfig(paths, workspaceName, role); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func rewriteConfig(paths config.Paths, workspaceName, role string) error {
 	// role (P6-SEC-02): "founder" (default) or "joiner". A joiner never founds
 	// a workspace on first sync; it waits to be granted the fleet WCK.
 	content := fmt.Sprintf("home: %q\nroot: %q\nworkspace_name: %q\nrole: %q\n", paths.Home, paths.Root, workspaceName, role)
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		return false, fmt.Errorf("write config: %w", err)
+	return writeConfigAtomic(paths.Home, content)
+}
+
+// rewriteConfigRoot updates ONLY the top-level `root:` line of an existing
+// config.yaml (appending one if absent), preserving every other key and any
+// comments — a `--move-root` must not clobber user settings like `hub:` or
+// `keys.rotate_max_age` by regenerating the file from the default template.
+func rewriteConfigRoot(paths config.Paths) error {
+	path := filepath.Join(paths.Home, "config.yaml")
+	raw, err := os.ReadFile(path) //nolint:gosec // path is the devstrap home config, not user-controlled input
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
 	}
-	return true, nil
+	rootLine := fmt.Sprintf("root: %q", paths.Root)
+	lines := strings.Split(string(raw), "\n")
+	replaced := false
+	for i, line := range lines {
+		// Top-level scalar key only: no leading whitespace, exact key.
+		if strings.HasPrefix(line, "root:") {
+			lines[i] = rootLine
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		// Keep a trailing newline invariant: insert before a final empty line.
+		if n := len(lines); n > 0 && lines[n-1] == "" {
+			lines = append(lines[:n-1], rootLine, "")
+		} else {
+			lines = append(lines, rootLine)
+		}
+	}
+	return writeConfigAtomic(paths.Home, strings.Join(lines, "\n"))
+}
+
+// writeConfigAtomic writes config.yaml via a same-directory temp file + rename
+// with mode 0600.
+func writeConfigAtomic(home, content string) error {
+	path := filepath.Join(home, "config.yaml")
+	tmp, err := os.CreateTemp(home, ".config.yaml.tmp-*")
+	if err != nil {
+		return fmt.Errorf("create config temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod config temp: %w", err)
+	}
+	if _, err := tmp.WriteString(content); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write config temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close config temp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("replace config: %w", err)
+	}
+	return nil
 }
