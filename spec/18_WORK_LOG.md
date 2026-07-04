@@ -31,6 +31,24 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — fix(sync): reconcileSamePath winner is HLC-monotonic (P4-QUAL-02 follow-up)
+
+Changed:
+- `internal/sync/events.go`: `reconcileSamePath` now installs the **highest** `(HLC, deviceID, eventID)` coordinate as the same-path/different-remote winner (a one-line comparison flip: `samePathLess(current, next)`), the same rule as same-remote LWW (`decideUpsert`) and snapshot import (`importEntryTx`). The previous lowest-coordinate winner was the odd one out and the root cause of both known order-dependence divergences: the active row's source HLC could sit BELOW a dropped rival's, so a delete gated on the installed winner's HLC — or a same-remote LWW lift racing the cross-remote reconcile — flipped the terminal state by delivery order. With the running-max invariant, delete/different-remote mixes and multi-event-per-remote mixes converge in every order. New doc comment states why highest is load-bearing.
+- `internal/sync/decide.go`: the header's "KNOWN RESIDUAL" paragraph replaced with the HLC-monotonic rule (nothing about the Decide seam remains order-dependent).
+- `internal/sync/decide_rapid_test.go`: both witness tripwires (`TestDecideDifferentRemote{Delete,MultiEvent}DivergesWitness`) fired exactly as designed and were **deleted per their own failure-message protocol**; header updated; unused `state` import dropped.
+- `internal/sync/property_helpers_test.go`: both generator exclusions removed — `genEventSet` now draws the full event space (per path: adds/updates/deletes freely over a 1-3 remote pool, so one remote can carry several HLCs and deletes mix with different-remote pairs); header rewritten to record the retired pattern.
+- Winner-direction test updates (assertions invert to the higher coordinate; property/structure unchanged): `internal/sync/hlc_test.go` (`TestApplyEventsIsIdempotentAndDetectsRemoteConflict`, `TestReconcileSamePathIsCommutative`, `TestApplyEventsSamePathDifferentRemoteUsesCanonicalWinnerAcrossPullWindows`), `internal/sync/decide_property_test.go` (`work/conf` winner sanity + headers), `internal/cli/conflicts_test.go` (`--keep-remote` switches off the new gitlab@20 winner). The `apply_test.go` `conflict.resolved` fingerprint fixtures are literal-match only and needed no change.
+- `spec/07_NAMESPACE_AND_SYNC_MODEL.md` (Decide-seam winner rule, model-check section marked fixed, §conflict-replay "lowest"→"highest"), `spec/16_TEST_PLAN.md` (generator now exclusion-free; the tripwire pattern kept as methodology), `spec/13_CLI_DAEMON_API.md` (`conflicts resolve` paragraph now names the interim installed winner: highest coordinate), `docs/audits/README.md` (P5-ARCH-01 + P4-QUAL-02 rows: residual/follow-up SHIPPED).
+
+Validated:
+- `gofmt -l cmd internal` (clean); `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...` (pass; the widened generator drives the rapid convergence, import≡replay, and 3-replica model suites over the previously-excluded classes).
+- Longer fuzz run over the widened space: `go test -run=^$ -fuzz=FuzzDecideConvergence -fuzztime=60s ./internal/sync/` (no crash).
+
+Follow-ups:
+- None.
+
 ## 2026-07-04 — test(sync): property/model-check layer over the pure Decide seam (P4-QUAL-02)
 
 Changed:

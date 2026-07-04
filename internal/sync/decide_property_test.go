@@ -20,8 +20,8 @@ import (
 // exercises:
 //
 //   - same-remote HLC last-writer-wins (highest coordinates win): work/lww;
-//   - same-path / different-remote conflict reconciliation (deterministic
-//     lowest-coordinate winner, per reconcileSamePath): work/conf;
+//   - same-path / different-remote conflict reconciliation (highest-coordinate
+//     winner, HLC-monotonic and consistent with same-remote LWW): work/conf;
 //   - delete tombstoning with a delete HLC above every add on the path so the
 //     tombstone dominates: work/del;
 //   - an isolated single add: work/solo.
@@ -76,7 +76,7 @@ func convergentEventSet() []state.Event {
 		upsertEvt("evt-lww-2", "dev-1", EventProjectUpdated, 3, "work/lww", "github.com/x/lww"),
 		upsertEvt("evt-lww-3", "dev-2", EventProjectUpdated, 2, "work/lww", "github.com/x/lww"),
 		// work/conf — different remotes → reconcileSamePath's deterministic
-		// lowest-coordinate winner (@2, remote conf-a).
+		// highest-coordinate winner (@4, remote conf-b).
 		upsertEvt("evt-conf-1", "dev-1", EventProjectAdded, 2, "work/conf", "github.com/x/conf-a"),
 		upsertEvt("evt-conf-2", "dev-2", EventProjectAdded, 4, "work/conf", "github.com/x/conf-b"),
 		// work/del — delete HLC (5) dominates the add (2) → tombstoned.
@@ -168,8 +168,8 @@ func TestDecideConvergesUnderEveryPermutation(t *testing.T) {
 	if row, ok := want.active("work/lww"); !ok || row.SourceEventID != "evt-lww-2" || row.RemoteKey != "github.com/x/lww" {
 		t.Fatalf("work/lww winner = %+v, want the @3 event (evt-lww-2)", want["work/lww"])
 	}
-	if row, ok := want.active("work/conf"); !ok || row.RemoteKey != "github.com/x/conf-a" || row.SourceEventID != "evt-conf-1" {
-		t.Fatalf("work/conf winner = %+v, want the @2 event (evt-conf-1, conf-a)", want["work/conf"])
+	if row, ok := want.active("work/conf"); !ok || row.RemoteKey != "github.com/x/conf-b" || row.SourceEventID != "evt-conf-2" {
+		t.Fatalf("work/conf winner = %+v, want the @4 event (evt-conf-2, conf-b)", want["work/conf"])
 	}
 	if tomb, ok := want.tombstone("work/del"); !ok || tomb != 5<<hlcLogicalBits {
 		t.Fatalf("work/del = %+v, want tombstoned @5", want["work/del"])

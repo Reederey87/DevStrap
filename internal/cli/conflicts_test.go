@@ -28,8 +28,8 @@ func TestConflictResolveKeepRemoteSwitchesVariant(t *testing.T) {
 	}
 	ctx := context.Background()
 	// Two competing remote events at the same path, different remotes, create a
-	// same_path_different_remote conflict. The deterministic winner is the lower
-	// coordinate (device-x @10).
+	// same_path_different_remote conflict. The deterministic winner is the higher
+	// coordinate (device-y @20).
 	const hlcShift = 16
 	ev1, err := dssync.NewProjectEvent("device-x", dssync.EventProjectAdded, 10<<hlcShift, dssync.ProjectPayload{
 		Path: "work/acme/api", Type: "git_repo", RemoteKey: "github.com/acme/api", RemoteURL: "https://github.com/acme/api",
@@ -83,8 +83,8 @@ func TestConflictResolveKeepRemoteSwitchesVariant(t *testing.T) {
 	if got.RemoteKey == winner.RemoteKey {
 		t.Fatalf("keep-remote did not switch the variant (still %q)", winner.RemoteKey)
 	}
-	if got.RemoteKey != "gitlab.com/acme/api" {
-		t.Fatalf("project remote = %q, want gitlab.com/acme/api", got.RemoteKey)
+	if got.RemoteKey != "github.com/acme/api" {
+		t.Fatalf("project remote = %q, want github.com/acme/api", got.RemoteKey)
 	}
 	if remaining, _ := store2.OpenConflicts(ctx); len(remaining) != 0 {
 		t.Fatalf("conflict still open after resolve = %d, want 0", len(remaining))

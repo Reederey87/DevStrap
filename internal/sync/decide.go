@@ -39,12 +39,13 @@ import (
 // therefore converges (the P5-ARCH-01 review had surfaced the missing
 // delete-side gate as a real strong-eventual-consistency gap; see
 // TestDecideConvergesDeleteReaddMix), and live replay now matches
-// importTombstoneTx's snapshot-import rule exactly. KNOWN RESIDUAL: when a
-// same-path/DIFFERENT-remote pair is in the mix, reconcileSamePath installs the
-// deterministic lowest-coordinate winner, so the active row's HLC can sit BELOW
-// a dropped rival's — a delete with an HLC between the two still converges to
-// different terminal states by delivery order (pre-existing, independent of the
-// delete-side gate; tracked as a P4-QUAL-02 follow-up).
+// importTombstoneTx's snapshot-import rule exactly. The same-path/DIFFERENT-
+// remote winner is HLC-monotonic: reconcileSamePath installs the HIGHEST
+// (HLC, deviceID, eventID) coordinate, the same rule as same-remote LWW and
+// importEntryTx, so the active row's HLC is the running max over every upsert
+// on the path and delete/different-remote and multi-event-per-remote mixes
+// converge in every delivery order (the P4-QUAL-02 follow-up that retired the
+// two generator exclusions and their witness tripwires).
 
 // ProjectionRow is the in-memory namespace-entry state `Decide` reads to
 // reconcile a single event. It mirrors the subset of namespace_entries (joined
