@@ -212,9 +212,12 @@ DevStrap owns object lifecycle: blob **ref-counting** and garbage collection of 
 > this device has pulled the map. Pull the latest event log first and skip objects newer than
 > a grace window before deleting. Prefer `--dry-run` until `P6-HUB-01` ships.
 
-> **Runbook (`P4-HUB-11`): `devstrap hub compact` bounds event-log growth.** Run it from ONE
-> designated device (concurrent compactions are not yet coordinated — the sweep lock is a
-> follow-up). It converges first (pull+apply+push) and refuses from any incomplete replica
+> **Runbook (`P4-HUB-11`): `devstrap hub compact` bounds event-log growth.** Concurrent
+> destructive hub passes (`gc`/`compact`/`migrate-events`) on cooperating clients are serialized
+> by an advisory sweep lock (`meta/sweep.lock`, `P4-HUB-12`): a real run acquires it after its
+> pre-sync and before the destructive publish/delete, refusing with the holder id if another
+> sweep is live and breaking a lock older than its 1h TTL. The lock protects cooperating clients
+> only, not a hostile writer (`spec/15`). It converges first (pull+apply+push) and refuses from any incomplete replica
 > (deferred/skipped/quarantined events, an open key-grant wait, or an open quarantine
 > conflict), so it never deletes events another device still needs. Its order is
 > confirm-before-delete — it publishes the sealed snapshot object and CAS-writes the signed
@@ -227,6 +230,18 @@ DevStrap owns object lifecycle: blob **ref-counting** and garbage collection of 
 > importing the snapshot (`P4-SYNC-02`). Because the snapshot covers all cold segments, an
 > R2-side object-lifecycle rule remains unnecessary — DevStrap deletes cold events itself only
 > after the superseding snapshot is confirmed.
+
+> **Runbook (`P4-HUB-12`): `devstrap hub migrate-events` once per pre-#59 hub.** A bucket that
+> served the fleet before the per-device seq layout (PR #59) still holds events under the retired
+> HLC-keyed `events/` prefix. `Pull` reads both layouts (dual-read), so nothing breaks, but the
+> legacy prefix is listed on every pull until it is drained. Run `devstrap hub migrate-events`
+> ONCE against such a bucket to re-key the legacy objects into `eventlog/<device>/` and delete
+> the legacy prefix; afterward the dual-read freezes to a cheap empty-prefix list. It is
+> idempotent, resumable, read-back-verified before each delete, and fails open (an object it
+> cannot parse/decode/coordinate-match is kept, never deleted), so it is safe to re-run and safe
+> to interrupt. Preview with `--dry-run`. It acquires the same advisory sweep lock as `gc`/
+> `compact`. Buckets created at or after PR #59 never used the legacy layout, and the file-backed
+> test hub never did either, so migrate-events is a no-op there.
 
 ### A.5 Cost note
 

@@ -49,6 +49,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Reederey87/DevStrap/internal/logging"
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
 	"golang.org/x/sync/errgroup"
@@ -97,6 +98,10 @@ type S3Client interface {
 	// still carrying etag (If-Match). A lost race surfaces as
 	// ErrPreconditionFailed. R2 supports If-Match on PUT as an S3 extension.
 	PutObjectIfMatch(ctx context.Context, key string, body []byte, etag string) error
+	// StatObject returns one object's metadata (Key + LastModified) via HEAD,
+	// for hub GC's pre-delete revalidation (P4-HUB-12). A missing object wraps
+	// dssync.ErrBlobNotFound.
+	StatObject(ctx context.Context, key string) (dssync.BlobInfo, error)
 }
 
 // R2Hub is the Cloudflare R2 zero-knowledge Hub backend (HUB-02). It implements
@@ -172,6 +177,13 @@ func (h R2Hub) legacyEventsPrefix() string {
 // (P4-SYNC-02/P6-HUB-04), guarded by compare-and-swap.
 func (h R2Hub) retentionKey() string {
 	return fmt.Sprintf("workspaces/%s/meta/retention.json", h.WorkspaceID)
+}
+
+// sweepLockKey is the advisory sweep-lock head object shared by the destructive
+// hub passes (gc / compact / migrate-events), created with If-None-Match:*
+// (P4-HUB-12).
+func (h R2Hub) sweepLockKey() string {
+	return fmt.Sprintf("workspaces/%s/meta/sweep.lock", h.WorkspaceID)
 }
 
 // snapshotsPrefix holds the content-addressed sealed snapshot objects
@@ -454,6 +466,16 @@ func (h R2Hub) PutBlob(ctx context.Context, sha256Hex string, r io.Reader) error
 	// throttling/transient errors; 412 is terminal and handled as a dedup hit.
 	if err := h.retry().do(ctx, func() error { return h.S3.PutObject(ctx, key, data, true) }); err != nil {
 		if errors.Is(err, ErrPreconditionFailed) {
+			// Dedup hit: the blob already exists. Refresh its LastModified with
+			// one unconditional same-bytes put so a blob re-referenced by a
+			// >grace-window-late recovery sync looks freshly written and `hub gc`
+			// does not sweep a live blob (P4-HUB-12 / the P6-HUB-01 residual).
+			// Content addressing makes the overwrite byte-safe (same sha256 =
+			// same ciphertext); a failed refresh surfaces (the blob is present,
+			// but gc could still race it, so do not swallow the error).
+			if rerr := h.retry().do(ctx, func() error { return h.S3.PutObject(ctx, key, data, false) }); rerr != nil {
+				return fmt.Errorf("refresh blob %s last-modified: %w", sha256Hex, rerr)
+			}
 			return nil
 		}
 		return fmt.Errorf("put blob %s: %w", sha256Hex, err)
@@ -476,6 +498,27 @@ func (h R2Hub) GetBlob(ctx context.Context, sha256Hex string) (io.ReadCloser, er
 		return nil, err
 	}
 	return io.NopCloser(bytesReader(data)), nil
+}
+
+// StatBlob returns one blob's current metadata via HEAD (P4-HUB-12), the
+// pre-delete revalidation primitive for hub GC. A missing blob wraps
+// dssync.ErrBlobNotFound.
+func (h R2Hub) StatBlob(ctx context.Context, sha256Hex string) (dssync.BlobInfo, error) {
+	if !isValidHexKey(sha256Hex) {
+		return dssync.BlobInfo{}, dssync.ErrInvalidBlobKey
+	}
+	var info dssync.BlobInfo
+	if err := h.retry().do(ctx, func() error {
+		var serr error
+		info, serr = h.S3.StatObject(ctx, h.blobKey(sha256Hex))
+		return serr
+	}); err != nil {
+		return dssync.BlobInfo{}, err
+	}
+	// Report the blob's sha256 as the key (the caller keys on the digest, not
+	// the full object path).
+	info.Key = sha256Hex
+	return info, nil
 }
 
 // DeleteBlob removes a content-addressed blob from the hub (SEC-01/HUB-12). A
@@ -823,6 +866,189 @@ func (h R2Hub) DeleteDeviceStream(ctx context.Context, deviceID string) (int, er
 		startAfter = next
 	}
 	return deleted, nil
+}
+
+// MigrateLegacyEvents re-keys the retired HLC-keyed legacy layout
+//
+//	workspaces/<ws>/events/<hlc pad20>/<device>/<seq>/<id>.json
+//
+// into the per-device seq layout and deletes the migrated legacy objects
+// (P4-HUB-12). It is idempotent and resumable — the dual-read keeps unmigrated
+// objects live, so a partial run leaves a correct superset — and FAILS OPEN:
+// a key that does not parse, a body that does not decode as a state.Event, or a
+// body whose (DeviceID, Seq) disagree with the key coordinates is reported and
+// KEPT (never deleted), mirroring Pull's fail-open dual-read. Each object is
+// verified by read-back on the new key before the legacy object is deleted, so
+// a mid-migration crash or a backend that returns wrong bytes never loses an
+// event. Re-running against a fully migrated hub reports (0, 0, nil). A dryRun
+// classifies every object (would-migrate vs would-keep) but writes and deletes
+// NOTHING.
+func (h R2Hub) MigrateLegacyEvents(ctx context.Context, dryRun bool) (migrated, kept int, err error) {
+	prefix := h.legacyEventsPrefix()
+	startAfter := ""
+	for {
+		var page []dssync.BlobInfo
+		var next string
+		if lerr := h.retry().do(ctx, func() error {
+			var e error
+			page, next, e = h.S3.ListObjectsV2(ctx, prefix, startAfter, 1000)
+			return e
+		}); lerr != nil {
+			return migrated, kept, fmt.Errorf("list legacy events: %w", lerr)
+		}
+		for _, obj := range page {
+			m, k, merr := h.migrateOneLegacyEvent(ctx, obj.Key, dryRun)
+			migrated += m
+			kept += k
+			if merr != nil {
+				return migrated, kept, merr
+			}
+		}
+		if next == "" {
+			break
+		}
+		startAfter = next
+	}
+	return migrated, kept, nil
+}
+
+// migrateOneLegacyEvent migrates a single legacy-layout object. It returns
+// (1, 0, nil) when the object was re-keyed and the legacy copy deleted (or, in
+// a dry run, would be), (0, 1, nil) when the object was kept (fail open:
+// unparseable key, undecodable body, coordinate mismatch, or a read-back that
+// did not match), and a non-nil error only for a genuine backend failure. A
+// dryRun performs the read-only classification (list/get/decode) but no PUT,
+// read-back, or DELETE.
+func (h R2Hub) migrateOneLegacyEvent(ctx context.Context, legacyKey string, dryRun bool) (migrated, kept int, err error) {
+	dev, seq, ok := parseLegacyEventKey(h.legacyEventsPrefix(), legacyKey)
+	if !ok {
+		logging.Logger(ctx).Warn("hub migrate-events: keeping unparseable legacy key", "key", legacyKey)
+		return 0, 1, nil
+	}
+	var raw []byte
+	if e := h.retry().do(ctx, func() error {
+		var gerr error
+		raw, gerr = h.S3.GetObject(ctx, legacyKey)
+		return gerr
+	}); e != nil {
+		return 0, 0, fmt.Errorf("get legacy event %s: %w", legacyKey, e)
+	}
+	var event state.Event
+	if json.Unmarshal(raw, &event) != nil {
+		logging.Logger(ctx).Warn("hub migrate-events: keeping legacy object with undecodable body", "key", legacyKey)
+		return 0, 1, nil
+	}
+	if event.DeviceID != dev || event.Seq != seq {
+		logging.Logger(ctx).Warn("hub migrate-events: keeping legacy object whose body coordinates disagree with its key",
+			"key", legacyKey, "key_device", dev, "key_seq", seq, "body_device", event.DeviceID, "body_seq", event.Seq)
+		return 0, 1, nil
+	}
+	if dryRun {
+		// Would re-key this object; write nothing.
+		return 1, 0, nil
+	}
+	newKey := h.eventKey(event)
+	// Conditional PUT: a 412 means the object is already at the new key (an
+	// earlier, possibly interrupted, migration or a Push twin) — treat it as
+	// already-migrated and fall through to read-back + delete.
+	if perr := h.retry().do(ctx, func() error { return h.S3.PutObject(ctx, newKey, raw, true) }); perr != nil && !errors.Is(perr, ErrPreconditionFailed) {
+		return 0, 0, fmt.Errorf("put migrated event %s: %w", newKey, perr)
+	}
+	// Verify read-back before deleting the legacy object: the new key must serve
+	// bytes equal to the legacy object. A mismatch (a wrong-bytes backend, or a
+	// Push twin serialized differently) fails open — keep the legacy copy so the
+	// dual-read continues to serve it and a later run can retry.
+	var rb []byte
+	if e := h.retry().do(ctx, func() error {
+		var gerr error
+		rb, gerr = h.S3.GetObject(ctx, newKey)
+		return gerr
+	}); e != nil {
+		return 0, 0, fmt.Errorf("read back migrated event %s: %w", newKey, e)
+	}
+	if !bytes.Equal(rb, raw) {
+		logging.Logger(ctx).Warn("hub migrate-events: keeping legacy object; new-key read-back did not match",
+			"legacy_key", legacyKey, "new_key", newKey)
+		return 0, 1, nil
+	}
+	if e := h.retry().do(ctx, func() error { return h.S3.DeleteObject(ctx, legacyKey) }); e != nil {
+		return 0, 0, fmt.Errorf("delete legacy event %s: %w", legacyKey, e)
+	}
+	return 1, 0, nil
+}
+
+// parseLegacyEventKey extracts the (device, seq) coordinates from a legacy
+// HLC-keyed object key. Key shape (after the events/ prefix):
+//
+//	<hlc pad20>/<device_id>/<seq>/<event_id>.json
+//
+// It returns ok=false for any key that does not have exactly four segments or
+// whose seq segment is not a positive integer, so the caller keeps it.
+func parseLegacyEventKey(prefix, key string) (device string, seq int64, ok bool) {
+	rest := strings.TrimPrefix(key, prefix)
+	parts := strings.Split(rest, "/")
+	if len(parts) != 4 {
+		return "", 0, false
+	}
+	seq, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || seq <= 0 {
+		return "", 0, false
+	}
+	if parts[1] == "" {
+		return "", 0, false
+	}
+	return parts[1], seq, true
+}
+
+// GetSweepLock reads the advisory sweep-lock object plus the object's
+// LastModified (from a single-key list) for TTL judgment (P4-HUB-12). A missing
+// lock is dssync.ErrSweepLockNotFound.
+func (h R2Hub) GetSweepLock(ctx context.Context) ([]byte, time.Time, error) {
+	var raw []byte
+	if err := h.retry().do(ctx, func() error {
+		var gerr error
+		raw, gerr = h.S3.GetObject(ctx, h.sweepLockKey())
+		return gerr
+	}); err != nil {
+		if errors.Is(err, dssync.ErrBlobNotFound) {
+			return nil, time.Time{}, dssync.ErrSweepLockNotFound
+		}
+		return nil, time.Time{}, fmt.Errorf("get sweep lock: %w", err)
+	}
+	// LastModified comes from the object listing, never the body's self-report,
+	// so a stale-lock break cannot be gamed by a clock-skewed writer.
+	var lastModified time.Time
+	var page []dssync.BlobInfo
+	if err := h.retry().do(ctx, func() error {
+		var lerr error
+		page, _, lerr = h.S3.ListObjectsV2(ctx, h.sweepLockKey(), "", 1)
+		return lerr
+	}); err != nil {
+		return nil, time.Time{}, fmt.Errorf("stat sweep lock: %w", err)
+	}
+	for _, obj := range page {
+		if obj.Key == h.sweepLockKey() {
+			lastModified = obj.LastModified
+		}
+	}
+	return raw, lastModified, nil
+}
+
+// PutSweepLock writes the sweep-lock object create-only (If-None-Match:*): an
+// existing lock surfaces as dssync.ErrSweepLockHeld (P4-HUB-12).
+func (h R2Hub) PutSweepLock(ctx context.Context, raw []byte) error {
+	if err := h.retry().do(ctx, func() error { return h.S3.PutObject(ctx, h.sweepLockKey(), raw, true) }); err != nil {
+		if errors.Is(err, ErrPreconditionFailed) {
+			return dssync.ErrSweepLockHeld
+		}
+		return fmt.Errorf("put sweep lock: %w", err)
+	}
+	return nil
+}
+
+// DeleteSweepLock removes the sweep-lock object (idempotent).
+func (h R2Hub) DeleteSweepLock(ctx context.Context) error {
+	return h.retry().do(ctx, func() error { return h.S3.DeleteObject(ctx, h.sweepLockKey()) })
 }
 
 // validAckDeviceID rejects a device id that could escape the meta/acks or

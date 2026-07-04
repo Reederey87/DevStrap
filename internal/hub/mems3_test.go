@@ -100,6 +100,18 @@ func (m *memS3) ListObjectsV2(_ context.Context, prefix, startAfter string, maxK
 	return objs, next, nil
 }
 
+// StatObject returns an object's key + stored mtime, mirroring HeadObject for
+// the pre-delete revalidation contract (P4-HUB-12). A missing object wraps
+// dssync.ErrBlobNotFound.
+func (m *memS3) StatObject(_ context.Context, key string) (dssync.BlobInfo, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.objects[key]; !ok {
+		return dssync.BlobInfo{}, fmt.Errorf("%w: %s", dssync.ErrBlobNotFound, key)
+	}
+	return dssync.BlobInfo{Key: key, LastModified: m.modTimes[key]}, nil
+}
+
 // GetObjectWithETag mirrors GetObject and derives the etag from the object
 // bytes (sha256 hex), matching the FileHub etag convention closely enough for
 // the CAS conformance contract (the etag is opaque to callers).
