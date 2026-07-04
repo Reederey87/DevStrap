@@ -55,6 +55,11 @@ var (
 	ErrAuth           = errors.New("git authentication error")
 	ErrBranchNotFound = errors.New("git branch not found")
 	ErrRemoteMissing  = errors.New("git remote missing")
+	// ErrNonFastForward classifies a push rejected because the remote ref
+	// advanced past the local view (someone else pushed first). It is the
+	// retryable outcome of the git-carrier hub's optimistic write loop:
+	// refetch, re-apply, push again — never a terminal failure.
+	ErrNonFastForward = errors.New("git non-fast-forward push")
 )
 
 type CommandError struct {
@@ -821,6 +826,12 @@ func safeRemoteName(remote string) bool {
 	return regexp.MustCompile(`^[A-Za-z0-9._-]+$`).MatchString(remote)
 }
 
+// SafeBranchName reports whether branch is a plain, option-injection-free git
+// branch name (the git-carrier hub validates its configured branch with it).
+func SafeBranchName(branch string) bool {
+	return safeBranchName(branch)
+}
+
 func safeBranchName(branch string) bool {
 	if branch == "" || strings.HasPrefix(branch, "-") || strings.Contains(branch, "..") {
 		return false
@@ -843,6 +854,12 @@ func redactGitText(value string) string {
 func classifyGitError(stderr string) error {
 	text := strings.ToLower(stderr)
 	switch {
+	case strings.Contains(text, "non-fast-forward"),
+		strings.Contains(text, "fetch first"),
+		strings.Contains(text, "stale info"),
+		strings.Contains(text, "cannot lock ref"),
+		strings.Contains(text, "[rejected]"):
+		return ErrNonFastForward
 	case strings.Contains(text, "couldn't find remote ref"),
 		strings.Contains(text, "could not find remote ref"),
 		strings.Contains(text, "remote ref does not exist"),
