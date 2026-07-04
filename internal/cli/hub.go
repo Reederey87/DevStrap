@@ -94,7 +94,14 @@ func hubCredStore(ctx context.Context, opts *options, store *state.Store) device
 // (P6-XP-04) is best-effort: an unreadable decision leaves the store in the
 // legacy hybrid mode, and DEVSTRAP_NO_KEYCHAIN still forces file custody.
 func buildKeyring(ctx context.Context, opts *options, store *state.Store) *workspacekeys.Keyring {
-	base := devicekeys.NewHybridStore(opts.paths().KeyDir(), keychainBackend())
+	return buildKeyringFromPaths(ctx, opts.paths(), store)
+}
+
+// buildKeyringFromPaths builds the WCK epoch keyring from an explicit paths value
+// rather than *options, for callers (hubGC's snapshot recovery) that hold paths
+// but not opts.
+func buildKeyringFromPaths(ctx context.Context, paths config.Paths, store *state.Store) *workspacekeys.Keyring {
+	base := devicekeys.NewHybridStore(paths.KeyDir(), keychainBackend())
 	custody, _ := store.KeyCustody(ctx)
 	return workspacekeys.New(store, base.WithCustody(state.EffectiveKeyCustody(custody)))
 }
@@ -560,10 +567,25 @@ func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync
 	// applies other devices' draft.snapshot.created events so their blobs
 	// enter RetainedBlobRefs below.
 	pull, err := pullAndApplyEvents(ctx, store, hub, hubID)
-	if err != nil {
-		if errors.Is(err, dssync.ErrSnapshotRequired) {
-			return 0, 0, appError{code: exitNetwork, err: fmt.Errorf("pre-gc sync: %w", err)}
+	if errors.Is(err, dssync.ErrSnapshotRequired) {
+		// P4-SYNC-02: recover via snapshot exchange before sweeping, so the mark
+		// set reflects the full compacted state. A keyless device cannot build a
+		// complete view, so it must refuse rather than sweep from a partial one.
+		_, _ = fmt.Fprintln(stderr, "Recovering from hub snapshot (retention floor passed our cursor)…")
+		imported, rerr := recoverFromSnapshot(ctx, stderr, store, hub, hubID, paths, buildKeyringFromPaths(ctx, paths, store))
+		if rerr != nil {
+			return 0, 0, rerr
 		}
+		if !imported {
+			return 0, 0, appError{code: exitInvalidConfig, err: fmt.Errorf(
+				"%w: hub requires a snapshot but this device holds no workspace key to unseal it; approve this device and sync before running gc", errGCRefused)}
+		}
+		pull, err = pullAndApplyEvents(ctx, store, hub, hubID)
+		if errors.Is(err, dssync.ErrSnapshotRequired) {
+			return 0, 0, appError{code: exitNetwork, err: fmt.Errorf("pre-gc sync: hub still demands a snapshot after recovery — re-run devstrap sync")}
+		}
+	}
+	if err != nil {
 		return 0, 0, fmt.Errorf("pre-gc sync: %w", err)
 	}
 	// Cache the referenced blobs the pre-pull consumed, exactly as sync does —

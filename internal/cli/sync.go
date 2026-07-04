@@ -98,10 +98,26 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 	// a key nobody else holds — the SEC-02 data loss.
 	// EAGER-02: cursor-based incremental pull.
 	pull, err := pullAndApplyEvents(ctx, store, hub, hubID)
-	if err != nil {
-		if errors.Is(err, dssync.ErrSnapshotRequired) {
-			return appError{code: exitNetwork, err: err}
+	if errors.Is(err, dssync.ErrSnapshotRequired) {
+		// P4-SYNC-02: the pull cursor fell behind the hub's retention floor.
+		// Recover via a full-state snapshot exchange, then resume incremental
+		// pulls (which now succeed because import advanced the cursors).
+		_, _ = fmt.Fprintln(stdout, "Recovering from hub snapshot (retention floor passed our cursor)…")
+		imported, rerr := recoverFromSnapshot(ctx, stdout, store, hub, hubID, opts.paths(), buildKeyring(ctx, opts, store))
+		if rerr != nil {
+			return rerr
 		}
+		if !imported {
+			// Keyless joiner: awaiting a grant. recoverFromSnapshot already
+			// printed the defer message; nothing to materialize or push yet.
+			return nil
+		}
+		pull, err = pullAndApplyEvents(ctx, store, hub, hubID)
+		if errors.Is(err, dssync.ErrSnapshotRequired) {
+			return appError{code: exitNetwork, err: fmt.Errorf("hub still demands a snapshot after recovery — re-run devstrap sync")}
+		}
+	}
+	if err != nil {
 		return err
 	}
 	remoteEvents := pull.events
@@ -444,10 +460,24 @@ func pushReferencedBlobs(ctx context.Context, hub dssync.Hub, events []state.Eve
 // pullReferencedBlobs fetches blobs referenced by remote events from the hub and
 // caches them locally (DRAFT-02 blob plane).
 func pullReferencedBlobs(ctx context.Context, hub dssync.Hub, events []state.Event, paths config.Paths) (int, error) {
-	missing := 0
+	refs := make([]string, 0, len(events))
 	for _, event := range events {
-		ref, ok := blobRefFromEvent(event)
-		if !ok {
+		if ref, ok := blobRefFromEvent(event); ok {
+			refs = append(refs, ref)
+		}
+	}
+	return pullBlobsByRef(ctx, hub, refs, paths)
+}
+
+// pullBlobsByRef fetches the given age_blob:<sha256> refs from the hub and caches
+// them locally, returning the count that were missing or failed content-address
+// verification. It backs both pullReferencedBlobs (refs from events) and snapshot
+// recovery (refs from imported draft pointers, which have no carrier event on the
+// hub tail). Already-cached refs are skipped.
+func pullBlobsByRef(ctx context.Context, hub dssync.Hub, refs []string, paths config.Paths) (int, error) {
+	missing := 0
+	for _, ref := range refs {
+		if ref == "" {
 			continue
 		}
 		if _, err := readEnvBlob(paths, ref); err == nil {
@@ -463,11 +493,12 @@ func pullReferencedBlobs(ctx context.Context, hub dssync.Hub, events []state.Eve
 		if err != nil {
 			return missing, fmt.Errorf("read blob %s: %w", ref, err)
 		}
-		// SEC-03: the blob_ref comes from a signed namespace event, so the hub
-		// is an untrusted bit-bucket. Recompute sha256 of the fetched
-		// ciphertext and reject on mismatch so a malicious or buggy hub cannot
-		// substitute arbitrary bytes under a valid content-addressed key. Do
-		// not cache a mismatched blob; surface it as a missing/tampered blob.
+		// SEC-03: the blob_ref comes from a signed namespace event (or a
+		// signature-authenticated snapshot), so the hub is an untrusted
+		// bit-bucket. Recompute sha256 of the fetched ciphertext and reject on
+		// mismatch so a malicious or buggy hub cannot substitute arbitrary bytes
+		// under a valid content-addressed key. Do not cache a mismatched blob;
+		// surface it as a missing/tampered blob.
 		if err := verifyBlobContentHash(ref, ciphertext); err != nil {
 			logging.Logger(ctx).Warn("blob content-address verification failed; not caching",
 				"ref", ref, "err", err.Error())

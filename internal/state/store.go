@@ -1002,6 +1002,29 @@ func (tx *Tx) TombstoneProject(ctx context.Context, path string, hlc int64) erro
 	if err != nil {
 		return err
 	}
+	return tx.tombstonePath(ctx, pk, hlc)
+}
+
+// TombstoneByPathKey tombstones an entry addressed only by its case-folded
+// path_key (P4-SYNC-02 snapshot import: a snapshot tombstone carries no display
+// path). When a local row for the path_key exists its display path is preserved;
+// when none exists a deleted placeholder is created keyed on the path_key so a
+// later stale add cannot resurrect the path.
+func (tx *Tx) TombstoneByPathKey(ctx context.Context, pathKey string, hlc int64) error {
+	var display string
+	err := tx.tx.QueryRowContext(ctx, `
+SELECT path FROM namespace_entries WHERE workspace_id = ? AND path_key = ?;
+`, tx.workspaceID, pathKey).Scan(&display)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		display = pathKey
+	case err != nil:
+		return fmt.Errorf("read namespace entry for tombstone: %w", err)
+	}
+	return tx.tombstonePath(ctx, pathkey.Path{Display: display, Key: pathKey}, hlc)
+}
+
+func (tx *Tx) tombstonePath(ctx context.Context, pk pathkey.Path, hlc int64) error {
 	params := UpsertProjectParams{
 		Path:                  pk.Display,
 		Type:                  "git_repo",
@@ -1026,6 +1049,39 @@ WHERE id = ?;
 		return fmt.Errorf("tombstone project: %w", err)
 	}
 	return nil
+}
+
+// UpsertChainAnchor records a per-device hash-chain anchor imported from a
+// snapshot (P4-SYNC-02): the content hash of the last event the snapshot covers
+// for an origin device (at seq = floor-1), so the prev-hash verification of that
+// device's first post-floor event has a fallback predecessor. Keeps the HIGHEST
+// anchor_seq on conflict — a later snapshot's floor only ever moves forward, so a
+// stale re-import must never lower a device's anchor.
+func (tx *Tx) UpsertChainAnchor(ctx context.Context, deviceID string, anchorSeq int64, contentHash string, anchorHLC int64, snapshotSHA string) error {
+	now := timestampNow()
+	_, err := tx.tx.ExecContext(ctx, `
+INSERT INTO sync_chain_anchors (workspace_id, device_id, anchor_seq, anchor_content_hash, anchor_hlc, snapshot_sha256, imported_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(workspace_id, device_id) DO UPDATE SET
+  anchor_seq = excluded.anchor_seq,
+  anchor_content_hash = excluded.anchor_content_hash,
+  anchor_hlc = excluded.anchor_hlc,
+  snapshot_sha256 = excluded.snapshot_sha256,
+  imported_at = excluded.imported_at
+WHERE excluded.anchor_seq > sync_chain_anchors.anchor_seq;
+`, tx.workspaceID, deviceID, anchorSeq, contentHash, anchorHLC, snapshotSHA, now)
+	if err != nil {
+		return fmt.Errorf("upsert chain anchor: %w", err)
+	}
+	return nil
+}
+
+// ProjectByPathKey reads a project by its case-folded path_key within the
+// transaction (P4-SYNC-02 snapshot import: tombstones/entries carry path_key).
+// Returns the same "unknown namespace path" error as ProjectByPath when no
+// active row exists.
+func (tx *Tx) ProjectByPathKey(ctx context.Context, pathKey string) (ProjectStatus, error) {
+	return projectByPath(ctx, tx.tx, tx.workspaceID, pathkey.Path{Display: pathKey, Key: pathKey})
 }
 
 func (tx *Tx) TombstoneHLC(ctx context.Context, path string) (int64, bool, error) {
@@ -2577,6 +2633,62 @@ ON CONFLICT(key) DO NOTHING;
 // production always returns the detected platform keychain.
 var keychainBackend = func() devicekeys.SecretBackend { return platform.Detect().Keychain }
 
+// GetLocalMeta reads a local, never-synced key/value metadata row (migration
+// 00019), returning ok=false when the key is absent. Used by snapshot recovery
+// to cache the highest verified per-device retention floor (P4-SYNC-02).
+func (s *Store) GetLocalMeta(ctx context.Context, key string) (string, bool, error) {
+	var v string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM local_meta WHERE key = ?;`, key).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read local meta %q: %w", key, err)
+	}
+	return v, true, nil
+}
+
+// SetLocalMeta upserts a local, never-synced key/value metadata row. Unlike
+// RecordKeyCustody's write-once semantics, this overwrites so the cached
+// retention floor can advance (P4-SYNC-02).
+func (s *Store) SetLocalMeta(ctx context.Context, key, value string) error {
+	now := timestampNow()
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO local_meta (key, value, updated_at)
+VALUES (?, ?, ?)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;
+`, key, value, now)
+	if err != nil {
+		return fmt.Errorf("set local meta %q: %w", key, err)
+	}
+	return nil
+}
+
+// ApprovedDeviceSigningKey returns the signing public key of a locally known,
+// APPROVED device, or ok=false when the device is unknown, not approved, or has
+// no signing key recorded. It is the trust gate for snapshot recovery
+// (P4-SYNC-02): a retention manifest / snapshot producer must be a locally
+// pinned approved device before its wholesale state replacement is trusted, the
+// same fail-closed posture VerifyRemoteEvent applies to must-verify events.
+func (s *Store) ApprovedDeviceSigningKey(ctx context.Context, deviceID string) (string, bool, error) {
+	var signingPublicKey, trustState string
+	err := s.db.QueryRowContext(ctx, `
+SELECT COALESCE(signing_public_key, ''), trust_state
+FROM devices
+WHERE id = ?;
+`, deviceID).Scan(&signingPublicKey, &trustState)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read approved device signing key: %w", err)
+	}
+	if trustState != "approved" || signingPublicKey == "" {
+		return "", false, nil
+	}
+	return signingPublicKey, true, nil
+}
+
 // EffectiveKeyCustody applies the DEVSTRAP_NO_KEYCHAIN override to a recorded
 // custody decision: when set, file custody is forced regardless of what was
 // recorded, so headless/CI runs always use the file store (P6-XP-04). Otherwise
@@ -2754,6 +2866,27 @@ FROM events
 WHERE workspace_id = ? AND device_id = ? AND seq = ?
 LIMIT 1;
 `, event.WorkspaceID, event.DeviceID, event.Seq-1).Scan(&hash)
+		// P4-SYNC-02: a snapshot-bootstrapped device has no event rows below the
+		// retention floor, so the seq-1 predecessor of the first post-floor event
+		// per origin device is absent. Fall back to the imported chain anchor (the
+		// content hash of the last covered event, at seq = event.Seq-1). Match by
+		// device+seq: the store enforces a singleton workspace. A miss falls
+		// through to today's ("", false, nil) so a genuinely orphaned reference is
+		// still reported as a hash-chain break.
+		if errors.Is(err, sql.ErrNoRows) {
+			anchorErr := exec.QueryRowContext(ctx, `
+SELECT anchor_content_hash
+FROM sync_chain_anchors
+WHERE device_id = ? AND anchor_seq = ?;
+`, event.DeviceID, event.Seq-1).Scan(&hash)
+			if anchorErr == nil {
+				return hash, true, nil
+			}
+			if !errors.Is(anchorErr, sql.ErrNoRows) {
+				return "", false, fmt.Errorf("read chain anchor: %w", anchorErr)
+			}
+			return "", false, nil
+		}
 	} else if event.Seq == 1 {
 		return "", false, nil
 	} else {
