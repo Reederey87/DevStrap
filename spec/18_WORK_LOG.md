@@ -31,6 +31,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — fix(git): honor the stored lfs_policy on materialize/hydrate (P6-GIT-04)
+
+Changed:
+- `internal/git/git.go`: new `Runner.LFSInstallLocal(ctx, dir)` runs `git lfs install --local` — required on the materialize path because `gitEnv` sets `GIT_CONFIG_GLOBAL=/dev/null`, hiding any global `git lfs install` so a fresh clone would otherwise leave pointer files regardless of user config.
+- `internal/cli/hydrate.go`: new `applyMaterializeLFSPolicy` mirrors `applyWorktreeLFSPolicy` — `always`/`agent` → `install --local` + `LFSPull` (fail the project on error), `auto`/`never` → warn that pointer files remain. `LFSPull` already carries the P6-GIT-01 long-transfer timeout.
+- `internal/cli/materialize.go`: `materializeGitRepo` calls `applyMaterializeLFSPolicy` after `hydrateProjectUnlocked`, recording "failed" on error. **Placed in the caller, not inside `hydrateProjectUnlocked`** (which is shared by `createFreshWorktree`): the review's blocking finding was that codex's original in-`hydrate` placement (a) fired on the worktree flow and (b) missed the `SkeletonProjects` retry — a repo recorded "failed" for an LFS pull failure is re-queued and, on the already-on-disk early-return, silently flipped back to "available"/"clean" with pointers. Applying LFS in `materializeGitRepo` covers the fresh clone AND the retry, and leaves the worktree path (its own `applyWorktreeLFSPolicy`) untouched.
+- spec/08: LFS section notes the materialize/hydrate path now honors `lfs_policy`.
+
+Validated:
+- `gofmt -l cmd internal` clean; `go build ./...`; **full `go test ./...` green** (incl. `internal/cli` real-git LFS tests and the restored `TestCreateFreshWorktreeCleansUpAfterLFSPullFailure`). New `TestMaterializeLFSAlwaysDoesNotFlipFailedToAvailableOnRetry` pins the retry invariant. Independent opus review (one blocking finding, fixed as above) + Codex implementation.
+
+Follow-ups:
+- The worktree LFS path deliberately still omits `install --local` (pre-existing; a worktree shares the parent clone's `.git/config`, where materialize now installs the filter). Not in scope.
+
 ## 2026-07-04 — fix(ignore): align the compiler with real gitignore semantics (P6-XP-02)
 
 Changed:

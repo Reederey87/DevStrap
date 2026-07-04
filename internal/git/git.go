@@ -528,6 +528,15 @@ func (r Runner) LFSPull(ctx context.Context, dir string) error {
 	return err
 }
 
+// LFSInstallLocal installs the LFS smudge/clean filters into the repo's own
+// .git/config. It is required on the materialize path because gitEnv sets
+// GIT_CONFIG_GLOBAL=/dev/null, hiding any global `git lfs install` (P6-GIT-04).
+// This is a local operation (no network); it uses the default Timeout.
+func (r Runner) LFSInstallLocal(ctx context.Context, dir string) error {
+	_, err := r.Run(ctx, dir, "lfs", "install", "--local")
+	return err
+}
+
 func UsesLFS(ctx context.Context, dir string) (bool, error) {
 	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {

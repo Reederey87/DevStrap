@@ -275,6 +275,8 @@ For agents, avoid pulling all LFS objects unless needed.
 
 Current implementation stores `git_repos.lfs_policy` from `devstrap add --lfs-policy` and reads it during `worktree new`. After creating an agent worktree, DevStrap scans checked-out `.gitattributes` files for `filter=lfs`. If LFS is used and the policy is `agent` or `always`, it runs `git lfs pull` in the worktree and fails clearly with the worktree path if the pull fails, then removes the orphan checkout and branch. If the policy is `auto` or `never`, it leaves the worktree lightweight and prints a warning that LFS pointer files may remain.
 
+**The eager materialize/hydrate path honors `lfs_policy` too (`P6-GIT-04`).** `materializeGitRepo` (the whole-tree `devstrap sync`/`materialize` clone) applies the policy after `hydrateProjectUnlocked` returns, mirroring the worktree path: `always`/`agent` runs `git lfs install --local` (required because the sanitized git env sets `GIT_CONFIG_GLOBAL=/dev/null`, hiding any global smudge filter) then `git lfs pull`, recording the project **failed** on error rather than silently landing pointer files as available/clean; `auto`/`never` warns. It is applied in the caller (`materializeGitRepo`), not inside `hydrateProjectUnlocked` (which the worktree path also calls), so it covers both the fresh clone and a `SkeletonProjects` retry of a repo previously recorded failed — an always-policy repo can never be flipped back to available/clean with pointers on a later sync. `LFSPull` carries the `P6-GIT-01` long-transfer timeout.
+
 ## Dirty worktree handling
 
 Dirty primary repo:

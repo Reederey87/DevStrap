@@ -197,6 +197,18 @@ func materializeGitRepo(ctx context.Context, store *state.Store, opts *options, 
 	if err != nil {
 		return err
 	}
+	// P6-GIT-04: honor the stored lfs_policy on the eager materialize path (the
+	// whole-tree clone that must leave real content, not pointer files). This is
+	// applied in the caller — NOT inside hydrateProjectUnlocked, which is shared
+	// with worktree creation — so it runs on both the fresh clone and the
+	// SkeletonProjects retry of a repo previously recorded "failed" (which
+	// re-enters via the already-on-disk path), and never flips an unsatisfied
+	// always-policy LFS repo to available/clean with pointers. A usable checkout
+	// is guaranteed here: materialized-empty/broken-HEAD returns an error above.
+	if err := applyMaterializeLFSPolicy(ctx, gitRunner(opts), project, localPath); err != nil {
+		_ = store.UpdateProjectLocalState(ctx, project.ID, localPath, "failed", "unknown")
+		return err
+	}
 	// DRAFT-05/P6-GIT-03: dependency restores run lockfile/package lifecycle
 	// scripts, which are arbitrary repo-controlled code. Keep the existing
 	// global opt-in gate, but run the rebuild before env hydrate so the

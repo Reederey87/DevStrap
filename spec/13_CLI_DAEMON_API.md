@@ -254,7 +254,7 @@ Options:
 --lfs
 ```
 
-Current implementation uses partial clone by default, supports `--full` and `--lfs`, refuses to clone into non-empty non-skeleton directories, stages clones in hidden sibling temp directories, promotes only after clone success plus a second target validation, preserves the original skeleton on clone failure, and updates local materialization/dirty state. Planned (`DRAFT-*`): `hydrate` extends beyond `git_repo` projects to materialize `local_git`/`plain_folder`/draft content from decrypted `age_blob:<sha256>` bundles, while `node_modules`/build artifacts are rebuilt (npm/pnpm/uv install) rather than synced.
+Current implementation uses partial clone by default, supports `--full` and `--lfs`, refuses to clone into non-empty non-skeleton directories, stages clones in hidden sibling temp directories, promotes only after clone success plus a second target validation, preserves the original skeleton on clone failure, and updates local materialization/dirty state. The eager `materialize`/`sync` path additionally honors the stored `git_repos.lfs_policy` (`P6-GIT-04`): after clone, an `always`/`agent` repo runs `git lfs install --local` + `git lfs pull` (recorded **failed** on error, never available/clean with pointers), and `auto`/`never` warns — applied in `materializeGitRepo` so a `SkeletonProjects` retry of a failed repo cannot silently flip it to available (see `08_GIT_MATERIALIZATION_AND_WORKTREES.md`). The manual `--lfs` flag stays an explicit one-off pull. Planned (`DRAFT-*`): `hydrate` extends beyond `git_repo` projects to materialize `local_git`/`plain_folder`/draft content from decrypted `age_blob:<sha256>` bundles, while `node_modules`/build artifacts are rebuilt (npm/pnpm/uv install) rather than synced.
 
 ### add
 
