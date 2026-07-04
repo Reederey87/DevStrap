@@ -237,4 +237,4 @@ The branch workflow that backs this invariant — trunk-based development on a s
 - `16_TEST_PLAN.md` — unit, integration, e2e, chaos, and cross-platform tests.
 - `17_REFERENCES.md` — useful platform and tool references.
 - `18_WORK_LOG.md` — concise end-of-cycle implementation tracking and handoff notes.
-- `19_CLOUD_PROVISIONING_GUIDE.md` — register/configure the chosen cloud stack (Fly.io + Cloudflare R2 + Neon).
+- `19_CLOUD_PROVISIONING_GUIDE.md` — register/configure the chosen cloud stack (Fly.io + Cloudflare R2 + Neon). Live-R2 dogfood credentials are kept in a stable `0600` env file (`~/.devstrap/dogfood-r2.env`) that agents `source` for any live-R2 run — see `AGENTS.md` § *Live-R2 dogfood credentials*.
