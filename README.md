@@ -176,8 +176,9 @@ devstrap agent pr <run-id> --dry-run
 
 # 6. Point at a hub, then sync the namespace map + materialize the tree.
 #    Zero infrastructure: any private git repo you can push to IS the hub.
-#    Create an empty private repo and configure it once in ~/.devstrap/config.yaml:
-#      gh repo create you/devstrap-hub --private
+#    Create an empty private repo:
+gh repo create you/devstrap-hub --private
+#    then configure it once in ~/.devstrap/config.yaml:
 #      hub: "git@github.com:you/devstrap-hub.git"
 #    Auth is your existing ssh key / git credential helper, running non-interactively
 #    (load the key with `ssh-add`). No bucket, no token plane, no `hub login`.
@@ -216,7 +217,8 @@ R2 setup, credential custody options, and the multi-device runbook.
 
 ### Pair a second device
 
-Remote hubs (the git carrier and R2/S3) key everything under `workspaces/<workspace_id>/`, so devices converge only when
+Remote hubs (the git carrier and R2/S3) key everything under `workspaces/<workspace_id>/`,
+so devices converge only when
 they share **one** workspace id. The **founder** mints it at `init`; every later device
 **adopts** it — a bare `devstrap init` mints a *fresh* id and keys a disjoint prefix, so it
 never sees the founder's content. The workspace id is a non‑secret prefix selector (excluded
