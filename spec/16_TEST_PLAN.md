@@ -358,7 +358,7 @@ Proves the "Dropbox experience for code" round trip: one `devstrap sync` on Devi
 
 The cloud hub is pluggable behind one `Hub` interface with two planes — a signed HLC-ordered namespace-map event log and a content-addressed encrypted blob store (`age_blob:<sha256>`). The same conformance suite must pass against every backend: a file-backed local backend retained ONLY for tests, and Cloudflare R2 (S3 API) as the production backend.
 
-Shipped conformance (`P5-HUB-01`): `internal/hub`'s shared `assertHubRoundTrip` runs the contract below against both the in-memory `memS3` double (`TestR2ConformanceMemS3`) and the production `aws-sdk-go-v2` `S3Adapter` against a live bucket (`TestR2MinIOConformance` in `internal/hub/r2_minio_test.go`). The MinIO/R2 test is **env-gated** (not a build tag): it skips unless `DEVSTRAP_HUB_S3_ENDPOINT` (plus `DEVSTRAP_HUB_S3_ACCESS_KEY_ID`/`DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY`) is set, so the file always compiles (a refactor cannot silently break it and `go mod tidy` keeps the SDK a stable direct require) while `go test ./...` stays hermetic by default. A dedicated `minio-conformance` ubuntu CI job (`.github/workflows/ci.yml`) now boots a digest-pinned MinIO via `docker run` and sets the `DEVSTRAP_HUB_S3_*` env so this test runs against a real S3-API backend on every push/PR (`P6-QUAL-03`). The `mapS3Error` sentinel translation is also hermetically unit-tested in `s3client_awssdk_test.go` to protect the coverage floor independent of the gated job. Run the live test locally against a 2024+ MinIO image (for `If-None-Match: *` conditional-put support): `docker run -p 9000:9000 minio/minio server /data`, then `DEVSTRAP_HUB_S3_ENDPOINT=http://localhost:9000 DEVSTRAP_HUB_S3_ACCESS_KEY_ID=minioadmin DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY=minioadmin go test -run TestR2MinIOConformance ./internal/hub`.
+Shipped conformance (`P5-HUB-01`): `internal/hub`'s shared `assertHubRoundTrip` runs the contract below against both the in-memory `memS3` double (`TestR2ConformanceMemS3`) and the production `aws-sdk-go-v2` `S3Adapter` against a live bucket (`TestR2MinIOConformance` in `internal/hub/r2_minio_test.go`). The MinIO/R2 test is **env-gated** (not a build tag): it skips unless `DEVSTRAP_HUB_S3_ENDPOINT` (plus `DEVSTRAP_HUB_S3_ACCESS_KEY_ID`/`DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY`) is set, so the file always compiles (a refactor cannot silently break it and `go mod tidy` keeps the SDK a stable direct require) while `go test ./...` stays hermetic by default. A dedicated `minio-conformance` ubuntu CI job (`.github/workflows/ci.yml`) now boots a digest-pinned MinIO via `docker run` and sets the `DEVSTRAP_HUB_S3_*` env so this test runs against a real S3-API backend on `main` pushes and pull requests (`P6-QUAL-03`); superseded in-progress PR CI runs are cancelled by workflow-level `concurrency`. The `mapS3Error` sentinel translation is also hermetically unit-tested in `s3client_awssdk_test.go` to protect the coverage floor independent of the gated job. Run the live test locally against a 2024+ MinIO image (for `If-None-Match: *` conditional-put support): `docker run -p 9000:9000 minio/minio server /data`, then `DEVSTRAP_HUB_S3_ENDPOINT=http://localhost:9000 DEVSTRAP_HUB_S3_ACCESS_KEY_ID=minioadmin DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY=minioadmin go test -run TestR2MinIOConformance ./internal/hub`.
 
 ### Hub interface conformance (both backends)
 
@@ -567,12 +567,11 @@ stubSSH(t, `echo "hostname git.acme.com"`) // exercises the ssh -G branch
 stubSSH(t, `exit 1`)                        // forces the fallback parser
 ```
 
-### P6-QUAL-05 — CI runs the full 5-job matrix twice per PR commit with no concurrency cancellation
+### P6-QUAL-05 — CI push triggers scoped + PR concurrency cancellation — SHIPPED
 
-**Problem.** `.github/workflows/ci.yml:3-10` triggers on both `push: branches: ["**"]` and `pull_request` with no `concurrency:` block anywhere, so every in-repo topic-branch commit runs spec-drift + lint + 2×test + vuln twice, and rapid pushes stack uncancelled duplicate matrices.
+**Resolved.** `.github/workflows/ci.yml` now triggers `push` only for `main`, keeps `pull_request` coverage for PR branches, keeps the daily vulnerability schedule, and defines workflow-level `concurrency` so superseded in-progress PR runs cancel while non-PR runs continue.
 
-**Actionable steps.**
-1. Scope `push` to `main` (post-merge coverage) and add a `concurrency:` block that cancels superseded in-progress PR runs.
+Pinned workflow contract:
 
 ```yaml
 on: { push: { branches: [main] }, pull_request: {}, schedule: [{cron: "17 6 * * *"}] }

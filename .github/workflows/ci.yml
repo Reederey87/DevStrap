@@ -3,11 +3,17 @@ name: CI
 on:
   push:
     branches:
-      - "**"
+      - main
   pull_request:
   schedule:
     # Daily run so post-merge CVEs surface without blocking unrelated PRs (CI-01).
     - cron: "17 6 * * *"
+
+concurrency:
+  # Key PR runs by PR NUMBER, not head_ref: two fork PRs sharing a branch name
+  # must never cancel each other (CodeRabbit, PR #68). Non-PR runs key by ref.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
