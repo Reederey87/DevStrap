@@ -160,8 +160,11 @@ func TestApplyEventsIsIdempotentAndDetectsRemoteConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projects) != 1 || projects[0].RemoteKey != "github.com/acme/api" {
-		t.Fatalf("conflict overwrote project: %+v", projects)
+	if len(projects) != 1 ||
+		projects[0].RemoteKey != "github.com/other/api" ||
+		projects[0].RemoteURL != "git@github.com:other/api.git" ||
+		projects[0].SourceEventHLC != conflict.HLC {
+		t.Fatalf("project = %+v, want higher-HLC conflicting event", projects)
 	}
 	conflicts, err := st.CountOpenConflicts(ctx)
 	if err != nil {
@@ -219,11 +222,11 @@ func TestReconcileSamePathIsCommutative(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if forwardWinner.RemoteKey != acme.RemoteKey || reverseWinner.RemoteKey != acme.RemoteKey {
-		t.Fatalf("winners = %q/%q, want %q", forwardWinner.RemoteKey, reverseWinner.RemoteKey, acme.RemoteKey)
+	if forwardWinner.RemoteKey != other.RemoteKey || reverseWinner.RemoteKey != other.RemoteKey {
+		t.Fatalf("winners = %q/%q, want %q", forwardWinner.RemoteKey, reverseWinner.RemoteKey, other.RemoteKey)
 	}
-	if forwardIncomingWins || !reverseIncomingWins {
-		t.Fatalf("incoming wins flags = %v/%v, want false/true", forwardIncomingWins, reverseIncomingWins)
+	if !forwardIncomingWins || reverseIncomingWins {
+		t.Fatalf("incoming wins flags = %v/%v, want true/false", forwardIncomingWins, reverseIncomingWins)
 	}
 	if forwardDetails != reverseDetails {
 		t.Fatalf("conflict details differ:\nforward=%s\nreverse=%s", forwardDetails, reverseDetails)
@@ -277,8 +280,8 @@ func TestApplyEventsSamePathDifferentRemoteUsesCanonicalWinnerAcrossPullWindows(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(projects) != 1 || projects[0].RemoteKey != "github.com/acme/api" || projects[0].SourceEventID != older.ID {
-		t.Fatalf("projects = %+v, want canonical older remote/event", projects)
+	if len(projects) != 1 || projects[0].RemoteKey != "github.com/other/api" || projects[0].SourceEventID != newer.ID {
+		t.Fatalf("projects = %+v, want canonical newer remote/event", projects)
 	}
 	if _, err := ApplyEvents(ctx, st, []state.Event{newer, older}); err != nil {
 		t.Fatal(err)
@@ -294,8 +297,11 @@ func TestApplyEventsSamePathDifferentRemoteUsesCanonicalWinnerAcrossPullWindows(
 	if err := json.Unmarshal([]byte(conflicts[0].DetailsJSON), &details); err != nil {
 		t.Fatal(err)
 	}
-	if details.RemoteKeyA != "github.com/acme/api" || details.RemoteKeyB != "github.com/other/api" || details.WinnerKey != "github.com/acme/api" {
-		t.Fatalf("conflict details = %+v, want sorted keys and acme winner", details)
+	if details.RemoteKeyA != "github.com/acme/api" ||
+		details.RemoteKeyB != "github.com/other/api" ||
+		details.WinnerKey != "github.com/other/api" ||
+		details.LoserKey != "github.com/acme/api" {
+		t.Fatalf("conflict details = %+v, want sorted keys and newer other winner", details)
 	}
 }
 

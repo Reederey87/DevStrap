@@ -1,37 +1,21 @@
 package sync
 
 // property_helpers_test.go holds the shared machinery for the P4-QUAL-02
-// property / model-check layer (rapid-driven): the convergent-event-set
-// generator with its ONE documented divergence exclusion, a store harness that
-// works from a *rapid.T, a canonical active-projection encoder for cross-store
-// equality, and small draw helpers reused by the HLC, Decide-convergence,
-// import≡replay, and 3-replica model tests.
+// property / model-check layer (rapid-driven): the event-set generator, a store
+// harness that works from a *rapid.T, a canonical active-projection encoder for
+// cross-store equality, and small draw helpers reused by the HLC,
+// Decide-convergence, import≡replay, and 3-replica model tests.
 //
-// GENERATOR EXCLUSIONS (read before widening genEventSet). Both stem from the
-// SAME root cause: reconcileSamePath installs the deterministic LOWEST-coordinate
-// winner between competing remotes, which is incompatible with same-remote
-// last-writer-wins (HIGHEST HLC). Each is pinned by a witness tripwire so the
-// exclusion cannot silently outlive the bug.
-//
-//  1. Delete + different-remote pair on one path (decide.go's documented
-//     residual): a delete whose HLC falls between the lowest-coordinate winner
-//     and a dropped higher rival flips the terminal state by delivery order.
-//     Pinned by TestDecideDifferentRemoteDeleteDivergesWitness.
-//
-//  2. A single remote carrying MULTIPLE events at different HLCs on a
-//     different-remote path — even with NO delete (found by this property layer,
-//     reported as a P4-QUAL-02 finding). Same-remote LWW keeps that remote's
-//     HIGHEST event, but the cross-remote reconcile keeps the LOWEST coordinate,
-//     so whether the reconcile fires before or after the same-remote event
-//     reaches its LWW max flips the winner. Pinned by
-//     TestDecideDifferentRemoteMultiEventDivergesWitness.
-//
-// genEventSet therefore restricts its two regimes to the provably-convergent
-// subset: (A) single-remote add/update/delete/re-add mixes (PR #87 made these
-// converge) and (B) different-remote add/update mixes with EXACTLY ONE event per
-// remote and NO deletes (the reconcile then reduces to an order-independent
-// global-minimum). Widening either regime past its witness re-introduces a real
-// divergence — fix reconcileSamePath first.
+// genEventSet has NO exclusions. The layer originally excluded two
+// different-remote classes — delete + different-remote pairs, and one remote
+// carrying multiple events at different HLCs — both rooted in
+// reconcileSamePath installing the LOWEST-coordinate winner, incompatible with
+// same-remote last-writer-wins (highest HLC). The HLC-monotonic winner (the
+// P4-QUAL-02 follow-up: highest (HLC, deviceID, eventID) coordinate,
+// consistent with same-remote LWW and importEntryTx) fired both witness
+// tripwires as designed; the exclusions and witnesses were retired and the
+// generator now mixes deletes and multi-event remotes freely across
+// different-remote paths.
 
 import (
 	"context"
@@ -79,8 +63,10 @@ type propT interface {
 	Fatalf(format string, args ...any)
 }
 
-// genEventSet draws a namespace-convergence event set that is guaranteed to
-// converge under every delivery order (see the file header for the exclusion).
+// genEventSet draws a namespace-convergence event set spanning the full event
+// space: per path, adds/updates/deletes drawn freely over a small remote pool
+// (1-3 remotes), so same-remote LWW, delete/re-add, and same-path/different-
+// remote reconciliation — including one remote carrying several HLCs — all mix.
 // It returns events with RAW small HLCs already shifted into the physical band
 // (via upsertEvt/deleteEvt) and globally unique event ids.
 func genEventSet(t *rapid.T) []state.Event {
@@ -91,27 +77,16 @@ func genEventSet(t *rapid.T) []state.Event {
 	nextID := func() string { counter++; return fmt.Sprintf("evt-%03d", counter) }
 	for p := 0; p < nPaths; p++ {
 		path := fmt.Sprintf("work/p%d", p)
-		// regime B uses a UNIQUE remote per event (exclusion 2); regime A pins one
-		// shared remote so deletes/re-adds stay in the convergent single-remote
-		// class (exclusion 1).
-		singleRemote := fmt.Sprintf("github.com/x/p%d", p)
-		multiRemote := rapid.Bool().Draw(t, fmt.Sprintf("p%d_multiremote", p))
+		// A small per-path remote pool keeps cross-remote reconciles frequent
+		// while still letting a single remote carry multiple events at
+		// different HLCs (the class the retired exclusion 2 used to skip).
+		nRemotes := rapid.IntRange(1, 3).Draw(t, fmt.Sprintf("p%d_n_remotes", p))
 		nEvents := rapid.IntRange(1, 4).Draw(t, fmt.Sprintf("p%d_n", p))
 		for e := 0; e < nEvents; e++ {
 			// Small HLC range so collisions/ties happen often.
 			hlc := int64(rapid.IntRange(1, 6).Draw(t, fmt.Sprintf("p%d_e%d_hlc", p, e)))
 			dev := rapid.SampledFrom(devices).Draw(t, fmt.Sprintf("p%d_e%d_dev", p, e))
 			id := nextID()
-			if multiRemote {
-				// Different-remote, delete-free, ONE event per remote: the
-				// cross-remote reconcile reduces to an order-independent global
-				// minimum. A shared remote here would re-arm exclusion 2.
-				typ := rapid.SampledFrom([]string{EventProjectAdded, EventProjectUpdated}).Draw(t, fmt.Sprintf("p%d_e%d_typ", p, e))
-				remote := fmt.Sprintf("github.com/x/p%d-e%d", p, e)
-				events = append(events, upsertEvt(id, dev, typ, hlc, path, remote))
-				continue
-			}
-			// Single remote: deletes and re-adds are allowed freely (converge).
 			kind := rapid.SampledFrom([]string{"add", "update", "delete"}).Draw(t, fmt.Sprintf("p%d_e%d_kind", p, e))
 			if kind == "delete" {
 				events = append(events, deleteEvt(id, dev, hlc, path))
@@ -121,7 +96,8 @@ func genEventSet(t *rapid.T) []state.Event {
 			if kind == "update" {
 				typ = EventProjectUpdated
 			}
-			events = append(events, upsertEvt(id, dev, typ, hlc, path, singleRemote))
+			remote := fmt.Sprintf("github.com/x/p%d-r%d", p, rapid.IntRange(0, nRemotes-1).Draw(t, fmt.Sprintf("p%d_e%d_remote", p, e)))
+			events = append(events, upsertEvt(id, dev, typ, hlc, path, remote))
 		}
 	}
 	return events

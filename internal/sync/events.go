@@ -866,6 +866,12 @@ func upsertParamsForEvent(payload ProjectPayload, event state.Event) state.Upser
 	}
 }
 
+// reconcileSamePath picks the canonical winner between two remotes claiming
+// the same path: the HIGHEST (HLC, deviceID, eventID) coordinate. Highest is
+// load-bearing — it keeps the installed row's source HLC monotone with the
+// events applied, consistent with same-remote last-writer-wins (decideUpsert)
+// and snapshot import (importEntryTx), so different-remote mixes converge in
+// every delivery order.
 func reconcileSamePath(existing state.ProjectStatus, incoming ProjectPayload, event state.Event) (ProjectPayload, bool, string, error) {
 	current := samePathCandidate{
 		payload: ProjectPayload{
@@ -886,7 +892,7 @@ func reconcileSamePath(existing state.ProjectStatus, incoming ProjectPayload, ev
 		eventID:  event.ID,
 	}
 	winner, loser, incomingWins := current, next, false
-	if samePathLess(next, current) {
+	if samePathLess(current, next) {
 		winner, loser, incomingWins = next, current, true
 	}
 	remoteA, remoteB := current.payload.RemoteKey, next.payload.RemoteKey
