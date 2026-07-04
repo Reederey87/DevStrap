@@ -432,23 +432,11 @@ The hub-hardening imperative that these `HUB` items land alongside the zero-know
 
 **Shipped fix.** Hub S3/R2 credentials now resolve most-explicit-first through `resolveHubS3Credentials` (`internal/cli/hub.go`): `DEVSTRAP_HUB_S3_*` env/config — where either value may be a 1Password `op://` ref resolved via `op read` under the sanitized child env — then `AWS_*` literals, then the per-workspace OS-keychain slot written by the new `devstrap hub login` (0600 file fallback; removed by `hub logout`). The resolved secret rides `redact.Secret` and is revealed only at the `hub.NewS3Client` constructor. `mapS3Error` gained an `ErrS3Auth` branch so rejected/expired credentials surface a typed remediation hint instead of a raw `SignatureDoesNotMatch`. `spec/13`/`spec/15`/`spec/19` are reconciled — `spec/15` owns the custody threat model, `spec/19` the provisioning steps.
 
-### P6-HUB-03 — `R2Hub.Push` uploads one event per serial round-trip
+### P6-HUB-03 — `R2Hub.Push` fans out with bounded concurrency (shipped 2026-07-04, `fix/p6-hub-03`)
 
-**Problem.** `Push` (`internal/hub/r2.go:120-146`) loops one marshal + conditional-PUT per event with no `errgroup`, while `Pull` got bounded fan-out (`r2PullConcurrency=8`, `r2.go:182-203`) under `P5-HUB-04`; `pushReferencedBlobs` (`internal/cli/sync.go:151-166`) is likewise serial, so a first sync after a large `scan --adopt` stalls 30-60+ s on sequential PUTs.
+**Was.** `R2Hub.Push` serialized one marshal + conditional PUT per event while `Pull` already used bounded fan-out, and `pushReferencedBlobs` serialized each content-addressed blob PUT. A first sync after a large `scan --adopt` or draft snapshot wave could therefore spend one full network round-trip per event/blob even though the backend and in-memory conformance double are safe for concurrent use.
 
-**Actionable steps.**
-1. Fan out PUTs with an `errgroup` `SetLimit(r2PushConcurrency)`, but push in HLC-ordered waves (finish all PUTs at `HLC <= h` before starting `HLC > h`) — or sequence this after `P6-SYNC-01`'s ingestion-position cursor to avoid widening the intra-device clock gap.
-2. Fan out `pushReferencedBlobs` similarly.
-3. Document the wave-ordering invariant in the `Push` comment.
-
-```go
-g, ctx := errgroup.WithContext(ctx)
-g.SetLimit(r2PushConcurrency)
-for _, wave := range groupByHLCWave(events) { // ascending HLC
-    for _, ev := range wave { ev := ev; g.Go(func() error { return putEvent(ctx, ev) }) }
-    if err := g.Wait(); err != nil { return err } // barrier per wave
-}
-```
+**Shipped fix.** `R2Hub.Push` now validates the whole batch's positive Seq invariant before any network work, then uses `errgroup.WithContext` with `r2PushConcurrency=8` to write events concurrently (`internal/hub/r2.go:64-67`, `internal/hub/r2.go:213-258`). Each goroutine preserves the old body semantics: marshal, build the seq-keyed object key, retry the conditional `PutObject`, treat `ErrPreconditionFailed` as an idempotent duplicate, and return `put event <id>: ...` for other failures. Plain fan-out is correct: `runSyncCycle` pushes blobs, calls `hub.Push`, and only advances the per-device push watermark after the whole batch returns nil (`internal/cli/sync.go:412-429`), so any mid-batch failure leaves the watermark unchanged and the next cycle re-pushes the same batch; successful duplicates collapse through the conditional PUT. No HLC/Seq wave-ordering machinery is needed because `P5-SYNC-01`'s per-origin-device Seq transport cursor superseded the old HLC-gap concern. Blob pushes got the same unordered bounded fan-out with `blobPushConcurrency=8` (`internal/cli/sync.go:24-27`, `internal/cli/sync.go:454-474`) because blobs are content-addressed and have no event-log ordering invariant. Regression coverage proves a concurrent mid-batch event PUT failure surfaces while other event objects land, 50 concurrent event PUTs land with the expected bytes, multiple blob refs push correctly, and one blob failure preserves the existing error prefix (`internal/hub/r2_test.go:57-119`, `internal/cli/sync_test.go:44-102`).
 
 ### P6-HUB-04 — the retention horizon has no hub-side representation, so `ErrSnapshotRequired` can never fire in production
 

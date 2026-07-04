@@ -31,6 +31,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — feat(hub): bounded fan-out for R2Hub.Push + blob pushes (P6-HUB-03)
+
+Changed:
+- `internal/hub/r2.go`: added `r2PushConcurrency=8`; `R2Hub.Push` now pre-validates every event Seq before network work, then uses bounded `errgroup` fan-out for marshal + conditional PUT, preserving 412 duplicate no-op handling and aggregate all-or-nothing error semantics.
+- `internal/cli/sync.go`: added `blobPushConcurrency=8`; `pushReferencedBlobs` now uploads referenced content-addressed blobs with bounded unordered fan-out while preserving existing error messages.
+- `internal/hub/r2_test.go`, `internal/cli/sync_test.go`: added concurrent push coverage for mid-batch failure propagation, 50-event landing, multi-blob success, and blob failure surfacing.
+- `spec/03`, `spec/15`, `docs/audits/README.md`: marked `P6-HUB-03` shipped, removed stale HLC-wave guidance, documented why full-batch push watermark semantics make plain fan-out correct, and reconciled the Pass-6 ledger from 6 to 5 open.
+
+Validated:
+- `gofmt -l cmd internal` printed nothing.
+- `go test -race ./internal/hub/... ./internal/cli/...` passed.
+- `go build ./...` passed.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` passed after this work-log entry.
+
 ## 2026-07-04 — fix(sync): gate deletes against the live row's HLC — delete-vs-re-add now converges (P5-ARCH-01 residual)
 
 Changed:
