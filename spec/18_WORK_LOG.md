@@ -27,6 +27,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — fix(materialize): rebuild before env hydrate (P6-GIT-03)
+
+Changed:
+- `internal/cli/materialize.go`: `materializeGitRepo` now runs the existing `DEVSTRAP_REBUILD_DEPS`-gated dependency rebuild before `hydrateProjectEnv`, preserving best-effort warning behavior; rebuild stdout/stderr is written to `~/.devstrap/logs/rebuilds/<sanitized-project-path>.log` with mode `0600`, and rebuild failures name the log path.
+- `internal/cli/materialize_test.go`: added `TestMaterializeRebuildsBeforeHydrate` and `TestMaterializeRebuildLogIsWritten0600`.
+- `spec/08_GIT_MATERIALIZATION_AND_WORKTREES.md`: corrected the current rebuild ordering/logging and documented the global env-var gate vs the future per-project policy, including the defense-in-depth caveat.
+- `docs/audits/README.md`: moved `P6-GIT-03` to *Recently shipped* and reconciled the Pass-6 open count to 18.
+
+Validated:
+- `gofmt -w cmd internal`
+- `GOCACHE=/tmp/devstrap-gocache-git03 go test -race ./internal/cli/ ./internal/...`
+
+Follow-ups:
+- Per-project `materialization.rebuild_on_hydrate: ask|always|never` remains target design; the shipped gate is still the single global `DEVSTRAP_REBUILD_DEPS` env var.
+
 ## 2026-07-03 — P6-QUAL-05: scope CI push triggers + add concurrency cancellation
 
 Changed:
