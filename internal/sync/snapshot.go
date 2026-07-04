@@ -292,11 +292,22 @@ func UnsealSnapshot(obj []byte, wck []byte) (Snapshot, error) {
 	return snap, nil
 }
 
-// snapshotAAD binds the sealed snapshot to its plaintext carrier: workspace,
-// producing device, sealing key's kid, producer HLC, and epoch. Mirrors
-// envelopeAAD's injective length-prefixed encoding (P6-SYNC-04 posture).
+// snapshotAADDomain is the leading domain-separation tag of the snapshot
+// AAD. Snapshots and enc.v2 events are sealed under the SAME per-epoch WCK,
+// so without an explicit tag the two AAD encodings are distinguished only
+// structurally (field count/shape) — a domain constant makes the separation
+// unconditional even if the field shapes ever converge (post-#65 opus
+// review Nit; free now because no sealed snapshot exists anywhere yet;
+// envelopeAAD is deliberately NOT retrofitted — enc.v2 ciphertext is live).
+const snapshotAADDomain = "devstrap:snapshot-aead:v1"
+
+// snapshotAAD binds the sealed snapshot to its plaintext carrier: the domain
+// tag, workspace, producing device, sealing key's kid, producer HLC, and
+// epoch. Mirrors envelopeAAD's injective length-prefixed encoding
+// (P6-SYNC-04 posture).
 func snapshotAAD(workspaceID, producedBy, kid string, hlc, epoch int64) []byte {
-	aad := make([]byte, 0, 12+len(workspaceID)+len(producedBy)+len(kid)+16)
+	aad := make([]byte, 0, 16+len(snapshotAADDomain)+len(workspaceID)+len(producedBy)+len(kid)+16)
+	aad = appendLenPrefixed(aad, snapshotAADDomain)
 	aad = appendLenPrefixed(aad, workspaceID)
 	aad = appendLenPrefixed(aad, producedBy)
 	aad = appendLenPrefixed(aad, kid)
