@@ -8,8 +8,10 @@ tracks_code: [internal/hub/**, internal/cli/hub.go]
 > SaaS direction (`SCALE-*`, Fly.io compute, managed Postgres control plane) remains
 > FUTURE.** This guide is the provisioning runbook for both: it doubles as a single-owner
 > deployment recipe usable today and the SaaS hosting direction for later. The shipped sync
-> transport is `devstrap sync` with `hub: r2://<bucket>` (the `aws-sdk-go-v2` S3 adapter;
-> `--hub-file <path>` stays for tests). Env/config keys below marked *shipped* are live;
+> transport is `devstrap sync` with `hub: git+ssh://…` / `git@host:path.git` (the
+> zero-infrastructure git carrier — the documented default quickstart) or `hub: r2://<bucket>`
+> (the `aws-sdk-go-v2` S3 adapter — this guide's scale/power path; `--hub-file <path>`
+> stays for tests). Env/config keys below marked *shipped* are live;
 > those marked *planned* name the intended SaaS surface and are provisional until `SCALE-*`
 > ships. See `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` (decisions 5 and 6) and
 > `14_MVP_ROADMAP_AND_BACKLOG.md`.

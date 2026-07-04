@@ -307,7 +307,7 @@ Components:
 
 - **`devstrap`** — the CLI for workspace setup, status, hydration, worktrees, env, sync, and agents (shipped).
 - **`devstrapd`** — a local daemon for reconciliation, watchers, and a local API (planned).
-- **DevStrap Hub** — a two‑plane zero‑knowledge sync service: a signed HLC namespace‑map event log plus a content‑addressed encrypted blob store, on Cloudflare R2/S3 behind one pluggable `Hub` interface (shipped; a hosted control plane for device enrollment is still planned).
+- **DevStrap Hub** — a two‑plane zero‑knowledge sync service: a signed HLC namespace‑map event log plus a content‑addressed encrypted blob store, through any private git repo (the zero‑infra carrier) or Cloudflare R2/S3, behind one pluggable `Hub` interface (shipped; a hosted control plane for device enrollment is still planned).
 
 The full design corpus lives under [`spec/`](spec/) — start with [`spec/00_START_HERE.md`](spec/00_START_HERE.md).
 
@@ -317,7 +317,7 @@ Capability layers (see [`spec/14_MVP_ROADMAP_AND_BACKLOG.md`](spec/14_MVP_ROADMA
 
 1. **Local CLI proof** — scan, register, hydrate, fresh worktrees, env profiles. ✅
 2. **Agent workspaces** — one worktree per task, fresh remote base, logs, forge‑agnostic PR/MR. ✅
-3. **Multi‑device sync** — eager materialization, encrypted draft/env blobs, the R2 zero‑knowledge hub. 🚧
+3. **Multi‑device sync** — eager materialization, encrypted draft/env blobs, the zero‑knowledge hub (git carrier + R2/S3). 🚧
 4. **Mac daemon** — LaunchAgent, FSEvents watcher, shell/editor integration. ⏳
 5. **Optional StrapFS** — File Provider / FUSE evaluation. ⏳ (deliberately deferred)
 
