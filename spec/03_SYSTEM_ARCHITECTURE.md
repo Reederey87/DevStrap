@@ -1,6 +1,6 @@
 ---
 last_reviewed: 2026-07-03
-tracks_code: [cmd/**, internal/**, .github/**]
+tracks_code: [cmd/**, internal/**, internal/config/**, .github/**]
 ---
 # System Architecture
 

@@ -127,6 +127,32 @@ func TestBroadOnlyFileSatisfiedByBroadSpec(t *testing.T) {
 	}
 }
 
+func TestEveryInternalPackageHasASpecificSpecOwner(t *testing.T) {
+	root := filepath.Join("..", "..")
+	specs, findings, err := LoadSpecs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) > 0 {
+		t.Fatalf("spec findings = %v", findings)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(root, "internal"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pkg := entry.Name()
+		specific, _ := specsTrackingTiers(specs, "internal/"+pkg+"/x.go")
+		if len(specific) == 0 {
+			t.Errorf("internal/%s has no specific spec owner (only broad/catch-all matches)", pkg)
+		}
+	}
+}
+
 func TestLoadSpecsValidatesFrontmatter(t *testing.T) {
 	root := t.TempDir()
 	specDir := filepath.Join(root, "spec")

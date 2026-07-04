@@ -27,6 +27,16 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — specdrift: require specific spec owners for internal packages
+
+Changed:
+- Added `TestEveryInternalPackageHasASpecificSpecOwner`, which loads the real `spec/` frontmatter and walks the real top-level `internal/` package directories so a new internal package cannot rely only on broad `internal/**` / catch-all mappings.
+- Extended specific `tracks_code` ownership where the specs already describe the packages: `spec/03` now owns `internal/config/**`; `spec/07` now owns `internal/id/**` and `internal/pairing/**`; `spec/16` now owns `internal/specdrift/**`.
+- Ledger: moved `P6-DOC-04` to *Recently shipped* because both halves are now closed: the earlier `internal/workspacekeys/**` frontmatter fix and this new-package mapping regression gate.
+
+Validated:
+- `gofmt -w cmd internal`; `GOCACHE=/tmp/devstrap-gocache-doc04 go test -race ./internal/specdrift/ ./...`.
+
 ## 2026-07-03 — hermetic SSH alias forge tests (P6-QUAL-04)
 
 Changed:

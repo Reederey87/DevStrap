@@ -1,6 +1,6 @@
 ---
 last_reviewed: 2026-07-03
-tracks_code: [cmd/**, internal/**, .github/**, go.mod, go.sum]
+tracks_code: [cmd/**, internal/**, internal/specdrift/**, .github/**, go.mod, go.sum]
 ---
 # Test Plan
 
