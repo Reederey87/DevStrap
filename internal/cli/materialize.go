@@ -83,9 +83,9 @@ func newMaterializeCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// "no draft bundle yet" state is visible without polluting the exit
 			// code.
 			if err := opts.render(stdout, func(w io.Writer) error {
-				_, _ = fmt.Fprintf(w, "Materialized %d/%d projects (%d skipped)\n", results.succeeded, results.total, results.skipped)
+				opts.progressf(w, "Materialized %d/%d projects (%d skipped)\n", results.succeeded, results.total, results.skipped)
 				if results.failed > 0 {
-					_, _ = fmt.Fprintf(w, "%d project(s) failed; run 'devstrap doctor' or 'devstrap status' for details\n", results.failed)
+					opts.progressf(w, "%d project(s) failed; run 'devstrap doctor' or 'devstrap status' for details\n", results.failed)
 				}
 				return nil
 			}, struct {

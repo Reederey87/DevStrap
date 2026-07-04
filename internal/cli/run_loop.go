@@ -69,7 +69,7 @@ func runLoopJitterBound(interval time.Duration) int64 {
 
 func runLoopTick(ctx context.Context, stdout, stderr io.Writer, opts *options, hubFile string, namespaceOnly bool) error {
 	// P5-CLI-05: the tick header is progress, not a result — route it to stderr.
-	_, _ = fmt.Fprintf(stderr, "[%s] run-loop tick: scan + sync + materialize\n", time.Now().UTC().Format(time.RFC3339))
+	opts.progressf(stderr, "[%s] run-loop tick: scan + sync + materialize\n", time.Now().UTC().Format(time.RFC3339))
 	// P6-XP-03: scan + adopt at the START of each tick. Without a daemon or
 	// watcher there is no other automatic local→hub path, so a project created
 	// on this device would never reach the namespace (and thus the hub) until a
@@ -138,7 +138,7 @@ func runLoopScanAdopt(ctx context.Context, stderr io.Writer, opts *options) erro
 		return err
 	}
 	if adopted > 0 {
-		_, _ = fmt.Fprintf(stderr, "scan adopted %d new project(s)\n", adopted)
+		opts.progressf(stderr, "scan adopted %d new project(s)\n", adopted)
 	}
 	return nil
 }

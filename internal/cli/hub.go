@@ -432,8 +432,8 @@ time. Remove stored credentials with 'devstrap hub logout'.`,
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(stdout, "Stored hub S3 credentials for workspace %s in the %s store.\n", ws, location)
-			return err
+			opts.progressf(stdout, "Stored hub S3 credentials for workspace %s in the %s store.\n", ws, location)
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&accessKeyID, "access-key-id", "", "S3/R2 access key id (not secret; the secret is always prompted or piped)")
@@ -458,8 +458,8 @@ func newHubLogoutCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := keys.DeleteHubS3Credentials(cmd.Context(), ws); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(stdout, "Removed stored hub S3 credentials for workspace %s.\n", ws)
-			return err
+			opts.progressf(stdout, "Removed stored hub S3 credentials for workspace %s.\n", ws)
+			return nil
 		},
 	}
 }
@@ -538,8 +538,8 @@ scope (spec/15).`,
 			if dryRun {
 				verb = "would delete"
 			}
-			_, err = fmt.Fprintf(stdout, "hub gc: pruned %d superseded draft snapshot(s); %s %d unreferenced hub blob(s)\n", pruned, verb, removed)
-			return err
+			opts.progressf(stdout, "hub gc: pruned %d superseded draft snapshot(s); %s %d unreferenced hub blob(s)\n", pruned, verb, removed)
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&hubFile, "hub-file", "", "file-backed test hub path")

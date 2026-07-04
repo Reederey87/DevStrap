@@ -99,7 +99,7 @@ func newScanCommand(stdout io.Writer, opts *options) *cobra.Command {
 				_, _ = fmt.Fprintf(stdout, "warning: %s\n", warning)
 			}
 			if adopt && !dryRun {
-				_, _ = fmt.Fprintf(stdout, "Adopted %d projects\n", len(result.Findings))
+				opts.progressf(stdout, "Adopted %d projects\n", len(result.Findings))
 			}
 			return nil
 		},

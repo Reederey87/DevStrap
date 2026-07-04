@@ -244,13 +244,9 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 				}
 			}
 
-			if _, err := fmt.Fprintf(stdout, "Initialized DevStrap workspace %q at %s\n", workspaceName, paths.Root); err != nil {
-				return err
-			}
+			opts.progressf(stdout, "Initialized DevStrap workspace %q at %s\n", workspaceName, paths.Root)
 			if scanAdopt {
-				if _, err := fmt.Fprintf(stdout, "Adopted %d existing project(s).\n", adopted); err != nil {
-					return err
-				}
+				opts.progressf(stdout, "Adopted %d existing project(s).\n", adopted)
 			}
 			// PROD-03: always print a short next-steps hint (clig.dev: suggest
 			// the next command and surface state after every action). The hint
@@ -294,20 +290,14 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 					// recovery hint must include removing the state home.
 					steps = append([]string{fmt.Sprintf("on the founding device: devstrap status  # copy its Workspace ID, then (r2/s3 hubs only — file hubs need no id) rm -r %s here and re-run: devstrap init --join --workspace-id <id>", paths.Home)}, steps...)
 				} else {
-					if _, err := fmt.Fprintf(stdout, "Adopted workspace id %s.\n", workspaceID); err != nil {
-						return err
-					}
+					opts.progressf(stdout, "Adopted workspace id %s.\n", workspaceID)
 				}
 				for i, step := range steps {
 					hint += fmt.Sprintf("  %d. %s\n", i+1, step)
 				}
-				if _, err := fmt.Fprint(stdout, hint); err != nil {
-					return err
-				}
+				opts.progressf(stdout, "%s", hint)
 			} else {
-				if _, err := fmt.Fprintf(stdout, "Next: devstrap status • devstrap scan --adopt • set 'hub: r2://<bucket>' in ~/.devstrap/config.yaml then devstrap sync\n"); err != nil {
-					return err
-				}
+				opts.progressf(stdout, "Next: devstrap status • devstrap scan --adopt • set 'hub: r2://<bucket>' in ~/.devstrap/config.yaml then devstrap sync\n")
 			}
 			return nil
 		},

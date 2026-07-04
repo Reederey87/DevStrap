@@ -31,6 +31,17 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — fix(cli): --quiet suppresses progress chatter (P6-CLI-04)
+
+Changed:
+- `internal/cli/root.go`: added the quiet-aware `options.progressf` helper and updated `--quiet` help text.
+- `internal/cli/sync.go`, `internal/cli/materialize.go`, `internal/cli/init.go`, `internal/cli/run_loop.go`, `internal/cli/hub.go`, and `internal/cli/scan.go`: routed progress/action-summary lines through `opts.progressf` while leaving dry-run output, result rows, warnings, prompts, JSON output, and error signals visible.
+- `internal/cli/root_test.go` and `internal/cli/materialize_test.go`: added table-driven command tests for quiet vs non-quiet output and unchanged side effects/JSON results.
+- `spec/13_CLI_DAEMON_API.md`: marked `P6-CLI-04` resolved and reconciled the logging wording.
+- `docs/audits/README.md`: moved `P6-CLI-04` to Recently shipped and reconciled the Pass 6 open count.
+
+Validated:
+
 ## 2026-07-04 — P6-CLI-03: wire Cobra usage errors to exitUsage=10
 
 Changed:
@@ -46,6 +57,10 @@ Validated:
 - `GOCACHE=$TMPDIR/gocache go test -race ./internal/cli/...`
 - `go build ./...`
 - `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` → 0 issues (one errcheck finding on the initial `progressf` body caught and fixed during review).
+
+Follow-ups:
+- None. Judgment-call sites `hub login`, `hub logout`, and `scan --adopt` were routed through `progressf` because they are single-line action summaries with durable side effects and normal exit-code/DB state signals.
 
 Follow-ups:
 - None
