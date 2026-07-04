@@ -31,6 +31,19 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — docs: Pass-6 audit doc status reconciliation (37/43 shipped markers + spec counts)
+
+Changed:
+- `docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`: added "— SHIPPED <date> (<PR/branch>)" heading markers to the 30 findings that shipped since the pass landed but lacked one (matching the 7-marker precedent from PR #64); added a "Findings at a glance" status banner and an Executive-summary qualifier noting 37/43 shipped (all five P1s) while preserving the as-found historical prose/counts/roadmap table; `P6-DOC-01` gets a narrower "doc portion applied; test-hardening residual OPEN" suffix instead of a SHIPPED marker.
+- `spec/00_START_HERE.md`, `spec/14_MVP_ROADMAP_AND_BACKLOG.md`: refreshed the stale "Pass-6 P2/P3 backlog (11 open)" count to "(6 open)" to match `docs/audits/README.md`'s live ledger.
+
+Validated:
+- Docs-only change; no code touched.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` passes.
+
+Follow-ups:
+- None.
+
 ## 2026-07-04 — docs: live-R2 dogfood — compact + snapshot bootstrap PASS (spec/19 §F)
 
 Changed:
