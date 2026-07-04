@@ -22,7 +22,7 @@ func newRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "run <path> -- <command> [args...]",
 		Short: "Run a command with the project env profile",
-		Args:  cobra.MinimumNArgs(2),
+		Args:  usageArgs(cobra.MinimumNArgs(2)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := opts.openState(cmd.Context())
 			if err != nil {

@@ -34,7 +34,7 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "init [root]",
 		Short: "Initialize a DevStrap workspace",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  usageArgs(cobra.MaximumNArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var founderCode pairing.Code
 			var founderFingerprint string

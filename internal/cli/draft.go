@@ -35,7 +35,7 @@ func newDraftSnapshotCreateCommand(stdout io.Writer, opts *options) *cobra.Comma
 	cmd := &cobra.Command{
 		Use:   "create <path>",
 		Short: "Pack a non-git project into an encrypted draft bundle and emit a snapshot event",
-		Args:  cobra.ExactArgs(1),
+		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := opts.openState(cmd.Context())
 			if err != nil {

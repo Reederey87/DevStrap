@@ -15,7 +15,7 @@ func newOpenCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "open <path>",
 		Short: "Hydrate and open a namespace path in an editor",
-		Args:  cobra.ExactArgs(1),
+		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if cursor == vscode {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("choose exactly one of --cursor or --vscode")}

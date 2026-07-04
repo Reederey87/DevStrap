@@ -73,6 +73,9 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 
 	cmd.SetOut(stdout)
 	cmd.SetErr(stderr)
+	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		return appError{code: exitUsage, err: err}
+	})
 	cmd.PersistentFlags().StringVar(&opts.cfgFile, "config", "", "config file path")
 	cmd.PersistentFlags().BoolVar(&opts.json, "json", false, "print machine-readable JSON")
 	cmd.PersistentFlags().StringVar(&opts.home, "home", "", "DevStrap state directory")
@@ -139,6 +142,17 @@ func walkCommands(c *cobra.Command, fn func(*cobra.Command)) {
 	fn(c)
 	for _, sub := range c.Commands() {
 		walkCommands(sub, fn)
+	}
+}
+
+// usageArgs wraps a cobra positional-args validator so a failure classifies as
+// exitUsage (P6-CLI-03) instead of falling through to exitGeneric.
+func usageArgs(pa cobra.PositionalArgs) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if err := pa(cmd, args); err != nil {
+			return appError{code: exitUsage, err: err}
+		}
+		return nil
 	}
 }
 
@@ -217,6 +231,20 @@ func ExitCodeWithWriter(err error, stderr io.Writer) int {
 	}
 	if errors.Is(err, dsgit.ErrBranchNotFound) || errors.Is(err, dsgit.ErrRemoteMissing) {
 		return exitGit
+	}
+	// P6-CLI-03: an unknown top-level subcommand is resolved inside cobra's
+	// Find() before any RunE/PersistentPreRunE/Args validator runs (see
+	// github.com/spf13/cobra@v1.10.2 command.go:757-778, args.go:27-38), so it
+	// can never be wrapped in appError like every other usage error above.
+	// Root's Args field can't be set to intercept it either: execute() checks
+	// `!c.Runnable()` and returns flag.ErrHelp before ever calling
+	// ValidateArgs (command.go:952-966), and root has no Run/RunE. Matching
+	// cobra's own stable "unknown command %q for %q" format here is the least
+	// brittle interception point available; any legitimately Args-validated
+	// error with this exact text is already caught and wrapped by usageArgs
+	// above and returns via the appError branch, never reaching this fallback.
+	if strings.HasPrefix(err.Error(), `unknown command "`) {
+		return exitUsage
 	}
 	return exitGeneric
 }

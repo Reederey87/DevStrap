@@ -72,7 +72,7 @@ func newDBCommand(stdout io.Writer, opts *options) *cobra.Command {
 			"key material. Use --full to write a single tar archive containing the\n" +
 			"database, the referenced encrypted blobs, and the key material; restore\n" +
 			"it with `devstrap db restore`.",
-		Args: cobra.ExactArgs(1),
+		Args: usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out, err := filepath.Abs(filepath.Clean(args[0]))
 			if err != nil {
@@ -103,7 +103,7 @@ func newDBCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Long: "Restore a `devstrap db backup --full` archive: extract the database,\n" +
 			"encrypted blobs, and key material back into the state directory. Refuses\n" +
 			"to overwrite a non-empty state directory unless --force is given.",
-		Args: cobra.ExactArgs(1),
+		Args: usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			in, err := filepath.Abs(filepath.Clean(args[0]))
 			if err != nil {

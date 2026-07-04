@@ -31,6 +31,25 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — P6-CLI-03: wire Cobra usage errors to exitUsage=10
+
+Changed:
+- `internal/cli/root.go`: root `SetFlagErrorFunc` now wraps Cobra flag-parse errors in `appError{code: exitUsage}`; new `usageArgs` wrapper classifies positional-arg validator failures as `exitUsage`; `ExitCodeWithWriter` has a narrow fallback for Cobra's top-level `unknown command "` error text.
+- `internal/cli/*.go`: every leaf command using Cobra `ExactArgs`/`MinimumNArgs`/`MaximumNArgs`/`RangeArgs`/`NoArgs` now wraps that validator with `usageArgs`.
+- `internal/cli/root_test.go`: added regression coverage for unknown flags, wrong arity, unknown top-level subcommands, plain generic errors, and existing `appError` precedence.
+- `spec/13_CLI_DAEMON_API.md` and `docs/audits/README.md`: marked P6-CLI-03 shipped and reconciled the Pass 6 open count. The unknown-subcommand case stays in `ExitCodeWithWriter` because Cobra resolves it in `Find()` before any `RunE`, `PersistentPreRunE`, or `Args` hook can wrap it.
+
+Validated:
+- `go build -o /tmp/ds-smoke ./cmd/devstrap`; before the fix, `/tmp/ds-smoke frobnicate`, `/tmp/ds-smoke --frobnicate`, and `/tmp/ds-smoke add` all printed the existing Cobra error text and exited `1`.
+- `grep -rn "cobra\\.\\(ExactArgs\\|MinimumNArgs\\|MaximumNArgs\\|RangeArgs\\|NoArgs\\)" internal/cli/*.go` showed every match wrapped in `usageArgs(...)`.
+- `gofmt -l cmd internal`
+- `GOCACHE=$TMPDIR/gocache go test -race ./internal/cli/...`
+- `go build ./...`
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+
+Follow-ups:
+- None
+
 ## 2026-07-04 — feat(hub): bounded fan-out for R2Hub.Push + blob pushes (P6-HUB-03)
 
 Changed:

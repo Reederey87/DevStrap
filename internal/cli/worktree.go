@@ -49,7 +49,7 @@ func newWorktreeUnlockCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "unlock <path>",
 		Short: "Report and clear a stale repo operation lock for a project",
-		Args:  cobra.ExactArgs(1),
+		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := opts.openState(cmd.Context())
 			if err != nil {
@@ -106,7 +106,7 @@ func newWorktreeNewCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "new <path>",
 		Short: "Create a fresh worktree from remote upstream",
-		Args:  cobra.ExactArgs(1),
+		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !freshUpstream {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("--fresh-upstream is required")}
@@ -272,7 +272,7 @@ func newWorktreeStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status <id>",
 		Short: "Check worktree freshness against its recorded upstream base",
-		Args:  cobra.ExactArgs(1),
+		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := opts.openState(cmd.Context())
 			if err != nil {
@@ -323,7 +323,7 @@ func newWorktreeFinalizeCommand(stdout io.Writer, opts *options) *cobra.Command 
 	cmd := &cobra.Command{
 		Use:   "finalize <id>",
 		Short: "Run final stale-base checks before PR or handoff",
-		Args:  cobra.ExactArgs(1),
+		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := opts.openState(cmd.Context())
 			if err != nil {
@@ -394,7 +394,7 @@ func newWorktreeRemoveCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "remove <id>",
 		Short: "Mark a worktree removed",
-		Args:  cobra.ExactArgs(1),
+		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := opts.openState(cmd.Context())
 			if err != nil {

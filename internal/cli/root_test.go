@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -63,6 +64,39 @@ func TestExitCodeMapsTypedGitErrors(t *testing.T) {
 	stderr.Reset()
 	if got := ExitCodeWithWriter(dsgit.ErrBranchNotFound, &stderr); got != exitGit {
 		t.Fatalf("ExitCodeWithWriter(ErrBranchNotFound) = %d, want %d", got, exitGit)
+	}
+}
+
+func TestUsageErrorsExitTen(t *testing.T) {
+	_, _, err := executeForTest("--frobnicate")
+	if err == nil {
+		t.Fatal("expected unknown flag error")
+	}
+	if got := ExitCodeWithWriter(err, io.Discard); got != exitUsage {
+		t.Fatalf("unknown flag ExitCode = %d, want %d", got, exitUsage)
+	}
+
+	_, _, err = executeForTest("add")
+	if err == nil {
+		t.Fatal("expected wrong arity error")
+	}
+	if got := ExitCodeWithWriter(err, io.Discard); got != exitUsage {
+		t.Fatalf("wrong arity ExitCode = %d, want %d", got, exitUsage)
+	}
+
+	_, _, err = executeForTest("frobnicate")
+	if err == nil {
+		t.Fatal("expected unknown subcommand error")
+	}
+	if got := ExitCodeWithWriter(err, io.Discard); got != exitUsage {
+		t.Fatalf("unknown subcommand ExitCode = %d, want %d", got, exitUsage)
+	}
+
+	if got := ExitCodeWithWriter(errors.New("boom"), io.Discard); got != exitGeneric {
+		t.Fatalf("plain error ExitCode = %d, want %d", got, exitGeneric)
+	}
+	if got := ExitCodeWithWriter(appError{code: exitConflict, err: errors.New("conflict")}, io.Discard); got != exitConflict {
+		t.Fatalf("appError ExitCode = %d, want %d", got, exitConflict)
 	}
 }
 

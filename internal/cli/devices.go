@@ -48,7 +48,7 @@ func newDeviceEnrollCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "enroll [device-id]",
 		Short: "Enroll a remote device record",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  usageArgs(cobra.MaximumNArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			deviceID := ""
 			if len(args) == 1 {
@@ -173,7 +173,7 @@ func newDevicesPairingCodeCommand(stdout io.Writer, opts *options) *cobra.Comman
 	return &cobra.Command{
 		Use:   "pairing-code",
 		Short: "Print this device's one-paste pairing code",
-		Args:  cobra.NoArgs,
+		Args:  usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := opts.openState(cmd.Context())
 			if err != nil {
@@ -259,7 +259,7 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 	cmd := &cobra.Command{
 		Use:   use + " <device-id>",
 		Short: "Mark a device as " + trustState,
-		Args:  cobra.ExactArgs(1),
+		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := opts.openState(cmd.Context())
 			if err != nil {
@@ -445,7 +445,7 @@ func newDeviceRenameCommand(stdout io.Writer, opts *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "rename <device-id> <name>",
 		Short: "Rename a device",
-		Args:  cobra.ExactArgs(2),
+		Args:  usageArgs(cobra.ExactArgs(2)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := opts.openState(cmd.Context())
 			if err != nil {

@@ -23,7 +23,7 @@ func newScanCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "scan [root]",
 		Short: "Scan a workspace root for projects",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  usageArgs(cobra.MaximumNArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			root := opts.paths().Root
 			if len(args) == 1 {

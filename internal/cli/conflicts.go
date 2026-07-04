@@ -75,7 +75,7 @@ func newConflictsShowCommand(stdout io.Writer, opts *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "show <id>",
 		Short: "Show one conflict's details and status",
-		Args:  cobra.ExactArgs(1),
+		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := opts.openState(cmd.Context())
 			if err != nil {
@@ -109,7 +109,7 @@ func newConflictsResolveCommand(stdout io.Writer, opts *options) *cobra.Command 
 	cmd := &cobra.Command{
 		Use:   "resolve <id>",
 		Short: "Resolve a namespace conflict (keep-local | keep-remote | keep-both)",
-		Args:  cobra.ExactArgs(1),
+		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			action, err := resolveAction(keepLocal, keepRemote, keepBoth)
 			if err != nil {
