@@ -27,6 +27,16 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — fix(cli): refuse split-brain init root changes (P6-CLI-01)
+
+Changed:
+- `internal/cli/init.go`: before `EnsureWorkspace`, `init` now reads the existing workspace root and compares it to the effective resolved requested root (`DEVSTRAP_ROOT`, `--root`, or positional `[root]`, after absolute clean normalization). Different roots refuse with `exitConflict` and name both roots plus the `--move-root` remedy; `--move-root` accepts the relocation and rewrites ONLY the top-level `root:` line of `config.yaml` (surgical line update, atomically through a same-directory temp file + rename with mode `0600`), so user-added settings (`hub:`, key/sync tuning) and comments survive the move — regenerating from the default template would have silently wiped them (post-review fix, pinned by the hub-setting/comment preservation assertions in `TestInitMoveRootRewritesConfig`). Same-root re-init remains a no-op success, and first-init join flows are unchanged.
+- Tests: added `TestInitReRunSameRootSucceeds`, `TestInitReRunNewRootRefusedWithConflict`, and `TestInitMoveRootRewritesConfig`.
+- Specs/ledger: `spec/13` documents `--move-root` and marks `P6-CLI-01` resolved; `docs/audits/README.md` moves `P6-CLI-01` to *Recently shipped* and reconciles Pass-6 to 18 open rows.
+
+Validated:
+- `gofmt -w cmd internal`; `GOCACHE=/tmp/devstrap-gocache-cli01 go test -race ./internal/cli/ ./...` (first full run hit a transient `internal/git` temp-count read in `TestCloneTimeoutIsTerminalAndDoesNotRetryOrWipe`; `GOCACHE=/tmp/devstrap-gocache-cli01 go test -race ./internal/git` and the required full command rerun were green).
+
 ## 2026-07-03 — specdrift: require specific spec owners for internal packages
 
 Changed:
