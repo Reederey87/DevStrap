@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"filippo.io/age"
@@ -546,6 +547,103 @@ func (s HybridStore) DeleteHubS3Credentials(ctx context.Context, workspaceID str
 		}
 	}
 	return s.File.DeleteHubS3Credentials(workspaceID)
+}
+
+// BackupEpoch names one held Workspace Content Key by its epoch and kid so a
+// full backup can escrow it (P6-DATA-04). It mirrors the (epoch, kid) tuple the
+// store records in workspace_keys.
+type BackupEpoch struct {
+	Epoch int64
+	KID   string
+}
+
+// ExportForBackup reads every secret this device holds for the given device and
+// workspace — the device age identity, the device signing identity, each held
+// WCK epoch, and the hub S3 credentials when present — from the active custody
+// backend and writes them into dstDir using the FileStore on-disk format with
+// mode 0600 (P6-DATA-04). Because it reads through the recorded custody backend
+// (via HybridStore.Read/ReadSigning/LoadWCK/LoadHubS3Credentials), it captures
+// keychain-held material as portable escrow files for a full backup, not just
+// the file-custody KeyDir. A basename already present in dstDir is left
+// untouched, so it is safe to run over a directory the caller has pre-populated.
+//
+// It returns the basenames written (sorted). A REQUIRED secret — the device age
+// or signing identity, or any held WCK epoch — that cannot be read is a hard
+// error naming the secret: a "full" backup must never silently omit key
+// material. Hub S3 credentials are optional (a workspace may have no hub
+// configured): a genuinely-absent entry is skipped, but any other read failure
+// is fatal. No secret bytes are logged.
+func (s HybridStore) ExportForBackup(ctx context.Context, dstDir, deviceID, workspaceID string, epochs []BackupEpoch) ([]string, error) {
+	if err := validateDeviceID(deviceID); err != nil {
+		return nil, err
+	}
+	if err := validateWorkspaceID(workspaceID); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(dstDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create key escrow directory: %w", err)
+	}
+	dst := FileStore{Dir: dstDir}
+	var written []string
+	writeOnce := func(basename string, write func() error) error {
+		if _, err := os.Stat(filepath.Join(dstDir, basename)); err == nil {
+			return nil // already staged (e.g. a KeyDir copy); do not overwrite
+		}
+		if err := write(); err != nil {
+			return err
+		}
+		written = append(written, basename)
+		return nil
+	}
+
+	identity, err := s.Read(ctx, deviceID)
+	if err != nil {
+		return nil, fmt.Errorf("escrow device age identity: %w", err)
+	}
+	if err := writeOnce(filepath.Base(dst.path(deviceID)), func() error {
+		return dst.writeIdentity(deviceID, identity)
+	}); err != nil {
+		return nil, err
+	}
+
+	signing, err := s.ReadSigning(ctx, deviceID)
+	if err != nil {
+		return nil, fmt.Errorf("escrow device signing identity: %w", err)
+	}
+	if err := writeOnce(filepath.Base(dst.signingPath(deviceID)), func() error {
+		return dst.writeSigningIdentity(deviceID, signing)
+	}); err != nil {
+		return nil, err
+	}
+
+	for _, e := range epochs {
+		wck, err := s.LoadWCK(ctx, workspaceID, e.Epoch, e.KID)
+		if err != nil {
+			return nil, fmt.Errorf("escrow workspace key epoch %d: %w", e.Epoch, err)
+		}
+		if err := writeOnce(filepath.Base(dst.wckPath(workspaceID, e.Epoch, e.KID)), func() error {
+			return dst.WriteWCK(workspaceID, e.Epoch, e.KID, wck)
+		}); err != nil {
+			return nil, err
+		}
+	}
+
+	creds, err := s.LoadHubS3Credentials(ctx, workspaceID)
+	switch {
+	case err == nil:
+		if err := writeOnce(filepath.Base(dst.hubS3Path(workspaceID)), func() error {
+			return dst.WriteHubS3Credentials(workspaceID, creds)
+		}); err != nil {
+			return nil, err
+		}
+	case errors.Is(err, os.ErrNotExist):
+		// No hub credentials in local custody; nothing to escrow.
+	default:
+		return nil, fmt.Errorf("escrow hub s3 credentials: %w", err)
+	}
+
+	sort.Strings(written)
+	return written, nil
 }
 
 func Sign(privateKey, domain string, message []byte) (string, error) {

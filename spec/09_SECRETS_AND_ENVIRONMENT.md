@@ -398,11 +398,13 @@ WHERE needs_rotation = 1
     WHERE id = ? AND env_profile_id IS NOT NULL);
 ```
 
-### P6-DATA-04 — `db backup` produces an incomplete, unrestorable workspace backup
+### P6-DATA-04 — `db backup` produces an incomplete, unrestorable workspace backup — **SHIPPED 2026-07-04 (`fix/p6-data-04`)**
 
-**Problem.** `Backup` is `VACUUM INTO` + chmod + `validateBackup` — the SQLite file only (`internal/state/store.go:292-306`). Encrypted env values live outside the DB as `~/.devstrap/blobs/<hash>.age` (local-only per `P5-SEC-04`, `blob_gc.go:53-56`) and key fallback (age/signing identities, PR-#25 `wck-<ws>-<epoch>.key`) lives in `<statedir>/keys`; there is no restore command, yet `doctor.go:203-205` recommends "restore from a `devstrap db backup`." Restoring only `state.db` leaves dangling `age_blob:` refs and unrecoverable secrets.
+**Resolved.** `db backup --full <out.tar>` captures `state.db` (`VACUUM INTO`) + the `blobs/<sha256>.age` files `AllBlobRefs` reports + key material + `config.yaml`, all `0600`. Key capture is custody-aware: file custody copies `KeyDir` (asserting the device age + signing basenames are present, hard error otherwise); keychain custody escrows via `devicekeys.HybridStore.ExportForBackup` — the device age + Ed25519 signing identities + **every held WCK epoch** (enumerated from `HeldKeys`) + hub S3 creds, with a hard error naming any unreadable required key so a "full" backup can never be silently incomplete. `db restore <in.tar>` refuses a non-empty state dir without `--force`, validates the staged DB before promoting, and swaps only the captured targets in place (preserving un-captured Home data), with a zip-slip guard. A doctor dangling-blob-refs check and a keychain-custody restore warning ship too. The keychain-custody restore caveat (restored DB still records `keychain`; operator runs under `DEVSTRAP_NO_KEYCHAIN=1` or re-migrates) is surfaced at restore and documented in spec/12.
 
-**Actionable steps.**
+**Original problem (now fixed).** `Backup` was `VACUUM INTO` + chmod + `validateBackup` — the SQLite file only. Encrypted env values live outside the DB as `~/.devstrap/blobs/<hash>.age` (local-only per `P5-SEC-04`) and key fallback lives in `<statedir>/keys`; there was no restore command, yet `doctor` recommended "restore from a `devstrap db backup`." Restoring only `state.db` left dangling `age_blob:` refs and unrecoverable secrets.
+
+**Actionable steps (done).**
 1. Ship `devstrap db backup --full <out.tar>` (state.db + referenced `blobs/` + `keys/` when file-fallback active + keychain export/escrow in default mode, all 0600) and `devstrap db restore <in>` (refuse over a non-empty state dir without `--force`).
 2. Add a doctor "dangling blob refs" check over `AllBlobRefs` (stat local blob, fall back to hub `HasBlob` for draft refs).
 3. Fix the `doctor.go:203-205` remedy text once `--full` exists.

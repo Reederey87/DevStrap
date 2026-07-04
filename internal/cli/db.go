@@ -61,10 +61,18 @@ func newDBCommand(stdout io.Writer, opts *options) *cobra.Command {
 		},
 	})
 
-	cmd.AddCommand(&cobra.Command{
+	var fullBackup bool
+	backupCmd := &cobra.Command{
 		Use:   "backup [path]",
-		Short: "Write a consistent state database backup",
-		Args:  cobra.ExactArgs(1),
+		Short: "Write a consistent state database backup (add --full for a recoverable secrets archive)",
+		Long: "Write a consistent state database backup.\n\n" +
+			"By default this writes the SQLite state database only. That is NOT a\n" +
+			"recoverable backup on its own: a workspace's captured secrets live in\n" +
+			"age-encrypted blobs and are decryptable only with the device/workspace\n" +
+			"key material. Use --full to write a single tar archive containing the\n" +
+			"database, the referenced encrypted blobs, and the key material; restore\n" +
+			"it with `devstrap db restore`.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out, err := filepath.Abs(filepath.Clean(args[0]))
 			if err != nil {
@@ -75,13 +83,37 @@ func newDBCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			defer closeStore(store)
+			if fullBackup {
+				return runFullBackup(cmd.Context(), opts, store, out, stdout)
+			}
 			if err := store.Backup(cmd.Context(), out); err != nil {
 				return err
 			}
 			_, err = fmt.Fprintf(stdout, "backup written: %s\n", out)
 			return err
 		},
-	})
+	}
+	backupCmd.Flags().BoolVar(&fullBackup, "full", false, "write a tar archive with the database, encrypted blobs, and key material")
+	cmd.AddCommand(backupCmd)
+
+	var restoreForce bool
+	restoreCmd := &cobra.Command{
+		Use:   "restore [archive.tar]",
+		Short: "Restore a full backup archive into the state directory",
+		Long: "Restore a `devstrap db backup --full` archive: extract the database,\n" +
+			"encrypted blobs, and key material back into the state directory. Refuses\n" +
+			"to overwrite a non-empty state directory unless --force is given.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			in, err := filepath.Abs(filepath.Clean(args[0]))
+			if err != nil {
+				return appError{code: exitInvalidConfig, err: fmt.Errorf("resolve archive path: %w", err)}
+			}
+			return runRestore(cmd.Context(), opts, in, restoreForce, stdout)
+		},
+	}
+	restoreCmd.Flags().BoolVar(&restoreForce, "force", false, "overwrite a non-empty state directory")
+	cmd.AddCommand(restoreCmd)
 
 	cmd.AddCommand(&cobra.Command{
 		Use:   "down",

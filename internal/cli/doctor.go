@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime/debug"
 	"sort"
 	"strings"
@@ -217,6 +218,7 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 		} else {
 			defer closeStore(store)
 			results = append(results, checkDB(ctx, store)...)
+			results = append(results, checkDanglingBlobRefs(ctx, paths, store)...)
 			results = append(results, checkSecretsRotation(ctx, store)...)
 			results = append(results, checkDeviceKeys(ctx, paths, store)...)
 			results = append(results, checkKeyGrantWaits(ctx, store)...)
@@ -270,9 +272,9 @@ func checkDB(ctx context.Context, store *state.Store) []checkResult {
 	out = append(out, checkResult{Name: "schema", Status: checkOK, Detail: fmt.Sprintf("version %d", version)})
 	check, err := store.QuickCheck(ctx)
 	if err != nil {
-		out = append(out, checkResult{Name: "sqlite quick_check", Status: checkError, Detail: err.Error(), Remedy: "restore from a `devstrap db backup`"})
+		out = append(out, checkResult{Name: "sqlite quick_check", Status: checkError, Detail: err.Error(), Remedy: "restore from a `devstrap db backup --full` archive (only a full backup recovers the encrypted secrets alongside the database)"})
 	} else if check != "ok" {
-		out = append(out, checkResult{Name: "sqlite quick_check", Status: checkError, Detail: check, Remedy: "restore from a `devstrap db backup`"})
+		out = append(out, checkResult{Name: "sqlite quick_check", Status: checkError, Detail: check, Remedy: "restore from a `devstrap db backup --full` archive (only a full backup recovers the encrypted secrets alongside the database)"})
 	} else {
 		out = append(out, checkResult{Name: "sqlite quick_check", Status: checkOK, Detail: "ok"})
 	}
@@ -285,6 +287,48 @@ func checkDB(ctx context.Context, store *state.Store) []checkResult {
 		out = append(out, checkResult{Name: "foreign_key_check", Status: checkOK, Detail: "ok"})
 	}
 	return out
+}
+
+// checkDanglingBlobRefs verifies that every age blob the DB references has its
+// ciphertext present on disk under blobs/ (P6-DATA-04). A referenced blob whose
+// file is missing means the captured secret is unrecoverable — `env hydrate`
+// for that profile will fail — so it is graded an error. This is exactly the
+// wreckage left by restoring a DB-only backup: the refs survive, the secrets do
+// not. The remedy points at a full-backup restore, which alone carries blobs.
+func checkDanglingBlobRefs(ctx context.Context, paths config.Paths, store *state.Store) []checkResult {
+	refs, err := store.AllBlobRefs(ctx)
+	if err != nil {
+		return nil
+	}
+	if len(refs) == 0 {
+		return []checkResult{{Name: "blob refs", Status: checkOK, Detail: "0 referenced"}}
+	}
+	blobDir := filepath.Join(paths.Home, "blobs")
+	var missing []string
+	for _, ref := range refs {
+		hash, herr := envBlobHash(ref)
+		if herr != nil {
+			missing = append(missing, ref)
+			continue
+		}
+		if _, serr := os.Stat(filepath.Join(blobDir, hash+".age")); serr != nil {
+			missing = append(missing, ref)
+		}
+	}
+	if len(missing) == 0 {
+		return []checkResult{{Name: "blob refs", Status: checkOK, Detail: fmt.Sprintf("%d referenced, all present", len(refs))}}
+	}
+	sort.Strings(missing)
+	sample := missing
+	if len(sample) > 3 {
+		sample = sample[:3]
+	}
+	return []checkResult{{
+		Name:   "dangling blob refs",
+		Status: checkError,
+		Detail: fmt.Sprintf("%d of %d referenced blob(s) missing on disk (e.g. %s)", len(missing), len(refs), strings.Join(sample, ", ")),
+		Remedy: "restore from a `devstrap db backup --full` archive; a DB-only backup cannot recover these encrypted secrets",
+	}}
 }
 
 func checkSecretsRotation(ctx context.Context, store *state.Store) []checkResult {

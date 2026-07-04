@@ -313,6 +313,14 @@ func (s *Store) Backup(ctx context.Context, outputPath string) error {
 	return nil
 }
 
+// ValidateDBFile runs quick_check + foreign_key_check on a standalone SQLite
+// file (P6-DATA-04). It is the same validation Backup runs after VACUUM INTO,
+// exported so `db restore` can prove an extracted state.db is intact before it
+// is promoted into place.
+func ValidateDBFile(ctx context.Context, path string) error {
+	return validateBackup(ctx, path)
+}
+
 func validateBackup(ctx context.Context, path string) error {
 	dsn := sqliteDSN(path)
 	db, err := sql.Open("sqlite", dsn)

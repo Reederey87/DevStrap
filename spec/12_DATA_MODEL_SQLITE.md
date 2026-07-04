@@ -672,13 +672,45 @@ The current schema version is **20**. `00010_repo_forge_kind.sql` adds the per-p
 
 ## Backup
 
-Local backup command:
+### DB-only backup
 
 ```bash
 devstrap db backup ~/.devstrap/backups/state-20260623.db
 ```
 
-Backups use SQLite `VACUUM INTO`, not file copy, so WAL/SHM state is captured consistently. Today `db backup` captures `state.db` **only** — env blobs (`~/.devstrap/blobs/<hash>.age`) and file-fallback key material are excluded and there is no `restore` command (`P6-DATA-04`, see the section below).
+Backups use SQLite `VACUUM INTO`, not file copy, so WAL/SHM state is captured consistently. `db backup` (no `--full`) captures `state.db` **only**. This is a database snapshot, **not a recoverable workspace backup**: a workspace's captured secrets live outside the DB as `age`-encrypted blobs, and the DB holds only `age_blob:<sha256>` string refs. Restoring a lone `state.db` therefore leaves every `age_blob:` ref dangling — `env hydrate` fails and, on the file-custody path, the device identity and WCK epochs needed to decrypt even hub-synced draft blobs are gone. Use `--full` for disaster recovery.
+
+### Full backup / restore (disaster recovery, `P6-DATA-04` — shipped)
+
+```bash
+devstrap db backup --full ~/.devstrap/backups/workspace-20260704.tar   # state.db + blobs + keys
+devstrap db restore ~/.devstrap/backups/workspace-20260704.tar         # refuses over a non-empty state dir without --force
+```
+
+`db backup --full` writes a single uncompressed `tar` archive with a fixed layout; every entry and the output file are mode `0600`:
+
+| Entry                     | Contents                                                                                                    |
+|---------------------------|-------------------------------------------------------------------------------------------------------------|
+| `state.db`                | `VACUUM INTO` snapshot of the live state database (consistent on a live WAL DB; no exclusive lock).          |
+| `config.yaml`             | The workspace config when present — the `hub:` pointer (`r2://<bucket>`), custom `root:`, `workspace_name:`, `role:`, and `keys.rotate_max_age`. Non-secret but still written `0600`. Without it a restored workspace cannot re-pull hub-synced drafts or target a custom root. |
+| `blobs/<sha256>.age`      | Every `age`-encrypted blob the DB references via `AllBlobRefs` (env `secret_bindings` + `draft_snapshots`). A referenced blob missing on disk is warned and skipped. |
+| `keys/…`                  | The device age identity, the Ed25519 signing key, the WCK epoch keys (`wck-<ws>-<epoch>[-<kid>].key`), and hub S3 credentials when present. |
+
+**Key capture is custody-aware.** Under **file custody** (`DEVSTRAP_NO_KEYCHAIN=1` or no OS keychain) the KeyDir (`~/.devstrap/keys`) already holds the private material, so it is captured verbatim (with a hard-error guard that the device age + signing identities are actually present, symmetric with the escrow path). Under **keychain custody** the private material lives in the OS keychain, not on disk, so `--full` performs a **keychain escrow**: it reads the private identities and every held WCK epoch out of the keychain (via the `devicekeys` `HybridStore`) and writes them into the archive's `keys/` using the file-store on-disk format. If a required secret genuinely cannot be read, the backup **fails loudly naming what could not be captured** rather than silently producing an incomplete "full" archive.
+
+`db restore` extracts the archive and replaces the captured paths — `state.db`, `config.yaml`, `blobs/`, and `keys/` — **in place**. It is not a wipe: anything else already in the state directory (e.g. `quarantine/`, `logs/`) is left untouched. It refuses when any captured target already exists unless `--force` is given (so an un-captured sibling never blocks a restore, and a genuinely fresh state dir restores without `--force`). Extraction is staged in a sibling temp directory, guarded against path traversal (zip-slip: absolute paths and `..` components are rejected; entries are confined to the `state.db`/`config.yaml`/`blobs/`/`keys/` layout; only regular-file entries are accepted), the staged DB is validated with `quick_check` + `foreign_key_check` before any swap, and each captured path is swapped in via a temp `.bak` sibling + rename with rollback, written `0600`.
+
+**Restore runbook (recovering a workspace on a fresh or wiped machine):**
+
+1. Install `devstrap` and retrieve the `--full` archive from wherever you stored it (see the operator duty below).
+2. Point `DEVSTRAP_HOME` at the intended state directory (default `~/.devstrap`), or pass `--home`. The captured targets must be absent (or pass `--force` to overwrite them; un-captured siblings are preserved either way).
+3. `devstrap db restore <archive.tar>` — reconstructs `state.db`, `config.yaml` (so the `hub:` pointer and custom `root:` come back), `blobs/`, and `keys/`.
+4. `devstrap doctor` — confirms the schema, that no blob refs dangle, and reports the recorded key custody.
+5. `devstrap sync` — now that `config.yaml` is restored the hub pointer resolves, so hub-synced draft blobs re-pull — and `devstrap env hydrate <path> --write .env` to prove secrets decrypt.
+
+> **Custody note.** A `--full` archive always lands key material as **files** under `keys/`. If the source device used keychain custody, run the restored device under file custody (`DEVSTRAP_NO_KEYCHAIN=1`) or re-migrate the material into the keychain — the restored `state.db` still records the original custody backend, and a keychain-custody store will not read the escrowed files until custody is reconciled. `db restore` prints exactly this guidance when the restored DB records keychain custody.
+
+> **Operator duty — this archive is your Emergency Kit.** Model it on a 1Password Emergency Kit: the `keys/` entries are your **private** age identity, Ed25519 signing key, and Workspace Content Keys. Anyone with the archive can decrypt every captured secret and impersonate the device. Store it **encrypted at rest** (e.g. an encrypted disk image, a password manager's document store, or `age`/`gpg` the tar) and off the working machine. Never commit it to git, never place it inside `~/Code`, and treat its loss the same as losing the keychain itself. Losing the archive **and** the source machine means the workspace's encrypted secrets and draft bundles are permanently unrecoverable.
 
 Workspace export (**planned** — no command exists yet):
 
@@ -686,9 +718,7 @@ Workspace export (**planned** — no command exists yet):
 devstrap export --encrypted --output devstrap-snapshot.tar.age
 ```
 
-### DIRECTION — full backup/restore + recovery drill (AD-7, planned)
-
-`db backup` is incomplete for disaster recovery because a restored `state.db` holds dangling `age_blob:` refs (`P6-DATA-04`). Forward direction (not shipped): ship `db backup --full <out.tar>` bundling `state.db` + referenced `blobs/` + `keys/` (file fallback) + keychain escrow (age identity + WCK `wck-<ws>-<epoch>.key`), all `0600`, and a `db restore <in>` that refuses over a non-empty state dir without `--force`; add a doctor "dangling blob refs" check; and back both with a durability/recovery drill in `16_TEST_PLAN.md`. This pairs with the human-readable `workspace.yaml` escape hatch in `07_NAMESPACE_AND_SYNC_MODEL.md`.
+This pairs with the human-readable `workspace.yaml` escape hatch in `07_NAMESPACE_AND_SYNC_MODEL.md`.
 
 ## Hub backend (planned)
 
@@ -740,18 +770,20 @@ store.WithTx(ctx, func(tx *state.Tx) error {
 })
 ```
 
-### P6-DATA-04 — `db backup` is incomplete: env blobs and file-fallback keys excluded, no restore path
+### P6-DATA-04 — `db backup` is incomplete: env blobs and file-fallback keys excluded, no restore path — **shipped (2026-07-04)**
 
-**Problem.** `Backup` (`store.go:292-306`) is `VACUUM INTO` the `state.db` file only. Encrypted env values live outside the DB as `~/.devstrap/blobs/<hash>.age` (env blobs are local-only per `P5-SEC-04`) and key material lives in `<statedir>/keys`, so a restored DB holds dangling `age_blob:` refs; there is no `restore` command and `doctor.go:203-205` wrongly recommends restoring from a backup.
+**Was.** `Backup` (`store.go`) was `VACUUM INTO` the `state.db` file only. Encrypted env values live outside the DB as `~/.devstrap/blobs/<hash>.age` (env blobs are local-only per `P5-SEC-04`) and key material lives in `<statedir>/keys` (file custody) or the OS keychain (keychain custody), so a restored DB held dangling `age_blob:` refs; there was no `restore` command and `doctor.go` wrongly recommended restoring from a DB-only backup.
 
-**Actionable steps.**
-1. Ship `db backup --full <out.tar>` bundling `state.db` + referenced `blobs/` + `keys/` (file-fallback) + keychain escrow (age identity + WCK `wck-<ws>-<epoch>.key` files), all `0600`, and a `db restore <in>` (refuse over a non-empty state dir without `--force`).
-2. Add a doctor "dangling blob refs" check that stats each `AllBlobRefs` entry (draft refs falling back to hub `HasBlob`).
-3. Fix the `doctor.go:203-205` remedy text once `--full` exists.
+**Shipped fix.**
+1. `db backup --full <out.tar>` writes a single `tar` (stdlib `archive/tar`, no new deps) bundling `state.db` (via the reused `Store.Backup` `VACUUM INTO` primitive), `config.yaml` (the `hub:` pointer + custom `root:`, when present), the referenced `blobs/`, and `keys/` — captured verbatim from the KeyDir under file custody (with a hard-error guard that the device age + signing files are present), or escrowed out of the keychain under keychain custody via the new `devicekeys.HybridStore.ExportForBackup` (device age + Ed25519 signing identities, every held WCK epoch, and hub S3 credentials when present). A missing referenced blob is warned and skipped; unreadable required key material fails the backup loudly. Every entry and the output file are `0600`. `db restore <in.tar>` replaces only the captured paths **in place** (leaving un-captured state-dir contents like `quarantine/`/`logs/` intact), refuses when a captured target already exists without `--force`, is zip-slip-guarded, validates the extracted DB (`quick_check` + `foreign_key_check`, via the new exported `state.ValidateDBFile`) before any swap, swaps each captured path via a `.bak` sibling + rename with rollback, and prints the keychain-custody reconciliation guidance when the restored DB records keychain custody.
+2. `doctor` gained a "dangling blob refs" check that stats each `AllBlobRefs` entry under `blobs/` and grades a missing one an error.
+3. The `doctor` `quick_check` remedy now points at `db backup --full`.
+
+Covered by `db_backup_test.go` (capture → `--full` → wipe → restore → hydrate recovers the same plaintext, with `config.yaml`'s hub pointer round-tripped; restore refuses/forces over a non-empty dir while preserving an un-captured `quarantine/` file; zip-slip rejection), a `devicekeys` escrow test, a doctor dangling-ref test, and the `db_full_backup_restore.txtar` e2e testscript.
 
 ```bash
-devstrap db backup --full ~/.devstrap/backups/state-20260701.tar   # state.db + blobs + keys + escrow
-devstrap db restore ~/.devstrap/backups/state-20260701.tar         # refuses over non-empty state dir without --force
+devstrap db backup --full ~/.devstrap/backups/state-20260704.tar   # state.db + blobs + keys (+ keychain escrow)
+devstrap db restore ~/.devstrap/backups/state-20260704.tar         # refuses over non-empty state dir without --force
 ```
 
 ### P6-DATA-05 — `events(device_id, hlc)` index shipped
