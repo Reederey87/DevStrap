@@ -18,6 +18,8 @@ Each entry should be short and factual so future agents can quickly understand w
 Changed:
 - <code/spec/docs changes>
 
+- Post-review (Codex, dual-review): (P2 accepted) the recovery path now enforces the full producer-identity chain — `m.Snapshot.ProducedBy == m.ProducedBy` (a compactor signs its OWN snapshot; device B's payload can never ride device A's signature), the envelope must match the signed manifest on producer/epoch/kid/HLC, and the sealed document's own identity fields must match the envelope (defense in depth against a WCK-holding insider), pinned by `TestRecoverFromSnapshotRefusesForeignProducerSnapshot`; (P2 REJECTED with rationale) the tombstone import gate deliberately stays a bare-HLC comparison — the LIVE paths resolve equal-HLC add/delete ties in the tombstone's favor (applyEventTx blocks adds at `HLC <= tombstoneHLC`; `tombstonePath` keeps the max unconditionally), so the suggested full-coordinate tie-break would make import DIVERGE from replay, the exact property import exists to preserve (rationale pinned in a code comment); (P3) the recovery doc comment now states honestly that local store/keyring failures keep the default exit class.
+
 Validated:
 - <commands or checks run>
 
@@ -26,6 +28,23 @@ Follow-ups:
 ```
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
+
+## 2026-07-03 — feat(sync): snapshot import + ErrSnapshotRequired recovery (P4-SYNC-02 part 2)
+
+Changed:
+- Migration `00020_sync_chain_anchors.sql`: per-device hash-chain anchors imported from a snapshot (`sync_chain_anchors(workspace_id, device_id, anchor_seq, anchor_content_hash, anchor_hlc, snapshot_sha256, imported_at)`, PK `(workspace_id, device_id)`). Schema version 19 → 20.
+- `internal/state/store.go`: `previousEventContentHash` gains an anchor fallback in the `Seq>1` branch — when the seq-1 predecessor is absent (a snapshot-bootstrapped device holds no rows below the floor), it resolves the anchor by `(device_id, anchor_seq)`, so the first post-floor event per device verifies instead of hash-chain-quarantining forever. New `Tx.UpsertChainAnchor` (keeps the highest `anchor_seq`), `Tx.TombstoneByPathKey` + extracted `tombstonePath` helper, `Tx.ProjectByPathKey`, generic `Store.GetLocalMeta`/`SetLocalMeta`, and `Store.ApprovedDeviceSigningKey` (the snapshot-recovery trust gate — signing key only for a locally approved device).
+- New `internal/sync/snapshot_import.go`: `ImportSnapshot(ctx, st, snap, snapshotSHA256, hubID)` — a pure LWW merge in one transaction (direct derived-state writes on source-event coords, NO synthetic events), tombstone gating (newer local add wins; dirty checkout → `pending_delete_conflict`; else tombstone by path_key), draft-pointer idempotency, chain-anchor upsert, `ReceiveRemoteHLC(snap.HLC)`; then forward-only cursor advance to `floor-1` and a monotonic `retention_floor:<hubID>` cache in `local_meta`. Idempotent and order-independent with event replay. Exported `RetentionFloorMetaKey`/`LoadRetentionFloorCache`.
+- New `internal/cli/snapshot_recovery.go`: `recoverFromSnapshot` — get + fail-closed-verify the manifest (unapproved producer / bad sig / sha mismatch / AEAD failure ⇒ refuse at exit `invalid-config`; hub/fetch failure ⇒ `network`), floor-rollback guard, pull the tail first (ingest in-batch grants), unseal under held WCK candidates (keyless ⇒ defer, exit 0, import nothing), cross-check workspace id + floors, `ImportSnapshot`, pull imported-draft blobs. Wired into `runSyncCycle` and `hubGC`'s pre-pull (replacing the old `ErrSnapshotRequired` dead-ends), each recovering once then retrying the incremental pull. `pullReferencedBlobs` refactored to share `pullBlobsByRef`; `buildKeyringFromPaths` added for the opts-free gc caller.
+- Specs: 07 (Import + Recovery subsections; status flipped for the import half), 12 (migration 00020 + `sync_chain_anchors` table section + schema version 20 + amended the penciled gitstate reservation to "next free number at landing time"), 13 (sync recovery behavior + exit-code mapping; gc pre-pull recovers too), 15 (P6-HUB-04 import-verification shipped; byzantine withhold+forge recovery path now real; P4-SEC-04 bootstrap-state-acquisition residual narrowed), 16 (test inventory).
+
+Validated:
+- `gofmt -w cmd internal`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD` (passes against the committed PR-1 HEAD; this PR is uncommitted per the delegation contract); `DEVSTRAP_NO_KEYCHAIN=1 go test -race ./...`.
+- New tests: `internal/state/chain_anchor_test.go` (anchor fallback pass/mismatch/orphan; max-seq keep), `internal/sync/snapshot_import_test.go` (LWW matrix, tombstone gating both directions + unknown-path-blocks-stale-add, dirty conflict, draft idempotency, re-import idempotency, import/apply order-independent convergence), `internal/cli/sync_snapshot_recovery_test.go` (fresh-device bootstrap end-to-end, unpinned-producer refusal, keyless-joiner defer, floor-rollback warning, sha-mismatch refusal). Bumped the schema-version pins in `store_test.go` and the `db status` assertion in `root_test.go` to 20.
+
+Follow-ups:
+- Same wave: `hub compact` producer (PR 3) — its txtars cover the full 4-device roundtrip (behind-floor recovery + backlog push; fresh-joiner-via-pairing-code bootstrap) not reachable at the Go level without the producer sealing a live snapshot.
+- No ledger rows move yet: `P4-SYNC-02`/`P4-HUB-11`/`P6-HUB-04` close with the producer PR.
 
 ## 2026-07-03 — feat(sync): snapshot + retention wire format and hub snapshot plane (P4-SYNC-02 part 1, P6-HUB-04 format)
 
