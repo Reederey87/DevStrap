@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-03
+last_reviewed: 2026-07-04
 tracks_code: [**]
 ---
 # Work Log
@@ -30,6 +30,37 @@ Follow-ups:
 ```
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
+
+## 2026-07-04 — docs(hub): live git-carrier GitHub dogfood — two-device sync + compact + snapshot bootstrap PASS (spec/19 §F.2)
+
+Changed:
+- `spec/19_CLOUD_PROVISIONING_GUIDE.md`: §F retitled "Live dogfood validation log" (covers all hub
+  backends; git-carrier runs need no creds file) and a new **§F.2** records the first live exercise of
+  the AD-1 git carrier against a real private GitHub repo: three simulated devices, 8 real (mostly
+  private) project repos, one-paste pairing with `--fingerprint`, a deliberate concurrent two-device
+  push race (both landed via the non-FF refetch-and-reapply loop), ciphertext-only carrier contents
+  confirmed by plain `git clone` + grep, clean 1s non-interactive auth failure (exit `exitAuth`),
+  `hub compact` bounding remote history 18 commits → 2 (parentless squash root + sweep-unlock),
+  fresh-device snapshot bootstrap ("Recovering from hub snapshot…", materialized 8/8), `hub gc` clean,
+  `doctor --remote` 25 ok / 0 errors, and the env-gated `TestGitCarrierRealRemoteConformance` PASS
+  against a second disposable GitHub repo. No `hub login`, no bucket, no creds file — the
+  zero-infrastructure claim held end-to-end.
+- No code changes; `docs/audits/README.md` unchanged (AD-1 is a spec/14 direction item; ledger counts
+  unaffected).
+
+Validated:
+- The live run itself (all outputs quoted in §F.2), driven through a fresh `origin/main` build of
+  `cmd/devstrap` with per-device `--home`/`--root` + `DEVSTRAP_NO_KEYCHAIN=1`.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+- `doctor --remote` skips the `workspace id match`/`HasEvents` probe for `git:` hub ids
+  (`isRemoteHubID` in `internal/cli/doctor.go` matches only `r2:`/`s3:`) — observed live in §F.2
+  step 8; fix in flight.
+- Quickstart-default swap is now dogfood-unblocked (the git carrier is forge-proven); then
+  `devstrap hub init <git-url>` bootstrap and the folder carrier (spec/14 AD-1 slices).
+- Polish: auth-class carrier failures (e.g. "Repository not found") print no `ssh-add`/access remedy
+  hint; consider extending the git error remedy mapping for the carrier fetch path.
 
 ## 2026-07-04 — feat(hub): zero-infrastructure private-git-repo carrier (AD-1 first slice)
 

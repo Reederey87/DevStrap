@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-03
+last_reviewed: 2026-07-04
 tracks_code: [internal/hub/**, internal/cli/hub.go]
 ---
 # Cloud Provisioning & Configuration Guide
@@ -780,11 +780,13 @@ where `<home>` is the DevStrap home (`~/.devstrap` by default). This is safe: no
 lives there — repos re-clone from their remotes and env/draft blobs re-pull from the hub on the
 next `sync`.
 
-## F. Live-R2 dogfood validation log
+## F. Live dogfood validation log
 
-Chronological record of live-R2 dogfood runs against the registered bucket. Runs are driven
-from the `~/.devstrap/dogfood-r2.env` creds file (see `AGENTS.md` § *Live-R2 dogfood credentials*),
-simulating multiple devices on one Mac via per-device `--home`/`--root` + `DEVSTRAP_NO_KEYCHAIN=1`.
+Chronological record of live dogfood runs against real hub backends, simulating multiple
+devices on one Mac via per-device `--home`/`--root` + `DEVSTRAP_NO_KEYCHAIN=1`. R2 runs are
+driven from the `~/.devstrap/dogfood-r2.env` creds file (see `AGENTS.md` § *Live-R2 dogfood
+credentials*); git-carrier runs need no creds file at all — auth is the machine's existing
+ssh key.
 
 ### F.1 Compact + snapshot bootstrap (2026-07-04) — **PASS**
 
@@ -810,6 +812,51 @@ First live exercise of the snapshot-exchange wave (`hub compact` + fresh-device 
 Trap re-confirmed: run `db migrate` on each device home before its first `sync` (sync does not auto-migrate).
 Earlier same-day/prior runs (pairing ceremony, `keys rotate`, per-device Seq cursor migration + late-push
 delivery) are recorded in `spec/18_WORK_LOG.md` and the project memory.
+
+### F.2 Git carrier against a real private GitHub repo (2026-07-04) — **PASS**
+
+First live exercise of the AD-1 zero-infrastructure git carrier against a real forge:
+`hub: "git@github.com:<owner>/devstrap-hub-dogfood.git"` (a fresh, **empty** private GitHub repo —
+`gh repo create --private`, no README, no branch protection). Three simulated devices, real private
+project repos, **no creds file and no `hub login` anywhere** — the zero-infra payoff held end-to-end:
+
+1. **A (founder)** `init` → `db migrate` → `add` 2 private repos → `sync` = *"pushed 2 …
+   materialized 2/2"*; `git ls-remote` on the carrier showed `refs/heads/main` created by the first push.
+2. **B (join)** one-paste ceremony with `--fingerprint` on both sides → B `sync` = *"pulled 3;
+   materialized 2/2"* — real blobless clones of private repos over GitHub ssh. Churned to **6 projects**
+   across A+B; converged (final syncs *push/pull 0*).
+3. **Concurrent push race:** one local event staged on each device, `sync` launched simultaneously on
+   both — **both exited 0** and each reported *"pushed 1"* (the non-fast-forward refetch-and-reapply
+   loop resolved the ref collision); the next syncs delivered both events. 8 projects total, converged.
+4. **Ciphertext spot-check:** a plain `git clone` of the carrier contains only `devstrap-hub.json`,
+   `workspaces/<ws>/**`, and `.devstrap-meta/times/**`; grepping the checkout for project names/paths
+   found **no plaintext** (event envelopes expose ids/HLC by design — spec/15: host sees metadata,
+   contents are ciphertext).
+5. **Clean auth failure:** with the hub pointed at an inaccessible repo, `sync` failed in **1s**,
+   fully non-interactive (BatchMode; no prompt, no hang), exit 6 (`exitAuth`), quoting git's
+   *"ERROR: Repository not found."* — correct classification, though no `ssh-add`-style remedy hint
+   is printed for this failure class (polish follow-up in `spec/18`).
+6. **`hub compact` on A:** `--dry-run` reported "would publish a snapshot of 8 entries / 2 anchors,
+   delete ~9 cold events, keep 2 snapshots"; the real run: *"published snapshot 2abfbbb7983e; advanced
+   2 device floor(s); deleted 9 cold event(s)"*. Remote history bounded **18 commits → 2**:
+   the parentless *"devstrap hub compact"* squash root plus the *"devstrap hub sweep-unlock"* release
+   commit (the hermetic `rev-list --count == 1` assertion measures immediately after
+   `CompactEventsBelow`, before the unlock batch lands).
+7. **Fresh device C** (join post-compact, cursor 0 below the floor): `sync` printed **"Recovering from
+   hub snapshot (retention floor passed our cursor)…"** and **materialized 8/8 projects**.
+8. Incumbents A/B synced post-compact with **no** false "Recovering"; `hub gc` clean; a 2nd compact
+   `--dry-run` ≈ no-op; C `doctor --remote` = **25 ok / 0 errors** with hub reachable `git:<ws>` —
+   but **no** `workspace id match` probe row: `isRemoteHubID` (`internal/cli/doctor.go`) matches only
+   `r2:`/`s3:`, so the git carrier skips the joiner never-pulled heuristic (fix in flight).
+9. **Real-remote conformance:** `DEVSTRAP_HUB_GIT_TEST_REMOTE=git@github.com:<owner>/devstrap-hub-conformance.git
+   go test ./internal/hub -run TestGitCarrierRealRemoteConformance` — **PASS (26s)** against a second
+   disposable private repo.
+
+Traps: `db migrate` before each device's first `sync` (re-confirmed). On a Mac whose ssh key is
+keychain-loaded, even agent-less shells authenticate — an "unloaded key" is hard to simulate locally;
+test the failure path with an inaccessible repo URL instead. A non-TTY `init --join` without
+`--fingerprint` leaves the founder unpinned and prints the exact `devices approve … --fingerprint`
+remedy — behaved as designed; pass `--fingerprint` to keep the ceremony scriptable.
 
 ## Pass 6 audit recommendations (2026-07-01)
 
