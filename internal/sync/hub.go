@@ -347,7 +347,12 @@ func (h FileHub) retentionFloors(ctx context.Context) (map[string]int64, error) 
 		}
 	}
 	for dev, seq := range h.RetentionSeqs {
-		floors[dev] = seq
+		// The test override may only TIGHTEN a floor (raise it) — an override
+		// below the manifest floor would let a cursor pull incrementally across
+		// a compacted gap (CodeRabbit, PR #65).
+		if seq > floors[dev] {
+			floors[dev] = seq
+		}
 	}
 	return floors, nil
 }
@@ -455,6 +460,9 @@ func acquireLockFile(path string) (func(), error) {
 func (h FileHub) PutSnapshotObject(_ context.Context, sha256Hex string, body []byte) error {
 	if err := validateBlobKey(sha256Hex); err != nil {
 		return err
+	}
+	if contentETag(body) != sha256Hex {
+		return fmt.Errorf("%w: snapshot body does not hash to its key %s", ErrInvalidBlobKey, sha256Hex)
 	}
 	if err := os.MkdirAll(h.snapshotDir(), 0o700); err != nil {
 		return fmt.Errorf("create hub snapshot dir: %w", err)

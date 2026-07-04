@@ -289,6 +289,13 @@ func UnsealSnapshot(obj []byte, wck []byte) (Snapshot, error) {
 	if snap.V != snapshotVersion {
 		return Snapshot{}, fmt.Errorf("%w: snapshot document version %d, want %d", ErrSnapshotVerification, snap.V, snapshotVersion)
 	}
+	// The plaintext document's identity fields must equal the AAD-authenticated
+	// carrier (and the sealing key's kid) — SealSnapshot stamps both from one
+	// struct, so a divergence means a WCK holder handcrafted the inner document
+	// (CodeRabbit, PR #65; every caller gets the check, not just recovery).
+	if snap.WorkspaceID != env.WorkspaceID || snap.ProducedBy != env.ProducedBy || snap.HLC != env.HLC || snap.Epoch != env.Epoch || snap.KID != KIDForWCK(wck) {
+		return Snapshot{}, fmt.Errorf("%w: sealed snapshot document identity disagrees with its authenticated envelope", ErrSnapshotVerification)
+	}
 	return snap, nil
 }
 

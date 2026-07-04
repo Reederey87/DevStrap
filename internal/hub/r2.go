@@ -37,6 +37,8 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -560,6 +562,9 @@ func (h R2Hub) PutSnapshotObject(ctx context.Context, sha256Hex string, body []b
 	if !isValidHexKey(sha256Hex) {
 		return dssync.ErrInvalidBlobKey
 	}
+	if sum := sha256.Sum256(body); hex.EncodeToString(sum[:]) != sha256Hex {
+		return fmt.Errorf("%w: snapshot body does not hash to its key %s", dssync.ErrInvalidBlobKey, sha256Hex)
+	}
 	if err := h.retry().do(ctx, func() error { return h.S3.PutObject(ctx, h.snapshotKey(sha256Hex), body, true) }); err != nil {
 		if errors.Is(err, ErrPreconditionFailed) {
 			return nil
@@ -603,7 +608,11 @@ func (h R2Hub) ListSnapshotObjects(ctx context.Context) ([]dssync.BlobInfo, erro
 			return nil, fmt.Errorf("list snapshots: %w", err)
 		}
 		for _, obj := range objs {
-			key := strings.TrimSuffix(strings.TrimPrefix(obj.Key, prefix), ".json")
+			rest := strings.TrimPrefix(obj.Key, prefix)
+			if !strings.HasSuffix(rest, ".json") {
+				continue // a bare snapshots/<sha> object is not addressable by GetSnapshotObject
+			}
+			key := strings.TrimSuffix(rest, ".json")
 			if isValidHexKey(key) {
 				out = append(out, dssync.BlobInfo{Key: key, LastModified: obj.LastModified})
 			}
