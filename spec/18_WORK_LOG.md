@@ -27,6 +27,17 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — P6-QUAL-05: scope CI push triggers + add concurrency cancellation
+
+Changed:
+- `.github/workflows/ci.yml`: scoped `push` CI triggers to `main` while keeping `pull_request` and the daily schedule, and added workflow-level PR-only cancellation via `concurrency`.
+- `spec/16_TEST_PLAN.md`: updated the MinIO CI trigger description from every push/PR to `main` pushes and pull requests, with PR supersession cancellation.
+- `docs/audits/README.md`: moved `P6-QUAL-05` to *Recently shipped*, decremented the Pass-6 open count, and reconciled the Pass-6 open-table row count.
+
+Validated:
+- `python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/ci.yml'))"`.
+- Pass-6 open table recount.
+
 ## 2026-07-03 — fix(ignore): ShouldPruneDir bare-name fallback defeated anchored/negation patterns (P6-XP-01)
 
 Changed:
