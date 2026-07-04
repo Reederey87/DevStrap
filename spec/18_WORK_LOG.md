@@ -31,6 +31,19 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — docs: snapshot-exchange wave close-out (P4-SYNC-02/P4-HUB-11/P4-HUB-12/P6-HUB-04 shipped + 7 quick-wins)
+
+Changed:
+- spec/00 + spec/14: compaction + full-state snapshot exchange flipped to SHIPPED (PRs #65/#73–#76); the "snapshot exchange before retention GC" gating sentences retired; next core-engine candidates re-pointed at the remaining backlog (Pass-6 11 open, `AD-1` zero-infra hub carrier, `P4-GIT-03` OS sandbox, `P4-QUAL-02`/`P5-ARCH-01` convergence property tests); spec/00's "Not implemented yet" bullet no longer claims snapshot exchange is unbuilt.
+- Ledger: dated snapshot-exchange wave note added (Pass-6 19→11 open across the dual-track wave; every code PR dual-reviewed with findings fixed pre-merge); `P6-HUB-03` re-based (PR #59's per-device seq layout mooted the "HLC-ordered waves" framing — remaining work is a plain bounded fan-out of the still-serial per-event PUT loop); `P4-HUB-14` narrowed (doctor --remote half shipped; metrics/op-byte counters fully open); Pass-6 header renamed to include the snapshot-exchange wave; header count re-derived from the table (11 == 11).
+
+Validated:
+- Docs only. `go run ./cmd/spec-drift --base origin/main --head HEAD`; `TestEveryCommandIsDocumented` + `TestMigrationsDocumented`; ledger header count re-derived from the table.
+
+Follow-ups:
+- Live R2 dogfood run 4 (two-device `hub compact` + fresh-device snapshot bootstrap on the real bucket) is the natural next validation step.
+- Next-wave candidates: remaining Pass-6 M-effort items (`P6-XP-02` gitignore semantics, `P6-XP-03` run-loop scan stage, `P6-XP-05` offline scan, `P6-GIT-04` LFS policy on materialize, `P6-DATA-04` `db backup --full`), `P5-CLI-01` renderer rollout, `P5-ARCH-01` pure-`Decide` extraction.
+
 ## 2026-07-04 — feat(hub): migrate-events + sweep lock + dedup-PutBlob freshness (P4-HUB-12 residual, spec/18 follow-ups)
 
 Changed:
