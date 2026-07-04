@@ -86,7 +86,16 @@ type BlobInfo struct {
 //
 // Blob plane:
 //   - PutBlob stores a content-addressed encrypted blob keyed by its sha256 hex
-//     digest. Writes are idempotent: a blob already present is a no-op.
+//     digest. Writes are idempotent: a blob already present is a no-op EXCEPT
+//     that the dedup hit refreshes the object's LastModified (an unconditional
+//     same-bytes re-put on R2, an mtime bump on FileHub). Content addressing
+//     makes the re-write byte-safe, and the refresh is load-bearing: `hub gc`
+//     keeps blobs younger than its grace window, so a blob re-referenced by a
+//     late recovery sync must look freshly written or the sweep would delete a
+//     live blob (P4-HUB-12 / the P6-HUB-01 grace-window residual). Its partner
+//     on the read side is StatBlob: gc re-stats each candidate immediately
+//     before deleting, so a refresh that lands AFTER gc's ListBlobs snapshot is
+//     still honored and the just-re-referenced blob survives.
 //   - GetBlob returns the blob as a stream the caller must close. A missing
 //     blob returns an error wrapping os.ErrNotExist.
 //   - DeleteBlob removes a content-addressed blob. It is the reclamation
@@ -126,6 +135,24 @@ type BlobInfo struct {
 //   - DeleteDeviceStream removes an entire origin device's event-log prefix
 //     (idempotent), reclaiming a revoked device's stream after a compaction has
 //     folded its state into the snapshot. It returns the object count deleted.
+//
+// Maintenance plane (P4-HUB-12):
+//   - MigrateLegacyEvents re-keys the retired HLC-keyed legacy layout into the
+//     per-device seq layout and deletes the migrated legacy objects. It is
+//     idempotent, resumable, and FAILS OPEN: an object whose key does not parse
+//     or whose body does not decode as a state.Event with matching (device,
+//     seq) is reported and KEPT (never deleted), mirroring the dual-read's
+//     fail-open posture — a parse bug must never delete an event it cannot
+//     account for. Each object is verified by read-back on the new key before
+//     the legacy object is deleted. FileHub has no legacy layout and returns
+//     (0, 0, nil).
+//   - GetSweepLock / PutSweepLock / DeleteSweepLock are the raw sweep-lock ops
+//     the advisory sweep mutex is built on (see SweepLock): a create-only
+//     PutSweepLock (returns ErrSweepLockHeld on conflict), a GetSweepLock that
+//     returns the lock bytes plus the object's backend LastModified for TTL
+//     judgment (ErrSweepLockNotFound when absent), and an idempotent
+//     DeleteSweepLock to release or break it. The lock is ADVISORY: it
+//     serializes cooperating clients only, not a hostile writer (spec/15).
 type Hub interface {
 	Push(ctx context.Context, events []state.Event) error
 	Pull(ctx context.Context, after Cursor) ([]state.Event, error)
@@ -136,6 +163,13 @@ type Hub interface {
 	// (P5-HUB-02). It is the enumeration primitive for mark-and-sweep hub GC:
 	// list everything, delete what no current binding/snapshot references.
 	ListBlobs(ctx context.Context) ([]BlobInfo, error)
+	// StatBlob returns one blob's current metadata (P4-HUB-12). It is the
+	// pre-delete revalidation primitive for hub GC: the LastModified in a
+	// ListBlobs snapshot goes stale the instant a concurrent sync dedup-re-puts
+	// (and refreshes) the object, so gc re-stats each candidate immediately
+	// before deleting it and keeps a blob whose fresh mtime shows it was just
+	// re-referenced. A missing blob returns an error wrapping os.ErrNotExist.
+	StatBlob(ctx context.Context, sha256Hex string) (BlobInfo, error)
 	GetRetention(ctx context.Context) (raw []byte, etag string, err error)
 	PutRetention(ctx context.Context, raw []byte, ifMatchETag string) error
 	PutSnapshotObject(ctx context.Context, sha256Hex string, body []byte) error
@@ -147,6 +181,10 @@ type Hub interface {
 	ListAcks(ctx context.Context) (map[string][]byte, error)
 	DeleteAck(ctx context.Context, deviceID string) error
 	DeleteDeviceStream(ctx context.Context, deviceID string) (deleted int, err error)
+	MigrateLegacyEvents(ctx context.Context, dryRun bool) (migrated, kept int, err error)
+	GetSweepLock(ctx context.Context) (raw []byte, lastModified time.Time, err error)
+	PutSweepLock(ctx context.Context, raw []byte) error
+	DeleteSweepLock(ctx context.Context) error
 }
 
 // validateDeviceID rejects a device id that could escape its meta/acks or
@@ -262,7 +300,17 @@ func (h FileHub) PutBlob(ctx context.Context, sha256Hex string, r io.Reader) err
 	}
 	dst := h.blobPath(sha256Hex)
 	if _, err := os.Stat(dst); err == nil {
-		return nil // idempotent: blob already present
+		// Idempotent dedup hit, but refresh the mtime so a blob re-referenced by
+		// a late recovery sync looks freshly written and `hub gc`'s grace window
+		// protects it (P4-HUB-12 / P6-HUB-01). Content addressing makes this
+		// byte-safe; a failure to bump the mtime is non-fatal (the blob is still
+		// present) but logged by leaving err unchanged is wrong — treat it as an
+		// error so a broken FS surfaces.
+		now := time.Now()
+		if cerr := os.Chtimes(dst, now, now); cerr != nil {
+			return fmt.Errorf("refresh blob mtime: %w", cerr)
+		}
+		return nil
 	}
 	tmp, err := os.CreateTemp(h.blobDir(), ".blob-*.tmp")
 	if err != nil {
@@ -352,6 +400,22 @@ func (h FileHub) ListBlobs(_ context.Context) ([]BlobInfo, error) {
 		}
 	}
 	return out, nil
+}
+
+// StatBlob returns one blob's current metadata (P4-HUB-12). A missing blob
+// returns an error wrapping os.ErrNotExist so gc can treat it as already gone.
+func (h FileHub) StatBlob(_ context.Context, sha256Hex string) (BlobInfo, error) {
+	if err := validateBlobKey(sha256Hex); err != nil {
+		return BlobInfo{}, err
+	}
+	info, err := os.Stat(h.blobPath(sha256Hex))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return BlobInfo{}, fmt.Errorf("%w: %s", ErrBlobNotFound, sha256Hex)
+		}
+		return BlobInfo{}, fmt.Errorf("stat blob: %w", err)
+	}
+	return BlobInfo{Key: sha256Hex, LastModified: info.ModTime()}, nil
 }
 
 // retentionFloors merges the retention manifest's per-device floors (when a
@@ -673,6 +737,61 @@ func (h FileHub) DeleteDeviceStream(_ context.Context, deviceID string) (int, er
 	return deleted, nil
 }
 
+// MigrateLegacyEvents is a no-op for FileHub: the file-backed test hub stores
+// every event in one JSON array and never used the retired HLC-keyed R2 layout,
+// so there is nothing to re-key (P4-HUB-12). The dryRun flag is irrelevant.
+func (h FileHub) MigrateLegacyEvents(_ context.Context, _ bool) (int, int, error) {
+	return 0, 0, nil
+}
+
+// GetSweepLock reads the advisory sweep-lock object and its file mtime
+// (P4-HUB-12). A missing lock is ErrSweepLockNotFound.
+func (h FileHub) GetSweepLock(_ context.Context) ([]byte, time.Time, error) {
+	raw, err := os.ReadFile(h.sweepLockPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, time.Time{}, ErrSweepLockNotFound
+		}
+		return nil, time.Time{}, fmt.Errorf("read sweep lock: %w", err)
+	}
+	info, err := os.Stat(h.sweepLockPath())
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("stat sweep lock: %w", err)
+	}
+	return raw, info.ModTime(), nil
+}
+
+// PutSweepLock writes the sweep-lock object create-only (O_EXCL): an existing
+// lock is ErrSweepLockHeld, mirroring R2's If-None-Match:* conditional put.
+func (h FileHub) PutSweepLock(_ context.Context, raw []byte) error {
+	if err := os.MkdirAll(h.metaDir(), 0o700); err != nil {
+		return fmt.Errorf("create hub meta dir: %w", err)
+	}
+	f, err := os.OpenFile(h.sweepLockPath(), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			return ErrSweepLockHeld
+		}
+		return fmt.Errorf("create sweep lock: %w", err)
+	}
+	if _, werr := f.Write(raw); werr != nil {
+		_ = f.Close()
+		return fmt.Errorf("write sweep lock: %w", werr)
+	}
+	if cerr := f.Close(); cerr != nil {
+		return fmt.Errorf("close sweep lock: %w", cerr)
+	}
+	return nil
+}
+
+// DeleteSweepLock removes the sweep-lock object (idempotent).
+func (h FileHub) DeleteSweepLock(_ context.Context) error {
+	if err := os.Remove(h.sweepLockPath()); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete sweep lock: %w", err)
+	}
+	return nil
+}
+
 func (h FileHub) baseName() string {
 	return strings.TrimSuffix(filepath.Base(h.Path), filepath.Ext(h.Path))
 }
@@ -695,6 +814,10 @@ func (h FileHub) ackPath(deviceID string) string {
 
 func (h FileHub) retentionPath() string {
 	return filepath.Join(h.metaDir(), "retention.json")
+}
+
+func (h FileHub) sweepLockPath() string {
+	return filepath.Join(h.metaDir(), "sweep.lock")
 }
 
 func (h FileHub) snapshotPath(sha256Hex string) string {

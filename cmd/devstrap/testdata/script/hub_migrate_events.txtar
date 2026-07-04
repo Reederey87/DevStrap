@@ -1,0 +1,27 @@
+# P4-HUB-12: `hub migrate-events` re-keys the retired HLC-keyed legacy layout
+# into the per-device seq layout. The file-backed test hub (--hub-file) never
+# used the legacy layout, so migrate-events against it is a NO-OP by design.
+# The R2-key migration matrix is covered by internal/hub memS3 tests; a txtar
+# cannot exercise real R2 object keys through --hub-file (see spec/16), so this
+# script pins exactly the no-op contract end-to-end through the real binary.
+
+env DEVSTRAP_HOME=$WORK/home
+env DEVSTRAP_ROOT=$WORK/Code
+env DEVSTRAP_NO_KEYCHAIN=1
+
+# Found a workspace and an empty file hub.
+exec devstrap init $WORK/Code
+exec devstrap sync --hub-file=$WORK/hub.json
+
+# Dry run: no legacy layout exists, so the plan is a no-op and nothing is written.
+exec devstrap hub migrate-events --hub-file=$WORK/hub.json --dry-run
+stdout 'would migrate 0 legacy event\(s\); kept 0'
+
+# Real run: still a no-op (FileHub has no legacy layout), acquires and releases
+# the advisory sweep lock, and reports zero migrated / zero kept.
+exec devstrap hub migrate-events --hub-file=$WORK/hub.json
+stdout 'migrated 0 legacy event\(s\); kept 0'
+
+# Idempotent: a second run reports the same no-op.
+exec devstrap hub migrate-events --hub-file=$WORK/hub.json
+stdout 'migrated 0 legacy event\(s\); kept 0'

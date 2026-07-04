@@ -156,6 +156,24 @@ func (a *S3Adapter) DeleteObject(ctx context.Context, key string) error {
 	return mapped
 }
 
+// StatObject returns one object's metadata (Key + LastModified) via HEAD, for
+// hub GC's pre-delete revalidation (P4-HUB-12). A missing object wraps
+// dssync.ErrBlobNotFound (via mapS3Error, which maps *types.NotFound / 404).
+func (a *S3Adapter) StatObject(ctx context.Context, key string) (dssync.BlobInfo, error) {
+	out, err := a.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(a.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return dssync.BlobInfo{}, mapS3Error(err)
+	}
+	info := dssync.BlobInfo{Key: key}
+	if out.LastModified != nil {
+		info.LastModified = *out.LastModified
+	}
+	return info, nil
+}
+
 // GetObjectWithETag returns the object bytes at key plus the object's ETag,
 // for compare-and-swap read-modify-write of the retention manifest
 // (P4-SYNC-02/P6-HUB-04).

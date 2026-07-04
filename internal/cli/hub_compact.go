@@ -43,10 +43,10 @@ while any pulled event was deferred, skipped, or quarantined, while any
 quarantine-class conflict or skipped event is open, or while any workspace key
 grant is still awaited.
 
-Run compact from one designated device; concurrent compactions from several
-devices are not yet coordinated (a sweep lock arrives in a later change). A
-keyless device cannot compact — the snapshot is sealed under the current-epoch
-workspace key.`,
+Concurrent destructive hub passes (gc / compact / migrate-events) on cooperating
+clients are serialized by an advisory sweep lock; a hostile writer is out of
+scope (spec/15). A keyless device cannot compact — the snapshot is sealed under
+the current-epoch workspace key.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := opts.openState(cmd.Context())
 			if err != nil {
@@ -173,6 +173,17 @@ func hubCompact(ctx context.Context, stdout, stderr io.Writer, opts *options, st
 	if dryRun {
 		return printCompactPlan(ctx, stdout, store, device.ID, hlc, previewFloors, estimate, keepSnapshots, gcTombstones, gcReady, gcBeforeHLC, gcSkip)
 	}
+
+	// P4-HUB-12: serialize the destructive publish/delete sequence behind the
+	// advisory sweep lock so a concurrent gc/compact/migrate-events on a
+	// cooperating client cannot interleave. The pre-sync (pull + push above) is
+	// non-destructive; the lock guards the seal → publish → CAS → delete run
+	// below. A dry run returned above without acquiring it.
+	release, lerr := hubSweepLock(ctx, store, hub, defaultSweepLockTTL)
+	if lerr != nil {
+		return lerr
+	}
+	defer release()
 
 	// 6. Seal under the CURRENT-epoch WCK (a keyless device cannot compact).
 	epoch, kid, wck, err := keyring.PushKey(ctx)

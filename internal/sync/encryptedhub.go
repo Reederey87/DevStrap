@@ -685,6 +685,10 @@ func (h EncryptedHub) ListBlobs(ctx context.Context) ([]BlobInfo, error) {
 	return h.Hub.ListBlobs(ctx)
 }
 
+func (h EncryptedHub) StatBlob(ctx context.Context, sha256Hex string) (BlobInfo, error) {
+	return h.Hub.StatBlob(ctx, sha256Hex)
+}
+
 // Retention/snapshot-plane operations pass through (P4-SYNC-02/P4-HUB-11):
 // snapshot objects are sealed by the caller (SealSnapshot, the same WCK plane
 // as enc.v2 events) and the retention manifest is a SIGNED plaintext head
@@ -735,6 +739,27 @@ func (h EncryptedHub) DeleteAck(ctx context.Context, deviceID string) error {
 
 func (h EncryptedHub) DeleteDeviceStream(ctx context.Context, deviceID string) (int, error) {
 	return h.Hub.DeleteDeviceStream(ctx, deviceID)
+}
+
+// Maintenance-plane operations pass through (P4-HUB-12): legacy events are
+// carrier objects the migration re-keys byte-for-byte (no decrypt needed — the
+// payload stays sealed), and the sweep lock is an unencrypted advisory head
+// object, so the envelope decorator adds nothing on either path.
+
+func (h EncryptedHub) MigrateLegacyEvents(ctx context.Context, dryRun bool) (int, int, error) {
+	return h.Hub.MigrateLegacyEvents(ctx, dryRun)
+}
+
+func (h EncryptedHub) GetSweepLock(ctx context.Context) ([]byte, time.Time, error) {
+	return h.Hub.GetSweepLock(ctx)
+}
+
+func (h EncryptedHub) PutSweepLock(ctx context.Context, raw []byte) error {
+	return h.Hub.PutSweepLock(ctx, raw)
+}
+
+func (h EncryptedHub) DeleteSweepLock(ctx context.Context) error {
+	return h.Hub.DeleteSweepLock(ctx)
 }
 
 // Compile-time assertion that EncryptedHub satisfies Hub.

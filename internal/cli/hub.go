@@ -374,6 +374,7 @@ func newHubCommand(stdout io.Writer, opts *options) *cobra.Command {
 	}
 	cmd.AddCommand(newHubGCCommand(stdout, opts))
 	cmd.AddCommand(newHubCompactCommand(stdout, opts))
+	cmd.AddCommand(newHubMigrateEventsCommand(stdout, opts))
 	cmd.AddCommand(newHubLoginCommand(stdout, opts))
 	cmd.AddCommand(newHubLogoutCommand(stdout, opts))
 	return cmd
@@ -516,8 +517,9 @@ device that has pushed a blob whose referencing event is not on the hub yet:
 a device offline longer than the window is not protected (it re-pushes on its
 next successful sync).
 
-Run gc from one designated device; concurrent sweeps from several devices
-are not coordinated.`,
+Concurrent destructive hub passes (gc / compact / migrate-events) on cooperating
+clients are serialized by an advisory sweep lock; a hostile writer is out of
+scope (spec/15).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := opts.openState(cmd.Context())
 			if err != nil {
@@ -681,6 +683,16 @@ func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync
 	if _, gerr := refuseIfIncompleteView(ctx, stderr, store, hub, hubID, paths, buildKeyringFromPaths(ctx, paths, store)); gerr != nil {
 		return 0, 0, gerr
 	}
+	// P4-HUB-12: serialize the destructive sweep behind the advisory lock so a
+	// concurrent gc/compact/migrate-events on a cooperating client cannot
+	// interleave. A dry run deletes nothing, so it needs no lock.
+	if !dryRun {
+		release, lerr := hubSweepLock(ctx, store, hub, defaultSweepLockTTL)
+		if lerr != nil {
+			return 0, 0, lerr
+		}
+		defer release()
+	}
 	if !dryRun {
 		pruned, err = store.PruneDraftSnapshots(ctx, keep)
 		if err != nil {
@@ -716,6 +728,25 @@ func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync
 		// than guess.
 		if grace > 0 && (info.LastModified.IsZero() || now.Sub(info.LastModified) < grace) {
 			continue
+		}
+		// P4-HUB-12 pre-delete revalidation: `info.LastModified` came from the
+		// pre-sweep ListBlobs snapshot, which goes stale the instant a
+		// concurrent sync dedup-re-puts (and refreshes) this object — a race the
+		// sweep lock cannot close because it serializes SWEEPERS, not syncing
+		// devices. Re-stat immediately before acting: a blob now gone was
+		// already reclaimed; a blob whose fresh mtime is within the grace window
+		// was just re-referenced, so keep it. A stat error fails safe (keep).
+		if grace > 0 {
+			cur, sErr := hub.StatBlob(ctx, key)
+			switch {
+			case errors.Is(sErr, dssync.ErrBlobNotFound):
+				continue // already gone
+			case sErr != nil:
+				_, _ = fmt.Fprintf(stderr, "warning: failed to stat hub blob %s before delete: %v\n", key, sErr)
+				continue // fail safe: keep
+			case cur.LastModified.IsZero() || now.Sub(cur.LastModified) < grace:
+				continue // refreshed since the pre-sweep list — just re-referenced
+			}
 		}
 		if dryRun {
 			_, _ = fmt.Fprintf(stderr, "would delete unreferenced hub blob %s\n", key)

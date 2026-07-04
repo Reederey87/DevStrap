@@ -15,11 +15,14 @@ import (
 // recordingHub is an in-memory Hub double that records pushed events and blobs
 // so the EncryptedHub decorator can be tested without filesystem I/O.
 type recordingHub struct {
-	events    []state.Event
-	blobs     map[string][]byte
-	retention []byte
-	snapshots map[string][]byte
-	acks      map[string][]byte
+	events      []state.Event
+	blobs       map[string][]byte
+	blobTimes   map[string]time.Time
+	retention   []byte
+	snapshots   map[string][]byte
+	acks        map[string][]byte
+	sweepLock   []byte
+	sweepLockAt time.Time
 }
 
 func (r *recordingHub) Push(_ context.Context, events []state.Event) error {
@@ -46,7 +49,11 @@ func (r *recordingHub) PutBlob(_ context.Context, sha string, rr io.Reader) erro
 	if r.blobs == nil {
 		r.blobs = map[string][]byte{}
 	}
+	if r.blobTimes == nil {
+		r.blobTimes = map[string]time.Time{}
+	}
 	r.blobs[sha] = data
+	r.blobTimes[sha] = time.Now()
 	return nil
 }
 
@@ -69,6 +76,13 @@ func (r *recordingHub) ListBlobs(_ context.Context) ([]BlobInfo, error) {
 		out = append(out, BlobInfo{Key: k})
 	}
 	return out, nil
+}
+
+func (r *recordingHub) StatBlob(_ context.Context, sha string) (BlobInfo, error) {
+	if _, ok := r.blobs[sha]; !ok {
+		return BlobInfo{}, ErrBlobNotFound
+	}
+	return BlobInfo{Key: sha, LastModified: r.blobTimes[sha]}, nil
 }
 
 // Retention/snapshot plane: an in-memory mirror of the FileHub semantics so
@@ -170,6 +184,32 @@ func (r *recordingHub) DeleteDeviceStream(_ context.Context, deviceID string) (i
 	}
 	r.events = kept
 	return deleted, nil
+}
+
+func (r *recordingHub) MigrateLegacyEvents(_ context.Context, _ bool) (int, int, error) {
+	return 0, 0, nil
+}
+
+func (r *recordingHub) GetSweepLock(_ context.Context) ([]byte, time.Time, error) {
+	if r.sweepLock == nil {
+		return nil, time.Time{}, ErrSweepLockNotFound
+	}
+	return r.sweepLock, r.sweepLockAt, nil
+}
+
+func (r *recordingHub) PutSweepLock(_ context.Context, raw []byte) error {
+	if r.sweepLock != nil {
+		return ErrSweepLockHeld
+	}
+	r.sweepLock = raw
+	r.sweepLockAt = time.Now()
+	return nil
+}
+
+func (r *recordingHub) DeleteSweepLock(_ context.Context) error {
+	r.sweepLock = nil
+	r.sweepLockAt = time.Time{}
+	return nil
 }
 
 // fakeKeyring is a WorkspaceKeyring double with pre-set WCKs (one per epoch)
