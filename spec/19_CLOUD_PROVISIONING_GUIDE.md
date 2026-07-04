@@ -768,6 +768,37 @@ where `<home>` is the DevStrap home (`~/.devstrap` by default). This is safe: no
 lives there — repos re-clone from their remotes and env/draft blobs re-pull from the hub on the
 next `sync`.
 
+## F. Live-R2 dogfood validation log
+
+Chronological record of live-R2 dogfood runs against the registered bucket. Runs are driven
+from the `~/.devstrap/dogfood-r2.env` creds file (see `AGENTS.md` § *Live-R2 dogfood credentials*),
+simulating multiple devices on one Mac via per-device `--home`/`--root` + `DEVSTRAP_NO_KEYCHAIN=1`.
+
+### F.1 Compact + snapshot bootstrap (2026-07-04) — **PASS**
+
+First live exercise of the snapshot-exchange wave (`hub compact` + fresh-device snapshot bootstrap,
+`P4-SYNC-02`/`P4-HUB-11`). Three simulated devices, fresh workspace (own R2 prefix). All clean:
+
+1. **A (founder)** `init` → `db migrate` → `add` 3 repos → `sync` = *pushed 3*, minted WCK epoch 1.
+2. **B (join)** `init --join --code <A> --fingerprint <A-fp>` (adopts A's workspace id + pins A) →
+   A `devices enroll --code <B> --approve --fingerprint <B-fp>` → A `sync` (grant) → B `sync`
+   materialized 3/3. The `--fingerprint` flag on both sides makes the one-paste ceremony scriptable
+   (skips the interactive compare-and-confirm).
+3. Churned to **6 repos** across A+B, converged both (final syncs *push/pull 0* — exact per-device Seq boundary).
+4. **`hub compact` on A** (a complete replica): `--dry-run` reported "would delete ~7 cold events, publish
+   a snapshot of 6 entries / 2 anchors, keep 2 snapshots"; the real run: *"published snapshot 5f144f0efc44;
+   advanced 2 device floor(s); deleted 7 cold event(s)"* — **the event log is bounded**. Floors are per-device
+   Seq (dev_A=7, dev_B=2 — each device's own consumed watermark).
+5. **Fresh device C** (`init --join` → approve → grant; pull cursor 0, below the floor): `sync` printed
+   **"Recovering from hub snapshot (retention floor passed our cursor)…"**, imported the sealed snapshot,
+   and **materialized 6/6 projects** — converging to the full namespace despite the 7 cold events being gone.
+6. Incumbents A/B synced post-compact with **no** false "Recovering" (cursors above the floor); `hub gc`
+   clean; a 2nd compact was a no-op; C `doctor --remote` = 24 ok / 0 errors.
+
+Trap re-confirmed: run `db migrate` on each device home before its first `sync` (sync does not auto-migrate).
+Earlier same-day/prior runs (pairing ceremony, `keys rotate`, per-device Seq cursor migration + late-push
+delivery) are recorded in `spec/18_WORK_LOG.md` and the project memory.
+
 ## Pass 6 audit recommendations (2026-07-01)
 
 From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
