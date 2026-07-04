@@ -212,6 +212,22 @@ DevStrap owns object lifecycle: blob **ref-counting** and garbage collection of 
 > this device has pulled the map. Pull the latest event log first and skip objects newer than
 > a grace window before deleting. Prefer `--dry-run` until `P6-HUB-01` ships.
 
+> **Runbook (`P4-HUB-11`): `devstrap hub compact` bounds event-log growth.** Run it from ONE
+> designated device (concurrent compactions are not yet coordinated — the sweep lock is a
+> follow-up). It converges first (pull+apply+push) and refuses from any incomplete replica
+> (deferred/skipped/quarantined events, an open key-grant wait, or an open quarantine
+> conflict), so it never deletes events another device still needs. Its order is
+> confirm-before-delete — it publishes the sealed snapshot object and CAS-writes the signed
+> retention manifest, reads the manifest back to confirm, and only THEN deletes the cold events
+> below the floors — so a crash leaves a superset of the committed state. Floors are monotonic
+> (it refuses to lower any device's floor). Use `--dry-run` to preview the floors and
+> event-delete estimate without writing; `--keep-snapshots N` (default 2) bounds snapshot
+> retention; `--min-events N` skips a compaction that would reclaim less than N events. A device
+> that falls below a published floor recovers automatically on its next `devstrap sync` by
+> importing the snapshot (`P4-SYNC-02`). Because the snapshot covers all cold segments, an
+> R2-side object-lifecycle rule remains unnecessary — DevStrap deletes cold events itself only
+> after the superseding snapshot is confirmed.
+
 ### A.5 Cost note
 
 R2's free tier currently includes 10 GB-month Standard storage, 1M Class A operations, and

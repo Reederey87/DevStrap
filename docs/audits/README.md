@@ -59,6 +59,8 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P6-QUAL-04 | P3 | `fix/p6-qual-04` (2026-07-03) | SSH host-alias forge tests now install a canned `ssh` executable in `t.TempDir()` and prepend it to `PATH`, deterministically covering the `ssh -G` hostname override path, the no-override echo path, and non-zero-exit fallback to the file parser. No production code change was needed because `exec.LookPath("ssh")` is intercepted by the PATH shim. |
 | P6-HUB-02 | P2 | `fix/p6-hub-02` (2026-07-03) | Hub S3 credentials resolve env/config (`op://` refs via `op read`, 60s-bounded) → `AWS_*` → per-workspace keychain slot written by new `devstrap hub login`/`logout` (0600 file fallback under `DEVSTRAP_NO_KEYCHAIN`); resolved secret rides `redact.Secret` (with struct-level Stringer guards); auth failures map to `ErrS3Auth` with a hint. spec/13/15/19 reconciled (age-blob variant deliberately not built). |
 | P5-SYNC-01 | P2 | PR #59 (2026-07-03) | Transport cursor decoupled from HLC: per-origin-device Seq cursors (`hub_device_cursors`, migration 00017) — a late-pushed event can never be skipped (e2e `sync_late_push.txtar`, verified failing pre-cursor); R2 writes the per-device `eventlog/` layout with legacy dual-read (no bucket wipe); per-device fault isolation (a held event pins only its origin device); push watermark by gapless Seq (no legacy backfill — it could strand a regressed-HLC event); founder gate consults both cursor tables. Completes the AD-2 hardening freeze. Residual (documented, spec/15): byzantine withhold+forge slot consumption; recovery = snapshot exchange (`P4-SYNC-02`). |
+| P4-SYNC-02 | P1 | PRs #65/#73/`feat/hub-compact` (2026-07-04) | Event-log compaction + snapshot exchange SHIPPED end-to-end: sealed content-addressed `snapshot.v1` objects under the current-epoch WCK + a signed CAS retention manifest (`devstrap:retention:v1`, per-device floors, PrevSHA256 chain); `ImportSnapshot` pure-LWW merge with per-device chain anchors (migration 00020) and fail-closed producer verification (no pre-enrollment window); `hub compact` publishes floors from the transport cursors with monotonic-CAS + byte-for-byte read-back confirm BEFORE any deletion. Also the recovery path for the spec/15 byzantine withhold+forge residual. |
+| P4-HUB-11 | P1 | `feat/hub-compact` (2026-07-04) | R2 compaction: `CompactEventsBelow` bounds the seq-layout listing at each floor key and deletes only parseable below-floor legacy keys (unparseable KEPT); snapshot objects at `snapshots/<sha256>.json`, manifest at `meta/retention.json`; superseded snapshots pruned (`--keep-snapshots`). Pull cost/memory now bounded by the floor. |
 | P6-SYNC-02 | P2 | PR #63 (2026-07-03) | Durable, classified pull-drop records (`sync_skipped_events`, migration 00018): unknown envelope version defers per origin device within `sync.key_grant_grace` then quarantines (post-upgrade replay recovers; implausible ≤-current versions quarantine immediately); malformed envelopes forward to the undecryptable quarantine; retired-v1/anti-downgrade drops hold their device's cursor with `status`/`doctor` surfacing and a fail-closed `hub gc` refusal; records self-clear on consume (apply or dedup). No `--replay-skipped` flag by design (held classes self-retry; quarantined classes ride the replay). |
 | P6-DATA-03 | P2 | PR #61 (2026-07-03) | Event emission + derived state commit in ONE transaction at every local site (add, scan --adopt, both conflict_resolve paths, conflicts resolve, keyring Grant/Rotate) via Tx-scoped constructors; Rotate's wrap-first invariant preserved. Deliberately unchanged: ApplyEvents re-apply-on-duplicate (trust-boundary follow-up). |
 | P6-DATA-05 | P3 | PR #61 (2026-07-03) | `idx_events_device_hlc` serves the device-scoped HLC event scans. |
@@ -115,7 +117,7 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P5-SEC-04 | P3 | Don't push local-only env secret blobs to the hub during revoke rewrap | M |
 | P5-SEC-05 | P3 | Cap `redact.Writer`'s line buffer so a newline-free stream can't grow memory unbounded | S |
 | P5-ARCH-01 | P3 | Extract a pure `Decide(state, event)` layer so convergence can be property-tested | M |
-| P5-HUB-03 | P3 | Give `R2Hub.Pull` a retention floor + `ErrSnapshotRequired` before compaction lands | M |
+| P5-HUB-03 | P3 | Retention floor + `ErrSnapshotRequired` — **shipped/subsumed 2026-07-04** by the snapshot-exchange wave (PRs #65/#73 + `hub compact`): the per-device floor now lives in the signed retention manifest and the recovery path is real. Moved to _Recently shipped_. | M |
 | P5-HUB-04 | P3 | Fetch the pull log with bounded concurrency + an exclusive composite cursor | M |
 | P5-CLI-02 | P3 | Wire or remove the dead `materialize --partial` flag | S |
 | P5-CLI-03 | P3 | Reject `--open`/`--vscode` conflict before the network clone (`MarkFlagsMutuallyExclusive`) | S |
@@ -136,7 +138,7 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P5-DATA-02 | P3 | Add a DB `UNIQUE` index for `draft_snapshots` idempotency (defense-in-depth) | S |
 | P5-PROC-01 | P3 | Consolidate audit files + adopt pass-scoped IDs + a single status ledger _(this PR)_ | M |
 
-### Pass 4 (2026-06-28) — still open (re-prioritized in PASS5 Appendix A)
+### Pass 4 (2026-06-28) — still open (re-prioritized in PASS5 Appendix A); `P4-SYNC-02`/`P4-HUB-11` shipped 2026-07-04 (snapshot-exchange wave, moved to _Recently shipped_)
 
 | ID | Sev | Finding |
 |---|---|---|
@@ -145,13 +147,11 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P4-SEC-05 | P1 | Sign release binaries — **partial 2026-06-30**: `goreleaser-action` SHA-pinned (`release.yml`); cosign keyless signing + SLSA provenance + SBOM still open (fold into `P4-QUAL-05`; see `P6-QUAL-02`) |
 | P4-SEC-07 | — | **Shipped 2026-07-03** (foundation PR #25 + pairing wave + periodic rotation PR #56) — moved to _Recently shipped_ above. |
 | P4-SEC-08 | P2 | Hosted-mode prefix-scoped/temporary credentials + object immutability |
-| P4-SYNC-02 | P1 | Event-log compaction + snapshot exchange (events table grows forever) |
 | P4-SYNC-03 | P2 | Raise `epochFloorMS` above 0; past-direction quarantine |
 | P4-SYNC-05 | P2 | Folded running hash chain + signed per-device head |
 | P4-SYNC-06 | P2 | Wire tombstone GC + per-peer cursor/delivery tables; enforce GC-safety invariant |
 | P4-SYNC-07 | P3 | `MaxOpenConns(1)` serializes all WAL reads behind the single writer |
 | P4-SYNC-08 | P3 | Unblock the multi-workspace future + sign re-stamped workspace-id binding |
-| P4-HUB-11 | P1 | Event-log compaction / working-snapshot exchange for R2 (bound Pull cost/memory) |
 | P4-HUB-12 | P1 | Hub Delete path — primitive shipped via SEC-01; full mark-and-sweep GC still open (see P5-HUB-02) |
 | P4-HUB-14 | P2 | Emit hub metrics/traces + op/byte counters (partly delivered by P5-PROD-05 `doctor --remote`) |
 | P4-HUB-15 | P2 | Cost controls, quotas, rate limiting |

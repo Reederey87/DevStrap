@@ -1,0 +1,92 @@
+# P4-HUB-11: `hub compact` publishes a signed, sealed full-state snapshot,
+# advances the per-device retention floors, and deletes the now-cold events
+# below them. This proves the three headline behaviors through the real binary:
+#   1. device A compacts — a snapshot object appears and the cold events are
+#      gone, while the hub still stores only ciphertext (no plaintext paths);
+#   2. device B, which synced BEFORE compaction, keeps syncing incrementally
+#      (its cursor already sits at the floor, so no snapshot is demanded);
+#   3. a FRESH device C joins via the pairing-code ceremony AFTER compaction,
+#      is demanded a snapshot on its first sync, bootstraps from it, and
+#      materializes the namespace it never saw as individual events.
+
+env DEVSTRAP_NO_KEYCHAIN=1
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+# Two bare remotes, one per project.
+exec git init --bare -b main $WORK/remoteApi.git
+exec git clone $WORK/remoteApi.git $WORK/srcApi
+exec sh -c 'echo hello-api > $WORK/srcApi/README.md'
+exec sh -c 'cd $WORK/srcApi && git add README.md && git commit -m init && git branch -M main && git push origin main'
+exec git init --bare -b main $WORK/remoteWeb.git
+exec git clone $WORK/remoteWeb.git $WORK/srcWeb
+exec sh -c 'echo hello-web > $WORK/srcWeb/README.md'
+exec sh -c 'cd $WORK/srcWeb && git add README.md && git commit -m init && git branch -M main && git push origin main'
+
+# Device A (founder): init, add two projects, sync (founds + pushes 2 events).
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA init
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/api $WORK/remoteApi.git
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/web $WORK/remoteWeb.git
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+stdout 'pushed 2'
+
+# Device B joins via the one-paste pairing code, pinning A. Mutual enroll+approve
+# so B can verify A's signed events and A can grant B the workspace key.
+exec sh -c 'CODE=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices pairing-code 2>/dev/null); AFP=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --fingerprint); devstrap --home=$WORK/homeB --root=$WORK/CodeB init --join --code "$CODE" --fingerprint "$AFP"'
+stdout 'Adopted workspace id ws_'
+exec sh -c 'BCODE=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices pairing-code 2>/dev/null); BFP=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --fingerprint); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll --code "$BCODE" --approve --fingerprint "$BFP"'
+stdout 'enrolled as approved'
+
+# A publishes B's grant; B ingests it and materializes both projects.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
+exec test -d $WORK/CodeB/work/api/.git
+exec test -d $WORK/CodeB/work/web/.git
+
+# A compacts: publishes a snapshot, advances floors, deletes cold events.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA hub compact --hub-file=$WORK/hub.json
+stdout 'published snapshot'
+
+# A snapshot object and a retention manifest now exist on the hub.
+exec sh -c 'ls $WORK/hub-snapshots/*.json'
+exec test -f $WORK/hub-meta/retention.json
+
+# The hub still stores only ciphertext — project paths never leak in plaintext,
+# not in the event log nor in the snapshot object.
+! grep 'work/api' $WORK/hub.json
+! grep 'work/web' $WORK/hub.json
+# Cold event OBJECTS are actually gone, not merely unreadable (post-review P3):
+# the compactor had consumed every event on the hub, so no event carrier (every
+# one has an "id" field) may remain in the log after compaction.
+! grep '"id"' $WORK/hub.json
+! exec grep -r 'work/api' $WORK/hub-snapshots
+! exec grep -r 'work/web' $WORK/hub-snapshots
+
+# B synced before compaction, so its cursor already sits at the floor: its next
+# sync is incremental (no snapshot demand) and clean.
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB conflicts list
+stdout 'No open conflicts.'
+
+# A fresh device C joins AFTER compaction via the pairing code. A approves C so
+# C's grant lands ABOVE the new floor (approval re-grants as fresh events).
+exec sh -c 'CODE=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices pairing-code 2>/dev/null); AFP=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --fingerprint); devstrap --home=$WORK/homeC --root=$WORK/CodeC init --join --code "$CODE" --fingerprint "$AFP"'
+stdout 'Adopted workspace id ws_'
+exec sh -c 'CCODE=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices pairing-code 2>/dev/null); CFP=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices recipient --fingerprint); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll --code "$CCODE" --approve --fingerprint "$CFP"'
+stdout 'enrolled as approved'
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+
+# C's first sync: its cursor is below the floor, so the hub demands a snapshot;
+# C recovers from it, imports the namespace, and materializes both projects it
+# never saw as individual events.
+exec devstrap --home=$WORK/homeC --root=$WORK/CodeC sync --hub-file=$WORK/hub.json
+stdout 'Recovering from hub snapshot'
+exec test -d $WORK/CodeC/work/api/.git
+exec test -d $WORK/CodeC/work/web/.git
+exec devstrap --home=$WORK/homeC --root=$WORK/CodeC status
+stdout 'work/api'
+stdout 'work/web'
+exec devstrap --home=$WORK/homeC --root=$WORK/CodeC conflicts list
+stdout 'No open conflicts.'
