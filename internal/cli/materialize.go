@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -364,7 +366,12 @@ func rebuildDependencies(ctx context.Context, home, projectPath, localPath strin
 }
 
 func rebuildLogPath(home, projectPath string) string {
-	return filepath.Join(home, "logs", "rebuilds", sanitizeRebuildLogName(projectPath)+".log")
+	// The readable sanitized name can collide across distinct paths ("/" maps
+	// to "_", which is also a passthrough character), so a short digest of the
+	// raw path keeps log files distinct per project (CodeRabbit, PR #69).
+	sum := sha256.Sum256([]byte(projectPath))
+	name := sanitizeRebuildLogName(projectPath) + "-" + hex.EncodeToString(sum[:4])
+	return filepath.Join(home, "logs", "rebuilds", name+".log")
 }
 
 func sanitizeRebuildLogName(projectPath string) string {

@@ -101,7 +101,10 @@ echo "stderr from rebuild" >&2
 	if err := rebuildDependencies(ctx, home, "work/acme/api-server", localPath); err != nil {
 		t.Fatal(err)
 	}
-	logPath := filepath.Join(home, "logs", "rebuilds", "work_acme_api-server.log")
+	logPath := rebuildLogPath(home, "work/acme/api-server")
+	if !strings.Contains(filepath.Base(logPath), "work_acme_api-server-") {
+		t.Fatalf("log path %q lost its readable sanitized prefix", logPath)
+	}
 	info, err := os.Stat(logPath)
 	if err != nil {
 		t.Fatal(err)
