@@ -104,10 +104,11 @@ requirements.txt                         -> python -m venv + pip install -r
 
 Rules:
 
-- the rebuild is **opt-in/gated** — today only globally, via the `DEVSTRAP_REBUILD_DEPS` env var (`internal/cli/materialize.go`); the per-project `materialization.rebuild_on_hydrate: ask|always|never` policy and the "ask before running" default are **target design, not yet implemented** (`P6-GIT-03`), and the shipped rebuild currently runs **after** env hydrate rather than before it;
-- the hook runs **after** atomic promotion of the cloned/hydrated tree, in the project root, with the shared sanitized child-process environment (no secrets injected unless an env profile is explicitly bound);
+- the rebuild is **opt-in/gated** — today only globally, via the `DEVSTRAP_REBUILD_DEPS` env var (`internal/cli/materialize.go`); the per-project `materialization.rebuild_on_hydrate: ask|always|never` policy and the "ask before running" default are **target design, not yet implemented**;
+- the hook runs **after** atomic promotion of the cloned/hydrated tree but **before** any env hydrate, in the project root, with the shared sanitized child-process environment; this ordering keeps untrusted lifecycle/postinstall scripts from running after the project's live `.env` has already been decrypted into the same directory at `$HOME/.env`;
+- the rebuild-before-hydrate ordering is defense in depth, not a sandbox boundary: without OS enforcement, a script may still resolve the real user home via platform APIs such as `getpwuid`/`dscl`, or read another known project's `.env` by absolute path;
 - the package-manager binary is resolved from the chosen tool adapter; a missing tool produces a typed, actionable warning rather than a hard failure, and the tree is left dependency-less;
-- rebuild output should be captured to a `0600` log and rebuilds are best-effort and never block the rest of `devstrap sync`; **today the shipped rebuild discards its output with no log** (`P6-GIT-03`);
+- rebuild stdout/stderr is captured to `~/.devstrap/logs/rebuilds/<sanitized-project-path>.log` with mode `0600`; rebuilds are best-effort and never block the rest of `devstrap sync`;
 - the rebuild map is OS-aware so the same project resolves to the correct toolchain on macOS and Linux, keeping Mac-specific behavior behind adapters (see `00_START_HERE.md`).
 
 `node_modules` and equivalents stay gitignored and `.devstrapignore`-excluded so they are never adopted, never event-logged, and never bundled into `age_blob:<sha256>` content (cross-reference `11_IGNORE_AND_LOCAL_GARBAGE.md`).
@@ -402,14 +403,13 @@ From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.m
 
 **Accepted trade-off (review sign-off).** A hard-hung (not fast-failing) transfer is now detected at `LongTimeout` (30m) instead of the old 2m×3 (~6m) — one stuck clone can occupy a materialize worker slot (concurrency cap 4) for up to 30 minutes during a bulk sync. This is the deliberate cost of letting slow-but-progressing large-repo transfers finish, and it is operator-tunable (`materialization.clone_timeout`). Follow-up idea for hang-vs-slow discrimination without shrinking the ceiling: pass `-c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60` on transfer commands so a genuinely stalled HTTP transfer dies in ~60s while a progressing one continues.
 
-### P6-GIT-03 — Dependency rebuild runs after env hydrate, discards output, and is gated by one global env var
+### P6-GIT-03 — Dependency rebuild runs after env hydrate, discards output, and is gated by one global env var — **shipped (2026-07-03)**
 
-**Problem.** The shipped rebuild path gates all rebuilds on the single global `DEVSTRAP_REBUILD_DEPS` env var (`internal/cli/materialize.go:205`), runs `npm ci`/`uv sync`/etc. **after** the project's `.env` has been decrypted into the working tree with `$HOME` pointed at it, and discards rebuild stdout/stderr with no log (`:361-362`) — so lifecycle/postinstall scripts can read freshly-decrypted secrets, and failures leave no trace. This contradicts the "opt-in per-project, secrets-free, `0600`-logged" rules in "Post-hydrate dependency rebuild" above.
+**Was.** The rebuild path gated all rebuilds on the single global `DEVSTRAP_REBUILD_DEPS` env var, ran `npm ci`/`uv sync`/etc. **after** the project's `.env` had been decrypted into the working tree with `$HOME` pointed at it, and discarded rebuild stdout/stderr with no log — so lifecycle/postinstall scripts could read freshly-decrypted secrets, and failures left no trace. This contradicted the "secrets-free, `0600`-logged" rules in "Post-hydrate dependency rebuild" above.
 
-**Actionable steps.**
-1. Run dependency rebuilds **before** any env hydrate so lifecycle/postinstall scripts never see decrypted secrets.
-2. Capture rebuild output to a `0600` log under `~/.devstrap/logs/rebuilds/`.
-3. Gate rebuilds per-project (`materialization.rebuild_on_hydrate: ask|always|never`) rather than by a single global env var; keep the env var as an override only.
+**Shipped fix.** `materializeGitRepo` now keeps the same global opt-in gate but runs `rebuildDependencies` before `hydrateProjectEnv`, so any untrusted lifecycle scripts execute before DevStrap writes the project's live `.env` into that directory. `runRebuildCommand` captures stdout/stderr to `~/.devstrap/logs/rebuilds/<sanitized-project-path>.log` with mode `0600`, overwriting the prior per-project log on re-run, and rebuild failures name the log path. Pinned by `TestMaterializeRebuildsBeforeHydrate` and `TestMaterializeRebuildLogIsWritten0600`.
+
+**Remaining design gap.** The per-project `materialization.rebuild_on_hydrate: ask|always|never` policy is still target design; the shipped gate remains the single global `DEVSTRAP_REBUILD_DEPS` env var.
 
 ### P6-GIT-04 — Eager materialize/hydrate ignore stored `lfs_policy`; `always` repos land as silent pointer files
 

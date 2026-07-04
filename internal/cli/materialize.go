@@ -34,6 +34,11 @@ var ErrPartialMaterialize = errors.New("one or more projects failed to materiali
 // re-broke the QUAL-03 exit-code gate (any such workspace exited non-zero).
 var ErrDraftNotMaterializable = errors.New("content sync not yet materialized (no draft bundle synced)")
 
+var (
+	materializeHydrateProjectEnv   = hydrateProjectEnv
+	materializeRebuildDependencies = rebuildDependencies
+)
+
 // materializeConcurrency returns the bounded worker count for the eager
 // materialization pass (EAGER-04). It is capped so clone-everything across a
 // large ~/Code does not exhaust file descriptors or network connections.
@@ -190,20 +195,22 @@ func materializeGitRepo(ctx context.Context, store *state.Store, opts *options, 
 	if err != nil {
 		return err
 	}
+	// DRAFT-05/P6-GIT-03: dependency restores run lockfile/package lifecycle
+	// scripts, which are arbitrary repo-controlled code. Keep the existing
+	// global opt-in gate, but run the rebuild before env hydrate so the
+	// project's freshly decrypted .env is not sitting at $HOME/.env while those
+	// scripts execute. This is defense in depth; the child still is not an OS
+	// sandbox.
+	if os.Getenv("DEVSTRAP_REBUILD_DEPS") != "" {
+		if err := materializeRebuildDependencies(ctx, opts.paths().Home, project.Path, localPath); err != nil {
+			logging.Logger(ctx).Warn("dependency rebuild failed", "path", project.Path, "err", err.Error())
+		}
+	}
 	// EAGER-03: hydrate the env profile into the freshly materialized repo so
 	// the project is usable, not just cloned. Best-effort: no env profile or an
 	// existing .env means we skip silently.
-	if err := hydrateProjectEnv(ctx, store, opts, project, localPath); err != nil {
+	if err := materializeHydrateProjectEnv(ctx, store, opts, project, localPath); err != nil {
 		logging.Logger(ctx).Warn("env hydrate skipped", "path", project.Path, "err", err.Error())
-	}
-	// DRAFT-05: opt-in post-hydrate dependency rebuild. node_modules and build
-	// artifacts are never synced (excluded by the ignore compiler); they are
-	// rebuilt locally from the lockfile. Gated on DEVSTRAP_REBUILD_DEPS so it
-	// never runs on metered/offline paths without explicit opt-in.
-	if os.Getenv("DEVSTRAP_REBUILD_DEPS") != "" {
-		if err := rebuildDependencies(ctx, localPath); err != nil {
-			logging.Logger(ctx).Warn("dependency rebuild failed", "path", project.Path, "err", err.Error())
-		}
 	}
 	return nil
 }
@@ -332,7 +339,7 @@ func extractDraftBundle(ctx context.Context, store *state.Store, opts *options, 
 // dependency restore from the lockfile (DRAFT-05). node_modules and build
 // artifacts are never synced; they are rebuilt locally. This is opt-in
 // (DEVSTRAP_REBUILD_DEPS) and logged, never automatic on metered/offline runs.
-func rebuildDependencies(ctx context.Context, localPath string) error {
+func rebuildDependencies(ctx context.Context, home, projectPath, localPath string) error {
 	toolchains := []struct {
 		marker  string
 		command string
@@ -350,18 +357,54 @@ func rebuildDependencies(ctx context.Context, localPath string) error {
 		if _, err := os.Stat(filepath.Join(localPath, tc.marker)); err != nil {
 			continue
 		}
-		return runRebuildCommand(ctx, localPath, tc.command, tc.args)
+		logPath := rebuildLogPath(home, projectPath)
+		return runRebuildCommand(ctx, localPath, tc.command, tc.args, logPath)
 	}
 	return nil // no recognized lockfile — nothing to rebuild
 }
 
-func runRebuildCommand(ctx context.Context, dir, command string, args []string) error {
+func rebuildLogPath(home, projectPath string) string {
+	return filepath.Join(home, "logs", "rebuilds", sanitizeRebuildLogName(projectPath)+".log")
+}
+
+func sanitizeRebuildLogName(projectPath string) string {
+	var b strings.Builder
+	for _, r := range filepath.ToSlash(projectPath) {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '-' || r == '_' || r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	name := strings.Trim(b.String(), "._")
+	if name == "" {
+		return "project"
+	}
+	return name
+}
+
+func runRebuildCommand(ctx context.Context, dir, command string, args []string, logPath string) error {
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		return fmt.Errorf("create rebuild log dir: %w", err)
+	}
+	logFile, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600) //nolint:gosec // Rebuild log path is generated under DevStrap home from the namespace path.
+	if err != nil {
+		return fmt.Errorf("create rebuild log %s: %w", logPath, err)
+	}
+	defer func() { _ = logFile.Close() }()
 	//nolint:gosec // command is from a hardcoded toolchain table, not user input.
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Dir = dir
 	cmd.Stdin = nil
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
 	// P5-SEC-03 (+ P5 review): dependency rebuild runs package-manager lifecycle
 	// scripts (npm/pnpm postinstall, etc.) which are arbitrary code driven by an
 	// attacker-influenceable lockfile/package.json from a cloned repo. Mirror the
@@ -372,8 +415,11 @@ func runRebuildCommand(ctx context.Context, dir, command string, args []string) 
 	// LD_*/DYLD_*/NODE_OPTIONS names are stripped too.
 	env, err := childenv.FromOS(childenv.AgentAllowlist(), map[string]string{"HOME": dir})
 	if err != nil {
-		return fmt.Errorf("build rebuild environment: %w", err)
+		return fmt.Errorf("dependency rebuild failed (see %s): build rebuild environment: %w", logPath, err)
 	}
 	cmd.Env = env
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("dependency rebuild failed (see %s): %w", logPath, err)
+	}
+	return nil
 }
