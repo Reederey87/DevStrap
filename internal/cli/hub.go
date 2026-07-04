@@ -11,12 +11,14 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/Reederey87/DevStrap/internal/childenv"
 	"github.com/Reederey87/DevStrap/internal/config"
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
+	dsgit "github.com/Reederey87/DevStrap/internal/git"
 	"github.com/Reederey87/DevStrap/internal/hub"
 	"github.com/Reederey87/DevStrap/internal/redact"
 	"github.com/Reederey87/DevStrap/internal/state"
@@ -163,8 +165,26 @@ func selectBackendHub(ctx context.Context, opts *options, store *state.Store, hu
 		// Hub-id keys per-hub sync cursors; "r2:"+ws is anticipated by migration
 		// 00008. Zero Retry => R2Hub's default retry policy (HUB-10).
 		return hub.R2Hub{S3: adapter, WorkspaceID: ws}, "r2:" + ws, nil
+	case isGitCarrierURI(uri):
+		remote, branch, err := parseGitCarrierURI(uri)
+		if err != nil {
+			return nil, "", err
+		}
+		ws, err := store.WorkspaceID(ctx)
+		if err != nil {
+			if errors.Is(err, state.ErrNotInitialized) {
+				return nil, "", fmt.Errorf("git hub requires an initialized workspace: run `devstrap init`")
+			}
+			return nil, "", err
+		}
+		cacheRoot := filepath.Join(filepath.Dir(opts.paths().KeyDir()), "hub-git")
+		gitHub, err := hub.NewGitCarrierHub(remote, branch, ws, cacheRoot)
+		if err != nil {
+			return nil, "", err
+		}
+		return gitHub, "git:" + ws, nil
 	default:
-		return nil, "", fmt.Errorf("unrecognized hub %q (want file:<path> or r2://...)", uri)
+		return nil, "", fmt.Errorf("unrecognized hub %q (want file:<path>, r2://..., or git+ssh://...)", uri)
 	}
 }
 
@@ -339,6 +359,81 @@ func parseHubURI(uri string) (hubSpec, error) {
 	return spec, nil
 }
 
+func isGitCarrierURI(uri string) bool {
+	return strings.HasPrefix(uri, "git+") || strings.HasPrefix(uri, "git@")
+}
+
+// parseGitCarrierURI parses a git-carrier hub URI. The stored remote is the real
+// git remote (git+ stripped and ?branch= removed); branch defaults to main.
+func parseGitCarrierURI(uri string) (remote, branch string, err error) {
+	uri = strings.TrimSpace(uri)
+	if uri == "" {
+		return "", "", fmt.Errorf("git hub uri must not be empty")
+	}
+	branch = "main"
+	if strings.HasPrefix(uri, "git@") {
+		remote, branch, err = parseGitCarrierSCPLikeURI(uri, branch)
+		if err != nil {
+			return "", "", err
+		}
+		if err := dsgit.ValidateRemote(remote); err != nil {
+			return "", "", fmt.Errorf("git hub remote: %w", err)
+		}
+		return remote, branch, nil
+	}
+	u, err := url.Parse(uri)
+	if err != nil {
+		return "", "", fmt.Errorf("parse git hub uri: %w", err)
+	}
+	if !strings.HasPrefix(strings.ToLower(u.Scheme), "git+") {
+		return "", "", fmt.Errorf("unrecognized git hub %q (want git+ssh://..., git+https://..., git+file://..., or git@host:path.git)", u.Redacted())
+	}
+	if u.User != nil {
+		if _, hasPassword := u.User.Password(); hasPassword {
+			return "", "", fmt.Errorf("git hub uri %q must not contain credentials", u.Redacted())
+		}
+	}
+	realScheme := strings.TrimPrefix(strings.ToLower(u.Scheme), "git+")
+	switch realScheme {
+	case "ssh", "https", "file":
+	default:
+		return "", "", fmt.Errorf("unsupported git hub scheme %q", u.Scheme)
+	}
+	if b := u.Query().Get("branch"); b != "" {
+		if !dsgit.SafeBranchName(b) {
+			return "", "", fmt.Errorf("git hub branch %q: not a safe branch name", b)
+		}
+		branch = b
+	}
+	u.Scheme = realScheme
+	u.RawQuery = ""
+	u.Fragment = ""
+	remote = u.String()
+	if err := dsgit.ValidateRemote(remote); err != nil {
+		return "", "", fmt.Errorf("git hub remote: %w", err)
+	}
+	return remote, branch, nil
+}
+
+func parseGitCarrierSCPLikeURI(uri, defaultBranch string) (remote, branch string, err error) {
+	remote = uri
+	branch = defaultBranch
+	if before, after, ok := strings.Cut(uri, "?"); ok {
+		remote = before
+		values, err := url.ParseQuery(after)
+		if err != nil {
+			return "", "", fmt.Errorf("parse git hub uri query: %w", err)
+		}
+		if b := values.Get("branch"); b != "" {
+			if !dsgit.SafeBranchName(b) {
+				return "", "", fmt.Errorf("git hub branch %q: not a safe branch name", b)
+			}
+			branch = b
+		}
+	}
+	return remote, branch, nil
+}
+
 // hubConfigured is a lightweight, store-free hub-config validator used by the
 // run-loop preflight (P5-HUB-01): run-loop has no state store open at preflight
 // time, so it cannot build the R2 adapter. It checks that a hub is resolvable
@@ -362,8 +457,13 @@ func hubConfigured(opts *options, hubFile string) error {
 			return err
 		}
 		return nil
+	case isGitCarrierURI(uri):
+		if _, _, err := parseGitCarrierURI(uri); err != nil {
+			return err
+		}
+		return nil
 	default:
-		return fmt.Errorf("unrecognized hub %q (want file:<path> or r2://...)", uri)
+		return fmt.Errorf("unrecognized hub %q (want file:<path>, r2://..., or git+ssh://...)", uri)
 	}
 }
 

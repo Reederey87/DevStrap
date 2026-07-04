@@ -1,0 +1,41 @@
+# AD-1: two-device convergence through a git+file carrier hub. The carrier is
+# a private git repository that stores the same encrypted hub object set as the
+# R2/S3 backend, so devices must share the founding workspace id.
+
+env DEVSTRAP_NO_KEYCHAIN=1
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+# Set up a bare git project remote with one commit and a separate bare carrier
+# repo used by hub: git+file://...
+exec git init --bare -b main $WORK/remote.git
+exec git clone $WORK/remote.git $WORK/src
+exec sh -c 'echo hello > $WORK/src/README.md'
+exec sh -c 'cd $WORK/src && git add README.md && git commit -m init && git branch -M main && git push origin main'
+exec git init --bare -b main $WORK/hub.git
+
+# Device A: init, configure the git carrier hub, add a project, and sync.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA init
+exec sh -c 'echo "hub: \"git+file://$WORK/hub.git\"" >> $WORK/homeA/config.yaml'
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/git-proj $WORK/remote.git
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync
+stdout 'pushed 1'
+
+# Device B joins A's workspace id so it reads the same carrier object prefix,
+# then uses the same git carrier hub config.
+exec sh -c 'WS=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --workspace-id); devstrap --home=$WORK/homeB --root=$WORK/CodeB init --join --workspace-id "$WS"'
+stdout 'Adopted workspace id ws_'
+exec sh -c 'echo "hub: \"git+file://$WORK/hub.git\"" >> $WORK/homeB/config.yaml'
+
+# Enroll and approve B on A so A grants B the workspace key epochs.
+exec sh -c 'REC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); SIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); FP=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --fingerprint); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll dev_b --name b --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve --fingerprint "$FP"'
+stdout 'enrolled as approved'
+
+# A syncs to publish grant events; B syncs, decrypts A's history, and
+# materializes the project from its real git remote.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync
+stdout 'materialized'
+exec sh -c 'test -d $WORK/CodeB/work/git-proj/.git'

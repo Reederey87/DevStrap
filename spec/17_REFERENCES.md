@@ -241,6 +241,13 @@ Backs the hub GC/retention/manifest findings (P6-HUB-01/03/04): a log on object 
 - Cloudflare R2 S3 extensions — `If-Match` CAS beyond plain S3: https://developers.cloudflare.com/r2/api/s3/extensions/
 - S3 conditional-write leader election — epoch-numbered lock objects via `PUT If-None-Match`: https://www.morling.dev/blog/leader-election-with-s3-conditional-writes/
 
+Git-as-carrier prior art (`AD-1` — the private-git-repo hub backend):
+
+- git-remote-gcrypt — encrypted git remotes; its dumb-transport backends re-upload the whole history per push, which is why the carrier uses REAL git transport (incremental) only: https://github.com/spwhitton/git-remote-gcrypt
+- git-remote-annex — a git repo stored as manifest+bundle objects in a special remote; the whole-repo re-upload cases mirror our compact-squash trade-off: https://git-annex.branchable.com/git-remote-annex/
+- Git as database, lessons — one-file-per-entity / append-only layouts avoid merge conflicts; concurrent ref updates need fetch-and-retry optimistic concurrency: https://github.com/kody-w/rappterbook/discussions/11
+- Shared git repositories under write pressure — the push-ref update is a compare-and-swap on the old object id; concurrent pushes collide on the ref, not the objects; schedule full `gc` deliberately on write-hot repos: https://gitperf.com/chapter-18.html
+
 ### Go engineering & supply chain
 
 Backs the pool-split, release-signing, and CI-gate findings (P6-QUAL-02/03, P6-DATA-04): a single-writer pool serializes reads, release artifacts are unsigned, and some CI gates look like coverage but don't run.

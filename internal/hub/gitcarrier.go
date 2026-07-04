@@ -687,7 +687,7 @@ func (s *fsObjectStore) GetObject(_ context.Context, key string) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // keyPath confines the key under the carrier checkout root
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("%w: %s", dssync.ErrBlobNotFound, key)
 	}
@@ -843,7 +843,7 @@ func (s *fsObjectStore) PutObjectIfMatch(_ context.Context, key string, body []b
 	}
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
-	current, rerr := os.ReadFile(path)
+	current, rerr := os.ReadFile(path) //nolint:gosec // keyPath confines the key under the carrier checkout root
 	if rerr != nil || fsETag(current) != etag {
 		return ErrPreconditionFailed
 	}
