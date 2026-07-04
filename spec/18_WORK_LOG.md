@@ -31,6 +31,18 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — docs: document the live-R2 dogfood credential convention (AGENTS.md)
+
+Changed:
+- `AGENTS.md`: new "Live-R2 dogfood credentials" section — live-R2 dogfood runs source their S3 credentials from a stable `0600`, never-committed `~/.devstrap/dogfood-r2.env` (the five `DEVSTRAP_HUB_S3_*` exports), so agents no longer re-ask how to provide creds when the file exists. Records the `source`-per-invocation requirement, `DEVSTRAP_HUB=r2://$BUCKET`, `DEVSTRAP_NO_KEYCHAIN=1` per-device simulation, and `db migrate`-before-first-`sync`.
+- `spec/00`: the `spec/19` document-map line points at the new AGENTS.md section.
+
+Validated:
+- Docs-only; `go run ./cmd/spec-drift` passes. No code change.
+
+Follow-ups:
+- None (the dogfood run itself + its field notes land in a separate spec/19 close-out).
+
 ## 2026-07-04 — feat(db): full backup/restore for the whole workspace secret set (P6-DATA-04)
 
 Changed:

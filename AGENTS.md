@@ -29,3 +29,25 @@ ssh-add /Users/reederey/.ssh/id_ed25519
 ```
 
 Use `gh auth switch --user Reederey87`; remote `git@github.com:Reederey87/DevStrap.git`.
+
+## Live-R2 dogfood credentials
+
+Live-R2 dogfood runs (multi-device sync, `hub compact`, snapshot bootstrap against the real
+Cloudflare R2 bucket) read their S3 credentials from a stable, `0600`, **never-committed** env
+file the maintainer keeps at:
+
+```text
+~/.devstrap/dogfood-r2.env
+```
+
+It `export`s the five hub vars — `DEVSTRAP_HUB_S3_ENDPOINT` (`https://<accountid>.r2.cloudflarestorage.com`),
+`DEVSTRAP_HUB_S3_REGION` (`auto`), `DEVSTRAP_HUB_S3_ACCESS_KEY_ID`, `DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY`,
+and `DEVSTRAP_HUB_S3_BUCKET`. Obtain the values from the Cloudflare R2 dashboard (bucket + an
+Object-Read/Write API token; see `spec/19_CLOUD_PROVISIONING_GUIDE.md` §A). **Agents: for any
+live-R2 dogfood, `source ~/.devstrap/dogfood-r2.env` in each shell invocation** (it does not
+persist across tool calls), set `export DEVSTRAP_HUB="r2://$DEVSTRAP_HUB_S3_BUCKET"`, use
+`DEVSTRAP_NO_KEYCHAIN=1` with per-device `--home`/`--root` to simulate devices on one Mac, and
+`db migrate` each device home before its first `sync` — do **not** re-ask how to provide creds
+if the file exists. If the file is absent, ask the maintainer to create it once (never paste the
+secret into the chat; keep it in the `0600` file). It lives under `~/.devstrap`, outside the repo,
+so it is never at risk of being committed.
