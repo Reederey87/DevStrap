@@ -1,6 +1,6 @@
 ---
 last_reviewed: 2026-07-03
-tracks_code: [internal/pathkey/**, internal/scan/**, internal/state/**, internal/sync/**, internal/workspacekeys/**, internal/devicekeys/**]
+tracks_code: [internal/pathkey/**, internal/scan/**, internal/state/**, internal/sync/**, internal/workspacekeys/**, internal/devicekeys/**, internal/id/**, internal/pairing/**]
 ---
 # Namespace and Sync Model
 
