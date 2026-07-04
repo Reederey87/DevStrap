@@ -31,6 +31,19 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — fix(hub): userinfo-strip the echoed hub value in hub init's conflict error (review P3)
+
+Changed:
+- `internal/cli/hub.go`: the `hub init` conflict refusal wraps the EXISTING config value in `redact.URL` before echoing — a hand-edited credentialed `hub:` value no longer depends on the outer output scrub to stay out of the error text (defense in depth; the new argument is already credential-rejected before this point).
+- `spec/13_CLI_DAEMON_API.md`: the `hub init` section now states the echoed existing value is userinfo-stripped and that the same-value no-op skips the reachability probe (behavior unchanged; the sentence previously implied the probe always ran).
+- Review context: PR #101's independent review (no P1/P2) landed these two P3/nit items after auto-merge fired on green CI; skipped with rationale — `--quiet` suppressing the "Configured hub:" line (consistent with the P6-CLI-04 resolution routing sibling hub summaries through `progressf`) and the `DEVSTRAP_HUB` env value participating in current-hub detection (low impact, semantics shared with every hub consumer).
+
+Validated:
+- `gofmt -l cmd internal`; `go build ./...`; `GOCACHE=/tmp/devstrap-gocache go test ./internal/cli -count=1`; `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+- None
+
 ## 2026-07-04 — feat(hub): devstrap hub init <git-url> writes the carrier hub into config (AD-1 slice)
 
 Changed:
