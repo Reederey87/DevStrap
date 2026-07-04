@@ -282,7 +282,7 @@ devices revoke` is the response to a *known* key compromise.
 | `devstrap env` | Manage project environment profiles (`capture`/`hydrate`/`bind`/`rotate`) |
 | `devstrap run` | Run a command with the project env profile injected |
 | `devstrap draft` | Manage non‑git draft project content sync (`snapshot`) |
-| `devstrap hub` | Operate on the sync hub (`gc` reclaims unreferenced blobs) |
+| `devstrap hub` | Operate on the sync hub (`init` configures git carriers; `gc` reclaims unreferenced blobs) |
 | `devstrap devices` | Manage device trust state (`list`/`approve`/`revoke`/`lost`/`rename`) |
 | `devstrap conflicts` | List open namespace conflicts |
 | `devstrap db` | Manage the local state database (`migrate`/`status`/`backup`/`down`) |

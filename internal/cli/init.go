@@ -512,6 +512,37 @@ func rewriteConfigRoot(paths config.Paths) error {
 	return writeConfigAtomic(paths.Home, strings.Join(lines, "\n"))
 }
 
+// rewriteConfigHub updates ONLY the top-level `hub:` line of an existing
+// config.yaml (appending one if absent), preserving every other key and any
+// comments.
+func rewriteConfigHub(paths config.Paths, hubURI string) error {
+	path := filepath.Join(paths.Home, "config.yaml")
+	raw, err := os.ReadFile(path) //nolint:gosec // path is the devstrap home config, not user-controlled input
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	hubLine := fmt.Sprintf("hub: %q", hubURI)
+	lines := strings.Split(string(raw), "\n")
+	replaced := false
+	for i, line := range lines {
+		// Top-level scalar key only: no leading whitespace, exact key.
+		if strings.HasPrefix(line, "hub:") {
+			lines[i] = hubLine
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		// Keep a trailing newline invariant: insert before a final empty line.
+		if n := len(lines); n > 0 && lines[n-1] == "" {
+			lines = append(lines[:n-1], hubLine, "")
+		} else {
+			lines = append(lines, hubLine)
+		}
+	}
+	return writeConfigAtomic(paths.Home, strings.Join(lines, "\n"))
+}
+
 // writeConfigAtomic writes config.yaml via a same-directory temp file + rename
 // with mode 0600.
 func writeConfigAtomic(home, content string) error {
