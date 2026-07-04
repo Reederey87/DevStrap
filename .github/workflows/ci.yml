@@ -80,6 +80,14 @@ jobs:
         run: go build ./...
       - name: Test
         run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+      - name: Fuzz smoke (Decide convergence property)
+        # P4-QUAL-02: run the rapid convergence property under the coverage-guided
+        # fuzzer for a short, fixed budget so a regression that breaks strong
+        # eventual consistency is caught by mutation, not only the seeded rapid
+        # checks. Linux-only (the property is OS-independent; no need to double it
+        # on the macOS runner).
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -run=^$ -fuzz=FuzzDecideConvergence -fuzztime=30s ./internal/sync/
       - name: Coverage floor
         # P5-QUAL-04: consume the coverage profile instead of writing and
         # discarding it. Gate at a conservative floor so under-tested new code

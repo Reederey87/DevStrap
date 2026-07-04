@@ -19,6 +19,7 @@ require (
 	golang.org/x/term v0.44.0
 	golang.org/x/text v0.38.0
 	modernc.org/sqlite v1.53.0
+	pgregory.net/rapid v1.3.0
 )
 
 require (
