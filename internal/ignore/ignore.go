@@ -183,14 +183,16 @@ func parseLine(line string) (Pattern, bool, error) {
 		p.dirOnly = true
 		line = line[:len(line)-1]
 	}
-	if strings.HasPrefix(line, "/") {
-		p.anchored = true
-		line = line[1:]
+	body := line
+	hasLeadingSlash := strings.HasPrefix(body, "/")
+	if hasLeadingSlash {
+		body = body[1:]
 	}
-	if line == "" {
+	p.anchored = hasLeadingSlash || strings.Contains(body, "/")
+	if body == "" {
 		return Pattern{}, false, fmt.Errorf("empty pattern after stripping prefix/suffix")
 	}
-	re, err := patternToRegex(line, p.anchored)
+	re, err := patternToRegex(body, p.anchored)
 	if err != nil {
 		return Pattern{}, false, fmt.Errorf("compile pattern %q: %w", p.text, err)
 	}
@@ -228,9 +230,21 @@ func patternToRegex(body string, anchored bool) (*regexp.Regexp, error) {
 		c := body[i]
 		switch c {
 		case '*':
-			if i+1 < len(body) && body[i+1] == '*' {
-				// ** — consume the double star and any surrounding slashes.
-				i += 2
+			end := i + 1
+			for end < len(body) && body[end] == '*' {
+				end++
+			}
+			starCount := end - i
+			prevSegmentBoundary := i == 0 || body[i-1] == '/'
+			nextSegmentBoundary := end == len(body) || body[end] == '/'
+			// A whole-segment run of 2+ stars is git's recursive form. git's
+			// wildmatch sets match_slash on the FIRST `*` whenever it is
+			// followed by another `*`, so "***" (and longer) between separators
+			// cross "/" exactly like "**" — verified against `git check-ignore`
+			// (a/***/b matches a/m/n/b). CodeRabbit #79 suggested `== 2`; the
+			// differential test proves that would DIVERGE from real git.
+			if starCount >= 2 && prevSegmentBoundary && nextSegmentBoundary {
+				i = end
 				if i < len(body) && body[i] == '/' {
 					i++
 					sb.WriteString("(?:.*/)?")
@@ -238,12 +252,20 @@ func patternToRegex(body string, anchored bool) (*regexp.Regexp, error) {
 					sb.WriteString(".*")
 				}
 			} else {
+				i = end
 				sb.WriteString("[^/]*")
-				i++
 			}
 		case '?':
 			sb.WriteString("[^/]")
 			i++
+		case '[':
+			next, ok := appendBracketClass(&sb, body, i)
+			if !ok {
+				sb.WriteString(`\[`)
+				i++
+				continue
+			}
+			i = next
 		case '.', '+', '(', ')', '^', '$', '|', '{', '}', '\\':
 			sb.WriteByte('\\')
 			sb.WriteByte(c)
@@ -255,6 +277,44 @@ func patternToRegex(body string, anchored bool) (*regexp.Regexp, error) {
 	}
 	sb.WriteString("/?$")
 	return regexp.Compile(sb.String())
+}
+
+func appendBracketClass(sb *strings.Builder, body string, start int) (int, bool) {
+	i := start + 1
+	if i >= len(body) {
+		return start, false
+	}
+	negated := false
+	if body[i] == '!' || body[i] == '^' {
+		negated = true
+		i++
+	}
+	classStart := i
+	if i < len(body) && body[i] == ']' {
+		i++
+	}
+	for i < len(body) && body[i] != ']' {
+		i++
+	}
+	if i >= len(body) {
+		return start, false
+	}
+	sb.WriteByte('[')
+	if negated {
+		// Gitignore uses fnmatch(3) with FNM_PATHNAME: a bracket class never
+		// matches the path separator, so a NEGATED class must also exclude "/"
+		// (otherwise x[!a]y would match x/y). CodeRabbit #79.
+		sb.WriteString("^/")
+	}
+	for j := classStart; j < i; j++ {
+		switch body[j] {
+		case '\\', ']':
+			sb.WriteByte('\\')
+		}
+		sb.WriteByte(body[j])
+	}
+	sb.WriteByte(']')
+	return i + 1, true
 }
 
 // defaultPatterns is the canonical OS-junk and build-artifact table (DRAFT-03).
@@ -299,11 +359,15 @@ var defaultPatterns = func() []Pattern {
 		".nyc_output/",
 		"checkpoints/",
 		// ML data-pipeline conventions (excluded from sync, not artifacts).
-		"data/raw/",
-		"data/interim/",
-		// DevStrap internal dirs.
-		".devstrap/tmp/",
-		".devstrap/cache/",
+		// The `**/` prefix keeps these pruned at ANY depth (project-level
+		// data/raw, not only workspace-root): with correct gitignore anchoring
+		// (P6-XP-02) a bare `data/raw/` would anchor to the scan root, so the
+		// prune-anywhere intent must be spelled out with `**/`.
+		"**/data/raw/",
+		"**/data/interim/",
+		// DevStrap internal dirs (pruned at any depth, see above).
+		"**/.devstrap/tmp/",
+		"**/.devstrap/cache/",
 	}
 	patterns := make([]Pattern, 0, len(lines))
 	for _, line := range lines {

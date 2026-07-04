@@ -31,6 +31,19 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — fix(ignore): align the compiler with real gitignore semantics (P6-XP-02)
+
+Changed:
+- `internal/ignore/ignore.go`: three gitignore-semantics fixes on the draft-sync data plane. (1) `parseLine` now anchors on a leading **or middle** separator (`anchored = hasLeadingSlash || strings.Contains(body, "/")`) — `docs/build/` no longer also excludes `packages/site/docs/build`. (2) `patternToRegex` gains a `case '['` → `appendBracketClass` that translates a bracket expression to a real regex character class (leading `!`/`^` → `[^…]`, `\`/`]` escaped, leading `]` treated as a literal member) and **degrades an unclosed `[` to a literal `\[`** instead of returning a compile error that failed the whole file (`draft snapshot create` no longer hard-fails on `foo[1.txt`). (3) `**` crosses `/` only when it is a standalone segment (slash-bounded on both sides); a non-standalone `a**b` collapses to a single `[^/]*`.
+- Behavior-preserving defaults fix: the built-in default patterns with a middle slash (`data/raw/`, `data/interim/`, `.devstrap/tmp/`, `.devstrap/cache/`) gained an explicit `**/` prefix so they keep pruning at ANY depth (project-level `data/raw`, not just the scan root) under the now-correct anchoring — otherwise a bare `data/raw/` would anchor to the workspace root and stop pruning nested project data dirs. Pinned by `TestMatchDefaults` (`data/raw` and `experiments/data/raw` both pruned) and the consumer test `internal/scan` `TestShouldPruneDir` (`work/ml/data/raw` pruned). (User-authored patterns still follow exact git anchoring — the differential test proves a user `data/raw/` is root-anchored; only the built-in defaults opt into prune-anywhere via `**/`.)
+- `spec/11`: flipped the P6-XP-02 finding + the "not fully gitignore-compatible" caveat to shipped.
+
+Validated:
+- `gofmt -l internal/ignore` (clean); `go build ./...`; `go test ./internal/ignore/...` green (incl. the fuzz seed). New `ignore_gitdiff_test.go` runs the `Matcher` against `git check-ignore --verbose` over a middle-slash/bracket/`a**b`/negation corpus and asserts agreement (skips when git is absent); `TestCompileDoesNotFailOnUnclosedBracket` and `TestAnchoredMiddleSlashDoesNotMatchNested` pin the degradation + anchoring. Independent review + the differential oracle.
+
+Follow-ups:
+- `P6-XP-06` (compile the scan prune matcher from the root `.devstrapignore`) remains open — the scanner still hardwires the defaults-only matcher.
+
 ## 2026-07-04 — fix(scan): keep `scan` offline — local default-branch resolution (P6-XP-05)
 
 Changed:
