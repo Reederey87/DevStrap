@@ -243,7 +243,10 @@ func (g *GitCarrierHub) refreshLocked(ctx context.Context) error {
 	if err := g.ensureRepoLocked(ctx); err != nil {
 		return err
 	}
-	_, err := g.runner.Run(ctx, g.dir, "fetch", "--quiet", "origin", "+refs/heads/"+g.branch)
+	// Runner.Fetch rides the shared transient-network retry + the
+	// long-transfer deadline class, so a flaky link degrades to a retry
+	// instead of failing the whole sync cycle (matching R2's retry posture).
+	err := g.runner.Fetch(ctx, g.dir, "origin", g.branch)
 	switch {
 	case err == nil:
 		sha, err := g.runner.Run(ctx, g.dir, "rev-parse", "FETCH_HEAD")
@@ -280,9 +283,15 @@ func (g *GitCarrierHub) refreshLocked(ctx context.Context) error {
 
 // validateMarkerLocked enforces the carrier marker on a non-empty branch: a
 // tree without it is some OTHER repository and is refused rather than written
-// to; a marker for a different workspace is refused rather than mixed.
+// to; a marker for a different workspace is refused rather than mixed. A
+// symlinked marker is refused outright — reading or later rewriting it must
+// never follow a hostile tree outside the checkout.
 func (g *GitCarrierHub) validateMarkerLocked() error {
-	raw, err := os.ReadFile(filepath.Join(g.dir, gitMarkerFile))
+	markerPath := filepath.Join(g.dir, gitMarkerFile)
+	if info, lerr := os.Lstat(markerPath); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("git hub %s: %s is a symlink; refusing", redactedRemote(g.remote), gitMarkerFile)
+	}
+	raw, err := os.ReadFile(markerPath) //nolint:gosec // fixed name under the checkout root, symlink-refused above
 	if errors.Is(err, os.ErrNotExist) {
 		empty, eerr := dirEmptyExceptGit(g.dir)
 		if eerr != nil {
@@ -374,11 +383,15 @@ func (g *GitCarrierHub) writeLoop(ctx context.Context, op string, apply func() e
 		if !changed {
 			return nil
 		}
-		_, err = g.runner.Run(ctx, g.dir, "push", "--quiet", "origin", "HEAD:refs/heads/"+g.branch)
+		// PushBranch rides the long-transfer deadline; repeating a failed
+		// push is safe here (idempotent mutations + the ref CAS), so both a
+		// lost race (non-fast-forward) and a transient network error retry
+		// through the same refetch-and-reapply cycle.
+		err = g.runner.PushBranch(ctx, g.dir, "origin", g.branch)
 		if err == nil {
 			return nil
 		}
-		if !errors.Is(err, git.ErrNonFastForward) {
+		if !errors.Is(err, git.ErrNonFastForward) && !errors.Is(err, git.ErrNetwork) {
 			return fmt.Errorf("push git hub: %w", err)
 		}
 		g.sleep(backoff)
@@ -657,7 +670,7 @@ func (g *GitCarrierHub) CompactEventsBelow(ctx context.Context, floors dssync.Cu
 			}
 			return deleted, nil
 		}
-		if !errors.Is(err, git.ErrNonFastForward) {
+		if !errors.Is(err, git.ErrNonFastForward) && !errors.Is(err, git.ErrNetwork) {
 			return 0, fmt.Errorf("push git hub compaction: %w", err)
 		}
 		g.sleep(backoff)
@@ -706,15 +719,45 @@ func (s *fsObjectStore) keyPath(key string) (string, error) {
 	if key == "" || strings.HasPrefix(key, "/") || strings.Contains(key, "\\") || strings.Contains(key, "..") {
 		return "", fmt.Errorf("%w: %q", dssync.ErrInvalidBlobKey, key)
 	}
-	return filepath.Join(s.root, filepath.FromSlash(key)), nil
+	return s.safePath(key)
 }
 
-func (s *fsObjectStore) timePath(key string) string {
-	return filepath.Join(s.root, filepath.FromSlash(gitTimesPrefix+key))
+// safePath resolves a validated slash key under the checkout root, refusing
+// any path component that is a symlink: a hostile carrier tree can commit a
+// symlink (e.g. `workspaces -> /etc`) that survives `reset --hard`, and
+// following it would read or write OUTSIDE the checkout. Components that do
+// not exist yet (the write path creates them) have nothing to follow and are
+// fine.
+func (s *fsObjectStore) safePath(key string) (string, error) {
+	cur := s.root
+	for _, part := range strings.Split(key, "/") {
+		if part == "" {
+			return "", fmt.Errorf("%w: %q", dssync.ErrInvalidBlobKey, key)
+		}
+		cur = filepath.Join(cur, part)
+		info, err := os.Lstat(cur)
+		if errors.Is(err, os.ErrNotExist) {
+			return filepath.Join(s.root, filepath.FromSlash(key)), nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("stat git hub path component: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("%w: %q traverses a symlink in the carrier tree", dssync.ErrInvalidBlobKey, key)
+		}
+	}
+	return cur, nil
+}
+
+func (s *fsObjectStore) timePath(key string) (string, error) {
+	return s.safePath(gitTimesPrefix + key)
 }
 
 func (s *fsObjectStore) writeTimestamp(key string) error {
-	path := s.timePath(key)
+	path, err := s.timePath(key)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -723,9 +766,11 @@ func (s *fsObjectStore) writeTimestamp(key string) error {
 
 func (s *fsObjectStore) modTime(key string) time.Time {
 	sidecar := time.Time{}
-	if raw, err := os.ReadFile(s.timePath(key)); err == nil {
-		if t, perr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(raw))); perr == nil {
-			sidecar = t
+	if tp, terr := s.timePath(key); terr == nil {
+		if raw, err := os.ReadFile(tp); err == nil { //nolint:gosec // safePath denies escapes and symlinked components
+			if t, perr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(raw))); perr == nil {
+				sidecar = t
+			}
 		}
 	}
 	// Floor at this clone's first observation: a skewed-slow writer's sidecar
@@ -821,7 +866,7 @@ func (s *fsObjectStore) GetObject(_ context.Context, key string) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path) //nolint:gosec // keyPath confines the key under the carrier checkout root
+	data, err := os.ReadFile(path) //nolint:gosec // keyPath/safePath confine the key under the checkout root and deny symlinked components
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("%w: %s", dssync.ErrBlobNotFound, key)
 	}
@@ -855,8 +900,10 @@ func (s *fsObjectStore) DeleteObject(_ context.Context, key string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("delete git hub object: %w", err)
 	}
-	if err := os.Remove(s.timePath(key)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("delete git hub object sidecar: %w", err)
+	if tp, terr := s.timePath(key); terr == nil {
+		if err := os.Remove(tp); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("delete git hub object sidecar: %w", err)
+		}
 	}
 	s.forgetObservedLocked(key)
 	return nil
@@ -978,7 +1025,7 @@ func (s *fsObjectStore) PutObjectIfMatch(_ context.Context, key string, body []b
 	}
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
-	current, rerr := os.ReadFile(path) //nolint:gosec // keyPath confines the key under the carrier checkout root
+	current, rerr := os.ReadFile(path) //nolint:gosec // keyPath/safePath confine the key under the checkout root and deny symlinked components
 	if rerr != nil || fsETag(current) != etag {
 		return ErrPreconditionFailed
 	}

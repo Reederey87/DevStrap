@@ -150,6 +150,48 @@ func TestGitCarrierDryRunMigrateWritesNothing(t *testing.T) {
 	}
 }
 
+// TestGitCarrierRefusesSymlinkedCarrierPaths pins the safePath confinement: a
+// hostile carrier tree that commits `workspaces` as a symlink pointing outside
+// the checkout must be refused at the object layer — reads must not follow it
+// (exfiltration) and writes must not land through it (clobbering).
+func TestGitCarrierRefusesSymlinkedCarrierPaths(t *testing.T) {
+	ctx := context.Background()
+	remote := newBareCarrier(t)
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "victim"), []byte("host file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seed a hostile-but-marked carrier: valid marker + workspaces -> outside.
+	scratch := filepath.Join(t.TempDir(), "scratch")
+	runGit(t, "", "clone", "--quiet", remote, scratch)
+	if err := os.WriteFile(filepath.Join(scratch, gitMarkerFile), []byte(`{"version":1,"workspace_id":"ws_test"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(scratch, "workspaces")); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, scratch, "-c", "user.name=t", "-c", "user.email=t@localhost", "add", "-A")
+	runGit(t, scratch, "-c", "user.name=t", "-c", "user.email=t@localhost", "commit", "--quiet", "-m", "hostile")
+	runGit(t, scratch, "push", "--quiet", "origin", "HEAD:refs/heads/main")
+
+	h := newGitCarrierTestHub(t, remote, "victim-reader")
+	const blobSHA = "dd00000000000000000000000000000000000000000000000000000000000001"
+	if _, err := h.GetBlob(ctx, blobSHA); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("GetBlob through a symlinked component = %v, want symlink refusal", err)
+	}
+	if err := h.PutBlob(ctx, blobSHA, strings.NewReader("x")); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("PutBlob through a symlinked component = %v, want symlink refusal", err)
+	}
+	entries, err := os.ReadDir(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "victim" {
+		t.Fatalf("outside dir was touched through the symlink: %v", entries)
+	}
+}
+
 func gitLsRemote(t *testing.T, remote string) string {
 	t.Helper()
 	out, err := exec.Command("git", "ls-remote", remote).CombinedOutput()
