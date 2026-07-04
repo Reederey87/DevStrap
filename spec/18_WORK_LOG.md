@@ -31,6 +31,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — fix(scan): compile root .devstrapignore for scan pruning (P6-XP-06)
+
+Changed:
+- `internal/scan/scan.go`: `Options.Ignore` test-injection seam; `Walk` now compiles the scan root `.devstrapignore` once per walk via `ignore.CompileFromDir(cleanRoot, true)`, falls back to `ignore.DefaultMatcher()` with a warning on compile errors, prunes through the per-walk matcher and counts pruned directories into `Result.PrunedDirs`; the interactive `scan` prints the count as one informational line (NOT a warning — run-loop echoes scan warnings every tick, so routine default prunes would chatter forever; coordinator-adjusted during review). Compile failures remain warnings. Removed the package-level defaults-only prune matcher and `shouldPruneDir` shim.
+- `internal/scan/scan_test.go`: default-prune table now calls `ignore.DefaultMatcher().ShouldPruneDir`; added scan-level `.devstrapignore` coverage for custom pruning plus defaults, malformed-file fallback to defaults, and `!bin/` re-inclusion.
+- `spec/11_IGNORE_AND_LOCAL_GARBAGE.md`: P6-XP-06 marked shipped and scanner ignore behavior reconciled.
+- `docs/audits/README.md`: P6-XP-06 moved to Recently shipped; Pass 6 open count reconciled to 5.
+- `spec/18_WORK_LOG.md`: this entry.
+
+Validated:
+- `gofmt -l cmd internal` — clean (no output).
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./internal/scan/... ./internal/ignore/... ./internal/cli/...` — PASS.
+- `go build ./...` — blocked by sandboxed default Go cache (`operation not permitted` under `/Users/reederey/Library/Caches/go-build`); reran as `GOCACHE=/tmp/devstrap-gocache go build ./...` — PASS.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` — blocked by the same sandboxed default Go cache; reran as `GOCACHE=/tmp/devstrap-gocache go run ./cmd/spec-drift --base origin/main --head HEAD` — PASS (`spec drift check passed: 20 specs, 5 changed files`).
 ## 2026-07-04 — P6-DOC-01 residual — path-anchor the command-doc gate
 
 Changed:
