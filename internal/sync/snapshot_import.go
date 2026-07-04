@@ -128,11 +128,12 @@ func importTombstoneTx(ctx context.Context, tx *state.Tx, ts SnapshotTombstone) 
 	if err == nil {
 		// Deliberately a bare-HLC comparison, NOT the full (HLC, device, event)
 		// coordinate tie-break: the LIVE paths resolve add/delete ties by HLC
-		// alone in the tombstone's favor (applyEventTx blocks an add when
-		// event.HLC <= tombstoneHLC, and tombstonePath keeps the max HLC
-		// unconditionally), so both replay orders of an equal-HLC add+delete
-		// converge on deleted. Import must mirror that exactly — a full
-		// coordinate compare here would make import diverge from replay on
+		// alone in the tombstone's favor (decideUpsert blocks an add when
+		// event.HLC <= tombstoneHLC, decideDelete keeps a live row only when
+		// its source HLC is STRICTLY above the delete, and tombstonePath keeps
+		// the max HLC unconditionally), so both replay orders of an equal-HLC
+		// add+delete converge on deleted. Import must mirror that exactly — a
+		// full coordinate compare here would make import diverge from replay on
 		// equal-HLC ties (reviewed and rejected as a post-review suggestion).
 		if existing.SourceEventHLC > ts.TombstoneHLC {
 			return nil // local add is strictly newer than the delete → keep it

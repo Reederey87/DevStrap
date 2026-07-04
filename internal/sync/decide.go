@@ -32,12 +32,19 @@ import (
 //   - draft.snapshot.created / device.key.granted — the side-effecting "exotic"
 //     branches (blob-ref recording, key-grant audit) that remain inline.
 //
-// Because renames are excluded, the property test's event set intentionally omits
-// the delete-vs-strictly-higher-re-add interaction on one path: a delete
-// tombstones unconditionally (last-writer-wins on the delete side is not
-// HLC-gated against the live row) while a re-add is gated by the tombstone HLC,
-// so that specific mix is order-sensitive by construction and out of the pure
-// core's remit.
+// Delete-vs-re-add is HLC-symmetric: a re-add is gated by the standing tombstone
+// HLC (decideUpsert) AND a delete is gated by the live row's source-event HLC
+// (decideDelete), both as bare-HLC comparisons that resolve exact ties in the
+// delete's favor. Every delivery order of a SAME-REMOTE add/update/delete mix
+// therefore converges (the P5-ARCH-01 review had surfaced the missing
+// delete-side gate as a real strong-eventual-consistency gap; see
+// TestDecideConvergesDeleteReaddMix), and live replay now matches
+// importTombstoneTx's snapshot-import rule exactly. KNOWN RESIDUAL: when a
+// same-path/DIFFERENT-remote pair is in the mix, reconcileSamePath installs the
+// deterministic lowest-coordinate winner, so the active row's HLC can sit BELOW
+// a dropped rival's — a delete with an HLC between the two still converges to
+// different terminal states by delivery order (pre-existing, independent of the
+// delete-side gate; tracked as a P4-QUAL-02 follow-up).
 
 // ProjectionRow is the in-memory namespace-entry state `Decide` reads to
 // reconcile a single event. It mirrors the subset of namespace_entries (joined
@@ -203,29 +210,42 @@ func decideUpsert(proj Projection, payload ProjectPayload, event state.Event) (D
 	return Decision{Mutations: []Mutation{{Kind: MutationUpsert, Upsert: upsertParamsForEvent(payload, event)}}}, nil
 }
 
-// decideDelete mirrors the original applyEventTx project.deleted branch: a dirty
-// active checkout raises a pending_delete_conflict and is NOT tombstoned;
+// decideDelete mirrors importTombstoneTx's precedence exactly: a live add
+// strictly newer than the delete keeps the path (LWW — the delete is stale); a
+// dirty active checkout raises a pending_delete_conflict and is NOT tombstoned;
 // otherwise the path is tombstoned (creating a deleted placeholder when absent).
 func decideDelete(proj Projection, payload ProjectPayload, event state.Event) (Decision, error) {
 	pk, err := pathkey.Clean(payload.Path)
 	if err != nil {
 		return Decision{}, err
 	}
-	if existing, ok := proj.active(pk.Key); ok && existing.DirtyState == dirtyStateDirty {
-		raw, err := json.Marshal(pendingDeleteConflictDetails{
-			Path:     payload.Path,
-			EventID:  event.ID,
-			DeviceID: event.DeviceID,
-			HLC:      event.HLC,
-		})
-		if err != nil {
-			return Decision{}, err
+	if existing, ok := proj.active(pk.Key); ok {
+		// Deliberately a bare-HLC comparison, NOT the full (HLC, device, event)
+		// coordinate tie-break: the add side resolves add/delete ties by HLC
+		// alone in the tombstone's favor (decideUpsert blocks an add when
+		// event.HLC <= tombstoneHLC), so an equal-HLC add+delete converges on
+		// deleted in both orders only if the delete also wins its tie here.
+		// A samePathLess compare would diverge from importTombstoneTx, which
+		// pins the same bare-HLC rule for snapshot import.
+		if existing.SourceEventHLC > event.HLC {
+			return Decision{}, nil // live add strictly newer than the delete → keep it
 		}
-		return Decision{Conflicts: []ConflictRecord{{
-			NamespaceID: existing.NamespaceID,
-			Type:        ConflictPendingDelete,
-			Details:     string(raw),
-		}}}, nil
+		if existing.DirtyState == dirtyStateDirty {
+			raw, err := json.Marshal(pendingDeleteConflictDetails{
+				Path:     payload.Path,
+				EventID:  event.ID,
+				DeviceID: event.DeviceID,
+				HLC:      event.HLC,
+			})
+			if err != nil {
+				return Decision{}, err
+			}
+			return Decision{Conflicts: []ConflictRecord{{
+				NamespaceID: existing.NamespaceID,
+				Type:        ConflictPendingDelete,
+				Details:     string(raw),
+			}}}, nil
+		}
 	}
 	return Decision{Mutations: []Mutation{{Kind: MutationTombstone, Tombstone: TombstoneMutation{Path: payload.Path, HLC: event.HLC}}}}, nil
 }

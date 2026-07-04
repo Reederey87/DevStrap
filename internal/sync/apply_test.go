@@ -212,6 +212,114 @@ func TestApplyEventsDeleteVsDirtyRaisesConflict(t *testing.T) {
 	}
 }
 
+// A delete strictly below the live add's source-event HLC is stale and must be
+// a no-op — in BOTH pull-window orders. Before decideDelete gained the live-row
+// HLC gate (the P5-ARCH-01 review finding), the A-then-D order destroyed the
+// newer add while D-then-A kept it: a real convergence divergence across
+// separate pull windows. Equal HLC still resolves in the delete's favor, in
+// both orders, mirroring importTombstoneTx exactly.
+func TestApplyEventsStaleDeleteDoesNotDestroyNewerAdd(t *testing.T) {
+	ctx := context.Background()
+
+	newAdd := func(t *testing.T, dev string, hlc int64) state.Event {
+		t.Helper()
+		add, err := NewProjectEvent(dev, EventProjectAdded, hlc, ProjectPayload{
+			Path: "work/acme/api", Type: "git_repo", RemoteKey: "github.com/acme/api",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return add
+	}
+	newDel := func(t *testing.T, dev string, hlc int64) state.Event {
+		t.Helper()
+		del, err := NewProjectEvent(dev, EventProjectDeleted, hlc, ProjectPayload{Path: "work/acme/api"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return del
+	}
+	terminalHLC := func(t *testing.T, st *state.Store) int64 {
+		t.Helper()
+		p, err := st.ProjectByPath(ctx, "work/acme/api")
+		if err != nil {
+			t.Fatalf("work/acme/api must stay active: %v", err)
+		}
+		return p.SourceEventHLC
+	}
+
+	// Order 1 (the pre-fix loss): add@10 applies, then the stale delete@5
+	// arrives in a LATER pull window.
+	stA, devA := newSyncStore(t)
+	if _, err := ApplyEvents(ctx, stA, []state.Event{newAdd(t, devA.ID, 10<<hlcLogicalBits)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyEvents(ctx, stA, []state.Event{newDel(t, devA.ID, 5<<hlcLogicalBits)}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Order 2: delete@5 tombstones first, then the newer add@10 arrives.
+	stB, devB := newSyncStore(t)
+	if _, err := ApplyEvents(ctx, stB, []state.Event{newDel(t, devB.ID, 5<<hlcLogicalBits)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyEvents(ctx, stB, []state.Event{newAdd(t, devB.ID, 10<<hlcLogicalBits)}); err != nil {
+		t.Fatal(err)
+	}
+
+	if a, b := terminalHLC(t, stA), terminalHLC(t, stB); a != b || a != 10<<hlcLogicalBits {
+		t.Fatalf("pull-window orders diverged: add-then-delete=%d delete-then-add=%d, want both %d", a, b, int64(10)<<hlcLogicalBits)
+	}
+
+	// Dirty + strictly-newer add: the stale delete is a no-op BEFORE the dirty
+	// guard (matching importTombstoneTx's precedence) — the row is kept and NO
+	// pending_delete_conflict is raised, since the delete lost on LWW.
+	stDirty, devDirty := newSyncStore(t)
+	if _, err := ApplyEvents(ctx, stDirty, []state.Event{newAdd(t, devDirty.ID, 10<<hlcLogicalBits)}); err != nil {
+		t.Fatal(err)
+	}
+	dirtyProject, err := stDirty.ProjectByPath(ctx, "work/acme/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stDirty.UpdateProjectLocalState(ctx, dirtyProject.ID, "/tmp/Code/work/acme/api", "available", "dirty"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyEvents(ctx, stDirty, []state.Event{newDel(t, devDirty.ID, 5<<hlcLogicalBits)}); err != nil {
+		t.Fatal(err)
+	}
+	if got := terminalHLC(t, stDirty); got != 10<<hlcLogicalBits {
+		t.Fatalf("dirty row with a newer add must survive a stale delete: source_hlc=%d", got)
+	}
+	dirtyConflicts, err := stDirty.OpenConflicts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasConflictType(dirtyConflicts, "pending_delete_conflict") {
+		t.Fatalf("a stale delete must not raise pending_delete_conflict on a newer dirty row: %+v", dirtyConflicts)
+	}
+
+	// Equal-HLC tie: the delete wins in BOTH orders (the bare-HLC rule shared
+	// with importTombstoneTx; a full-coordinate tie-break would diverge).
+	for name, order := range map[string][2]string{"add-then-delete": {"add", "del"}, "delete-then-add": {"del", "add"}} {
+		st, dev := newSyncStore(t)
+		for _, kind := range order {
+			var ev state.Event
+			if kind == "add" {
+				ev = newAdd(t, dev.ID, 7<<hlcLogicalBits)
+			} else {
+				ev = newDel(t, dev.ID, 7<<hlcLogicalBits)
+			}
+			if _, err := ApplyEvents(ctx, st, []state.Event{ev}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := st.ProjectByPath(ctx, "work/acme/api"); err == nil {
+			t.Fatalf("%s: equal-HLC add+delete must converge on deleted", name)
+		}
+	}
+}
+
 // SYNC-5: tombstone GC purges deleted entries below the supplied HLC only.
 func TestGCTombstonesPurgesBelowHLC(t *testing.T) {
 	ctx := context.Background()

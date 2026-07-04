@@ -26,10 +26,11 @@ import (
 //     tombstone dominates: work/del;
 //   - an isolated single add: work/solo.
 //
-// It deliberately omits a delete mixed with a strictly-higher re-add on ONE path:
-// a delete tombstones unconditionally while a re-add is gated by the tombstone
-// HLC, so that specific interaction is order-sensitive by construction and sits
-// outside the pure convergence core Decide owns (see decide.go scope note).
+// The delete-vs-re-add interaction lives in its own full-permutation test
+// (TestDecideConvergesDeleteReaddMix) so this 8-event anchor set stays byte-for-
+// byte what P5-ARCH-01 shipped: since decideDelete gained the live-row HLC gate
+// (mirroring importTombstoneTx), a delete mixed with a strictly-higher re-add
+// converges in every delivery order instead of being order-sensitive.
 
 func upsertEvt(id, dev, typ string, hlc int64, path, remoteKey string) state.Event {
 	payload := ProjectPayload{Path: path, Type: "git_repo"}
@@ -190,6 +191,74 @@ func TestDecideConvergesUnderEveryPermutation(t *testing.T) {
 	})
 	if count != 40320 { // 8! — every ordering of the 8-event batch was folded.
 		t.Fatalf("visited %d permutations, want 40320 (8!)", count)
+	}
+}
+
+// deleteReaddEventSet is the delete-vs-re-add mix that was order-sensitive
+// before decideDelete gained the live-row HLC gate: the exact divergence the
+// P5-ARCH-01 review surfaced (D@5 then A@10 converged active while A@10 then
+// D@5 converged deleted). Both paths must now converge on the live add.
+func deleteReaddEventSet() []state.Event {
+	return []state.Event{
+		// work/readd — add@2, delete@4, re-add@6 → the strictly-higher re-add
+		// survives the tombstone in every order.
+		upsertEvt("evt-readd-1", "dev-1", EventProjectAdded, 2, "work/readd", "github.com/x/readd"),
+		deleteEvt("evt-readd-2", "dev-2", 4, "work/readd"),
+		upsertEvt("evt-readd-3", "dev-1", EventProjectAdded, 6, "work/readd", "github.com/x/readd"),
+		// work/late — the review's exact pair: a delete strictly below the live
+		// add must lose in BOTH orders (before the fix, A@10 then D@5 deleted).
+		upsertEvt("evt-late-1", "dev-1", EventProjectAdded, 10, "work/late", "github.com/x/late"),
+		deleteEvt("evt-late-2", "dev-2", 5, "work/late"),
+	}
+}
+
+// TestDecideConvergesDeleteReaddMix is the convergence property for the
+// delete-vs-re-add interaction: folding the pure Decide over EVERY delivery
+// order (5! = 120) of adds, deletes, and strictly-higher re-adds on the same
+// paths yields the SAME final projection — the one where the newest add wins.
+func TestDecideConvergesDeleteReaddMix(t *testing.T) {
+	events := deleteReaddEventSet()
+
+	want := foldDecide(t, events)
+
+	// Winner sanity: the strictly-higher re-add and the strictly-higher add
+	// must both be terminal-active, so a regression that lets the delete
+	// dominate fails loudly rather than "converging" to the wrong state.
+	if row, ok := want.active("work/readd"); !ok || row.SourceEventID != "evt-readd-3" {
+		t.Fatalf("work/readd = %+v, want the re-add @6 (evt-readd-3) active", want["work/readd"])
+	}
+	if row, ok := want.active("work/late"); !ok || row.SourceEventID != "evt-late-1" {
+		t.Fatalf("work/late = %+v, want the add @10 (evt-late-1) active — the delete @5 is stale", want["work/late"])
+	}
+
+	var count int
+	permute(events, func(perm []state.Event) {
+		count++
+		got := foldDecide(t, perm)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("permutation %d diverged:\n got=%s\nwant=%s\norder=%s", count, dumpProjection(got), dumpProjection(want), orderOf(perm))
+		}
+	})
+	if count != 120 { // 5! — every ordering of the 5-event batch was folded.
+		t.Fatalf("visited %d permutations, want 120 (5!)", count)
+	}
+
+	// Idempotency: re-delivering any event against the converged projection is
+	// a no-op (the stale delete hits the live-row gate; the stale adds hit the
+	// LWW gate).
+	for _, ev := range events {
+		decision, err := Decide(want, ev)
+		if err != nil {
+			t.Fatalf("Decide(%s): %v", ev.ID, err)
+		}
+		next, err := want.Apply(decision)
+		if err != nil {
+			t.Fatalf("Apply(%s): %v", ev.ID, err)
+		}
+		if !reflect.DeepEqual(next, want) {
+			t.Fatalf("re-applying %s changed the converged projection:\n got=%s\nwant=%s",
+				ev.ID, dumpProjection(next), dumpProjection(want))
+		}
 	}
 }
 
