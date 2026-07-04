@@ -54,9 +54,11 @@ devstrap wip
 Current repository status as of `2026-07-01`:
 
 ```text
-Implemented: devstrap init, version, scan, add, clone, hydrate, open, sync --hub-file, sync (hub: r2://<bucket> production R2/S3 SDK wiring), hub gc, hub compact, hub migrate-events, hub login/logout, keys rotate, materialize, draft snapshot create, run-loop, status, doctor, conflicts list/show/resolve, db migrate/status/backup/backup --full/restore/down, env capture/hydrate/bind/rotate, run, worktree new/status/finalize/list/remove/cleanup/unlock, agent run/list/show/pr, devices enroll/list/approve/revoke/lost/rename/recipient/pairing-code
+Implemented: devstrap init, version, scan, add, clone, hydrate, open, sync --hub-file, sync (hub: r2://<bucket> production R2/S3 SDK wiring), hub compact, hub gc, hub login, hub logout, hub migrate-events, keys rotate, materialize, draft snapshot create, run-loop, status, doctor, conflicts list, conflicts show, conflicts resolve, db migrate, db status, db backup, db backup --full, db restore, db down, env capture, env hydrate, env bind, env rotate, run, worktree new, worktree status, worktree finalize, worktree list, worktree remove, worktree cleanup, worktree unlock, agent run, agent list, agent show, agent pr, devices enroll, devices list, devices approve, devices revoke, devices lost, devices rename, devices recipient, devices pairing-code
 Planned: env check, OS-enforced agent sandboxing, automatic remote device enrollment/fingerprint confirmation, daemon/socket API, export, promote, gitstate, wip
 ```
+
+`TestEveryCommandIsDocumented` path-anchors this inventory against the live Cobra tree: every visible command path must appear as a contiguous substring here and in `spec/00_START_HERE.md`.
 
 ### init
 

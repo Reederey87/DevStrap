@@ -31,6 +31,15 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — P6-DOC-01 residual — path-anchor the command-doc gate
+
+Changed:
+- `internal/cli/command_doc_test.go`: rewrote the command collector to recurse through visible Cobra subcommands as full paths, including arbitrary depth (`draft snapshot create`), and assert every path appears contiguously in both `spec/13_CLI_DAEMON_API.md` and `spec/00_START_HERE.md`.
+- `spec/00` and `spec/13`: expanded the command inventories so slash-grouped subcommands now appear as literal full paths; the concrete `spec/00` gaps caught by the hardened gate were grouped `agent`, `conflicts`, `devices`, `env`, `hub`, and `worktree` paths plus `db restore`.
+- `docs/audits/README.md`: moved `P6-DOC-01` from the Pass-6 open table to Recently shipped and reconciled the Pass-6 open count.
+
+Validated:
+- `GOCACHE=$TMPDIR/gocache go test ./internal/cli/... -run TestEveryCommandIsDocumented -v`
 ## 2026-07-04 — fix(cli): --quiet suppresses progress chatter (P6-CLI-04)
 
 Changed:
