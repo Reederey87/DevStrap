@@ -56,7 +56,7 @@ func newMaterializeCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "materialize [path]",
 		Short: "Eagerly materialize skeleton projects (clone repos, hydrate env)",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  usageArgs(cobra.MaximumNArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := opts.openState(cmd.Context())
 			if err != nil {

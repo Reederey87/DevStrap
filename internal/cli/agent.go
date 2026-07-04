@@ -39,7 +39,7 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run <path> [-- command [args...]]",
 		Short: "Run a generic agent command in a fresh worktree",
-		Args:  cobra.MinimumNArgs(1),
+		Args:  usageArgs(cobra.MinimumNArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if taskName == "" {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("--task is required")}
@@ -166,7 +166,7 @@ func newAgentShowCommand(stdout io.Writer, opts *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "show <id>",
 		Short: "Show an agent run",
-		Args:  cobra.ExactArgs(1),
+		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := opts.openState(cmd.Context())
 			if err != nil {
@@ -197,7 +197,7 @@ func newAgentPRCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "pr <agent-run-id>",
 		Short: "Create a PR/MR after the stale-base gate (forge-agnostic: gh/glab/tea)",
-		Args:  cobra.ExactArgs(1),
+		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := opts.openState(cmd.Context())
 			if err != nil {

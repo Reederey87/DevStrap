@@ -19,7 +19,7 @@ func newAddCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "add <remote>",
 		Short: "Add a Git repository to the namespace",
-		Args:  cobra.ExactArgs(1),
+		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if nsPath == "" {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("--path is required")}

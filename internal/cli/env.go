@@ -90,7 +90,7 @@ func newEnvRotateCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "rotate [path] [env-file]",
 		Short: "Re-capture a rotated secret to the current recipients and clear its needs-rotation flag (P5-PROD-03)",
-		Args:  cobra.MaximumNArgs(2),
+		Args:  usageArgs(cobra.MaximumNArgs(2)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := opts.openState(cmd.Context())
 			if err != nil {
@@ -145,7 +145,7 @@ func newEnvCaptureCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "capture <path> <env-file>",
 		Short: "Capture and encrypt a project env file",
-		Args:  cobra.ExactArgs(2),
+		Args:  usageArgs(cobra.ExactArgs(2)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := opts.openState(cmd.Context())
 			if err != nil {
@@ -202,7 +202,7 @@ func newEnvHydrateCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "hydrate <path>",
 		Short: "Decrypt a captured env profile to a local env file",
-		Args:  cobra.ExactArgs(1),
+		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if writePath == "" {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("--write is required")}
@@ -306,7 +306,7 @@ func newEnvBindCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bind <path> <refs-file>",
 		Short: "Bind provider secret references to a project env profile",
-		Args:  cobra.ExactArgs(2),
+		Args:  usageArgs(cobra.ExactArgs(2)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			provider = strings.ToLower(strings.TrimSpace(provider))
 			if provider != "1password" {

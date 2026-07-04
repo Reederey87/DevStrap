@@ -25,7 +25,7 @@ func newHydrateCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "hydrate <path>",
 		Short: "Clone a skeleton Git repository",
-		Args:  cobra.ExactArgs(1),
+		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if partial && full {
 				return appError{code: exitInvalidConfig, err: errors.New("use either --partial or --full")}

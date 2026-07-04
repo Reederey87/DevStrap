@@ -25,7 +25,7 @@ func newCloneCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "clone <url> [path]",
 		Short: "Clone a Git repo into the namespace and materialize it in one command",
-		Args:  cobra.RangeArgs(1, 2),
+		Args:  usageArgs(cobra.RangeArgs(1, 2)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			remote := args[0]
 			nsPath := ""

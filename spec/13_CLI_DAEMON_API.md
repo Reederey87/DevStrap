@@ -529,7 +529,7 @@ Rules:
 7 Git error
 8 network/sync error
 9 policy violation
-10 usage error (partially wired: only hand-mapped sites; Cobra flag/arg/unknown-command errors still exit 1 — see P6-CLI-03)
+10 usage error (fully wired: hand-mapped sites, Cobra flag-parse errors, positional-arg validators, and unknown-subcommand errors all map here — P6-CLI-03)
 100+N child process exit code
 ```
 
@@ -561,7 +561,7 @@ PR creation becomes forge-agnostic (`gh`/`glab`/`tea`) with a `--forge` override
 
 - **CLI-02**: `scan --quarantine` progress lines now go to stderr, preserving valid JSON on stdout.
 - **CLI-03**: `run` and `agent run` propagate child exit codes as `100+N` (new `childExitBase`).
-- **CLI-04**: Added `exitUsage = 10` and `childExitBase = 100` (child process exit codes). Note (`P6-CLI-03`): `exitUsage` is only wired at hand-mapped sites; Cobra flag-parse, Args-validation, and unknown-command errors still bypass `appError` and exit 1 — the `SetFlagErrorFunc`/Args-validator wiring is not yet in place.
+- **CLI-04**: Added `exitUsage = 10` and `childExitBase = 100` (child process exit codes). `P6-CLI-03` is now shipped: `SetFlagErrorFunc` wraps Cobra flag-parse errors, every leaf command's positional-arg validator is wrapped via `usageArgs`, and unknown top-level subcommands are caught by a narrow match on Cobra's own error text in `ExitCodeWithWriter`. The fallback match is necessary because Cobra's `Find()` resolves unknown subcommands before any command hook runs.
 - **PROD-01**: `deriveDisplayStatus` maps materialization+dirty states to user-facing labels; `status` output uses it.
 - **PROD-02/PROD-06**: `devstrap conflicts` is a command group (`list`/`show`/`resolve --keep-local|--keep-remote|--keep-both`) that surfaces and resolves open conflicts; `status` shows the open-conflict count and it converges as rows are resolved.
 - **ARCH2-04**: Reserved `exitDaemonUnavailable` code for M5 daemon.
