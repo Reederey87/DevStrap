@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Reederey87/DevStrap/internal/ignore"
 )
 
 func TestWalkPrunesGeneratedDirsWarnsSecretsSymlinkEscapesAndReportsDuplicates(t *testing.T) {
@@ -130,6 +132,69 @@ func TestScanResolvesDefaultBranchOfflineAndWarns(t *testing.T) {
 	}
 }
 
+func TestWalkCompilesDevstrapignoreAndPrunesCustomPatternWithDefaults(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, ".devstrapignore"), "vendor-drop/\n")
+	initRepo(t, filepath.Join(root, "vendor-drop", "custom"), "git@github.com:acme/custom.git")
+	initRepo(t, filepath.Join(root, "node_modules", "vendored"), "git@github.com:acme/vendored.git")
+	initRepo(t, filepath.Join(root, "work", "api"), "git@github.com:acme/api.git")
+
+	result, err := Walk(context.Background(), root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Findings) != 1 || result.Findings[0].Path != "work/api" {
+		t.Fatalf("findings = %+v, want only work/api", result.Findings)
+	}
+	if result.PrunedDirs != 2 {
+		t.Fatalf("PrunedDirs = %d, want 2 (custom vendor-drop + default node_modules)", result.PrunedDirs)
+	}
+}
+
+func TestWalkMalformedDevstrapignoreWarnsAndFallsBackToDefaults(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, ".devstrapignore"), "/\n")
+	initRepo(t, filepath.Join(root, "node_modules", "vendored"), "git@github.com:acme/vendored.git")
+	initRepo(t, filepath.Join(root, "work", "api"), "git@github.com:acme/api.git")
+
+	result, err := Walk(context.Background(), root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Findings) != 1 || result.Findings[0].Path != "work/api" {
+		t.Fatalf("findings = %+v, want default-pruned node_modules and visible work/api", result.Findings)
+	}
+	if !hasWarning(result.Warnings, "ignore compile failed, using defaults") {
+		t.Fatalf("warnings = %+v, want ignore compile warning", result.Warnings)
+	}
+	if !hasWarning(result.Warnings, "empty pattern after stripping prefix/suffix") {
+		t.Fatalf("warnings = %+v, want parse error detail", result.Warnings)
+	}
+	if result.PrunedDirs != 1 {
+		t.Fatalf("PrunedDirs = %d, want 1 (default node_modules pruned via fallback)", result.PrunedDirs)
+	}
+}
+
+func TestWalkDevstrapignoreNegationReincludesDefaultPrunedDirectory(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, ".devstrapignore"), "!bin/\n")
+	initRepo(t, filepath.Join(root, "bin", "somerepo"), "git@github.com:acme/somerepo.git")
+
+	result, err := Walk(context.Background(), root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Findings) != 1 {
+		t.Fatalf("findings = %+v, want re-included bin repo", result.Findings)
+	}
+	if result.Findings[0].Path != "bin/somerepo" {
+		t.Fatalf("finding path = %q, want bin/somerepo", result.Findings[0].Path)
+	}
+	if result.PrunedDirs != 0 {
+		t.Fatalf("PrunedDirs = %d, want 0 when the negation re-includes the only prunable dir", result.PrunedDirs)
+	}
+}
+
 func TestIsSecretName(t *testing.T) {
 	cases := []struct {
 		name, rel string
@@ -175,13 +240,13 @@ func TestShouldPruneDir(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := shouldPruneDir(c.name, c.rel); got != c.want {
+			if got := ignore.DefaultMatcher().ShouldPruneDir(c.name, c.rel); got != c.want {
 				t.Fatalf("shouldPruneDir(%q,%q)=%v want %v", c.name, c.rel, got, c.want)
 			}
 		})
 	}
 	// rel-suffix data dirs.
-	if !shouldPruneDir("raw", "work/ml/data/raw") {
+	if !ignore.DefaultMatcher().ShouldPruneDir("raw", "work/ml/data/raw") {
 		t.Fatal("expected data/raw to be pruned")
 	}
 }
@@ -209,6 +274,13 @@ func runGit(t *testing.T, dir string, args ...string) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+func writeFile(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

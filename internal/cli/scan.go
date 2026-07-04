@@ -98,6 +98,13 @@ func newScanCommand(stdout io.Writer, opts *options) *cobra.Command {
 			for _, warning := range result.Warnings {
 				_, _ = fmt.Fprintf(stdout, "warning: %s\n", warning)
 			}
+			if result.PrunedDirs > 0 {
+				// Informational, not a warning: routine default prunes
+				// (node_modules, build dirs) would otherwise chatter on every
+				// run-loop tick. Re-include a dir with a negation (e.g.
+				// "!bin/") in the workspace root .devstrapignore.
+				opts.progressf(stdout, "Pruned %d directories per ignore rules (defaults + root .devstrapignore)\n", result.PrunedDirs)
+			}
 			if adopt && !dryRun {
 				opts.progressf(stdout, "Adopted %d projects\n", len(result.Findings))
 			}

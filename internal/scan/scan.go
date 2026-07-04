@@ -41,6 +41,10 @@ type Result struct {
 	// Secrets lists secret-looking files (relative slash paths) discovered
 	// during the walk so callers can quarantine or ignore them.
 	Secrets []string `json:"secrets,omitempty"`
+	// PrunedDirs counts directories skipped by the ignore rules (defaults +
+	// root .devstrapignore). Informational: the CLI surfaces it as progress
+	// output, not a warning, so run-loop ticks stay quiet about routine prunes.
+	PrunedDirs int
 }
 
 type Duplicate struct {
@@ -52,6 +56,11 @@ type Duplicate struct {
 type Options struct {
 	IncludePlainFolders bool
 	Git                 dsgit.Runner
+	// Ignore overrides the compiled ignore policy used to prune directories.
+	// When nil, Walk compiles the root's .devstrapignore itself (falling back
+	// to defaults with a warning on a compile error). Tests inject a Matcher
+	// here to avoid touching the real filesystem's .devstrapignore.
+	Ignore *ignore.Matcher
 }
 
 func Walk(ctx context.Context, root string, opts Options) (Result, error) {
@@ -70,6 +79,16 @@ func Walk(ctx context.Context, root string, opts Options) (Result, error) {
 		return Result{}, fmt.Errorf("scan root is not a directory: %s", cleanRoot)
 	}
 	result := Result{Root: cleanRoot}
+	matcher := opts.Ignore
+	if matcher == nil {
+		m, err := ignore.CompileFromDir(cleanRoot, true)
+		if err != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("ignore compile failed, using defaults: %v", err))
+			m = ignore.DefaultMatcher()
+		}
+		matcher = m
+	}
+	prunedDirs := 0
 	seenKeys := map[string]string{}
 	remotePaths := map[string][]string{}
 	err = filepath.WalkDir(cleanRoot, func(path string, d fs.DirEntry, walkErr error) error {
@@ -108,7 +127,8 @@ func Walk(ctx context.Context, root string, opts Options) (Result, error) {
 			}
 			return nil
 		}
-		if d.IsDir() && shouldPruneDir(name, relSlash) {
+		if d.IsDir() && matcher.ShouldPruneDir(name, relSlash) {
+			prunedDirs++
 			return filepath.SkipDir
 		}
 		if !d.IsDir() && isSecretName(name, relSlash) {
@@ -175,6 +195,7 @@ func Walk(ctx context.Context, root string, opts Options) (Result, error) {
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return Result{}, err
 	}
+	result.PrunedDirs = prunedDirs
 	for key, paths := range remotePaths {
 		if len(paths) < 2 {
 			continue
@@ -189,15 +210,6 @@ func Walk(ctx context.Context, root string, opts Options) (Result, error) {
 	sort.Slice(result.Findings, func(i, j int) bool { return result.Findings[i].Path < result.Findings[j].Path })
 	sort.Slice(result.Duplicates, func(i, j int) bool { return result.Duplicates[i].RemoteKey < result.Duplicates[j].RemoteKey })
 	return result, err
-}
-
-// pruneMatcher is the single compiled ignore policy used for directory pruning
-// (DRAFT-03). The scanner prune predicate, watcher skip set, bundle allow-list,
-// and agent deny-list all share one source of truth via internal/ignore.
-var pruneMatcher = ignore.DefaultMatcher()
-
-func shouldPruneDir(name, rel string) bool {
-	return pruneMatcher.ShouldPruneDir(name, rel)
 }
 
 func isSecretName(name, rel string) bool {

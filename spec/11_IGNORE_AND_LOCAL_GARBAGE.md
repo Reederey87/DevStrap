@@ -86,7 +86,7 @@ data/interim/
 .devstrap/cache/
 ```
 
-> **Warning: the shipped defaults contain NO secret patterns** — no `.env`, `.aws/credentials`, `*.pem`, `id_rsa`, or `id_ed25519`. Do not assume the default policy keeps secrets out of draft bundles; secret exclusion in draft sync is enforced separately by a hardcoded detector (see "Draft sync" below and `P6-XP-06`). The defaults also prune `env/` and `bin/` at any depth, which is the source of the `P6-XP-06` scan discovery blind spot.
+> **Warning: the shipped defaults contain NO secret patterns** — no `.env`, `.aws/credentials`, `*.pem`, `id_rsa`, or `id_ed25519`. Do not assume the default policy keeps secrets out of draft bundles; secret exclusion in draft sync is enforced separately by a hardcoded detector (see "Draft sync" below and `P6-XP-06`). The defaults also prune `env/` and `bin/` at any depth, which was the source of the now-fixed `P6-XP-06` scan discovery blind spot: a workspace-root `.devstrapignore` negation (e.g. `!bin/`) now overrides this on the scan path too.
 
 ## Recommended per-project `.devstrapignore` (target)
 
@@ -244,14 +244,14 @@ cargo build
 
 Rules:
 
-- never descend into `.git`, `node_modules`, `.venv`/`venv`/`env`, `dist`, `build`, `out`, `target`, `bin`, `obj`, `.gradle`, and the other default generated trees (see the shipped default table above). Note: because the defaults prune `env/` and `bin/` at any depth and the scanner currently ignores the project `.devstrapignore` (defaults-only matcher — `configured ignored directories` is not yet implemented on the scan path), repos under those names are invisible to `scan --adopt` — see `P6-XP-06` below;
+- never descend into `.git`, `node_modules`, `.venv`/`venv`/`env`, `dist`, `build`, `out`, `target`, `bin`, `obj`, `.gradle`, and the other default generated trees (see the shipped default table above). Note: the defaults still prune `env/` and `bin/` at any depth by default, but the scanner now compiles the workspace-root `.devstrapignore` (`P6-XP-06`, shipped), so users can add a negation pattern such as `!bin/` or `!env/` to make repos under those names visible to `scan --adopt` again;
 - bound parallelism to `GOMAXPROCS`;
 - batch namespace writes in one short `BEGIN IMMEDIATE` transaction per scan batch;
 - use mtime/inode markers for incremental rescans;
 - treat watcher events as hints and periodic scan as the source of truth;
 - benchmark against a large `~/Code` fixture and keep the first visible tree target under 5 minutes.
 
-Current implementation prunes the default generated directories before descent, warns on secret-looking filenames, reports symlink escapes, detects duplicate remotes, and has direct scanner coverage plus CLI integration coverage for generated-folder pruning during scan/adopt. Incremental mtime/inode markers, configured ignore files, parallel walking, and large benchmark fixtures remain future hardening work.
+Current implementation compiles the workspace-root `.devstrapignore` plus defaults before descent, prunes ignored/generated directories, warns on secret-looking filenames, reports symlink escapes, detects duplicate remotes, and has direct scanner coverage plus CLI integration coverage for generated-folder pruning during scan/adopt. Incremental mtime/inode markers, parallel walking, and large benchmark fixtures remain future hardening work.
 
 ## Large artifact strategy
 
@@ -313,7 +313,7 @@ Loose:
 
 ## Audit follow-ups (2026-06-27)
 
-**The single `.devstrapignore` compiler is now built** as `internal/ignore` (DRAFT-03). It compiles *gitignore-inspired* patterns from a project's `.devstrapignore` file plus a canonical default OS-junk/build-artifact table, and feeds the draft-bundle allow-list from one source; a `GitignoreFragment` API exists but has no consumer yet (no code writes a managed `.gitignore` block). The compiler now follows gitignore semantics (`P6-XP-02`, shipped 2026-07-04, differential-tested against `git check-ignore`): it anchors on a leading **or** middle separator, translates bracket classes, degrades an unclosed `[` to a literal, and treats non-standalone `**` as a single `*`. Also, the scanner prune predicate does **not** yet read the project's `.devstrapignore` at all — `scan.Walk` hardwires the defaults-only matcher (see `P6-XP-06`), so only the defaults half of "feeds the scanner prune predicate" is currently true. The watcher and agent deny-list still carry some hardcoded entries to be folded in as follow-up.
+**The single `.devstrapignore` compiler is now built** as `internal/ignore` (DRAFT-03). It compiles *gitignore-inspired* patterns from a project's `.devstrapignore` file plus a canonical default OS-junk/build-artifact table, and feeds the draft-bundle allow-list from one source; a `GitignoreFragment` API exists but has no consumer yet (no code writes a managed `.gitignore` block). The compiler now follows gitignore semantics (`P6-XP-02`, shipped 2026-07-04, differential-tested against `git check-ignore`): it anchors on a leading **or** middle separator, translates bracket classes, degrades an unclosed `[` to a literal, and treats non-standalone `**` as a single `*`. The scanner prune predicate is now fixed too (`P6-XP-06`, shipped 2026-07-04): `scan.Walk` calls `ignore.CompileFromDir` once per walk, offers an `Options.Ignore` test-injection seam, falls back to the default matcher with a warning on compile error, and sources pruning from `internal/ignore`, matching the draft-bundle path. The watcher and agent deny-list still carry some hardcoded entries to be folded in as follow-up.
 
 ## Audit follow-ups (2026-06-28)
 
@@ -367,21 +367,6 @@ p.anchored = strings.Contains(body, "/")
 // '**' not slash-bounded on both sides -> '[^/]*' (regular *), not '.*'.
 ```
 
-### P6-XP-06 — Scanner hardwires the defaults-only ignore matcher, skipping repos under `env/`/`bin/`/`build/`
+### P6-XP-06 — Scanner hardwires the defaults-only ignore matcher, skipping repos under `env/`/`bin/`/`build/` — SHIPPED 2026-07-04 (`fix/p6-xp-06`)
 
-**Problem.** `scan.go:191` declares `var pruneMatcher = ignore.DefaultMatcher()` and `scan.Walk` never calls `ignore.CompileFromDir`, so the per-project `.devstrapignore` is ignored on the discovery path. Because the prune check (`scan.go:111`) runs before `dsgit.IsRepo` (`scan.go:131`) and the defaults prune `env/`/`bin/`/`build/`/`dist/`/`out/`/`target/` at any depth, a repo at `~/Code/env/...` is skipped with no `Finding` or warning; `init --scan` (`internal/cli/init.go:106`) shares the blind spot.
-
-**Actionable steps.**
-1. Call `ignore.CompileFromDir(root, true)` in `scan.Walk`, falling back to `DefaultMatcher()` with a warning on error.
-2. Add an `Options.Ignore *ignore.Matcher` field for test injection.
-3. Count pruned directories and emit one summary warning pointing users to add negations in `~/Code/.devstrapignore`.
-4. Wire the same compiled matcher through `init.go:106`'s `scan.Walk` call.
-
-```go
-m, err := ignore.CompileFromDir(cleanRoot, true)
-if err != nil {
-    result.Warnings = append(result.Warnings, fmt.Sprintf("ignore compile failed, using defaults: %v", err))
-    m = ignore.DefaultMatcher()
-}
-// thread m through as Options.Ignore for test injection
-```
+**Resolved.** `scan.Options` now has an `Ignore *ignore.Matcher` seam for tests, and `scan.Walk` compiles the workspace root's `.devstrapignore` once per walk via `ignore.CompileFromDir(cleanRoot, true)` when that seam is nil. A malformed ignore file emits a compile-failure warning and falls back to `ignore.DefaultMatcher()`, so default generated-tree pruning remains fail-safe. The old package-level defaults-only matcher and scan-local `shouldPruneDir` shim are gone; directory pruning now uses the per-walk matcher and counts pruned directories into `Result.PrunedDirs`, which the interactive `scan` surfaces as ONE informational line (deliberately not a `Result.Warnings` entry: `run-loop` prints scan warnings every tick, and routine default prunes like `node_modules` would become permanent per-tick chatter — the exact class `P6-CLI-04` removed). Compile failures stay real warnings. Re-include a pruned dir with a root-`.devstrapignore` negation (e.g. `!bin/`). Regression coverage: `TestWalkCompilesDevstrapignoreAndPrunesCustomPatternWithDefaults`, `TestWalkMalformedDevstrapignoreWarnsAndFallsBackToDefaults`, and `TestWalkDevstrapignoreNegationReincludesDefaultPrunedDirectory` (`internal/scan/scan_test.go`).

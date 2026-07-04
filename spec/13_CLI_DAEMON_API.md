@@ -129,7 +129,7 @@ Detects:
 
 Current implementation:
 
-- prunes generated folders before descent;
+- prunes generated folders before descent — the prune matcher is compiled per walk from the workspace root's `.devstrapignore` plus the built-in defaults (`P6-XP-06`; compile failures warn and fall back to defaults), so a root-level negation like `!bin/` re-includes a default-pruned directory; the pruned-dir count is surfaced as one informational `Pruned N directories …` line through the quiet-aware `progressf` seam (deliberately not a warning: `run-loop` echoes scan warnings every tick);
 - records secret-looking filename warnings but never file values;
 - only persists a discovered git remote after it passes validation, so an unvalidated/dangerous origin (e.g. `ext::`) is never stored for a later materialization step;
 - normalizes SSH, HTTPS, `ssh://`, absolute, and `file://` remotes;
