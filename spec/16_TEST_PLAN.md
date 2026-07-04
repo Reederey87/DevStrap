@@ -413,6 +413,34 @@ Device B: rename work/api → personal/api
 Assert conflict
 ```
 
+## Property and model-check layer (P4-QUAL-02)
+
+Randomized property tests over the pure `Decide`/`Projection` seam (`internal/sync/decide.go`) and the HLC, built on the test-only dependency **`pgregory.net/rapid`** — adopted per the P4-QUAL-02 audit ask because it has zero transitive dependencies and gives shrinking + a coverage-guided fuzz bridge for free. These complement, not replace, the fixed-batch anchors in `decide_property_test.go` (the 8!-permutation and delete/re-add-mix example tests).
+
+Properties (each test names its one-sentence invariant):
+
+- **HLC** (`hlc_property_test.go`) — Send/Receive interleavings with wall-clock offsets injected through the `HLC.Now` seam (frozen `time.UnixMilli`, no `math/rand`): (a) every successful Send/Receive strictly advances the clock even under a backward-stepping wall clock; (b) Receive never regresses; (c) a remote HLC is rejected at *exactly* the documented `MaxSkew` boundary (offset == skew accepted, skew+1 rejected); (d) the logical-counter overflow carries into the physical component and stays monotonic.
+- **Decide convergence** (`decide_rapid_test.go`) — folding `Decide`+`Apply` over two independent delivery permutations of one generated event set yields the same final `Projection`, and duplicate delivery is a no-op. Bridged to `go test -fuzz` via `FuzzDecideConvergence` (`rapid.MakeFuzz`), which CI runs for a fixed 30s budget (ubuntu only).
+- **Import ≡ replay** (`import_replay_property_test.go`) — `BuildSnapshot`→`ImportSnapshot` on a converged replica, then replay of an arbitrary subset of the same events, lands on the same active `ProjectStatus` rows as a plain full replay (the randomized generalization of `TestImportThenApplyEqualsApplyThenImport`).
+- **3-replica model check** (`replica_model_test.go`) — the audit's core ask (small-scope hypothesis: 3 replicas suffice). One shared event set is delivered to three replicas, each in an independent order **split into sequential `ApplyEvents` batches** to model cross-pull-window delivery — exactly where the pre-#87 divergence hid behind whole-batch example tests. All three converge to byte-identical **active** rows; one replica re-delivers a duplicate subset (idempotency) and another interleaves tombstone GC (`GCTombstones` purges only deleted rows, so the invariant is asserted on active rows only).
+
+### The generator exclusion + witness-tripwire pattern
+
+The event-set generator (`genEventSet`) is deliberately confined to the provably-convergent class. It excludes two configurations, both rooted in `reconcileSamePath` installing the deterministic **lowest-coordinate** winner between competing remotes — which is incompatible with same-remote **last-writer-wins** (highest HLC):
+
+1. a delete mixed with a same-path/**different-remote** pair (the residual documented in `decide.go`); and
+2. a single remote carrying **multiple events** at different HLCs on a different-remote path — a divergence this property layer surfaced *with no delete involved*.
+
+Each exclusion is kept honest by a **witness tripwire** — a plain example test pinning the exact divergent triad in both orders (`TestDecideDifferentRemoteDeleteDivergesWitness`, `TestDecideDifferentRemoteMultiEventDivergesWitness`). The moment `reconcileSamePath` is made HLC-monotonic, both orders converge, the witness FAILS, and that failure is the signal to remove the corresponding generator exclusion. This prevents an exclusion from silently outliving the bug it documents. Both divergences are tracked as a `reconcileSamePath` HLC-monotonic-winner follow-up, out of P4-QUAL-02 scope.
+
+### Running the fuzz target
+
+```bash
+go test -run=^$ -fuzz=FuzzDecideConvergence -fuzztime=30s ./internal/sync/
+```
+
+CI runs this as a fixed-budget smoke step after the race tests; a longer local run explores deeper. The seeded rapid checks (`rapid.Check`, default 100) run as ordinary `go test` units.
+
 ## Platform adapter tests
 
 - `internal/platform.Detect` returns watcher, service manager, keychain, and editor adapters for the current OS;

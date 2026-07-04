@@ -31,6 +31,29 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — test(sync): property/model-check layer over the pure Decide seam (P4-QUAL-02)
+
+Changed:
+- `go.mod`/`go.sum`: adopt the test-only dependency `pgregory.net/rapid` v1.3.0 (zero transitive deps), per the P4-QUAL-02 audit ask (`P5-ARCH-01`→PR #87→here — the pure `Decide`/`Projection` seam is the foundation this builds on).
+- `internal/sync/property_helpers_test.go`: the shared machinery — a convergent-event-set generator (`genEventSet`), a rapid-`T` store harness (`newSyncStoreRapid`; unenrolled local device, so the pre-enrollment window accepts the unsigned generated events exactly as the example apply tests do), a canonical active-projection encoder for cross-store equality (restricted to path/remote_key/source-coords/status; materialization + timestamps excluded because the event-apply and snapshot-import write paths legitimately differ there), and small draw helpers.
+- `internal/sync/hlc_property_test.go`: rapid properties for the HLC via the injected `HLC.Now` seam — strict Send monotonicity under a backward-stepping clock, Receive non-regression, the EXACT `MaxSkew` accept/reject boundary, and logical-overflow carry.
+- `internal/sync/decide_rapid_test.go`: the randomized convergence property (two independent permutations fold to one `Projection` + duplicate idempotency), the `FuzzDecideConvergence` `rapid.MakeFuzz` bridge, and the TWO witness tripwires (`TestDecideDifferentRemote{Delete,MultiEvent}DivergesWitness`).
+- `internal/sync/import_replay_property_test.go`: import≡replay property (`BuildSnapshot`→`ImportSnapshot`+subset-replay ≡ full replay on active rows).
+- `internal/sync/replica_model_test.go`: the 3-replica model check — independent orders split into sequential `ApplyEvents` batches converge byte-identically, with duplicate re-delivery and a tombstone-GC interleaving.
+- `.github/workflows/ci.yml`: a Linux-only 30s `go test -fuzz=FuzzDecideConvergence` smoke step after the race tests.
+- `spec/16_TEST_PLAN.md`: new "Property and model-check layer (P4-QUAL-02)" section (the properties, the rapid-dep decision, the generator-exclusion + witness-tripwire pattern, how to run the fuzz target).
+- `docs/audits/README.md`: `P4-QUAL-02` moved from the Pass-4 open table to _Recently shipped_.
+
+New finding (reported, out of scope to fix here):
+- The 3-replica model check surfaced a genuine divergence BEYOND P5-ARCH-01's documented delete residual: same-path/different-remote convergence is order-dependent **with no delete involved** whenever one remote carries multiple events at different HLCs — same-remote LWW keeps that remote's HIGHEST HLC while cross-remote `reconcileSamePath` keeps the LOWEST coordinate, so the terminal winner flips by delivery order (deterministic witness: `rB@4, rB@1, rA@1` folds to `rA@1` in one order and `rB@4` in the reverse). Same lowest-coordinate root cause as the delete residual. `genEventSet` excludes both classes (pinned by the two witness tripwires that fail the day `reconcileSamePath` becomes LWW-consistent); the fix is a `reconcileSamePath` HLC-monotonic-winner follow-up.
+
+Validated:
+- `gofmt -l cmd internal` (clean); `go build ./...`; `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+- `go test -race ./internal/sync/...` (pass) and the full `go test -race ./...`.
+- Fuzz smoke: `go test -run=^$ -fuzz=FuzzDecideConvergence -fuzztime=10s ./internal/sync/` (no crash; 81k execs).
+
+Follow-ups:
+- Make `reconcileSamePath`'s different-remote winner HLC-monotonic (consistent with same-remote LWW); removing it retires both generator exclusions and their witness tests.
 ## 2026-07-04 — fix(agent): gate `agent pr` on run status + dead-PID sweep (P6-GIT-06)
 
 Changed:
