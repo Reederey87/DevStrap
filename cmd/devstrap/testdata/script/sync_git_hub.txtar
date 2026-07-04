@@ -18,7 +18,7 @@ exec git init --bare -b main $WORK/hub.git
 
 # Device A: init, configure the git carrier hub, add a project, and sync.
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA init
-exec sh -c 'echo "hub: \"git+file://$WORK/hub.git\"" >> $WORK/homeA/config.yaml'
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA hub init git+file://$WORK/hub.git
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/git-proj $WORK/remote.git
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync
 stdout 'pushed 1'
@@ -27,7 +27,7 @@ stdout 'pushed 1'
 # then uses the same git carrier hub config.
 exec sh -c 'WS=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --workspace-id); devstrap --home=$WORK/homeB --root=$WORK/CodeB init --join --workspace-id "$WS"'
 stdout 'Adopted workspace id ws_'
-exec sh -c 'echo "hub: \"git+file://$WORK/hub.git\"" >> $WORK/homeB/config.yaml'
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB hub init git+file://$WORK/hub.git
 
 # Enroll and approve B on A so A grants B the workspace key epochs.
 exec sh -c 'REC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); SIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); FP=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --fingerprint); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll dev_b --name b --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve --fingerprint "$FP"'

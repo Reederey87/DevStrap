@@ -479,12 +479,82 @@ func newHubCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Use:   "hub",
 		Short: "Operate on the sync hub (zero-knowledge event log + blob store)",
 	}
+	cmd.AddCommand(newHubInitCommand(stdout, opts))
 	cmd.AddCommand(newHubGCCommand(stdout, opts))
 	cmd.AddCommand(newHubCompactCommand(stdout, opts))
 	cmd.AddCommand(newHubMigrateEventsCommand(stdout, opts))
 	cmd.AddCommand(newHubLoginCommand(stdout, opts))
 	cmd.AddCommand(newHubLogoutCommand(stdout, opts))
 	return cmd
+}
+
+func newHubInitCommand(stdout io.Writer, opts *options) *cobra.Command {
+	var force bool
+	var noProbe bool
+	cmd := &cobra.Command{
+		Use:   "init <git-url>",
+		Short: "Write a git-carrier hub into config.yaml",
+		Args:  usageArgs(cobra.ExactArgs(1)),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			paths := opts.paths()
+			configPath := filepath.Join(paths.Home, "config.yaml")
+			if _, err := os.Stat(configPath); err != nil {
+				if os.IsNotExist(err) {
+					return appError{code: exitUsage, err: fmt.Errorf("hub init requires an initialized home: run `devstrap init` first")}
+				}
+				return fmt.Errorf("stat config: %w", err)
+			}
+
+			hubURI := strings.TrimSpace(args[0])
+			if !isGitCarrierURI(hubURI) {
+				return appError{code: exitUsage, err: fmt.Errorf("hub init only bootstraps git carriers; set `hub:` manually for r2/s3")}
+			}
+			remote, branch, err := parseGitCarrierURI(hubURI)
+			if err != nil {
+				return appError{code: exitUsage, err: err}
+			}
+
+			if current := strings.TrimSpace(opts.v.GetString("hub")); current != "" {
+				if current == hubURI {
+					opts.progressf(stdout, "hub already configured as %s; nothing to do.\n", hubURI)
+					printHubInitNextSteps(stdout, opts)
+					return nil
+				}
+				if !force {
+					return appError{code: exitConflict, err: fmt.Errorf("hub already configured as %s; refusing to replace with %s (use --force to overwrite)", current, hubURI)}
+				}
+			}
+
+			if err := rewriteConfigHub(paths, hubURI); err != nil {
+				return err
+			}
+			opts.progressf(stdout, "Configured hub: %s\n", hubURI)
+			if !noProbe {
+				probeGitHubCarrier(cmd.Context(), cmd.ErrOrStderr(), opts, remote, branch)
+			}
+			printHubInitNextSteps(stdout, opts)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing different hub value")
+	cmd.Flags().BoolVar(&noProbe, "no-probe", false, "skip the best-effort git reachability probe")
+	return cmd
+}
+
+func probeGitHubCarrier(ctx context.Context, stderr io.Writer, opts *options, remote, branch string) {
+	runner := gitRunner(opts)
+	args := []string{"ls-remote", remote}
+	if branch != "" {
+		args = append(args, "refs/heads/"+branch)
+	}
+	if _, err := runner.Run(ctx, "", args...); err != nil {
+		_, _ = fmt.Fprintf(stderr, "warning: could not reach git hub carrier: %s; check ssh key / repo access (ssh-add)\n", err)
+	}
+}
+
+func printHubInitNextSteps(stdout io.Writer, opts *options) {
+	opts.progressf(stdout, "Next: devstrap sync\n")
+	opts.progressf(stdout, "Joiner: run the joiner ceremony from `devstrap init --join` before syncing another device.\n")
 }
 
 func newHubLoginCommand(stdout io.Writer, opts *options) *cobra.Command {

@@ -31,6 +31,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — feat(hub): devstrap hub init <git-url> writes the carrier hub into config (AD-1 slice)
+
+Changed:
+- `internal/cli/hub.go`: added `devstrap hub init <git-url>` with `--force` and `--no-probe`, wired under `devstrap hub`. The command requires an initialized home (`config.yaml` present), accepts only the existing git-carrier URI forms via `parseGitCarrierURI`, rejects credentialed URIs without echoing the secret-bearing value, refuses non-git hubs with the manual `hub:` config message, detects existing different `hub:` values as `exit-conflict`, and treats same-value reruns as no-op success. After writing, it runs a best-effort sanitized `git ls-remote` probe unless `--no-probe`; probe failure is a warning with the `ssh-add`/repo-access remedy, never a refusal.
+- `internal/cli/init.go`: added `rewriteConfigHub`, modeled on `rewriteConfigRoot`, to replace or append exactly one top-level `hub:` line while preserving every other line/comment and writing through the existing `0600` atomic config writer.
+- Tests: new `internal/cli/hub_init_test.go` covers config rewriting, uninitialized-home usage refusal, same-URL no-op, conflict/force overwrite behavior, credential redaction, r2/s3 manual-config refusal, and `--no-probe` skipping the git runner (via a PATH-shadowing fake git). `cmd/devstrap/testdata/script/sync_git_hub.txtar` now uses `devstrap hub init git+file://...` before `devstrap sync` to prove the bootstrap path converges.
+- Docs: `spec/13_CLI_DAEMON_API.md` command inventory and new `### hub init` section, `spec/00` command inventory, README command table, and the `spec/14` AD-1 checkbox flipped. `docs/audits/README.md` intentionally unchanged.
+
+Validated:
+- `gofmt -l cmd internal` (clean); `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...` including the new `hub_init` unit tests and the updated `sync_git_hub` two-device e2e.
+- Implemented by gpt-5.5 (codex) from a written spec with acceptance criteria; diff transplanted onto a fresh `origin/main` worktree (base had moved under the job as items 1–3 of the AD-1 wave merged) and line-by-line reviewed.
+
+Follow-ups:
+- Remaining AD-1 slice: local-folder / cloud-drive-folder carrier (plus the partial-clone cache optimization noted in the carrier entry).
+
 ## 2026-07-04 — docs(quickstart): git carrier is the documented default hub; r2:// demoted to scale-up (AD-1 swap)
 
 Changed:
