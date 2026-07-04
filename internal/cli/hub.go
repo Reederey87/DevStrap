@@ -373,6 +373,7 @@ func newHubCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Short: "Operate on the sync hub (zero-knowledge event log + blob store)",
 	}
 	cmd.AddCommand(newHubGCCommand(stdout, opts))
+	cmd.AddCommand(newHubCompactCommand(stdout, opts))
 	cmd.AddCommand(newHubLoginCommand(stdout, opts))
 	cmd.AddCommand(newHubLogoutCommand(stdout, opts))
 	return cmd
@@ -546,9 +547,118 @@ are not coordinated.`,
 	return cmd
 }
 
-// errGCRefused wraps the P6-HUB-01 refuse-to-sweep condition so tests can
-// assert on it and callers exit non-zero without deleting anything.
-var errGCRefused = errors.New("hub gc: refusing to sweep")
+// errIncompleteView is the shared refusal sentinel for `hub gc` and
+// `hub compact` (P6-HUB-01 / P4-HUB-11): neither may act on a partial view of
+// the event log. Both a sweep (gc) and a floor advance (compact) delete hub
+// objects, so both refuse unless this device has a complete, converged replica.
+var errIncompleteView = errors.New("refusing to operate on an incomplete view of the event log")
+
+// errGCRefused is retained as the name existing gc tests assert on
+// (errors.Is(err, errGCRefused)); it is the shared refusal sentinel.
+var errGCRefused = errIncompleteView
+
+// refuseIfIncompleteView runs the pre-action convergence-and-completeness gate
+// shared by `hub gc` and `hub compact` (P6-HUB-01 / P4-HUB-11): it pulls and
+// applies the hub event log (recovering via snapshot exchange when the
+// retention floor has passed this device's cursor), caches the referenced
+// blobs the pull consumed (as sync does — the cursor has moved past them), and
+// then refuses on ANY signal that this device's view of the log is incomplete.
+// A truncated mark set / floor advance driven by a partial view deletes other
+// devices' live objects, so every refusal wraps errIncompleteView and exits
+// non-zero without mutating the hub.
+//
+// It returns the pull outcome so a caller may inspect it; both current callers
+// only need the pass/fail decision.
+func refuseIfIncompleteView(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync.Hub, hubID string, paths config.Paths, keyring *workspacekeys.Keyring) (pullApplyOutcome, error) {
+	pull, err := pullAndApplyEvents(ctx, store, hub, hubID)
+	if errors.Is(err, dssync.ErrSnapshotRequired) {
+		// P4-SYNC-02: recover via snapshot exchange before acting, so the view
+		// reflects the full compacted state. A keyless device cannot build a
+		// complete view, so it must refuse rather than act on a partial one.
+		_, _ = fmt.Fprintln(stderr, "Recovering from hub snapshot (retention floor passed our cursor)…")
+		imported, rerr := recoverFromSnapshot(ctx, stderr, store, hub, hubID, paths, keyring)
+		if rerr != nil {
+			return pullApplyOutcome{}, rerr
+		}
+		if !imported {
+			return pullApplyOutcome{}, appError{code: exitInvalidConfig, err: fmt.Errorf(
+				"%w: hub requires a snapshot but this device holds no workspace key to unseal it; approve this device and sync before running gc/compact", errIncompleteView)}
+		}
+		pull, err = pullAndApplyEvents(ctx, store, hub, hubID)
+		if errors.Is(err, dssync.ErrSnapshotRequired) {
+			return pullApplyOutcome{}, appError{code: exitNetwork, err: fmt.Errorf("pre-action sync: hub still demands a snapshot after recovery — re-run devstrap sync")}
+		}
+	}
+	if err != nil {
+		return pullApplyOutcome{}, fmt.Errorf("pre-action sync: %w", err)
+	}
+	// Cache the referenced blobs the pre-pull consumed, exactly as sync does —
+	// the cursor has advanced past these events, so a later sync will never see
+	// them again and this is the only chance to fetch their blobs.
+	if missing, bErr := pullReferencedBlobs(ctx, hub, pull.events, paths); bErr != nil {
+		return pullApplyOutcome{}, appError{code: exitNetwork, err: fmt.Errorf("pre-action sync: pull blobs: %w", bErr)}
+	} else if missing > 0 {
+		_, _ = fmt.Fprintf(stderr, "warning: %d referenced blob(s) missing from hub; materialization may be incomplete\n", missing)
+	}
+	// Gate 1: a truncated/skipped pull (grant not yet held, undecryptable
+	// events) means this device cannot see the full log.
+	if eh, ok := hub.(dssync.EncryptedHub); ok && eh.Stats != nil {
+		if eh.Stats.Truncated > 0 || eh.Stats.Skipped > 0 || eh.Stats.Undecryptable > 0 {
+			return pullApplyOutcome{}, appError{code: exitInvalidConfig, err: fmt.Errorf(
+				"%w: pull deferred %d, skipped %d, and quarantined %d undecryptable event(s); this device cannot see the full event log (awaiting a key grant or holding undecryptable events) — resolve that and re-run",
+				errIncompleteView, eh.Stats.Truncated, eh.Stats.Skipped, eh.Stats.Undecryptable)}
+		}
+	}
+	// Gate 2: the durable skip table outlives one pull's in-memory stats
+	// (P6-SYNC-02). An unreadable table fails CLOSED.
+	skipped, sErr := store.OpenSkippedEvents(ctx)
+	if sErr != nil {
+		return pullApplyOutcome{}, fmt.Errorf("read skipped events before acting: %w", sErr)
+	}
+	if len(skipped) > 0 {
+		return pullApplyOutcome{}, appError{code: exitInvalidConfig, err: fmt.Errorf(
+			"%w: %d event(s) remain skipped (see `devstrap doctor`); the hub is serving objects this device cannot consume yet — upgrade devstrap or investigate, then re-run",
+			errIncompleteView, len(skipped))}
+	}
+	// Gate 3 (P4-HUB-11): any awaited workspace key grant means this device
+	// cannot decrypt part of the log yet, so its state — and any floor derived
+	// from it — is incomplete. An unreadable table fails CLOSED.
+	waits, wErr := store.OpenKeyGrantWaits(ctx)
+	if wErr != nil {
+		return pullApplyOutcome{}, fmt.Errorf("read key grant waits before acting: %w", wErr)
+	}
+	if len(waits) > 0 {
+		return pullApplyOutcome{}, appError{code: exitInvalidConfig, err: fmt.Errorf(
+			"%w: %d workspace key grant(s) are still awaited (see `devstrap doctor`); this device cannot decrypt part of the log yet — approve/sync and re-run",
+			errIncompleteView, len(waits))}
+	}
+	// Gate 4: a transiently-held event (clock skew or hash-chain break) will be
+	// re-delivered; acting now would miss it.
+	if pull.stats.CursorHeld {
+		return pullApplyOutcome{}, appError{code: exitInvalidConfig, err: fmt.Errorf(
+			"%w: a pulled event is transiently held (clock skew or hash-chain break) and will be re-delivered; re-run after a later sync applies it",
+			errIncompleteView)}
+	}
+	// Gate 5: events quarantined this cycle.
+	if pull.stats.Quarantined > 0 {
+		return pullApplyOutcome{}, appError{code: exitInvalidConfig, err: fmt.Errorf(
+			"%w: %d pulled event(s) were quarantined this cycle; run `devstrap conflicts list` and resolve before continuing",
+			errIncompleteView, pull.stats.Quarantined)}
+	}
+	// Gate 6: any still-open quarantine-class conflict from an earlier cycle.
+	for _, typ := range dssync.QuarantineConflictTypes {
+		open, cErr := store.OpenConflictsByType(ctx, typ)
+		if cErr != nil {
+			return pullApplyOutcome{}, cErr
+		}
+		if len(open) > 0 {
+			return pullApplyOutcome{}, appError{code: exitInvalidConfig, err: fmt.Errorf(
+				"%w: %d open %s conflict(s) mean unapplied events may reference blobs; run `devstrap conflicts list` and resolve before continuing",
+				errIncompleteView, len(open), typ)}
+		}
+	}
+	return pull, nil
+}
 
 // hubGC reclaims superseded blobs (P5-HUB-02). It first syncs the namespace
 // map (pull + apply) so the mark set reflects every device's latest events,
@@ -563,92 +673,13 @@ var errGCRefused = errors.New("hub gc: refusing to sweep")
 // nothing but uses RetainedBlobRefs so the preview reflects post-prune state and
 // matches what a real run would delete (P5 review).
 func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync.Hub, hubID string, paths config.Paths, keep int, grace time.Duration, dryRun bool) (pruned, removed int, err error) {
-	// P6-HUB-01 gate 1: sweep only from a fully-synced replica. The pull also
-	// applies other devices' draft.snapshot.created events so their blobs
-	// enter RetainedBlobRefs below.
-	pull, err := pullAndApplyEvents(ctx, store, hub, hubID)
-	if errors.Is(err, dssync.ErrSnapshotRequired) {
-		// P4-SYNC-02: recover via snapshot exchange before sweeping, so the mark
-		// set reflects the full compacted state. A keyless device cannot build a
-		// complete view, so it must refuse rather than sweep from a partial one.
-		_, _ = fmt.Fprintln(stderr, "Recovering from hub snapshot (retention floor passed our cursor)…")
-		imported, rerr := recoverFromSnapshot(ctx, stderr, store, hub, hubID, paths, buildKeyringFromPaths(ctx, paths, store))
-		if rerr != nil {
-			return 0, 0, rerr
-		}
-		if !imported {
-			return 0, 0, appError{code: exitInvalidConfig, err: fmt.Errorf(
-				"%w: hub requires a snapshot but this device holds no workspace key to unseal it; approve this device and sync before running gc", errGCRefused)}
-		}
-		pull, err = pullAndApplyEvents(ctx, store, hub, hubID)
-		if errors.Is(err, dssync.ErrSnapshotRequired) {
-			return 0, 0, appError{code: exitNetwork, err: fmt.Errorf("pre-gc sync: hub still demands a snapshot after recovery — re-run devstrap sync")}
-		}
-	}
-	if err != nil {
-		return 0, 0, fmt.Errorf("pre-gc sync: %w", err)
-	}
-	// Cache the referenced blobs the pre-pull consumed, exactly as sync does —
-	// the cursor has advanced past these events, so a later sync will never
-	// see them again and this is the only chance to fetch their blobs.
-	if missing, bErr := pullReferencedBlobs(ctx, hub, pull.events, paths); bErr != nil {
-		return 0, 0, appError{code: exitNetwork, err: fmt.Errorf("pre-gc sync: pull blobs: %w", bErr)}
-	} else if missing > 0 {
-		_, _ = fmt.Fprintf(stderr, "warning: %d referenced blob(s) missing from hub; materialization may be incomplete\n", missing)
-	}
-	// P6-HUB-01 gate 2: refuse to sweep on any signal that this device's view
-	// of the event log is incomplete — a truncated/skipped pull (grant not yet
-	// held, undecryptable events), a quarantined or cursor-holding apply, or
-	// any still-open quarantine conflict from an earlier cycle. Sweeping from
-	// a partial mark set deletes other devices' live blobs.
-	if eh, ok := hub.(dssync.EncryptedHub); ok && eh.Stats != nil {
-		// Undecryptable carriers also land in pull.stats.Quarantined below;
-		// this counter is checked too so the refusal message names the cause.
-		if eh.Stats.Truncated > 0 || eh.Stats.Skipped > 0 || eh.Stats.Undecryptable > 0 {
-			return 0, 0, appError{code: exitInvalidConfig, err: fmt.Errorf(
-				"%w: pull deferred %d, skipped %d, and quarantined %d undecryptable event(s); this device cannot see the full event log (awaiting a key grant or holding undecryptable events) — resolve that and re-run",
-				errGCRefused, eh.Stats.Truncated, eh.Stats.Skipped, eh.Stats.Undecryptable)}
-		}
-	}
-	// P6-SYNC-02: the durable skip table outlives one pull's in-memory stats —
-	// a record from an EARLIER cycle (unknown envelope version awaiting an
-	// upgrade, retired v1, anti-downgrade plaintext) still means this device's
-	// view is incomplete even when the current pull happened to see nothing.
-	skipped, sErr := store.OpenSkippedEvents(ctx)
-	if sErr != nil {
-		// Fail CLOSED: this gate exists to stop a sweep from an incomplete
-		// view, so an unreadable skip table must abort like the quarantine
-		// gate below, never silently proceed (CodeRabbit, PR #63).
-		return 0, 0, fmt.Errorf("read skipped events before sweep: %w", sErr)
-	}
-	if len(skipped) > 0 {
-		return 0, 0, appError{code: exitInvalidConfig, err: fmt.Errorf(
-			"%w: %d event(s) remain skipped (see `devstrap doctor`); the hub is serving objects this device cannot consume yet — upgrade devstrap or investigate, then re-run",
-			errGCRefused, len(skipped))}
-	}
-	if pull.stats.CursorHeld {
-		// A transiently-held event (clock skew or hash-chain break) is
-		// re-delivered on a later pull; `conflicts resolve` cannot clear the
-		// hold, so point at the actual remedy.
-		return 0, 0, appError{code: exitInvalidConfig, err: fmt.Errorf(
-			"%w: a pulled event is transiently held (clock skew or hash-chain break) and will be re-delivered; re-run gc after a later sync applies it",
-			errGCRefused)}
-	}
-	if pull.stats.Quarantined > 0 {
-		return 0, 0, appError{code: exitInvalidConfig, err: fmt.Errorf(
-			"%w: %d pulled event(s) were quarantined this cycle; run `devstrap conflicts list` and resolve before sweeping",
-			errGCRefused, pull.stats.Quarantined)}
-	}
-	for _, typ := range dssync.QuarantineConflictTypes {
-		open, cErr := store.OpenConflictsByType(ctx, typ)
-		if cErr != nil {
-			return 0, 0, cErr
-		}
-		if len(open) > 0 {
-			return 0, 0, appError{code: exitInvalidConfig, err: fmt.Errorf(
-				"%w: %d open %s conflict(s) mean unapplied events may reference blobs; run `devstrap conflicts list` and resolve before sweeping",
-				errGCRefused, len(open), typ)}
-		}
+	// P6-HUB-01: sweep only from a fully-synced, complete replica. The shared
+	// gate pulls + applies (recovering via snapshot when required), caches the
+	// consumed blobs so they enter RetainedBlobRefs below, and refuses on any
+	// incomplete-view signal — a truncated/skipped pull, an awaited key grant,
+	// a quarantined/cursor-held apply, or an open quarantine conflict.
+	if _, gerr := refuseIfIncompleteView(ctx, stderr, store, hub, hubID, paths, buildKeyringFromPaths(ctx, paths, store)); gerr != nil {
+		return 0, 0, gerr
 	}
 	if !dryRun {
 		pruned, err = store.PruneDraftSnapshots(ctx, keep)

@@ -20,6 +20,8 @@ Changed:
 
 - Post-review (Codex, dual-review): (P2 accepted) the recovery path now enforces the full producer-identity chain — `m.Snapshot.ProducedBy == m.ProducedBy` (a compactor signs its OWN snapshot; device B's payload can never ride device A's signature), the envelope must match the signed manifest on producer/epoch/kid/HLC, and the sealed document's own identity fields must match the envelope (defense in depth against a WCK-holding insider), pinned by `TestRecoverFromSnapshotRefusesForeignProducerSnapshot`; (P2 REJECTED with rationale) the tombstone import gate deliberately stays a bare-HLC comparison — the LIVE paths resolve equal-HLC add/delete ties in the tombstone's favor (applyEventTx blocks adds at `HLC <= tombstoneHLC`; `tombstonePath` keeps the max unconditionally), so the suggested full-coordinate tie-break would make import DIVERGE from replay, the exact property import exists to preserve (rationale pinned in a code comment); (P3) the recovery doc comment now states honestly that local store/keyring failures keep the default exit class.
 
+- Post-review (Codex P1 + P3): the pre-delete read-back confirm is now a BYTE-FOR-BYTE comparison against the manifest bytes this device just CAS-wrote — a hostile hub that acks the CAS and serves back a forged manifest naming the same snapshot sha can no longer widen the deletion floors (deletion is gated on the confirmed bytes); the roundtrip txtar additionally asserts no event carrier remains in the log after compaction (cold objects actually GONE, not merely unreadable).
+
 Validated:
 - <commands or checks run>
 
@@ -28,6 +30,23 @@ Follow-ups:
 ```
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
+
+## 2026-07-03 — feat(hub): hub compact — snapshot producer + floor advance + cold-event deletion (P4-HUB-11)
+
+Changed:
+- `internal/cli/hub_compact.go` (new): `devstrap hub compact` — the snapshot-exchange PRODUCER. Flags `--hub-file`, `--dry-run`, `--keep-snapshots` (default 2), `--min-events` (default 0). Order is load-bearing (confirm-before-delete): converge (shared gate + push local pending so `floors[self]` covers local history) → compute floors from the transport cursors (remote `pullCursor+1`, self `pushWatermark+1`, cursor-0 devices skipped) → reconcile against the current manifest (fail-closed verify producer = local or approved, refuse a floor rollback, carry forward absent devices) → `--min-events` guard before any write → build+seal the snapshot under the CURRENT-epoch WCK → `PutSnapshotObject` → sign + CAS `PutRetention` (one re-read-and-retry on `ErrRetentionConflict`, error on a second) → read-back confirm names our snapshot → `CompactEventsBelow` → advance our own pull cursors to the floors (so the next sync is incremental, not a self-snapshot demand) → prune superseded snapshot objects. A keyless device refuses.
+- `internal/cli/hub.go`: extracted the pre-sweep gate into the shared `refuseIfIncompleteView` (pull+apply+recover, blob-cache, all incomplete-view refusals) used by BOTH `hub gc` and `hub compact`; ADDED a new gate — an open `key_grant_waits` row refuses. `errGCRefused` is retained as an alias of the shared `errIncompleteView` sentinel so existing gc assertions stay green; `hubGC` now calls the helper (behavior identical).
+- `internal/sync/snapshot_build.go` (new): `BuildSnapshot` assembles the `snapshot.v1` document from store reads (symmetric to `snapshot_import.go`); leaves V/Epoch/KID for `SealSnapshot` to stamp.
+- `internal/state/snapshot_reads.go` (new): `SnapshotEntries` (active namespace map + git_repos + latest draft pointer, source coords), `SnapshotTombstones` (surviving deleted rows), `ChainAnchorsForFloors` (per device, the content-hash/hlc of the event at seq=floor-1 from the events table, falling back to the imported `sync_chain_anchors` row, skipping devices with neither), and `CurrentHLC` (the local clock without minting an event). No migration (00020 shipped in part 2).
+- Tests: `internal/cli/hub_compact_test.go` (happy path incl. re-compact; dry-run writes nothing; `--min-events` refusal; the shared gate incl. the new key-grant-wait gate; keyless refusal; confirm-before-delete ordering via a `recordingHub`; CAS conflict retry-once; keep-snapshots pruning; `reconcileCompactFloors` monotonicity/carry-forward/unapproved-producer unit pins). E2e `cmd/devstrap/testdata/script/hub_compact_roundtrip.txtar` (A compacts; B incremental; fresh C bootstraps from the snapshot via the pairing ceremony and materializes both projects; hub is ciphertext-only) and `hub_compact_refuses_incomplete.txtar` (plaintext-downgrade wedge → refusal, nothing written).
+- Specs: 07 (producer/compaction protocol section; flipped "producer lands later"), 13 (`hub compact` doc mirroring `hub gc`, command list), 15 (old-epoch containment narrowed — snapshots seal under the current epoch; byzantine withhold+forge recovery real end-to-end; `P6-HUB-04` producer half shipped), 16 (compact test inventory), 19 (compaction runbook). Ledger: `P4-SYNC-02` and `P4-HUB-11` moved to *Recently shipped*; `P5-HUB-03` closed as subsumed.
+
+Validated:
+- `gofmt -w cmd internal`; `golangci-lint run` (clean); `go test -race ./...` (all packages green); `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+- `TestEveryCommandIsDocumented`/`TestMigrationsDocumented` pass; both new txtars pass through the real binary.
+
+Follow-ups:
+- Tombstone GC (`P4-SYNC-06`) + signed per-device sync acks (`P6-HUB-04` completion) + revoked-stream cleanup land as the next PR of the wave; the sweep lock (retiring the single-designated-device caveat) and `hub migrate-events` follow.
 
 ## 2026-07-03 — feat(sync): snapshot import + ErrSnapshotRequired recovery (P4-SYNC-02 part 2)
 
