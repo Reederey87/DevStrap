@@ -31,6 +31,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — fix(sync): gate deletes against the live row's HLC — delete-vs-re-add now converges (P5-ARCH-01 residual)
+
+Changed:
+- `internal/sync/decide.go`: `decideDelete` gains the live-row gate the P5-ARCH-01 review surfaced as missing — an active row whose `SourceEventHLC` is STRICTLY above the delete's HLC is kept (the delete is stale), with importTombstoneTx's exact precedence (newer-add-wins → dirty `pending_delete_conflict` → tombstone). Deliberately a bare-HLC comparison, NOT `samePathLess`: the add side resolves add/delete ties by HLC alone in the tombstone's favor (`decideUpsert` blocks adds at `HLC <= tombstoneHLC`), and `importTombstoneTx` pins the same rule for snapshot import — a full-coordinate tie-break here would re-diverge replay from import on equal-HLC ties. Before the fix, `A@10` then `D@5` (across pull windows) converged deleted while `D@5` then `A@10` converged active — a real strong-eventual-consistency violation; it also made `snapshot_import.go`'s import≡replay header claim false (import already had the gate, replay didn't). Scope note rewritten (delete-vs-re-add is now HLC-symmetric, in the pure core's remit).
+- `internal/sync/snapshot_import.go`: `importTombstoneTx`'s rationale comment now names `decideDelete` as the replay-side mirror.
+- `internal/sync/decide_property_test.go`: new `TestDecideConvergesDeleteReaddMix` folds `Decide` over all 5! delivery orders of an add/delete/strictly-higher-re-add mix (`work/readd` A@2→D@4→A@6, plus the review's exact `work/late` A@10/D@5 pair) asserting one terminal projection + duplicate-delivery idempotency; the 8-event anchor set and its 8! test are unchanged.
+- `internal/sync/apply_test.go`: new `TestApplyEventsStaleDeleteDoesNotDestroyNewerAdd` proves both pull-window orders converge on `active@10` through the REAL apply path (separate `ApplyEvents` calls, where the in-batch HLC sort cannot mask the divergence) that a DIRTY row with a strictly-newer add survives a stale delete with NO pending_delete_conflict (the gate precedes the dirty guard, matching import), and that an equal-HLC add+delete converges on deleted in both orders.
+- `spec/07`: the Decide/Projection seam section documents the HLC-symmetric delete-vs-re-add rule; ledger `P5-ARCH-01` row marks the residual FIXED.
+
+Validated:
+- `gofmt -l cmd internal` clean; `go test -race ./internal/sync/...` green (new 120-permutation property + both new example tests + all existing apply/hlc/import tests unchanged); full `go test -race ./...` green.
+
+Follow-ups:
+- `P4-QUAL-02` (randomized property/model-check foundation) now covers this interaction class by construction — next in this wave.
+- Review-surfaced (Codex, dual-review; verified pre-existing): a delete mixed with a same-path/DIFFERENT-remote pair can still diverge by delivery order — `reconcileSamePath` installs the deterministic lowest-coordinate winner, so the active row's HLC can sit below a dropped rival's and a delete between the two flips outcome with order (`A@2/R1, B@10/R2, D@5`: A,B,D → deleted@5; D,A,B → active@10/R2). Independent of this PR's gate (identical trace pre-fix); scope claims narrowed in decide.go/spec/07; the randomized `P4-QUAL-02` suite must include this class.
+
 ## 2026-07-04 — docs: Pass-6 audit doc status reconciliation (37/43 shipped markers + spec counts)
 
 Changed:
