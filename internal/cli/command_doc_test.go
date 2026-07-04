@@ -10,38 +10,54 @@ import (
 )
 
 // TestEveryCommandIsDocumented is the SPEC-5 drift gate: it walks the live
-// cobra command tree and fails if any command name is absent from
-// spec/13_CLI_DAEMON_API.md, so the hand-maintained command list cannot
-// silently drift from the binary. It runs as part of the normal test suite, so
-// CI enforces it automatically.
+// cobra command tree and fails if any command path is absent from the command
+// inventories, so the hand-maintained command lists cannot silently drift from
+// the binary. It runs as part of the normal test suite, so CI enforces it
+// automatically.
 func TestEveryCommandIsDocumented(t *testing.T) {
-	specPath := filepath.Join("..", "..", "spec", "13_CLI_DAEMON_API.md")
-	raw, err := os.ReadFile(specPath)
-	if err != nil {
-		t.Fatalf("read spec/13: %v", err)
+	specPaths := []string{
+		filepath.Join("..", "..", "spec", "13_CLI_DAEMON_API.md"),
+		filepath.Join("..", "..", "spec", "00_START_HERE.md"),
 	}
-	spec := string(raw)
+	specs := make(map[string]string, len(specPaths))
+	for _, specPath := range specPaths {
+		raw, err := os.ReadFile(specPath)
+		if err != nil {
+			t.Fatalf("read %s: %v", specPath, err)
+		}
+		specs[filepath.ToSlash(specPath)] = string(raw)
+	}
 
 	root := NewRootCommand(os.Stdout, os.Stderr)
-	var names []string
-	collectCommandNames(root, &names)
+	paths := collectCommandPaths(root)
 
-	for _, name := range names {
-		if name == "devstrap" || name == "help" || name == "completion" {
-			continue
-		}
-		if !strings.Contains(spec, name) {
-			t.Errorf("command %q is registered but not documented in spec/13_CLI_DAEMON_API.md", name)
+	// Keep the matching rule intentionally simple: each visible Cobra command
+	// path must appear as a contiguous substring in both spec inventories.
+	for _, path := range paths {
+		for specPath, specText := range specs {
+			if !strings.Contains(specText, path) {
+				t.Errorf("command %q is registered but not documented in %s", path, specPath)
+			}
 		}
 	}
 }
 
-func collectCommandNames(cmd *cobra.Command, out *[]string) {
+func collectCommandPaths(root *cobra.Command) []string {
+	var paths []string
+	collectCommandPathsFrom(root, "", &paths)
+	return paths
+}
+
+func collectCommandPathsFrom(cmd *cobra.Command, parent string, out *[]string) {
 	for _, sub := range cmd.Commands() {
 		if sub.Hidden {
 			continue
 		}
-		*out = append(*out, sub.Name())
-		collectCommandNames(sub, out)
+		path := sub.Name()
+		if parent != "" {
+			path = parent + " " + path
+		}
+		*out = append(*out, path)
+		collectCommandPathsFrom(sub, path, out)
 	}
 }
