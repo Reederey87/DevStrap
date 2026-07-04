@@ -685,5 +685,38 @@ func (h EncryptedHub) ListBlobs(ctx context.Context) ([]BlobInfo, error) {
 	return h.Hub.ListBlobs(ctx)
 }
 
+// Retention/snapshot-plane operations pass through (P4-SYNC-02/P4-HUB-11):
+// snapshot objects are sealed by the caller (SealSnapshot, the same WCK plane
+// as enc.v2 events) and the retention manifest is a SIGNED plaintext head
+// object by design — the decorator adds nothing on either path.
+
+func (h EncryptedHub) GetRetention(ctx context.Context) ([]byte, string, error) {
+	return h.Hub.GetRetention(ctx)
+}
+
+func (h EncryptedHub) PutRetention(ctx context.Context, raw []byte, ifMatchETag string) error {
+	return h.Hub.PutRetention(ctx, raw, ifMatchETag)
+}
+
+func (h EncryptedHub) PutSnapshotObject(ctx context.Context, sha256Hex string, body []byte) error {
+	return h.Hub.PutSnapshotObject(ctx, sha256Hex, body)
+}
+
+func (h EncryptedHub) GetSnapshotObject(ctx context.Context, sha256Hex string) ([]byte, error) {
+	return h.Hub.GetSnapshotObject(ctx, sha256Hex)
+}
+
+func (h EncryptedHub) ListSnapshotObjects(ctx context.Context) ([]BlobInfo, error) {
+	return h.Hub.ListSnapshotObjects(ctx)
+}
+
+func (h EncryptedHub) DeleteSnapshotObject(ctx context.Context, sha256Hex string) error {
+	return h.Hub.DeleteSnapshotObject(ctx, sha256Hex)
+}
+
+func (h EncryptedHub) CompactEventsBelow(ctx context.Context, floors Cursor) (int, error) {
+	return h.Hub.CompactEventsBelow(ctx, floors)
+}
+
 // Compile-time assertion that EncryptedHub satisfies Hub.
 var _ Hub = EncryptedHub{}

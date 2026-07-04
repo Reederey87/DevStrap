@@ -2,6 +2,8 @@ package hub
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -96,6 +98,42 @@ func (m *memS3) ListObjectsV2(_ context.Context, prefix, startAfter string, maxK
 		objs = append(objs, dssync.BlobInfo{Key: key, LastModified: m.modTimes[key]})
 	}
 	return objs, next, nil
+}
+
+// GetObjectWithETag mirrors GetObject and derives the etag from the object
+// bytes (sha256 hex), matching the FileHub etag convention closely enough for
+// the CAS conformance contract (the etag is opaque to callers).
+func (m *memS3) GetObjectWithETag(_ context.Context, key string) ([]byte, string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	data, ok := m.objects[key]
+	if !ok {
+		return nil, "", fmt.Errorf("%w: %s", dssync.ErrBlobNotFound, key)
+	}
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	return cp, memETag(data), nil
+}
+
+// PutObjectIfMatch stores body only when the current object's etag matches
+// (If-Match CAS). A missing object or a stale etag is ErrPreconditionFailed,
+// mirroring the 412 the production adapter maps.
+func (m *memS3) PutObjectIfMatch(_ context.Context, key string, body []byte, etag string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, ok := m.objects[key]
+	if !ok || memETag(current) != etag {
+		return ErrPreconditionFailed
+	}
+	m.objects[key] = body
+	m.counter++
+	m.modTimes[key] = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(m.counter) * time.Second)
+	return nil
+}
+
+func memETag(data []byte) string {
+	sum := sha256.Sum256(data)
+	return `"` + hex.EncodeToString(sum[:]) + `"`
 }
 
 // ListCommonPrefixes groups keys under prefix at the first delimiter after it

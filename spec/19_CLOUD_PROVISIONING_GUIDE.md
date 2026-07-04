@@ -91,10 +91,23 @@ are separated by **key prefix**; dedicated buckets or BYOC buckets remain option
 regulated or large tenants:
 
 ```text
-s3://devstrap-hub/workspaces/<workspace_id>/events/<hlc-padded>/<device_id>/<seq>/<event_id>.json
+s3://devstrap-hub/workspaces/<workspace_id>/eventlog/<device_id>/<seq pad20>_<event_id>.json
+s3://devstrap-hub/workspaces/<workspace_id>/events/<hlc-padded>/<device_id>/<seq>/<event_id>.json  # RETIRED layout, dual-READ only (pre-P5-SYNC-01 hubs)
 s3://devstrap-hub/workspaces/<workspace_id>/blobs/<sha256>
-s3://devstrap-hub/workspaces/<workspace_id>/snapshots/<hlc-padded>.json.age   # PLANNED — snapshot exchange (410->snapshot) is not built; only events/ and blobs/ exist today
+s3://devstrap-hub/workspaces/<workspace_id>/snapshots/<sha256>.json      # sealed full-state snapshot objects, content-addressed (P4-SYNC-02/P4-HUB-11)
+s3://devstrap-hub/workspaces/<workspace_id>/meta/retention.json          # signed per-device retention-floor manifest, CAS-guarded (P6-HUB-04)
 ```
+
+The earlier reservation for `snapshots/<hlc-padded>.json.age` is retired: snapshot
+objects are sealed under the current-epoch **Workspace Content Key** (the same
+XChaCha20-Poly1305 plane as `enc.v2` events), not age-wrapped to per-device
+recipients — WCK grants already solve group access with no per-device re-wrap on
+enrollment, and sealing under the current epoch makes each compaction a natural
+retirement boundary for old-epoch ciphertext. Content addressing (sha256 of the
+sealed bytes) replaces HLC keying so concurrent compactors can never clobber each
+other's objects; the signed retention manifest names the current snapshot and is
+the single mutable head object, written with If-Match/If-None-Match
+compare-and-swap (an S3 extension R2 supports on PUT).
 
 `<workspace_id>` is a `ws_<uuidv7>` identity minted on the **founder** device during
 `devstrap init`. A second device does **not** mint its own — it **adopts** the founder's id

@@ -27,6 +27,26 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-03 — feat(sync): snapshot + retention wire format and hub snapshot plane (P4-SYNC-02 part 1, P6-HUB-04 format)
+
+Changed:
+- New `internal/sync/snapshot.go`: the `snapshot.v1` wire format — `Snapshot` document (namespace entries with source-event coords, latest draft pointers, surviving tombstones, per-device chain anchors, per-device floor map), sealed under the CURRENT-epoch WCK with an enc.v2-style XChaCha20-Poly1305 AEAD (`snapshotAAD` binds workspace id, producing device, sealing key's kid, producer HLC, epoch; the envelope kid field stays an unauthenticated routing hint exactly like enc.v2). Content-addressed: object key = sha256 of the sealed bytes. `RetentionManifest` (per-device floors + snapshot ref + `prev_sha256` chain) signed under the new `devstrap:retention:v1` domain with a canonical alphabetical-key payload (v2-event style); `devstrap:ack:v1` reserved for the tombstone-GC ack markers; `devstrap:snapshot:v1` reserved-unused. Sentinels: `ErrSnapshotVerification`, `ErrRetentionNotFound`, `ErrRetentionConflict`, `ErrRetentionRollback`.
+- `internal/sync/hub.go`: the `Hub` interface grows the retention/snapshot plane — `GetRetention`/`PutRetention` (CAS: `""` = create-only, else If-Match; lost race = `ErrRetentionConflict`), `PutSnapshotObject`/`GetSnapshotObject`/`ListSnapshotObjects`/`DeleteSnapshotObject`, `CompactEventsBelow(floors)` (deletes strictly below each device's floor; never Seq<=0). FileHub implements all of it (`<hub>-meta/retention.json`, `<hub>-snapshots/<sha>.json`, sha256-of-bytes etags); `Pull` now reads the manifest floors (merged with the `RetentionSeqs` test override) and a garbled manifest is a HARD error — fail closed, a hub cannot garble its way to "no floor".
+- `internal/hub/r2.go`: R2 keys `workspaces/<ws>/meta/retention.json` + `workspaces/<ws>/snapshots/<sha256>.json`; Pull reads the marker unverified (backends hold no device registry; an unverified floor can only force the snapshot path, where fail-closed import verification lives — P6-HUB-04's DoS-only analysis); `CompactEventsBelow` bounds the seq-layout listing at the floor key per device and, in the legacy layout, deletes only parseable `(device, seq)` keys below their device's floor — unparseable legacy keys are KEPT (fail safe, inverting the dual-read's fail-open GET for the destructive path).
+- `internal/hub/s3client_awssdk.go` + `mems3_test.go`: `S3Client` grows `GetObjectWithETag` and `PutObjectIfMatch` (If-Match CAS — an S3 extension R2 supports on PUT; aws-sdk-go-v2 s3 v1.104.1 models `PutObjectInput.IfMatch`); memS3 simulates etags (sha256 of body) and CAS conflicts.
+- `internal/sync/encryptedhub.go`: pure pass-through delegation for the new plane (snapshot sealing lives in the caller; the manifest is signed plaintext by design).
+- Specs: 07 (new *Snapshot exchange and event-log compaction* section: wire format, manifest, trust model; retention paragraph re-based to the shipped manifest), 15 (P6-HUB-04 bullet flipped to shipped-format+plane with the unverified-pull/fail-closed-import trust split), 16 (test inventory), 19 (bucket layout updated to eventlog/ + snapshots/<sha256>.json + meta/retention.json; the `.json.age` reservation retired with the WCK-not-age rationale).
+
+- Post-review (Codex P1 + 2×P2): `ParseRetentionManifest` now validates structure fail-closed — `{}`/null-floors/wrong-version/negative-floors/empty-device are ERRORS, never "no floor" (a hub could otherwise garble its own marker into serving a partial post-compaction log as complete); `R2Hub.PutRetention` disambiguates a 412 by read-back byte comparison (a conditional PUT retried after an ambiguous failure would 412 against its OWN commit — that is success, not a lost race); `FileHub.PutRetention` serializes its read-check-write under an O_EXCL lock file (stale-broken after 10s) with an atomic temp+rename install, so two same-etag writers can never silently overwrite each other.
+
+Validated:
+- `gofmt -w cmd internal`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOCACHE=/tmp/devstrap-gocache go test -race ./...` (one unrelated flake: `internal/git` `TestCloneTimeoutIsTerminalAndDoesNotRetryOrWipe`, passes on rerun — pre-existing, also seen by an independent session today).
+- New tests: seal/unseal + AAD tamper matrix (kid relabel harmless), manifest sign/verify + tamper matrix + canonical re-parse pin, FileHub/memS3 CAS conflict matrices, Pull floor gates (at-floor boundary exact; fresh device forced to snapshot; garbled manifest hard-errors), both-layouts compaction with unparseable-legacy-keys-kept.
+
+Follow-ups:
+- Same wave, next PRs: migration `00020_sync_chain_anchors` + `store.ImportSnapshot` + `ErrSnapshotRequired` recovery in `sync`/`hub gc` (PR 2); `hub compact` producer (PR 3); signed per-device sync acks + tombstone GC + revoked-stream cleanup (PR 4); `hub migrate-events` + sweep lock + dedup-`PutBlob` freshness (PR 5).
+- No ledger rows move yet: `P4-SYNC-02`/`P4-HUB-11`/`P6-HUB-04` close when their consumer/producer halves land.
+
 ## 2026-07-03 — fix(cli): refuse split-brain init root changes (P6-CLI-01)
 
 Changed:
