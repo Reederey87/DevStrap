@@ -31,6 +31,19 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — docs: live-R2 dogfood — compact + snapshot bootstrap PASS (spec/19 §F)
+
+Changed:
+- `spec/19`: new "§F. Live-R2 dogfood validation log" recording the 2026-07-04 compact/snapshot run — the first LIVE exercise of the snapshot-exchange wave (`hub compact` + fresh-device snapshot bootstrap) against the real R2 bucket.
+
+Result (all PASS): three simulated devices on one Mac (per-device `--home`/`--root` + `DEVSTRAP_NO_KEYCHAIN=1`, creds from `~/.devstrap/dogfood-r2.env`). A founded + added 3 repos + synced (pushed 3, WCK epoch 1); B joined via the fingerprint-confirmed one-paste ceremony (`init --join --code --fingerprint` ↔ `devices enroll --code --approve --fingerprint`), was granted the WCK, materialized 3/3; churned to 6 repos, converged. **`hub compact` deleted 7 cold events and published a sealed snapshot** (`5f144f0efc44`, floors dev_A=7/dev_B=2) — event log bounded. **Fresh device C** (cursor 0 < floor) printed "Recovering from hub snapshot…", imported the snapshot, and materialized 6/6 despite the deleted events. Incumbents synced with no false recovery; `hub gc` clean; C `doctor --remote` 24 ok / 0 errors. This closes the "live two-machine R2 dogfood (wave close-out)" and "live-R2 dogfood of the snapshot-exchange wave" follow-ups tracked in earlier entries.
+
+Validated:
+- Observed live on the registered R2 bucket. Docs-only PR; `go run ./cmd/spec-drift` passes.
+
+Follow-ups:
+- The run's workspace prefix remains on the bucket for inspection. `boto3`/`aws` CLI absent on the host, so independent object-listing wasn't done — the `hub compact` "deleted 7 cold events / published snapshot" output + the fresh-device recovery are the validation.
+
 ## 2026-07-04 — docs: document the live-R2 dogfood credential convention (AGENTS.md)
 
 Changed:
