@@ -85,6 +85,44 @@ func TestShouldPruneDir(t *testing.T) {
 	}
 }
 
+// TestShouldPruneDirAnchoredPatternDoesNotPruneNested guards against a bare-name
+// fallback reintroduction: an anchored pattern like "/dist/" must only match
+// the root-level "dist" directory, never a nested directory that merely
+// shares its base name.
+func TestShouldPruneDirAnchoredPatternDoesNotPruneNested(t *testing.T) {
+	m, err := Compile("/dist/\n", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.ShouldPruneDir("dist", "packages/app/dist") {
+		t.Error(`ShouldPruneDir("dist", "packages/app/dist") = true, want false (anchored pattern must not match nested dir)`)
+	}
+}
+
+// TestShouldPruneDirNegationReincludes guards against a bare-name fallback
+// re-ignoring a path that a later negation pattern explicitly re-included.
+func TestShouldPruneDirNegationReincludes(t *testing.T) {
+	m, err := Compile("build/\n!keep/build/\n", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.ShouldPruneDir("build", "keep/build") {
+		t.Error(`ShouldPruneDir("build", "keep/build") = true, want false (negation must re-include)`)
+	}
+}
+
+// TestShouldPruneDirRootLevelStillPruned confirms the fix does not regress the
+// common case: an anchored pattern still prunes the matching top-level dir.
+func TestShouldPruneDirRootLevelStillPruned(t *testing.T) {
+	m, err := Compile("/dist/\n", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.ShouldPruneDir("dist", "dist") {
+		t.Error(`ShouldPruneDir("dist", "dist") = false, want true (anchored pattern must still prune root-level match)`)
+	}
+}
+
 func TestGitignoreFragmentRoundTrip(t *testing.T) {
 	m := DefaultMatcher()
 	frag := m.GitignoreFragment()

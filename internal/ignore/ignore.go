@@ -65,17 +65,18 @@ func (m *Matcher) Match(relPath string, isDir bool) bool {
 // ShouldPruneDir is a fast path for the scanner walk: it reports whether a
 // directory entry should be pruned (skipped entirely) based on the compiled
 // policy. name is the directory base name; relSlash is the forward-slash path
-// relative to the scan root.
+// relative to the scan root. Callers must pass the true root-relative path for
+// non-root directories — relSlash is authoritative so anchored patterns
+// (e.g. "/dist/") and negations (e.g. "!keep/build/") are evaluated against
+// the full path rather than silently falling back to the bare name.
 func (m *Matcher) ShouldPruneDir(name, relSlash string) bool {
 	if m == nil {
 		return DefaultMatcher().ShouldPruneDir(name, relSlash)
 	}
-	if m.Match(relSlash, true) {
-		return true
+	if relSlash == "" {
+		relSlash = name
 	}
-	// Also match the bare name so unanchored patterns like "node_modules/"
-	// prune even before the full relative path is known to the caller.
-	return m.Match(name, true)
+	return m.Match(relSlash, true)
 }
 
 // GitignoreFragment returns the compiled patterns as a .gitignore-compatible

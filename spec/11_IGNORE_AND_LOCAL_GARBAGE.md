@@ -329,14 +329,9 @@ Required follow-ups (workstream `DRAFT-*` in `docs/audits/AUDIT_RECOMMENDATIONS_
 
 From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
 
-### P6-XP-01 — `ShouldPruneDir` bare-name fallback defeats anchored and negation patterns
+### P6-XP-01 — `ShouldPruneDir` bare-name fallback defeats anchored and negation patterns — SHIPPED
 
-**Problem.** `ShouldPruneDir`'s bare-name fallback (`internal/ignore/ignore.go:73-78`) re-evaluates patterns against a directory's bare name with all path context stripped, so root-anchored patterns (`/build/`) prune at every depth and a negation re-including a nested dir (`!keep/build/`) is silently defeated. The only live consumer is `devstrap draft snapshot create` → `draftbundle.Pack` (`internal/draftbundle/draftbundle.go:113`), which then silently omits re-included content from the age-encrypted bundle.
-
-**Actionable steps.**
-1. Replace `ShouldPruneDir`'s body with a `relSlash`-authoritative form, keeping the empty-path guard only for callers that genuinely lack a path.
-2. Add regression tests: `/dist/` must not prune `packages/foo/dist`; `build/` + `!keep/build/` must keep `keep/build`.
-3. Extend the draft-bundle test to assert the packed manifest actually contains `keep/build/...` under that policy.
+**Resolved.** `ShouldPruneDir` (`internal/ignore/ignore.go`) no longer re-evaluates patterns against a directory's bare name as a fallback; `relSlash` is now the single, authoritative match target, with the empty-path guard (`relSlash == "" -> name`) kept only for the theoretical case of a caller with no path at all:
 
 ```go
 func (m *Matcher) ShouldPruneDir(name, relSlash string) bool {
@@ -349,6 +344,8 @@ func (m *Matcher) ShouldPruneDir(name, relSlash string) bool {
     return m.Match(relSlash, true)
 }
 ```
+
+Both live callers (`scan.Walk` and `draftbundle.Pack`) already compute `relSlash`/`rel` via `filepath.Rel` against their respective walk root for every non-root directory, so no caller changes were needed. Root-anchored patterns (`/dist/`) no longer prune nested directories that merely share a base name, and a negation re-including a nested path (`!keep/build/`) is honored instead of silently defeated. Regression coverage: `TestShouldPruneDirAnchoredPatternDoesNotPruneNested`, `TestShouldPruneDirNegationReincludes`, `TestShouldPruneDirRootLevelStillPruned` (`internal/ignore/ignore_test.go`).
 
 ### P6-XP-02 — Ignore compiler diverges from the gitignore semantics it advertises
 
