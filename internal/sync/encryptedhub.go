@@ -718,5 +718,24 @@ func (h EncryptedHub) CompactEventsBelow(ctx context.Context, floors Cursor) (in
 	return h.Hub.CompactEventsBelow(ctx, floors)
 }
 
+// Ack-plane operations pass through: ack markers are signed plaintext head
+// objects (like the retention manifest), so the envelope decorator adds nothing.
+
+func (h EncryptedHub) PutAck(ctx context.Context, deviceID string, raw []byte) error {
+	return h.Hub.PutAck(ctx, deviceID, raw)
+}
+
+func (h EncryptedHub) ListAcks(ctx context.Context) (map[string][]byte, error) {
+	return h.Hub.ListAcks(ctx)
+}
+
+func (h EncryptedHub) DeleteAck(ctx context.Context, deviceID string) error {
+	return h.Hub.DeleteAck(ctx, deviceID)
+}
+
+func (h EncryptedHub) DeleteDeviceStream(ctx context.Context, deviceID string) (int, error) {
+	return h.Hub.DeleteDeviceStream(ctx, deviceID)
+}
+
 // Compile-time assertion that EncryptedHub satisfies Hub.
 var _ Hub = EncryptedHub{}

@@ -1293,10 +1293,32 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?);
 	return nil
 }
 
+// CountTombstonesBelowHLC returns how many deleted namespace entries have a
+// tombstone HLC strictly below beforeHLC, i.e. how many rows GCTombstones would
+// purge. It backs the `hub compact --dry-run` tombstone-GC preview without
+// mutating state.
+func (s *Store) CountTombstonesBelowHLC(ctx context.Context, beforeHLC int64) (int, error) {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM namespace_entries
+WHERE workspace_id = ? AND status = 'deleted' AND tombstone_hlc IS NOT NULL AND tombstone_hlc < ?;
+`, workspaceID, beforeHLC).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count tombstones below hlc: %w", err)
+	}
+	return n, nil
+}
+
 // GCTombstones permanently removes deleted namespace entries whose tombstone
 // HLC is strictly below beforeHLC. Callers must pass the minimum HLC that every
 // approved sync cursor has already passed, so no peer can still resurrect the
-// entry with a stale add. Returns the number of rows purged.
+// entry with a stale add. Its first production caller is `hub compact
+// --gc-tombstones`, which derives beforeHLC as the minimum HLC watermark across
+// every approved device's signed sync ack (P4-SYNC-06). Returns the number of
+// rows purged.
 func (s *Store) GCTombstones(ctx context.Context, beforeHLC int64) (int, error) {
 	workspaceID, err := s.WorkspaceID(ctx)
 	if err != nil {

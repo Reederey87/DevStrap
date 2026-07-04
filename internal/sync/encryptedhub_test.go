@@ -19,6 +19,7 @@ type recordingHub struct {
 	blobs     map[string][]byte
 	retention []byte
 	snapshots map[string][]byte
+	acks      map[string][]byte
 }
 
 func (r *recordingHub) Push(_ context.Context, events []state.Event) error {
@@ -127,6 +128,41 @@ func (r *recordingHub) CompactEventsBelow(_ context.Context, floors Cursor) (int
 	deleted := 0
 	for _, e := range r.events {
 		if e.Seq > 0 && floors.After(e.DeviceID) > 0 && e.Seq < floors.After(e.DeviceID) {
+			deleted++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	r.events = kept
+	return deleted, nil
+}
+
+func (r *recordingHub) PutAck(_ context.Context, deviceID string, raw []byte) error {
+	if r.acks == nil {
+		r.acks = map[string][]byte{}
+	}
+	r.acks[deviceID] = raw
+	return nil
+}
+
+func (r *recordingHub) ListAcks(_ context.Context) (map[string][]byte, error) {
+	out := make(map[string][]byte, len(r.acks))
+	for k, v := range r.acks {
+		out[k] = v
+	}
+	return out, nil
+}
+
+func (r *recordingHub) DeleteAck(_ context.Context, deviceID string) error {
+	delete(r.acks, deviceID)
+	return nil
+}
+
+func (r *recordingHub) DeleteDeviceStream(_ context.Context, deviceID string) (int, error) {
+	kept := r.events[:0]
+	deleted := 0
+	for _, e := range r.events {
+		if e.DeviceID == deviceID {
 			deleted++
 			continue
 		}

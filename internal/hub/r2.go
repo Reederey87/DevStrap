@@ -184,6 +184,15 @@ func (h R2Hub) snapshotKey(sha256Hex string) string {
 	return h.snapshotsPrefix() + sha256Hex + ".json"
 }
 
+// acksPrefix holds the per-device signed sync-ack markers (P4-SYNC-06).
+func (h R2Hub) acksPrefix() string {
+	return fmt.Sprintf("workspaces/%s/meta/acks/", h.WorkspaceID)
+}
+
+func (h R2Hub) ackKey(deviceID string) string {
+	return h.acksPrefix() + deviceID + ".json"
+}
+
 func (h R2Hub) Push(ctx context.Context, events []state.Event) error {
 	for _, event := range events {
 		if ctx.Err() != nil {
@@ -716,6 +725,111 @@ func (h R2Hub) CompactEventsBelow(ctx context.Context, floors dssync.Cursor) (in
 		startAfter = next
 	}
 	return deleted, nil
+}
+
+// PutAck writes one device's signed sync-ack marker (P4-SYNC-06). Single writer
+// per key (each device writes only its own ack), so an unconditional PUT is
+// last-writer-wins by design.
+func (h R2Hub) PutAck(ctx context.Context, deviceID string, raw []byte) error {
+	if !validAckDeviceID(deviceID) {
+		return dssync.ErrInvalidBlobKey
+	}
+	if err := h.retry().do(ctx, func() error { return h.S3.PutObject(ctx, h.ackKey(deviceID), raw, false) }); err != nil {
+		return fmt.Errorf("put ack marker %s: %w", deviceID, err)
+	}
+	return nil
+}
+
+// ListAcks returns every device's sync-ack marker keyed by device id.
+func (h R2Hub) ListAcks(ctx context.Context) (map[string][]byte, error) {
+	prefix := h.acksPrefix()
+	out := map[string][]byte{}
+	startAfter := ""
+	for {
+		var objs []dssync.BlobInfo
+		var next string
+		if err := h.retry().do(ctx, func() error {
+			var lerr error
+			objs, next, lerr = h.S3.ListObjectsV2(ctx, prefix, startAfter, 1000)
+			return lerr
+		}); err != nil {
+			return nil, fmt.Errorf("list acks: %w", err)
+		}
+		for _, obj := range objs {
+			deviceID := strings.TrimSuffix(strings.TrimPrefix(obj.Key, prefix), ".json")
+			if !validAckDeviceID(deviceID) {
+				continue
+			}
+			var raw []byte
+			if err := h.retry().do(ctx, func() error {
+				var gerr error
+				raw, gerr = h.S3.GetObject(ctx, obj.Key)
+				return gerr
+			}); err != nil {
+				// A concurrently deleted ack (revoke racing a compaction) is not
+				// fatal: skip it, since a missing ack only DELAYS tombstone GC.
+				if errors.Is(err, dssync.ErrBlobNotFound) {
+					continue
+				}
+				return nil, fmt.Errorf("get ack marker %s: %w", deviceID, err)
+			}
+			out[deviceID] = raw
+		}
+		if next == "" {
+			break
+		}
+		startAfter = next
+	}
+	return out, nil
+}
+
+// DeleteAck removes a device's sync-ack marker (idempotent).
+func (h R2Hub) DeleteAck(ctx context.Context, deviceID string) error {
+	if !validAckDeviceID(deviceID) {
+		return dssync.ErrInvalidBlobKey
+	}
+	return h.retry().do(ctx, func() error { return h.S3.DeleteObject(ctx, h.ackKey(deviceID)) })
+}
+
+// DeleteDeviceStream deletes every object under one origin device's event-log
+// prefix (idempotent), reclaiming a revoked device's stream after compaction has
+// folded its state into the snapshot. It returns the object count deleted.
+func (h R2Hub) DeleteDeviceStream(ctx context.Context, deviceID string) (int, error) {
+	if !validAckDeviceID(deviceID) {
+		return 0, dssync.ErrInvalidBlobKey
+	}
+	dp := h.devicePrefix(deviceID)
+	deleted := 0
+	startAfter := ""
+	for {
+		var page []dssync.BlobInfo
+		var next string
+		if err := h.retry().do(ctx, func() error {
+			var lerr error
+			page, next, lerr = h.S3.ListObjectsV2(ctx, dp, startAfter, 1000)
+			return lerr
+		}); err != nil {
+			return deleted, fmt.Errorf("list device stream %s: %w", deviceID, err)
+		}
+		for _, obj := range page {
+			if err := h.retry().do(ctx, func() error { return h.S3.DeleteObject(ctx, obj.Key) }); err != nil {
+				return deleted, fmt.Errorf("delete device stream object %s: %w", obj.Key, err)
+			}
+			deleted++
+		}
+		if next == "" {
+			break
+		}
+		startAfter = next
+	}
+	return deleted, nil
+}
+
+// validAckDeviceID rejects a device id that could escape the meta/acks or
+// eventlog prefix. Device ids are locally-minted dev_<uuidv7> tokens, but a
+// listing-derived id is defensively checked all the same.
+func validAckDeviceID(deviceID string) bool {
+	return deviceID != "" && !strings.ContainsAny(deviceID, `/\`) && !strings.Contains(deviceID, "..")
 }
 
 // isValidHexKey checks for a 64-char hex digest with no path separators.
