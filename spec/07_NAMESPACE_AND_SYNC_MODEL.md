@@ -740,20 +740,15 @@ A revoked/lost row proves a deliberate local operator trust decision happened (r
 
 ### P6-XP-03 — `run-loop` never runs its advertised scan stage, so new local projects never reach the hub
 
-**Problem.** `runLoopTick` calls only `runSyncCycle` — there is no `scan.Walk`/adopt anywhere in `run_loop.go` — yet its `Short`, doc comment, README, and `spec/00` all promise "scan → sync → materialize" (`internal/cli/run_loop.go:32,20-24,69-73`). With the watcher unwired and the daemon deferred, there is no automatic local→hub path: a repo cloned into `~/Code` on A is never adopted and B never sees it.
+**Problem.** `runLoopTick` called only `runSyncCycle` — there was no `scan.Walk`/adopt anywhere in `run_loop.go` — yet its `Short`, doc comment, README, and `spec/00` all promised "scan → sync → materialize". With the watcher unwired and the daemon deferred, there was no automatic local→hub path: a repo cloned into `~/Code` on A was never adopted and B never saw it.
 
-**Actionable steps.**
-1. Add a `scan.Walk` + adopt step before `runSyncCycle` in `runLoopTick`.
-2. Make adoption idempotent first: skip findings whose `store.ProjectByPath` row already matches the same `remote_key`/type (else `adoptFindings` at `scan.go:125` appends a duplicate `project.added` every tick).
-3. Route secret/symlink-escape/duplicate-remote warning findings to stderr; never auto-adopt them. If the scan stage is deliberately out of scope, correct the `Short`/doc/README/spec-00 text to "sync + materialize" instead.
+**Shipped fix.** `runLoopTick` now runs a scan+adopt stage (`runLoopScanAdopt`) before `runSyncCycle`, so the advertised three-stage tick is real. Three cooperating pieces make it safe to run every tick:
 
-```go
-if res, err := scan.Walk(ctx, opts.paths().Root, scan.Options{IncludePlainFolders: true}); err == nil {
-    n, _ := adoptNewFindings(ctx, store, opts.paths().Root, res) // idempotent vs ProjectByPath
-    _ = n
-}
-return runSyncCycle(ctx, opts, stderr)
-```
+1. **Idempotent adoption.** `adoptNewFindings` (`internal/cli/scan.go`) filters the scan result down to genuinely-new findings before delegating to the shared `adoptFindings`: `findingAlreadyAdopted` skips any finding whose `store.ProjectByPath` row already matches on type and, for `git_repo`, on `remote_key`. An unchanged tree therefore adopts nothing and emits no duplicate `project.added` event. The one-shot `devstrap scan --adopt` keeps calling `adoptFindings` directly, so its re-stamping semantics are unchanged.
+2. **Fail-safe warnings.** Warning-class signals — secret-looking files, escaping symlinks, duplicate remotes, and per-finding warnings — are routed to stderr and never auto-adopted. Secrets and escaping symlinks never reach `result.Findings` (`scan.Walk` excludes them), so adoption can never persist them.
+3. **Cheap per-tick scan.** `P6-XP-05` already made `scan` offline (local-only default-branch resolution, no `set-head --auto` network call), so the per-tick cost is a filesystem walk plus local git ref reads. The scan runs even under `--namespace-only` because it feeds the namespace.
+
+Pinned by `TestRunLoopScanAdoptIdempotentAndPicksUpNewRepos`, `TestRunLoopScanSkipsDuplicateRemotes`, and `TestRunLoopScanWarnsSecretWithoutAdopting` (`internal/cli`) and the extended `run_loop_once.txtar` end-to-end script (scan adopts a checked-out repo on the first `--once`; a second `--once` over the unchanged tree re-adopts nothing).
 
 ### P6-XP-05 — `scan` makes a serial per-repo network call (`set-head --auto`), stalling offline onboarding
 

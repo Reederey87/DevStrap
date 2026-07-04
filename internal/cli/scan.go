@@ -162,6 +162,53 @@ func adoptFindings(ctx context.Context, store *state.Store, rootAbs string, resu
 	return adopted, nil
 }
 
+// adoptNewFindings adopts only findings that are not already present in local
+// state (P6-XP-03), so a repeated scan — e.g. run-loop's per-tick scan — never
+// re-emits a project.added event for an already-known project. It is the
+// idempotent variant of adoptFindings used by the loop; the one-shot
+// `devstrap scan --adopt` keeps calling adoptFindings directly so its
+// re-stamping semantics are unchanged. Warning-class items (secret-looking
+// files, escaping symlinks) never reach result.Findings, so they can never be
+// adopted here; the loop routes them to stderr separately.
+func adoptNewFindings(ctx context.Context, store *state.Store, rootAbs string, result scan.Result) (int, error) {
+	novel := scan.Result{Findings: make([]scan.Finding, 0, len(result.Findings))}
+	for _, finding := range result.Findings {
+		known, err := findingAlreadyAdopted(ctx, store, finding)
+		if err != nil {
+			return 0, err
+		}
+		if known {
+			continue
+		}
+		novel.Findings = append(novel.Findings, finding)
+	}
+	if len(novel.Findings) == 0 {
+		return 0, nil
+	}
+	return adoptFindings(ctx, store, rootAbs, novel)
+}
+
+// findingAlreadyAdopted reports whether a scan finding already exists in local
+// state as an active project of the same type (and, for git repos, the same
+// remote). A ProjectByPath error means the path is not tracked yet — the whole
+// codebase treats that lookup as presence/absence (see internal/sync/events.go)
+// — so a genuinely new or changed project falls through to adoption rather than
+// being silently dropped. A type or remote change is treated as new so the
+// namespace converges on the current on-disk reality.
+func findingAlreadyAdopted(ctx context.Context, store *state.Store, finding scan.Finding) (bool, error) {
+	existing, err := store.ProjectByPath(ctx, finding.Path)
+	if err != nil {
+		return false, nil
+	}
+	if existing.Type != string(finding.Type) {
+		return false, nil
+	}
+	if finding.Type == scan.TypeGitRepo && existing.RemoteKey != finding.RemoteKey {
+		return false, nil
+	}
+	return true, nil
+}
+
 type quarantinedFile struct {
 	from string
 	to   string
