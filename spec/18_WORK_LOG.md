@@ -31,6 +31,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — feat(run-loop): idempotent scan stage (P6-XP-03)
+
+Changed:
+- `internal/cli/run_loop.go`: `runLoopTick` now runs `runLoopScanAdopt` BEFORE `runSyncCycle` (the advertised scan stage; the daemonless loop otherwise had no local→hub path). The stderr tick header reads "scan + sync + materialize."
+- `internal/cli/scan.go`: `findingAlreadyAdopted` (skip a finding when `store.ProjectByPath` returns an active row matching its Type and, for `git_repo`, `remote_key`) + `adoptNewFindings` (filter to genuinely-new findings, then delegate to the existing `adoptFindings`). One-shot `scan --adopt` is unchanged (still calls `adoptFindings` directly). Warning-class findings (secret-looking files, symlink escapes) and duplicate-remote findings go to stderr and are never auto-adopted (duplicates dropped in the loop; the skeleton-clobber window is closed because `writeSkeleton` writes `README.devstrap.md`, which `looksLikeProject` does not match).
+- Docs reconciled: spec/00 XP-* line + spec/07 P6-XP-03 section flipped to shipped; README already read "scan + sync + materialize."
+
+Validated:
+- `gofmt -l cmd internal` clean; `go build ./...`; full `go test ./...` green. `TestRunLoopScanAdoptIdempotentAndPicksUpNewRepos` (4 ticks: 1 `project.added`, mid-run pickup, no duplicate), `...SkipsDuplicateRemotes`, `...WarnsSecretWithoutAdopting`; extended `run_loop_once.txtar` asserts `pushed 2 → pushed 0`. Independent opus review: no blocking findings. Chosen direction: implement the scan stage (user-confirmed), not the doc-only fix; depended on the merged P6-XP-05 keeping scan offline.
+
+Follow-ups (optional, from review):
+- Loop scan errors currently abort the whole tick (fail-loud); a best-effort "warn + continue to sync" is a defensible alternative if a local FS hiccup should not hold remote convergence.
+- Symlink-escape / case-only-path conflicts are surfaced on stderr each tick rather than recorded as `doctor`-visible conflict rows (parity is cheap via the existing dedup but out of scope here).
+
 ## 2026-07-04 — refactor(sync): pure Decide(state,event) extraction (P5-ARCH-01)
 
 Changed:

@@ -7,6 +7,7 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"github.com/Reederey87/DevStrap/internal/scan"
 	"github.com/spf13/cobra"
 )
 
@@ -68,8 +69,78 @@ func runLoopJitterBound(interval time.Duration) int64 {
 
 func runLoopTick(ctx context.Context, stdout, stderr io.Writer, opts *options, hubFile string, namespaceOnly bool) error {
 	// P5-CLI-05: the tick header is progress, not a result — route it to stderr.
-	_, _ = fmt.Fprintf(stderr, "[%s] run-loop tick: sync + materialize\n", time.Now().UTC().Format(time.RFC3339))
+	_, _ = fmt.Fprintf(stderr, "[%s] run-loop tick: scan + sync + materialize\n", time.Now().UTC().Format(time.RFC3339))
+	// P6-XP-03: scan + adopt at the START of each tick. Without a daemon or
+	// watcher there is no other automatic local→hub path, so a project created
+	// on this device would never reach the namespace (and thus the hub) until a
+	// manual `scan --adopt`. The scan runs even under --namespace-only because it
+	// FEEDS the namespace. P6-XP-05 made scan offline, so the per-tick cost is a
+	// filesystem walk plus local git ref reads — cheap enough to run every tick.
+	if err := runLoopScanAdopt(ctx, stderr, opts); err != nil {
+		return err
+	}
 	return runSyncCycle(ctx, stdout, opts, hubFile, namespaceOnly, false)
+}
+
+// runLoopScanAdopt walks the workspace root and idempotently adopts any newly
+// discovered projects (P6-XP-03). It is the loop's local→namespace feeder:
+//
+//   - Adoption is idempotent (adoptNewFindings): only genuinely new projects
+//     emit a project.added event, so an unchanged tree adopts nothing on every
+//     subsequent tick — no duplicate events.
+//   - Fail-safe: warning-class items (secret-looking files, escaping symlinks,
+//     duplicate remotes, per-finding warnings) are routed to stderr and never
+//     auto-adopted. Secrets and escaping symlinks are excluded from
+//     result.Findings by scan.Walk itself; findings whose remote is duplicated
+//     across paths are ambiguous, so the unattended loop refuses to guess a
+//     canonical path and drops them here (the one-shot `scan --adopt` still
+//     adopts them — a deliberate operator action).
+func runLoopScanAdopt(ctx context.Context, stderr io.Writer, opts *options) error {
+	rootAbs, err := cleanAbsPath(opts.paths().Root)
+	if err != nil {
+		return appError{code: exitInvalidConfig, err: err}
+	}
+	result, err := scan.Walk(ctx, rootAbs, scan.Options{IncludePlainFolders: true})
+	if err != nil {
+		return err
+	}
+	// P6-XP-03 fail-safe: surface every warning-class signal on stderr; none of
+	// these are auto-adopted.
+	for _, w := range result.Warnings {
+		_, _ = fmt.Fprintf(stderr, "scan warning: %s\n", w)
+	}
+	duplicated := map[string]bool{}
+	for _, d := range result.Duplicates {
+		duplicated[d.RemoteKey] = true
+		_, _ = fmt.Fprintf(stderr, "scan warning: duplicate remote %s across %v (not auto-adopted; recommended %s)\n", d.RemoteKey, d.Paths, d.RecommendedPath)
+	}
+	for _, f := range result.Findings {
+		for _, w := range f.Warnings {
+			_, _ = fmt.Fprintf(stderr, "scan warning: %s: %s\n", f.Path, w)
+		}
+	}
+	// Drop findings whose remote is duplicated across paths before adoption: the
+	// loop never auto-adopts an ambiguous duplicate remote.
+	adoptable := scan.Result{Findings: make([]scan.Finding, 0, len(result.Findings))}
+	for _, f := range result.Findings {
+		if f.Type == scan.TypeGitRepo && duplicated[f.RemoteKey] {
+			continue
+		}
+		adoptable.Findings = append(adoptable.Findings, f)
+	}
+	store, err := opts.openState(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeStore(store)
+	adopted, err := adoptNewFindings(ctx, store, rootAbs, adoptable)
+	if err != nil {
+		return err
+	}
+	if adopted > 0 {
+		_, _ = fmt.Fprintf(stderr, "scan adopted %d new project(s)\n", adopted)
+	}
+	return nil
 }
 
 func runLoopForever(ctx context.Context, stdout, stderr io.Writer, opts *options, hubFile string, namespaceOnly bool, interval time.Duration) error {

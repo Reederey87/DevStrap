@@ -256,6 +256,10 @@ Options:
 
 Current implementation uses partial clone by default, supports `--full` and `--lfs`, refuses to clone into non-empty non-skeleton directories, stages clones in hidden sibling temp directories, promotes only after clone success plus a second target validation, preserves the original skeleton on clone failure, and updates local materialization/dirty state. The eager `materialize`/`sync` path additionally honors the stored `git_repos.lfs_policy` (`P6-GIT-04`): after clone, an `always`/`agent` repo runs `git lfs install --local` + `git lfs pull` (recorded **failed** on error, never available/clean with pointers), and `auto`/`never` warns — applied in `materializeGitRepo` so a `SkeletonProjects` retry of a failed repo cannot silently flip it to available (see `08_GIT_MATERIALIZATION_AND_WORKTREES.md`). The manual `--lfs` flag stays an explicit one-off pull. Planned (`DRAFT-*`): `hydrate` extends beyond `git_repo` projects to materialize `local_git`/`plain_folder`/draft content from decrypted `age_blob:<sha256>` bundles, while `node_modules`/build artifacts are rebuilt (npm/pnpm/uv install) rather than synced.
 
+### run-loop
+
+`devstrap run-loop` is the portable, daemonless convergence loop: it runs **scan + sync + materialize** on an interval (`--interval`, default 5m; `--once` for cron/schedulers), identically on macOS and Linux. Progress/diagnostics go to stderr and the sync result stream to stdout (`P5-CLI-05`); a jittered backoff avoids hub stampedes and the loop aborts after 5 consecutive tick failures (`P5-CLI-05`/`P5-QUAL-03`). Per `P6-XP-03` the tick's **scan stage is real and idempotent** — it runs `scan.Walk` (offline since `P6-XP-05`) and adopts only genuinely-new findings (no active `ProjectByPath` row matching the finding's type and, for `git_repo`, `remote_key`), so a new local project reaches the hub without appending duplicate `project.added` events every tick. Warning-class findings (secret-looking files, symlink escapes) and duplicate-remote findings are surfaced on stderr and never auto-adopted; one-shot `scan --adopt` semantics are unchanged.
+
 ### add
 
 ```bash
