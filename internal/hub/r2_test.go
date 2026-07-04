@@ -150,7 +150,7 @@ func TestR2PushConcurrentBatchLandsAllEvents(t *testing.T) {
 // the production aws-sdk-go-v2 adapter is proven against the SAME contract as
 // the conformance double. Retention-floor, skip-HEAD, pagination, and retry
 // behaviors are memS3/fault-injection-specific and stay in their own tests below.
-func assertHubRoundTrip(t *testing.T, ctx context.Context, h R2Hub) {
+func assertHubRoundTrip(t *testing.T, ctx context.Context, h dssync.Hub) {
 	t.Helper()
 
 	// Event-log plane: push/pull round trip + deterministic (hlc, device, id) order.

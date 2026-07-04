@@ -14,15 +14,27 @@ tracks_code: [internal/hub/**, internal/cli/hub.go]
 > ships. See `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md` (decisions 5 and 6) and
 > `14_MVP_ROADMAP_AND_BACKLOG.md`.
 
-> **Direction — zero-infrastructure quickstart (AD-1, planned).** Provisioning an R2 bucket
-> is real first-run friction and undercuts the "new machine in minutes" promise. Because the
-> hub only ever holds ciphertext plus signed events, even a "dumb" carrier is a safe
-> zero-knowledge boundary. DIRECTION: add a **zero-infrastructure Hub backend behind the
-> existing pluggable `Hub` interface** — a private-git-repo-backed and/or
-> local-folder / cloud-drive-folder backend — and make it the quickstart default, keeping
-> `hub: r2://<bucket>` (this guide) as the scale/power option. This guide then becomes the
-> *power-user / self-hosting* path rather than a precondition for first sync. Not built yet;
-> tracked with the adoption workstream in `14_MVP_ROADMAP_AND_BACKLOG.md`.
+> **Zero-infrastructure quickstart (AD-1) — the git carrier is SHIPPED (2026-07-04).**
+> Provisioning an R2 bucket is real first-run friction. Because the hub only ever holds
+> ciphertext plus signed events, even a "dumb" carrier is a safe zero-knowledge boundary —
+> and you no longer need a bucket at all: point DevStrap at any **private git repository**
+> you can already push to:
+>
+> ```yaml
+> # config.yaml
+> hub: git+ssh://git@github.com/you/devstrap-hub.git   # or git+https://…, git@host:path.git
+> ```
+>
+> Create an empty private repo (any forge or bare ssh host), set `hub:` as above, and run
+> `devstrap sync` — the first push seeds the carrier (a `devstrap-hub.json` marker plus the
+> same encrypted object layout R2 stores). Requirements: non-interactive git auth (an
+> agent-loaded ssh key or stored https credentials — git runs with prompts disabled) and a
+> **private** repo (contents are ciphertext, but repo metadata/sizes are visible to the
+> host). `?branch=<name>` selects a carrier branch (default `main`). Run `hub compact`
+> periodically — it is what bounds the carrier repo's history (a squashed rewrite the host
+> then garbage-collects). The rest of this guide (provisioned R2/S3) is the
+> *scale/power / self-hosting* path; making the git carrier the documented default
+> quickstart is the remaining `AD-1` slice tracked in `14_MVP_ROADMAP_AND_BACKLOG.md`.
 
 ## Scope
 
