@@ -138,7 +138,7 @@ MVP enforcement options:
 4. terminal/session recording;
 5. later: sandbox/container.
 
-Current implementation has the shared `internal/childenv` environment sanitizer used by Git/editor/agent subprocesses. `devstrap agent run` supports the `generic` engine: it creates a fresh upstream worktree, runs explicit argv commands in that isolated cwd with a sanitized no-secret default environment, applies a wrapper-level command policy (`readonly`, `cautious`, `guarded`, or explicit `yolo-local`) plus a wrapper-level file path policy that denies explicit sensitive-path and outside-worktree references for non-`yolo-local` runs, records an `agent_runs` row, captures a `0600` log under `~/.devstrap/logs/agent-runs`, and stores a Git status/diff summary. If the post-create file policy denies the command, the just-created worktree is removed, its branch is deleted, and the DB row is marked removed. `devstrap agent pr` reuses the stale-base gate before pushing and creating a forge-aware PR/MR via `gh`/`glab`/`tea` when available, or a compare URL fallback for unsupported forges. OS-enforced sandboxing, project-env allowlists for agents, `agent cleanup`, and non-generic engine adapters remain future work; `doctor` now probes the matching forge CLI per adopted remote (`FORGE-04`/`GIT-05`).
+Current implementation has the shared `internal/childenv` environment sanitizer used by Git/editor/agent subprocesses. `devstrap agent run` supports the `generic` engine: it creates a fresh upstream worktree, runs explicit argv commands in that isolated cwd with a sanitized no-secret default environment, applies a wrapper-level command policy (`readonly`, `cautious`, `guarded`, or explicit `yolo-local`) plus a wrapper-level file path policy that denies explicit sensitive-path and outside-worktree references for non-`yolo-local` runs, records an `agent_runs` row, captures a `0600` log under `~/.devstrap/logs/agent-runs`, and stores a labeled Git diff summary split into `Committed since base:` (`BaseSHA..HEAD`) and `Uncommitted:` (`git status --short`) sections. If the post-create file policy denies the command, the just-created worktree is removed, its branch is deleted, and the DB row is marked removed. `devstrap agent pr` reuses the stale-base gate before pushing and creating a forge-aware PR/MR via `gh`/`glab`/`tea` when available, or a compare URL fallback for unsupported forges. OS-enforced sandboxing, project-env allowlists for agents, `agent cleanup`, and non-generic engine adapters remain future work; `doctor` now probes the matching forge CLI per adopted remote (`FORGE-04`/`GIT-05`).
 
 ## Enforcement reality (audit `AGEN-01..06`, `SECU-02`)
 
@@ -231,7 +231,7 @@ Algorithm:
 
 ```text
 1. ensure agent run status is complete or reviewable
-2. show diff summary
+2. show diff summary (`Committed since base:` plus `Uncommitted:` sections)
 3. run configured validation
 4. fetch origin/<default_branch>
 5. rebase if needed/approved
@@ -279,7 +279,7 @@ The `Tests` column is a **planned** surface — no test-result tracking is wired
 - worktree metadata is recorded;
 - agent env is scoped;
 - logs are captured;
-- diff summary is available;
+- diff summary is available for both committed work since the recorded base SHA and uncommitted residue;
 - cleanup avoids deleting dirty/unpushed work;
 - stale base is detected before PR.
 
@@ -296,14 +296,15 @@ The `Tests` column is a **planned** surface — no test-result tracking is wired
 
 From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
 
-### P6-GIT-02 — diff summary misses committed agent work
+### P6-GIT-02 — diff summary misses committed agent work — shipped 2026-07-03
 
-**Problem.** `agentDiffSummary` (`internal/cli/agent.go:479-480`) only runs revision-less `git status --short` + `git diff --stat`, so an agent that commits its work records "(no changes)"; `agent show` (`:181`) and the PR body gate (`:504`) then omit the real diff, violating the "diff summary is available" acceptance criterion. The recorded `BaseSHA` (`:97`) is never diffed against.
+**Problem.** `agentDiffSummary` previously only ran revision-less `git status --short` + `git diff --stat`, so an agent that committed its work recorded "(no changes)"; `agent show` and the PR body gate then omitted the real diff, violating the "diff summary is available" acceptance criterion. The recorded `BaseSHA` was never diffed against.
 
-**Actionable steps.**
-1. Change the signature to take the worktree; diff base-vs-HEAD plus uncommitted residue in labeled sections.
-2. Guard the unborn-HEAD case by falling back when `rev-parse --verify HEAD` fails.
-3. Test: agent command runs `git commit -am x`; assert the summary contains the committed file stat.
+**Shipped behavior.**
+1. `agentDiffSummary` takes the recorded base SHA and returns labeled `Committed since base:` and `Uncommitted:` sections.
+2. The committed section diffs `BaseSHA..HEAD`; the uncommitted section keeps `git status --short` output.
+3. If `rev-parse --verify HEAD` fails for an unborn repository, the helper falls back to the old working-tree-only summary.
+4. Tests cover committed work, uncommitted residue, and the unborn-HEAD fallback.
 
 **Example.**
 ```go
