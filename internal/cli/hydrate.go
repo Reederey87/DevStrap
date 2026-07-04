@@ -12,6 +12,7 @@ import (
 	"time"
 
 	dsgit "github.com/Reederey87/DevStrap/internal/git"
+	"github.com/Reederey87/DevStrap/internal/logging"
 	"github.com/Reederey87/DevStrap/internal/pathkey"
 	"github.com/Reederey87/DevStrap/internal/state"
 	"github.com/spf13/cobra"
@@ -218,6 +219,38 @@ func hydrateProjectUnlocked(ctx context.Context, store *state.Store, opts *optio
 		_ = r.MaintenanceRun(ctx, localPath)
 	}
 	return localPath, nil
+}
+
+// applyMaterializeLFSPolicy mirrors applyWorktreeLFSPolicy for the primary
+// materialize/hydrate clone path (P6-GIT-04). Unlike the worktree path it runs
+// `git lfs install --local` first because gitEnv hides the user's global smudge
+// filter. LFSPull already carries the P6-GIT-01 long-transfer timeout.
+func applyMaterializeLFSPolicy(ctx context.Context, r dsgit.Runner, project state.ProjectStatus, localPath string) error {
+	usesLFS, err := dsgit.UsesLFS(ctx, localPath)
+	if err != nil {
+		return appError{code: exitGit, err: err}
+	}
+	if !usesLFS {
+		return nil
+	}
+	policy := strings.ToLower(strings.TrimSpace(project.LFSPolicy))
+	if policy == "" {
+		policy = "auto"
+	}
+	switch policy {
+	case "always", "agent":
+		if err := r.LFSInstallLocal(ctx, localPath); err != nil {
+			return appError{code: exitGit, err: fmt.Errorf("%s: git lfs install --local failed: %w", project.Path, err)}
+		}
+		if err := r.LFSPull(ctx, localPath); err != nil {
+			return appError{code: exitGit, err: fmt.Errorf("%s materialized but LFS pull failed; objects may remain pointer files: %w", project.Path, err)}
+		}
+	case "auto", "never":
+		logging.Logger(ctx).Warn("git LFS pointer files remain; set lfs_policy=always to fetch objects", "path", project.Path, "lfs_policy", policy)
+	default:
+		return appError{code: exitInvalidConfig, err: fmt.Errorf("unsupported lfs_policy %q for %s", project.LFSPolicy, project.Path)}
+	}
+	return nil
 }
 
 // headResolvable reports whether the repo at localPath has a resolvable HEAD

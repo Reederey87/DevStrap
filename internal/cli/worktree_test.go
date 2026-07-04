@@ -70,7 +70,8 @@ func TestAddWorktreeWithFreshBranchRetriesBranchCollision(t *testing.T) {
 func TestCreateFreshWorktreeCleansUpAfterLFSPullFailure(t *testing.T) {
 	home := filepath.Join(t.TempDir(), ".devstrap")
 	root := filepath.Join(t.TempDir(), "Code")
-	localPath := setupFreshWorktreeRepo(t, home, root, "always", true)
+	localPath := setupFreshWorktreeRepo(t, home, root, "auto", true)
+	setProjectLFSPolicy(t, filepath.Join(home, "state.db"), "work/acme/repo", "always")
 	installFailingGitLFS(t)
 
 	_, stderr, err := executeForTest("--home", home, "--root", root, "worktree", "new", "work/acme/repo", "--fresh-upstream", "--name", "lfs failure")
@@ -232,6 +233,34 @@ exec %q "$@"
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func setProjectLFSPolicy(t *testing.T, dbPath, nsPath, policy string) {
+	t.Helper()
+	q := url.Values{}
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "foreign_keys(1)")
+	dsn := (&url.URL{Scheme: "file", Path: dbPath, RawQuery: q.Encode()}).String()
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	res, err := db.Exec(`
+UPDATE git_repos
+SET lfs_policy = ?
+WHERE namespace_id = (SELECT id FROM namespace_entries WHERE path = ?);
+`, policy, nsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("updated %d git_repos rows, want 1", n)
+	}
 }
 
 func installFailingWorktreeInsertTrigger(t *testing.T, dbPath string) {
