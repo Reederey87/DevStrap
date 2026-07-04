@@ -144,6 +144,49 @@ func TestInitDryRunIncludesLogDir(t *testing.T) {
 	}
 }
 
+func TestQuietSuppressesInitProgressButCreatesWorkspace(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	cases := []struct {
+		name        string
+		quiet       bool
+		wantSummary bool
+	}{
+		{name: "plain", wantSummary: true},
+		{name: "quiet", quiet: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := filepath.Join(t.TempDir(), ".devstrap")
+			root := filepath.Join(t.TempDir(), "Code")
+			args := []string{"--home", home, "--root", root}
+			if tc.quiet {
+				args = append(args, "--quiet")
+			}
+			args = append(args, "init", "--workspace-name", "quiet-test")
+			stdout, stderr, err := executeForTest(args...)
+			if err != nil {
+				t.Fatalf("stdout = %q stderr = %q err = %v", stdout, stderr, err)
+			}
+			hasSummary := strings.Contains(stdout, "Initialized DevStrap workspace")
+			if hasSummary != tc.wantSummary {
+				t.Fatalf("stdout = %q, contains init summary = %v, want %v", stdout, hasSummary, tc.wantSummary)
+			}
+
+			stdout, stderr, err = executeForTest("--home", home, "status", "--json")
+			if err != nil {
+				t.Fatalf("status stdout = %q stderr = %q err = %v", stdout, stderr, err)
+			}
+			var summary state.Summary
+			if err := json.Unmarshal([]byte(stdout), &summary); err != nil {
+				t.Fatalf("status --json is not valid JSON: %v\n%s", err, stdout)
+			}
+			if summary.WorkspaceName != "quiet-test" || summary.RootPath != root {
+				t.Fatalf("summary = %+v, want workspace quiet-test rooted at %s", summary, root)
+			}
+		})
+	}
+}
+
 func TestInitRejectsPositionalRootWithRootFlag(t *testing.T) {
 	home := filepath.Join(t.TempDir(), ".devstrap")
 	_, stderr, err := executeForTest("--home", home, "--root", filepath.Join(t.TempDir(), "flag-root"), "init", "pos-root")

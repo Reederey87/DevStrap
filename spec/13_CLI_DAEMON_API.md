@@ -512,7 +512,7 @@ Rules:
 - use `log/slog` with a single configured handler;
 - use a `ReplaceAttr` redaction choke point for secret-like attributes;
 - emit text logs for interactive TTY output and JSON logs for daemon/service files;
-- bind verbosity to `DEVSTRAP_LOG_LEVEL`, `--quiet`, and `--verbose`;
+- bind log verbosity to `DEVSTRAP_LOG_LEVEL`, `--quiet`, and `--verbose`;
 - rotate and retain logs under `~/.devstrap/logs`;
 - human summaries in CLI.
 
@@ -614,13 +614,9 @@ cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
 })
 ```
 
-### P6-CLI-04 — `--quiet` only lowers slog verbosity; stdout chatter ignores it
+### P6-CLI-04 — `--quiet` only lowers slog verbosity; stdout chatter ignores it — RESOLVED (`fix/p6-cli-04`, 2026-07-04)
 
-**Problem.** `--quiet` (help: "only print errors") is consumed solely by `logging.Configure` (`internal/cli/root.go:69` → `logging/logging.go:19`); `sync.go:144`, `materialize.go:81`, `init.go:126`, and `run_loop.go:71` print progress/summary lines unconditionally, so `run-loop --once --quiet` from cron still emits "pushed 0, pulled 0; materialized 0/0" every tick.
-
-**Actionable steps.**
-1. Add a render-seam helper `progressf` that no-ops when `o.quiet`, and route sync/materialize/init/hub-gc summary and progress lines through it; keep errors and explicitly-requested data (`--json`, `status`/`list`/`show` tables) printing.
-2. Zero-cost stopgap: reword the flag help to "suppress log output (command results still print)" so it matches the verbosity-only behavior documented under Logging.
+**Resolution.** `options.progressf` is the quiet-aware progress seam (`internal/cli/root.go:52-57`), and the flag help now says `suppress progress output (results and errors still print)` (`internal/cli/root.go:87`). Progress and action-summary chatter now routes through that seam for sync snapshot-recovery/status/GC/key-rotation/drained-delete lines (`internal/cli/sync.go:105`, `169-172`, `184`, `186`, `339`, `434`), materialize's human renderer only (`internal/cli/materialize.go:86-88`; `--json` remains structured output), init success/adopt/next-step hints (`internal/cli/init.go:247-300`), run-loop tick and scan-adopt progress (`internal/cli/run_loop.go:72`, `141`), hub login/logout/gc summaries (`internal/cli/hub.go:435`, `461`, `541`), and the `scan --adopt` adopted-count summary (`internal/cli/scan.go:102`). The "awaiting workspace key grant" deferred-push notice (`internal/cli/sync.go:406`, sibling to the always-visible one in `snapshot_recovery.go`) is deliberately left ungated — it is the only explanation of a real actionable state, not chatter. Dry-run output, result rows, warnings, prompts, JSON output, and error/exit-code signals stay ungated. Pinned by `TestQuietSuppressesInitProgressButCreatesWorkspace` and `TestQuietSuppressesMaterializeHumanProgressOnly`.
 
 ```go
 func (o *options) progressf(w io.Writer, format string, a ...any) {

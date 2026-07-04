@@ -49,6 +49,13 @@ type options struct {
 	v       *viper.Viper
 }
 
+func (o *options) progressf(w io.Writer, format string, a ...any) {
+	if o.quiet {
+		return
+	}
+	_, _ = fmt.Fprintf(w, format, a...)
+}
+
 func Execute(ctx context.Context) error {
 	root := NewRootCommand(os.Stdout, os.Stderr)
 	root.SetContext(ctx)
@@ -80,7 +87,7 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&opts.json, "json", false, "print machine-readable JSON")
 	cmd.PersistentFlags().StringVar(&opts.home, "home", "", "DevStrap state directory")
 	cmd.PersistentFlags().StringVar(&opts.root, "root", "", "managed code root")
-	cmd.PersistentFlags().BoolVar(&opts.quiet, "quiet", false, "only print errors")
+	cmd.PersistentFlags().BoolVar(&opts.quiet, "quiet", false, "suppress progress output (results and errors still print)")
 	cmd.PersistentFlags().CountVarP(&opts.verbose, "verbose", "v", "increase log verbosity")
 
 	_ = opts.v.BindPFlag("home", cmd.PersistentFlags().Lookup("home"))

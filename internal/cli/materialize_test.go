@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,90 @@ import (
 	"github.com/Reederey87/DevStrap/internal/state"
 	"github.com/spf13/viper"
 )
+
+func TestQuietSuppressesMaterializeHumanProgressOnly(t *testing.T) {
+	cases := []struct {
+		name             string
+		args             []string
+		wantHumanSummary bool
+		wantJSON         bool
+	}{
+		{name: "plain", wantHumanSummary: true},
+		{name: "quiet", args: []string{"--quiet"}},
+		{name: "quiet json", args: []string{"--quiet", "--json"}, wantJSON: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home, root, projectDir := setupPlainFolderSkeleton(t)
+			args := append([]string{"--home", home, "--root", root}, tc.args...)
+			args = append(args, "materialize")
+			stdout, stderr, err := executeForTest(args...)
+			if err != nil {
+				t.Fatalf("stdout = %q stderr = %q err = %v", stdout, stderr, err)
+			}
+			hasSummary := strings.Contains(stdout, "Materialized")
+			if hasSummary != tc.wantHumanSummary {
+				t.Fatalf("stdout = %q, contains materialize summary = %v, want %v", stdout, hasSummary, tc.wantHumanSummary)
+			}
+			if tc.wantJSON {
+				var got struct {
+					Total     int `json:"total"`
+					Succeeded int `json:"succeeded"`
+					Skipped   int `json:"skipped"`
+					Failed    int `json:"failed"`
+				}
+				if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+					t.Fatalf("materialize --json stdout is not valid JSON: %v\n%s", err, stdout)
+				}
+				if got.Total != 1 || got.Succeeded != 1 || got.Skipped != 0 || got.Failed != 0 {
+					t.Fatalf("json result = %+v, want one successful materialization", got)
+				}
+			}
+			if info, err := os.Stat(projectDir); err != nil || !info.IsDir() {
+				t.Fatalf("materialize side effect missing %s: info=%v err=%v", projectDir, info, err)
+			}
+		})
+	}
+}
+
+func setupPlainFolderSkeleton(t *testing.T) (home, root, projectDir string) {
+	t.Helper()
+	ctx := context.Background()
+	home = filepath.Join(t.TempDir(), ".devstrap")
+	root = filepath.Join(t.TempDir(), "Code")
+	projectPath := "work/acme/plain"
+	projectDir = filepath.Join(root, filepath.FromSlash(projectPath))
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := state.Open(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(store)
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureWorkspace(ctx, "test", root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnsureDevice(ctx, "device-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertProject(ctx, state.UpsertProjectParams{
+		Path:                 projectPath,
+		Type:                 "plain_folder",
+		MaterializationState: "skeleton",
+		DirtyState:           "clean",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return home, root, projectDir
+}
 
 func TestMaterializeRebuildsBeforeHydrate(t *testing.T) {
 	ctx := context.Background()

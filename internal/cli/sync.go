@@ -108,7 +108,7 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 		// P4-SYNC-02: the pull cursor fell behind the hub's retention floor.
 		// Recover via a full-state snapshot exchange, then resume incremental
 		// pulls (which now succeed because import advanced the cursors).
-		_, _ = fmt.Fprintln(stdout, "Recovering from hub snapshot (retention floor passed our cursor)…")
+		opts.progressf(stdout, "Recovering from hub snapshot (retention floor passed our cursor)…\n")
 		imported, rerr := recoverFromSnapshot(ctx, stdout, store, hub, hubID, opts.paths(), buildKeyring(ctx, opts, store))
 		if rerr != nil {
 			return rerr
@@ -172,11 +172,11 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 
 	if namespaceOnly {
 		if deferred {
-			_, err = fmt.Fprintf(stdout, "Synced namespace events: pulled %d; %d local event(s) queued awaiting workspace key grant\n", len(remoteEvents), len(localEvents))
-			return err
+			opts.progressf(stdout, "Synced namespace events: pulled %d; %d local event(s) queued awaiting workspace key grant\n", len(remoteEvents), len(localEvents))
+			return nil
 		}
-		_, err = fmt.Fprintf(stdout, "Synced namespace events: pushed %d, pulled %d\n", pushed, len(remoteEvents))
-		return err
+		opts.progressf(stdout, "Synced namespace events: pushed %d, pulled %d\n", pushed, len(remoteEvents))
+		return nil
 	}
 	// EAGER-01: eager materialization.
 	projects, err := store.SkeletonProjects(ctx)
@@ -187,11 +187,11 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 	results := materializePass(ctx, store, opts, projects, true)
 	// HUB-05: reclaim locally-cached blobs no longer referenced.
 	if removed, gcErr := gcUnreferencedBlobs(ctx, store, opts.paths()); gcErr == nil && removed > 0 {
-		_, _ = fmt.Fprintf(stdout, "GC'd %d unreferenced blob(s)\n", removed)
+		opts.progressf(stdout, "GC'd %d unreferenced blob(s)\n", removed)
 	}
-	_, err = fmt.Fprintf(stdout, "Synced events: pushed %d, pulled %d; materialized %d/%d projects (%d skipped)\n",
+	opts.progressf(stdout, "Synced events: pushed %d, pulled %d; materialized %d/%d projects (%d skipped)\n",
 		pushed, len(remoteEvents), results.succeeded, results.total, results.skipped)
-	return err
+	return nil
 }
 
 // pullApplyOutcome reports one pull+apply pass: the decrypted events and the
@@ -342,7 +342,7 @@ func maybeRotateWorkspaceKey(ctx context.Context, stdout io.Writer, opts *option
 		// queued and the failure loud.
 		return false, fmt.Errorf("periodic workspace key rotation failed (fix the cause or disable via keys.rotate_max_age=0 / --key-max-age 0): %w", rerr)
 	}
-	_, _ = fmt.Fprintf(stdout, "Rotated workspace key to epoch %d (epoch %d exceeded keys.rotate_max_age %s); %d grant event(s) ride this push\n",
+	opts.progressf(stdout, "Rotated workspace key to epoch %d (epoch %d exceeded keys.rotate_max_age %s); %d grant event(s) ride this push\n",
 		newEpoch, epoch, maxAge, len(grants))
 	return true, nil
 }
@@ -403,6 +403,11 @@ func pushLocalEventsGated(ctx context.Context, stdout io.Writer, opts *options, 
 		} else {
 			// Ungranted joiner (or empty-hub joiner): defer the push. Leaving the
 			// push cursor unadvanced keeps localEvents queued for a later cycle.
+			// Deliberately NOT gated by --quiet (unlike the summary lines above):
+			// this is the only explanation of a real actionable state — an
+			// unapproved device otherwise sees a silent no-op — and mirrors the
+			// analogous awaiting-grant message in recoverFromSnapshot
+			// (snapshot_recovery.go), which is likewise always visible.
 			_, _ = fmt.Fprintf(stdout, "Awaiting workspace key grant: %d local event(s) queued. "+
 				"On an approved device run 'devstrap devices enroll … --approve' (or 'devices approve <id>'), then re-run sync.\n", len(localEvents))
 			return 0, true, nil
@@ -437,7 +442,7 @@ func pushLocalEventsGated(ctx context.Context, stdout io.Writer, opts *options, 
 	if drained, derr := drainPendingHubDeletes(ctx, store, hub); derr != nil {
 		logging.Logger(ctx).Warn("sync: pending hub delete drain failed", "err", derr.Error())
 	} else if drained > 0 {
-		_, _ = fmt.Fprintf(stdout, "Removed %d superseded blob(s) from the hub\n", drained)
+		opts.progressf(stdout, "Removed %d superseded blob(s) from the hub\n", drained)
 	}
 	return len(localEvents), false, nil
 }
