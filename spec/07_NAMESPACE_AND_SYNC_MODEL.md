@@ -373,6 +373,18 @@ Detectors:
 
 On dangerous conflicts, write a `conflicts` row and never auto-overwrite local files. For same-path/different-remote namespace events, the active entry is selected by the canonical event order `(hlc, device_id, event_id)` and the conflict identity is keyed by `path + sorted(remote_key_a, remote_key_b)`. `created_at` is display-only and must not affect the winner.
 
+### Decide/Projection seam (`P5-ARCH-01`)
+
+The namespace-convergence reconciliation is split into a genuinely pure decision and an impure persistence step (`internal/sync/decide.go`):
+
+```text
+Decide(projection Projection, event state.Event) -> Decision{ []Mutation, []ConflictRecord }
+```
+
+`Projection` is an in-memory namespace map keyed by `path_key` (each row's status/tombstone-HLC/remote/source-event coordinates); `Decision` enumerates the intended effects as plain data — `Mutation`s (upsert/tombstone params) and `ConflictRecord`s — with **no DB handle, no I/O, no `*state.Tx`**. `applyEventTx` reduces to: load the projection slice for the event's path from `tx` → call the pure `Decide` → persist the returned mutations (`UpsertProject`/`TombstoneProject`) and conflicts (`InsertConflict`). Because reconciliation is now pure, convergence is property-tested by folding `Decide` over every permutation of a batch (`decide_property_test.go`) and asserting an order-independent final projection plus duplicate-idempotency — the structural coupling to `*state.Tx` is exactly what let the `P5-SYNC-02`/`P5-SYNC-03` convergence bugs ship behind green example tests.
+
+`Decide` owns the convergence core: `project.added`/`project.updated`/`project.deleted` (same-remote HLC last-writer-wins, same-path/different-remote reconciliation via the pre-existing pure `reconcileSamePath`, the tombstone HLC gate, and the delete-vs-dirty guard). It deliberately does **not** own `project.renamed` — its winner/collision decision is fused with an identity-preserving in-place re-key (`tx.RenameProject`) that also carries the linked `git_repos`/`device_project_state`/old-path-tombstone rows, and a rename payload has no remote, so expressing it as pure upsert/tombstone mutations would mint a fresh `namespace_entries` id and drop the git-repo linkage (a behavior change). `conflict.created`/`conflict.resolved` (conflict-log bookkeeping) and `draft.snapshot.created`/`device.key.granted` (side-effecting blob/grant recording) also remain inline in `applyEventTx`.
+
 ## Hub storage
 
 The hub is **two planes**, both zero-knowledge: (a) the append-only, signed, HLC-ordered event log — the namespace map — whose payloads are **envelope-encrypted** (`enc.v2`, XChaCha20-Poly1305 under a per-epoch Workspace Content Key with the full carrier tuple bound into the AEAD AAD, `P4-SEC-02`/`SEC-07`/`P6-SYNC-04`) so the hub stores only ciphertext carriers plus the signed carrier fields (ID/DeviceID/Seq/HLC/DeviceSig); and (b) a content-addressed encrypted blob store (`age_blob:<sha256>`) for env and non-git/draft content. The hub sees only ciphertext plus a signed carrier map — it cannot read code, secrets, drafts, or event payloads. Repo content rides git's own transport and never enters the hub. Confidentiality comes from client-side encryption; integrity and availability come from signed event/hash chains, scoped credentials, snapshots, and backups.

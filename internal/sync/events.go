@@ -675,62 +675,22 @@ func insertEventConflictOnce(ctx context.Context, st *state.Store, event state.E
 
 func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 	switch event.Type {
-	case EventProjectAdded, EventProjectUpdated:
-		var payload ProjectPayload
-		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
-			return fmt.Errorf("decode event %s: %w", event.ID, err)
-		}
-		if tombstoneHLC, ok, err := tx.TombstoneHLC(ctx, payload.Path); err != nil {
+	case EventProjectAdded, EventProjectUpdated, EventProjectDeleted:
+		// P5-ARCH-01: the namespace-convergence core (same-remote LWW,
+		// same-path/different-remote reconciliation, tombstone HLC gate,
+		// delete-vs-dirty guard) is a PURE decision. Load the projection slice
+		// for the event's path, decide, then persist the returned effects. The
+		// decision (Decide, decide.go) reads only in-memory values, so it can be
+		// convergence-property-tested by permutation (decide_property_test.go).
+		proj, err := loadNamespaceProjection(ctx, tx, event)
+		if err != nil {
 			return err
-		} else if ok && event.HLC <= tombstoneHLC {
-			return nil
 		}
-		existing, err := tx.ProjectByPath(ctx, payload.Path)
-		if err == nil && existing.RemoteKey != "" && payload.RemoteKey != "" && existing.RemoteKey != payload.RemoteKey {
-			winner, incomingWins, details, err := reconcileSamePath(existing, payload, event)
-			if err != nil {
-				return err
-			}
-			if incomingWins {
-				if _, err := tx.UpsertProject(ctx, upsertParamsForEvent(winner, event)); err != nil {
-					return err
-				}
-			}
-			return tx.InsertConflict(ctx, existing.ID, ConflictSamePathDifferentRemote, details)
+		decision, err := Decide(proj, event)
+		if err != nil {
+			return err
 		}
-		// SYNC-01: same-remote add/update must be HLC last-writer-wins. Only
-		// mutate when the incoming event coordinates strictly dominate the
-		// stored source-event coordinates; otherwise no-op so convergence is
-		// deterministic regardless of arrival order.
-		if err == nil {
-			cur := samePathCandidate{hlc: existing.SourceEventHLC, deviceID: existing.SourceEventDeviceID, eventID: existing.SourceEventID}
-			inc := samePathCandidate{hlc: event.HLC, deviceID: event.DeviceID, eventID: event.ID}
-			if !samePathLess(cur, inc) {
-				return nil // stored coords dominate → stale, skip
-			}
-		}
-		_, err = tx.UpsertProject(ctx, upsertParamsForEvent(payload, event))
-		return err
-	case EventProjectDeleted:
-		var payload ProjectPayload
-		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
-			return fmt.Errorf("decode event %s: %w", event.ID, err)
-		}
-		// SYNC-5: never destroy a dirty local checkout on a remote delete;
-		// surface a conflict for the user to resolve instead.
-		if existing, err := tx.ProjectByPath(ctx, payload.Path); err == nil && existing.DirtyState == dirtyStateDirty {
-			raw, err := json.Marshal(pendingDeleteConflictDetails{
-				Path:     payload.Path,
-				EventID:  event.ID,
-				DeviceID: event.DeviceID,
-				HLC:      event.HLC,
-			})
-			if err != nil {
-				return err
-			}
-			return tx.InsertConflict(ctx, existing.ID, ConflictPendingDelete, string(raw))
-		}
-		return tx.TombstoneProject(ctx, payload.Path, event.HLC)
+		return applyDecisionTx(ctx, tx, decision)
 	case EventProjectRenamed:
 		var payload RenamePayload
 		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
@@ -807,6 +767,84 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 	default:
 		return nil
 	}
+}
+
+// loadNamespaceProjection loads the projection slice Decide needs for a
+// namespace-convergence event (project.added/updated/deleted): the single row
+// (active or tombstoned) at the event's path, keyed by path_key. An absent path
+// yields an empty projection. This is the impure read half of the P5-ARCH-01
+// seam — everything downstream of it (Decide) is pure.
+func loadNamespaceProjection(ctx context.Context, tx *state.Tx, event state.Event) (Projection, error) {
+	var payload ProjectPayload
+	if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+		return nil, fmt.Errorf("decode event %s: %w", event.ID, err)
+	}
+	pk, err := pathkey.Clean(payload.Path)
+	if err != nil {
+		return nil, err
+	}
+	proj := Projection{}
+	// An active row (if any) supplies the remote/source-event coordinates for
+	// reconciliation and the dirty flag for the delete guard.
+	if active, err := tx.ProjectByPath(ctx, payload.Path); err == nil {
+		proj[pk.Key] = projectionRowFromStatus(active)
+		return proj, nil
+	}
+	// No active row: a standing tombstone (if any) supplies the HLC gate. An
+	// active row never coexists with a tombstone (upsert clears tombstone_hlc),
+	// so this read is only reached when nothing active was found.
+	tombHLC, ok, err := tx.TombstoneHLC(ctx, payload.Path)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		proj[pk.Key] = ProjectionRow{PathKey: pk.Key, Path: pk.Display, Status: projectionStatusDeleted, TombstoneHLC: tombHLC}
+	}
+	return proj, nil
+}
+
+// projectionRowFromStatus adapts a persisted active ProjectStatus into the
+// in-memory ProjectionRow Decide reconciles against.
+func projectionRowFromStatus(p state.ProjectStatus) ProjectionRow {
+	return ProjectionRow{
+		NamespaceID:         p.ID,
+		PathKey:             p.PathKey,
+		Path:                p.Path,
+		Type:                p.Type,
+		RemoteURL:           p.RemoteURL,
+		RemoteKey:           p.RemoteKey,
+		DefaultBranch:       p.DefaultBranch,
+		Status:              projectionStatusActive,
+		SourceEventHLC:      p.SourceEventHLC,
+		SourceEventDeviceID: p.SourceEventDeviceID,
+		SourceEventID:       p.SourceEventID,
+		DirtyState:          p.DirtyState,
+	}
+}
+
+// applyDecisionTx persists a pure Decision (the impure write half of the
+// P5-ARCH-01 seam): mutations first (upsert/tombstone), then conflicts, matching
+// the original inline ordering exactly (winner upsert precedes the
+// same-path/different-remote conflict insert).
+func applyDecisionTx(ctx context.Context, tx *state.Tx, decision Decision) error {
+	for _, m := range decision.Mutations {
+		switch m.Kind {
+		case MutationUpsert:
+			if _, err := tx.UpsertProject(ctx, m.Upsert); err != nil {
+				return err
+			}
+		case MutationTombstone:
+			if err := tx.TombstoneProject(ctx, m.Tombstone.Path, m.Tombstone.HLC); err != nil {
+				return err
+			}
+		}
+	}
+	for _, c := range decision.Conflicts {
+		if err := tx.InsertConflict(ctx, c.NamespaceID, c.Type, c.Details); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // dirtyStateDirty mirrors git.DirtyDirty without importing the git package into

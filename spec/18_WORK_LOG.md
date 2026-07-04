@@ -31,6 +31,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — refactor(sync): pure Decide(state,event) extraction (P5-ARCH-01)
+
+Changed:
+- `internal/sync/decide.go` (new): a `ProjectionRow`/`Projection` value type (the namespace-entry subset that governs convergence, no DB handle) + a PURE `Decide(proj, event) → Decision{[]Mutation, []ConflictRecord}` (no DB/IO/`*state.Tx`, no time/rand) reusing the already-pure `reconcileSamePath`/`samePathLess`/`upsertParamsForEvent`, plus a pure `Projection.Apply(Decision)` reducer for the property test.
+- `internal/sync/events.go`: `applyEventTx` reduced to load-projection (`loadNamespaceProjection`) → `Decide` → `applyDecisionTx` for `project.added/updated/deleted`. `project.renamed` (fused with `RenameProject`'s identity-preserving in-place re-key), `conflict.*`, `draft.snapshot.created`, `device.key.granted` stay inline (documented). No behavior change.
+- `internal/sync/decide_property_test.go` (new): folds `Decide`+`Apply` over ALL 8! permutations of a fixed event set asserting identical final `Projection` (convergence) + duplicate-delivery idempotency. Stdlib-only deterministic permutation generator (Heap's algorithm); no new module deps.
+- spec/07: a "Decide/Projection seam" note under Conflict detection.
+
+Validated:
+- `gofmt -l internal/sync` clean; `go build ./...`; `go test -race ./internal/sync/...` green (all existing apply/hlc tests unchanged + the new 40320-permutation property test); full `go test ./...` green. Independent opus review confirmed the no-behavior-change equivalence (ProjectByPath/TombstoneHLC mutual-exclusivity, rename rationale, ordering) — no blocking findings.
+
+Follow-ups:
+- Unblocks `P4-QUAL-02` (HLC-monotonicity / convergence model-checking now has a pure foundation).
+- **Review-surfaced pre-existing hazard (documented, not fixed here):** a delete tombstones unconditionally with its own HLC while a re-add is gated only against the tombstone HLC, so `D@5`→`A@10` and `A@10`→`D@5` on one path converge to DIFFERENT terminal states — a real strong-eventual-consistency gap, and the one interaction the property set deliberately excludes. Candidate fix: gate the delete against the live row's source-event coords. Recorded in the ledger P5-ARCH-01 row as a follow-up.
+
 ## 2026-07-04 — fix(git): honor the stored lfs_policy on materialize/hydrate (P6-GIT-04)
 
 Changed:
