@@ -627,10 +627,10 @@ or quarantined ciphertext, never someone else's plaintext.
 
 ```bash
 devstrap init ~/Code                 # mints the workspace id; does NOT self-mint a WCK yet
-# point sync at the hub in ~/.devstrap/config.yaml — the zero-infra default is any private
-# git repo (`hub: "git@github.com:you/devstrap-hub.git"`, no login needed); for R2/S3 use
-# `hub: r2://<bucket>` plus DEVSTRAP_HUB_S3_ENDPOINT (or `?endpoint=`) — see section A.4/B
-devstrap hub login                   # R2/S3 only: store the secret in the keychain slot
+# point sync at the hub in ~/.devstrap/config.yaml — the zero-infra default is an empty
+# private git repo (`hub: "git@github.com:you/devstrap-hub.git"`, no login needed).
+# For R2/S3 use `hub: r2://<bucket>` plus DEVSTRAP_HUB_S3_ENDPOINT (or `?endpoint=`)
+# and run `devstrap hub login` to store the secret in the keychain slot — see A.4/B and E.3.
 devstrap sync                        # founds epoch 1 against the empty hub and pushes the namespace map
 devstrap status                      # the `Workspace ID:` line (also `--json` → workspace_id)
 
