@@ -156,6 +156,48 @@ func (a *S3Adapter) DeleteObject(ctx context.Context, key string) error {
 	return mapped
 }
 
+// GetObjectWithETag returns the object bytes at key plus the object's ETag,
+// for compare-and-swap read-modify-write of the retention manifest
+// (P4-SYNC-02/P6-HUB-04).
+func (a *S3Adapter) GetObjectWithETag(ctx context.Context, key string) (data []byte, etag string, err error) {
+	out, gerr := a.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(a.bucket),
+		Key:    aws.String(key),
+	})
+	if gerr != nil {
+		return nil, "", mapS3Error(gerr)
+	}
+	defer func() {
+		if cerr := out.Body.Close(); cerr != nil && err == nil {
+			err = fmt.Errorf("close object body %s: %w", key, cerr)
+		}
+	}()
+	data, rerr := io.ReadAll(out.Body)
+	if rerr != nil {
+		return nil, "", fmt.Errorf("read object %s: %w", key, rerr)
+	}
+	if out.ETag != nil {
+		etag = *out.ETag
+	}
+	return data, etag, nil
+}
+
+// PutObjectIfMatch stores body at key conditionally on the current object
+// still carrying etag (If-Match — an S3 extension R2 supports on PUT). A lost
+// CAS race surfaces as ErrPreconditionFailed via mapS3Error.
+func (a *S3Adapter) PutObjectIfMatch(ctx context.Context, key string, body []byte, etag string) error {
+	in := &s3.PutObjectInput{
+		Bucket:  aws.String(a.bucket),
+		Key:     aws.String(key),
+		Body:    bytes.NewReader(body),
+		IfMatch: aws.String(etag),
+	}
+	if _, err := a.client.PutObject(ctx, in); err != nil {
+		return mapS3Error(err)
+	}
+	return nil
+}
+
 // ListObjectsV2 returns objects under prefix, lexicographically after
 // startAfter, up to maxKeys. When truncated, it returns the last key of the page
 // as nextStartAfter (the memS3 start-after contract — NOT the S3 continuation

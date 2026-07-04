@@ -15,8 +15,10 @@ import (
 // recordingHub is an in-memory Hub double that records pushed events and blobs
 // so the EncryptedHub decorator can be tested without filesystem I/O.
 type recordingHub struct {
-	events []state.Event
-	blobs  map[string][]byte
+	events    []state.Event
+	blobs     map[string][]byte
+	retention []byte
+	snapshots map[string][]byte
 }
 
 func (r *recordingHub) Push(_ context.Context, events []state.Event) error {
@@ -66,6 +68,72 @@ func (r *recordingHub) ListBlobs(_ context.Context) ([]BlobInfo, error) {
 		out = append(out, BlobInfo{Key: k})
 	}
 	return out, nil
+}
+
+// Retention/snapshot plane: an in-memory mirror of the FileHub semantics so
+// snapshot-exchange tests can drive the same contract through the decorator.
+
+func (r *recordingHub) GetRetention(_ context.Context) ([]byte, string, error) {
+	if r.retention == nil {
+		return nil, "", ErrRetentionNotFound
+	}
+	return r.retention, contentETag(r.retention), nil
+}
+
+func (r *recordingHub) PutRetention(_ context.Context, raw []byte, ifMatchETag string) error {
+	switch {
+	case r.retention == nil && ifMatchETag != "":
+		return ErrRetentionConflict
+	case r.retention != nil && ifMatchETag == "":
+		return ErrRetentionConflict
+	case r.retention != nil && contentETag(r.retention) != ifMatchETag:
+		return ErrRetentionConflict
+	}
+	r.retention = raw
+	return nil
+}
+
+func (r *recordingHub) PutSnapshotObject(_ context.Context, sha string, body []byte) error {
+	if r.snapshots == nil {
+		r.snapshots = map[string][]byte{}
+	}
+	r.snapshots[sha] = body
+	return nil
+}
+
+func (r *recordingHub) GetSnapshotObject(_ context.Context, sha string) ([]byte, error) {
+	body, ok := r.snapshots[sha]
+	if !ok {
+		return nil, ErrBlobNotFound
+	}
+	return body, nil
+}
+
+func (r *recordingHub) ListSnapshotObjects(_ context.Context) ([]BlobInfo, error) {
+	out := make([]BlobInfo, 0, len(r.snapshots))
+	for k := range r.snapshots {
+		out = append(out, BlobInfo{Key: k})
+	}
+	return out, nil
+}
+
+func (r *recordingHub) DeleteSnapshotObject(_ context.Context, sha string) error {
+	delete(r.snapshots, sha)
+	return nil
+}
+
+func (r *recordingHub) CompactEventsBelow(_ context.Context, floors Cursor) (int, error) {
+	kept := r.events[:0]
+	deleted := 0
+	for _, e := range r.events {
+		if e.Seq > 0 && floors.After(e.DeviceID) > 0 && e.Seq < floors.After(e.DeviceID) {
+			deleted++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	r.events = kept
+	return deleted, nil
 }
 
 // fakeKeyring is a WorkspaceKeyring double with pre-set WCKs (one per epoch)

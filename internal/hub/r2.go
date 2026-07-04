@@ -85,6 +85,15 @@ type S3Client interface {
 	// P5-SYNC-01 uses it to discover origin-device streams under the eventlog/
 	// prefix without listing every object.
 	ListCommonPrefixes(ctx context.Context, prefix, delimiter string) ([]string, error)
+	// GetObjectWithETag returns the object at key plus its ETag, for
+	// compare-and-swap read-modify-write of head objects (the retention
+	// manifest, P4-SYNC-02/P6-HUB-04). A missing object wraps
+	// dssync.ErrBlobNotFound.
+	GetObjectWithETag(ctx context.Context, key string) (data []byte, etag string, err error)
+	// PutObjectIfMatch stores data at key conditionally on the current object
+	// still carrying etag (If-Match). A lost race surfaces as
+	// ErrPreconditionFailed. R2 supports If-Match on PUT as an S3 extension.
+	PutObjectIfMatch(ctx context.Context, key string, body []byte, etag string) error
 }
 
 // R2Hub is the Cloudflare R2 zero-knowledge Hub backend (HUB-02). It implements
@@ -156,6 +165,22 @@ func (h R2Hub) legacyEventsPrefix() string {
 	return fmt.Sprintf("workspaces/%s/events/", h.WorkspaceID)
 }
 
+// retentionKey is the single mutable retention-manifest head object
+// (P4-SYNC-02/P6-HUB-04), guarded by compare-and-swap.
+func (h R2Hub) retentionKey() string {
+	return fmt.Sprintf("workspaces/%s/meta/retention.json", h.WorkspaceID)
+}
+
+// snapshotsPrefix holds the content-addressed sealed snapshot objects
+// (P4-HUB-11; layout reserved in spec/19).
+func (h R2Hub) snapshotsPrefix() string {
+	return fmt.Sprintf("workspaces/%s/snapshots/", h.WorkspaceID)
+}
+
+func (h R2Hub) snapshotKey(sha256Hex string) string {
+	return h.snapshotsPrefix() + sha256Hex + ".json"
+}
+
 func (h R2Hub) Push(ctx context.Context, events []state.Event) error {
 	for _, event := range events {
 		if ctx.Err() != nil {
@@ -194,8 +219,16 @@ func (h R2Hub) Push(ctx context.Context, events []state.Event) error {
 func (h R2Hub) Pull(ctx context.Context, after dssync.Cursor) ([]state.Event, error) {
 	// P5-HUB-03 (Seq-re-based): honor the per-device retention horizon. A
 	// cursor below any device's compaction floor means the incremental log has
-	// a gap only a full-state snapshot exchange can fill.
-	for dev, minRetained := range h.RetentionSeqs {
+	// a gap only a full-state snapshot exchange can fill. Floors come from the
+	// hub's retention manifest (P6-HUB-04), merged with the RetentionSeqs
+	// override. The manifest is read UNVERIFIED here — the backend holds no
+	// device registry; an unverified floor can only FORCE the snapshot path,
+	// where fail-closed verification lives.
+	floors, err := h.retentionFloors(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for dev, minRetained := range floors {
 		if minRetained > 0 && after.After(dev)+1 < minRetained {
 			return nil, dssync.ErrSnapshotRequired
 		}
@@ -442,6 +475,227 @@ func (h R2Hub) DeleteBlob(ctx context.Context, sha256Hex string) error {
 		return dssync.ErrInvalidBlobKey
 	}
 	return h.retry().do(ctx, func() error { return h.S3.DeleteObject(ctx, h.blobKey(sha256Hex)) })
+}
+
+// retentionFloors merges the retention manifest's per-device floors with the
+// RetentionSeqs test override (the override wins per device).
+func (h R2Hub) retentionFloors(ctx context.Context) (map[string]int64, error) {
+	floors := map[string]int64{}
+	raw, _, err := h.GetRetention(ctx)
+	switch {
+	case errors.Is(err, dssync.ErrRetentionNotFound):
+		// no compaction yet
+	case err != nil:
+		return nil, err
+	default:
+		parsed, perr := dssync.ParseRetentionFloors(raw)
+		if perr != nil {
+			// Fail closed: a garbled marker must not read as "no floor".
+			return nil, fmt.Errorf("read retention manifest: %w", perr)
+		}
+		for dev, seq := range parsed {
+			floors[dev] = seq
+		}
+	}
+	for dev, seq := range h.RetentionSeqs {
+		floors[dev] = seq
+	}
+	return floors, nil
+}
+
+// GetRetention returns the raw retention-manifest bytes plus the object's ETag
+// for CAS (P4-SYNC-02/P6-HUB-04). Absent manifest is ErrRetentionNotFound.
+func (h R2Hub) GetRetention(ctx context.Context) ([]byte, string, error) {
+	var raw []byte
+	var etag string
+	if err := h.retry().do(ctx, func() error {
+		var gerr error
+		raw, etag, gerr = h.S3.GetObjectWithETag(ctx, h.retentionKey())
+		return gerr
+	}); err != nil {
+		if errors.Is(err, dssync.ErrBlobNotFound) {
+			return nil, "", dssync.ErrRetentionNotFound
+		}
+		return nil, "", fmt.Errorf("get retention manifest: %w", err)
+	}
+	return raw, etag, nil
+}
+
+// PutRetention writes the retention manifest with compare-and-swap semantics:
+// ifMatchETag "" is create-only (If-None-Match: *); otherwise If-Match. A lost
+// race in either mode is dssync.ErrRetentionConflict — the caller must
+// re-read, re-derive floors, and retry or refuse.
+func (h R2Hub) PutRetention(ctx context.Context, raw []byte, ifMatchETag string) error {
+	var err error
+	if ifMatchETag == "" {
+		err = h.retry().do(ctx, func() error { return h.S3.PutObject(ctx, h.retentionKey(), raw, true) })
+	} else {
+		err = h.retry().do(ctx, func() error { return h.S3.PutObjectIfMatch(ctx, h.retentionKey(), raw, ifMatchETag) })
+	}
+	if err != nil {
+		if errors.Is(err, ErrPreconditionFailed) {
+			return fmt.Errorf("%w: %w", dssync.ErrRetentionConflict, err)
+		}
+		return fmt.Errorf("put retention manifest: %w", err)
+	}
+	return nil
+}
+
+// PutSnapshotObject stores a sealed snapshot object. Content-addressed: a 412
+// on the conditional put is definitionally a dedup hit (same sha256 = same
+// bytes), so concurrent compactors producing identical snapshots cannot
+// clobber or fail each other.
+func (h R2Hub) PutSnapshotObject(ctx context.Context, sha256Hex string, body []byte) error {
+	if !isValidHexKey(sha256Hex) {
+		return dssync.ErrInvalidBlobKey
+	}
+	if err := h.retry().do(ctx, func() error { return h.S3.PutObject(ctx, h.snapshotKey(sha256Hex), body, true) }); err != nil {
+		if errors.Is(err, ErrPreconditionFailed) {
+			return nil
+		}
+		return fmt.Errorf("put snapshot object %s: %w", sha256Hex, err)
+	}
+	return nil
+}
+
+// GetSnapshotObject returns a sealed snapshot object's bytes. A missing object
+// wraps dssync.ErrBlobNotFound.
+func (h R2Hub) GetSnapshotObject(ctx context.Context, sha256Hex string) ([]byte, error) {
+	if !isValidHexKey(sha256Hex) {
+		return nil, dssync.ErrInvalidBlobKey
+	}
+	var data []byte
+	if err := h.retry().do(ctx, func() error {
+		var gerr error
+		data, gerr = h.S3.GetObject(ctx, h.snapshotKey(sha256Hex))
+		return gerr
+	}); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// ListSnapshotObjects returns metadata for every snapshot object in this
+// workspace's snapshots prefix (compaction prunes superseded ones by age).
+func (h R2Hub) ListSnapshotObjects(ctx context.Context) ([]dssync.BlobInfo, error) {
+	prefix := h.snapshotsPrefix()
+	var out []dssync.BlobInfo
+	startAfter := ""
+	for {
+		var objs []dssync.BlobInfo
+		var next string
+		if err := h.retry().do(ctx, func() error {
+			var lerr error
+			objs, next, lerr = h.S3.ListObjectsV2(ctx, prefix, startAfter, 1000)
+			return lerr
+		}); err != nil {
+			return nil, fmt.Errorf("list snapshots: %w", err)
+		}
+		for _, obj := range objs {
+			key := strings.TrimSuffix(strings.TrimPrefix(obj.Key, prefix), ".json")
+			if isValidHexKey(key) {
+				out = append(out, dssync.BlobInfo{Key: key, LastModified: obj.LastModified})
+			}
+		}
+		if next == "" {
+			break
+		}
+		startAfter = next
+	}
+	return out, nil
+}
+
+// DeleteSnapshotObject removes a superseded snapshot object (idempotent).
+func (h R2Hub) DeleteSnapshotObject(ctx context.Context, sha256Hex string) error {
+	if !isValidHexKey(sha256Hex) {
+		return dssync.ErrInvalidBlobKey
+	}
+	return h.retry().do(ctx, func() error { return h.S3.DeleteObject(ctx, h.snapshotKey(sha256Hex)) })
+}
+
+// CompactEventsBelow deletes event objects strictly below each device's floor
+// (Seq < floors[dev]) in both layouts. The caller must have durably published
+// the superseding snapshot + manifest first (confirm-before-delete). In the
+// seq-keyed layout the per-device prefix list is bounded with StartAfter-free
+// enumeration from the stream head, stopping at the floor key; in the legacy
+// layout parsed (device, seq) keys below the floor are deleted and unparseable
+// keys are KEPT (fail safe — mirroring the dual-read's fail-open posture, a
+// parse bug must never delete an event it cannot account for).
+func (h R2Hub) CompactEventsBelow(ctx context.Context, floors dssync.Cursor) (int, error) {
+	deleted := 0
+	for dev, floor := range floors {
+		if floor <= 0 {
+			continue
+		}
+		dp := h.devicePrefix(dev)
+		// Everything below the floor sorts lexically below the bare padded
+		// floor key, so enumerate from the stream head and stop at the
+		// boundary — no full-stream listing.
+		stop := fmt.Sprintf("%s%020d", dp, floor)
+		startAfter := ""
+	deviceLoop:
+		for {
+			var page []dssync.BlobInfo
+			var next string
+			if err := h.retry().do(ctx, func() error {
+				var lerr error
+				page, next, lerr = h.S3.ListObjectsV2(ctx, dp, startAfter, 1000)
+				return lerr
+			}); err != nil {
+				return deleted, fmt.Errorf("list events for device %s: %w", dev, err)
+			}
+			for _, obj := range page {
+				if obj.Key >= stop {
+					break deviceLoop
+				}
+				if err := h.retry().do(ctx, func() error { return h.S3.DeleteObject(ctx, obj.Key) }); err != nil {
+					return deleted, fmt.Errorf("delete event object %s: %w", obj.Key, err)
+				}
+				deleted++
+			}
+			if next == "" {
+				break
+			}
+			startAfter = next
+		}
+	}
+	// Legacy layout: parse (device, seq); delete only what parses below its
+	// device's floor.
+	prefix := h.legacyEventsPrefix()
+	startAfter := ""
+	for {
+		var page []dssync.BlobInfo
+		var next string
+		if err := h.retry().do(ctx, func() error {
+			var lerr error
+			page, next, lerr = h.S3.ListObjectsV2(ctx, prefix, startAfter, 1000)
+			return lerr
+		}); err != nil {
+			return deleted, fmt.Errorf("list legacy events: %w", err)
+		}
+		for _, obj := range page {
+			rest := strings.TrimPrefix(obj.Key, prefix)
+			parts := strings.Split(rest, "/")
+			if len(parts) != 4 {
+				continue // unparseable: keep
+			}
+			seq, perr := strconv.ParseInt(parts[2], 10, 64)
+			if perr != nil || seq <= 0 {
+				continue // unparseable or pre-sequence: keep
+			}
+			if floor := floors.After(parts[1]); floor > 0 && seq < floor {
+				if err := h.retry().do(ctx, func() error { return h.S3.DeleteObject(ctx, obj.Key) }); err != nil {
+					return deleted, fmt.Errorf("delete legacy event object %s: %w", obj.Key, err)
+				}
+				deleted++
+			}
+		}
+		if next == "" {
+			break
+		}
+		startAfter = next
+	}
+	return deleted, nil
 }
 
 // isValidHexKey checks for a 64-char hex digest with no path separators.

@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -95,7 +96,26 @@ type BlobInfo struct {
 //
 // The object-key contract is immutable: events and blobs are addressed by
 // content-derived, collision-resistant identifiers and are never overwritten in
-// place (HUB-06).
+// place (HUB-06). The single exception is the retention manifest, which is a
+// mutable head object guarded by compare-and-swap (PutRetention).
+//
+// Retention/snapshot plane (P4-SYNC-02 / P4-HUB-11 / P6-HUB-04):
+//   - GetRetention returns the raw signed retention-manifest bytes plus an
+//     opaque etag for CAS. Absent manifest (no compaction ever) returns
+//     ErrRetentionNotFound.
+//   - PutRetention writes the manifest conditionally: ifMatchETag "" means
+//     create-only (the manifest must not exist yet); otherwise the write
+//     succeeds only if the current object still matches the etag. A lost race
+//     returns ErrRetentionConflict. The hub cannot verify the signature — the
+//     manifest is verified fail-closed by importers (see snapshot.go).
+//   - Snapshot objects are content-addressed by the sha256 of their sealed
+//     bytes (concurrent compactors can never clobber each other) and immutable;
+//     DeleteSnapshotObject exists only so compaction can prune superseded
+//     snapshots.
+//   - CompactEventsBelow deletes event objects strictly below each device's
+//     floor (Seq < floors[dev]). Callers must have durably published a
+//     superseding snapshot + manifest FIRST — the hub does not enforce the
+//     ordering; the compactor's confirm-before-delete protocol does.
 type Hub interface {
 	Push(ctx context.Context, events []state.Event) error
 	Pull(ctx context.Context, after Cursor) ([]state.Event, error)
@@ -106,6 +126,13 @@ type Hub interface {
 	// (P5-HUB-02). It is the enumeration primitive for mark-and-sweep hub GC:
 	// list everything, delete what no current binding/snapshot references.
 	ListBlobs(ctx context.Context) ([]BlobInfo, error)
+	GetRetention(ctx context.Context) (raw []byte, etag string, err error)
+	PutRetention(ctx context.Context, raw []byte, ifMatchETag string) error
+	PutSnapshotObject(ctx context.Context, sha256Hex string, body []byte) error
+	GetSnapshotObject(ctx context.Context, sha256Hex string) ([]byte, error)
+	ListSnapshotObjects(ctx context.Context) ([]BlobInfo, error)
+	DeleteSnapshotObject(ctx context.Context, sha256Hex string) error
+	CompactEventsBelow(ctx context.Context, floors Cursor) (deleted int, err error)
 }
 
 // FileHub is a file-backed test Hub (HUB-01). The event log is a single JSON
@@ -148,8 +175,16 @@ func (h FileHub) Push(ctx context.Context, events []state.Event) error {
 
 func (h FileHub) Pull(ctx context.Context, after Cursor) ([]state.Event, error) {
 	// P5-HUB-03 (Seq-re-based): a cursor below any device's retention floor
-	// means the incremental log has a gap only a snapshot can fill.
-	for dev, minRetained := range h.RetentionSeqs {
+	// means the incremental log has a gap only a snapshot can fill. The floor
+	// comes from the hub's retention manifest (P6-HUB-04), merged with the
+	// RetentionSeqs test override. The manifest is read UNVERIFIED here — the
+	// backend holds no device registry; an unverified floor can only FORCE the
+	// snapshot path, where fail-closed verification lives.
+	floors, err := h.retentionFloors(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for dev, minRetained := range floors {
 		if minRetained > 0 && after.After(dev)+1 < minRetained {
 			return nil, ErrSnapshotRequired
 		}
@@ -290,9 +325,207 @@ func (h FileHub) ListBlobs(_ context.Context) ([]BlobInfo, error) {
 	return out, nil
 }
 
+// retentionFloors merges the retention manifest's per-device floors (when a
+// manifest exists) with the RetentionSeqs test override; the override wins
+// per device so tests can tighten a floor without writing a manifest.
+func (h FileHub) retentionFloors(ctx context.Context) (map[string]int64, error) {
+	floors := map[string]int64{}
+	raw, _, err := h.GetRetention(ctx)
+	switch {
+	case errors.Is(err, ErrRetentionNotFound):
+		// no compaction yet
+	case err != nil:
+		return nil, err
+	default:
+		parsed, perr := ParseRetentionFloors(raw)
+		if perr != nil {
+			// Fail closed: a garbled marker must not read as "no floor".
+			return nil, fmt.Errorf("read retention manifest: %w", perr)
+		}
+		for dev, seq := range parsed {
+			floors[dev] = seq
+		}
+	}
+	for dev, seq := range h.RetentionSeqs {
+		floors[dev] = seq
+	}
+	return floors, nil
+}
+
+// GetRetention returns the raw retention-manifest bytes plus an etag (the
+// sha256 hex of the bytes — FileHub has no HTTP etags).
+func (h FileHub) GetRetention(_ context.Context) ([]byte, string, error) {
+	raw, err := os.ReadFile(h.retentionPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, "", ErrRetentionNotFound
+		}
+		return nil, "", fmt.Errorf("read retention manifest: %w", err)
+	}
+	return raw, contentETag(raw), nil
+}
+
+// PutRetention writes the retention manifest with compare-and-swap semantics:
+// ifMatchETag "" requires that no manifest exists yet; otherwise the current
+// bytes must still hash to ifMatchETag. A lost race is ErrRetentionConflict.
+func (h FileHub) PutRetention(_ context.Context, raw []byte, ifMatchETag string) error {
+	if err := os.MkdirAll(h.metaDir(), 0o700); err != nil {
+		return fmt.Errorf("create hub meta dir: %w", err)
+	}
+	current, err := os.ReadFile(h.retentionPath())
+	switch {
+	case os.IsNotExist(err):
+		if ifMatchETag != "" {
+			return fmt.Errorf("%w: manifest absent, expected etag %s", ErrRetentionConflict, ifMatchETag)
+		}
+	case err != nil:
+		return fmt.Errorf("read retention manifest: %w", err)
+	default:
+		if ifMatchETag == "" {
+			return fmt.Errorf("%w: manifest already exists", ErrRetentionConflict)
+		}
+		if contentETag(current) != ifMatchETag {
+			return fmt.Errorf("%w: etag mismatch", ErrRetentionConflict)
+		}
+	}
+	if err := os.WriteFile(h.retentionPath(), raw, 0o600); err != nil {
+		return fmt.Errorf("write retention manifest: %w", err)
+	}
+	return nil
+}
+
+// PutSnapshotObject stores a sealed snapshot object keyed by the sha256 of its
+// bytes. Content-addressed: an existing object is a no-op.
+func (h FileHub) PutSnapshotObject(_ context.Context, sha256Hex string, body []byte) error {
+	if err := validateBlobKey(sha256Hex); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(h.snapshotDir(), 0o700); err != nil {
+		return fmt.Errorf("create hub snapshot dir: %w", err)
+	}
+	dst := h.snapshotPath(sha256Hex)
+	if _, err := os.Stat(dst); err == nil {
+		return nil // content-addressed dedup
+	}
+	if err := os.WriteFile(dst, body, 0o600); err != nil {
+		return fmt.Errorf("write snapshot object: %w", err)
+	}
+	return nil
+}
+
+// GetSnapshotObject returns a sealed snapshot object. Missing objects wrap
+// ErrBlobNotFound.
+func (h FileHub) GetSnapshotObject(_ context.Context, sha256Hex string) ([]byte, error) {
+	if err := validateBlobKey(sha256Hex); err != nil {
+		return nil, err
+	}
+	//nolint:gosec // The path is derived from a validated hex digest under the hub snapshot dir.
+	raw, err := os.ReadFile(h.snapshotPath(sha256Hex))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: snapshot %s", ErrBlobNotFound, sha256Hex)
+		}
+		return nil, fmt.Errorf("read snapshot object: %w", err)
+	}
+	return raw, nil
+}
+
+// ListSnapshotObjects returns metadata for every snapshot object on the hub
+// (compaction prunes superseded ones by age, keeping the newest N).
+func (h FileHub) ListSnapshotObjects(_ context.Context) ([]BlobInfo, error) {
+	entries, err := os.ReadDir(h.snapshotDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("list hub snapshots: %w", err)
+	}
+	var out []BlobInfo
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		key := strings.TrimSuffix(e.Name(), ".json")
+		if validateBlobKey(key) == nil {
+			info, err := e.Info()
+			if err != nil {
+				return nil, fmt.Errorf("stat hub snapshot %s: %w", key, err)
+			}
+			out = append(out, BlobInfo{Key: key, LastModified: info.ModTime()})
+		}
+	}
+	return out, nil
+}
+
+// DeleteSnapshotObject removes a superseded snapshot object (idempotent).
+func (h FileHub) DeleteSnapshotObject(_ context.Context, sha256Hex string) error {
+	if err := validateBlobKey(sha256Hex); err != nil {
+		return err
+	}
+	if err := os.Remove(h.snapshotPath(sha256Hex)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete snapshot object: %w", err)
+	}
+	return nil
+}
+
+// CompactEventsBelow deletes events strictly below each device's floor
+// (Seq > 0 && Seq < floors[dev]). Pre-sequence events (Seq <= 0) are never
+// compacted — they cannot be covered by a Seq floor. The caller must have
+// durably published the superseding snapshot + manifest first.
+func (h FileHub) CompactEventsBelow(ctx context.Context, floors Cursor) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	all, err := h.read()
+	if err != nil {
+		return 0, err
+	}
+	kept := all[:0]
+	deleted := 0
+	for _, event := range all {
+		if event.Seq > 0 && floors.After(event.DeviceID) > 0 && event.Seq < floors.After(event.DeviceID) {
+			deleted++
+			continue
+		}
+		kept = append(kept, event)
+	}
+	if deleted == 0 {
+		return 0, nil
+	}
+	if err := h.write(kept); err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
+
+func (h FileHub) baseName() string {
+	return strings.TrimSuffix(filepath.Base(h.Path), filepath.Ext(h.Path))
+}
+
+func (h FileHub) metaDir() string {
+	return filepath.Join(filepath.Dir(h.Path), h.baseName()+"-meta")
+}
+
+func (h FileHub) snapshotDir() string {
+	return filepath.Join(filepath.Dir(h.Path), h.baseName()+"-snapshots")
+}
+
+func (h FileHub) retentionPath() string {
+	return filepath.Join(h.metaDir(), "retention.json")
+}
+
+func (h FileHub) snapshotPath(sha256Hex string) string {
+	return filepath.Join(h.snapshotDir(), sha256Hex+".json")
+}
+
+// contentETag is FileHub's etag: the sha256 hex of the object bytes.
+func contentETag(raw []byte) string {
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
 func (h FileHub) blobDir() string {
-	base := strings.TrimSuffix(filepath.Base(h.Path), filepath.Ext(h.Path))
-	return filepath.Join(filepath.Dir(h.Path), base+"-blobs")
+	return filepath.Join(filepath.Dir(h.Path), h.baseName()+"-blobs")
 }
 
 func (h FileHub) blobPath(sha256Hex string) string {
