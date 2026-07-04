@@ -1,0 +1,75 @@
+# P6-DATA-04: `db backup --full` captures the state DB, the encrypted env
+# blob, and the device key material into one tar; `db restore` reconstructs the
+# whole state dir so `env hydrate` recovers the same secret after the state dir
+# is wiped. Runs under DEVSTRAP_NO_KEYCHAIN so keys live in the KeyDir and the
+# round-trip is hermetic.
+
+env DEVSTRAP_HOME=$WORK/home
+env DEVSTRAP_ROOT=$WORK/Code
+env DEVSTRAP_NO_KEYCHAIN=1
+
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+# Bare remote with one commit so `add` references a valid remote.
+exec git init --bare -b main $WORK/remote.git
+exec git clone $WORK/remote.git $WORK/src
+exec sh -c 'echo hello > $WORK/src/README.md'
+exec sh -c 'cd $WORK/src && git add README.md && git commit -m init && git branch -M main && git push origin main'
+
+exec devstrap init $WORK/Code
+exec devstrap add --path work/proj $WORK/remote.git
+exec devstrap hydrate work/proj
+
+# Give config.yaml a hub pointer so we can prove it round-trips.
+exec sh -c 'echo "hub: \"r2://roundtrip-bucket\"" >> $WORK/home/config.yaml'
+
+# Capture a secret into an age-encrypted blob.
+exec sh -c 'echo "API_KEY=roundtrip-secret" > $WORK/Code/work/proj/.env'
+exec devstrap env capture work/proj .env
+stdout 'Captured'
+
+# Full backup: one tar with state.db + config.yaml + blobs + keys.
+exec devstrap db backup --full $WORK/backup.tar
+stdout 'config: true'
+exists $WORK/backup.tar
+
+# The DB-only backup path still works and writes a bare .db.
+exec devstrap db backup $WORK/state-only.db
+stdout 'backup written'
+
+# Wipe the entire state dir: DB, config, blobs, and keys all gone.
+rm $WORK/home
+! exists $WORK/home
+
+# Restore reconstructs the captured paths.
+exec devstrap db restore $WORK/backup.tar
+stdout 'restored state dir'
+exists $WORK/home/state.db
+exec sh -c 'grep roundtrip-bucket $WORK/home/config.yaml'
+exec sh -c 'ls $WORK/home/blobs/*.age'
+exec sh -c 'ls $WORK/home/keys/*.agekey'
+
+# doctor confirms no dangling blob refs after restore.
+exec devstrap doctor
+stdout 'blob refs'
+
+# The secret decrypts again from the restored blob + key material.
+exec devstrap env hydrate work/proj --write .env.local
+stdout 'Hydrated'
+exec sh -c 'grep roundtrip-secret $WORK/Code/work/proj/.env.local'
+
+# An un-captured file under the state dir must survive a --force restore.
+mkdir $WORK/home/quarantine
+exec sh -c 'echo keep > $WORK/home/quarantine/keep.txt'
+
+# Restoring over the now-populated state dir is refused without --force.
+! exec devstrap db restore $WORK/backup.tar
+stderr 'not empty'
+exec devstrap db restore $WORK/backup.tar --force
+stdout 'restored state dir'
+
+# The un-captured quarantine file is still there.
+exists $WORK/home/quarantine/keep.txt

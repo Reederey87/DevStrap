@@ -1,0 +1,514 @@
+package cli
+
+import (
+	"archive/tar"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/Reederey87/DevStrap/internal/config"
+	"github.com/Reederey87/DevStrap/internal/devicekeys"
+	"github.com/Reederey87/DevStrap/internal/platform"
+	"github.com/Reederey87/DevStrap/internal/state"
+)
+
+// A full backup (P6-DATA-04) is a single uncompressed tar with a fixed layout;
+// every entry is a regular file with mode 0600:
+//
+//	state.db                 VACUUM INTO snapshot of the live state database
+//	config.yaml              hub pointer, root, workspace_name, role, key age
+//	blobs/<sha256>.age       every age-encrypted secret referenced by the DB
+//	keys/<file>              device identity, signing key, WCK epochs, hub creds
+//
+// The DB alone is not a recoverable backup: secrets live in blobs/ and are
+// decryptable only with the private key material in keys/, and the hub pointer
+// (`hub:`) plus custom `root:` live in config.yaml — without it a restored
+// workspace cannot re-pull hub-synced drafts or target the right root. `db
+// backup <path>` (no --full) keeps writing a bare .db; `db backup --full
+// <path.tar>` writes this archive and `db restore <path.tar>` reconstructs the
+// captured paths in place.
+const (
+	backupEntryDB     = "state.db"
+	backupEntryConfig = "config.yaml"
+	backupDirBlobs    = "blobs"
+	backupDirKeys     = "keys"
+	backupEntryMode   = 0o600
+	backupDirModePerm = 0o700
+)
+
+// backupTargets is the set of top-level paths `db backup --full` captures and
+// `db restore` replaces in place. Anything else in the state dir (e.g.
+// quarantine/, logs/) is neither captured nor touched by restore.
+var backupTargets = []string{backupEntryDB, backupEntryConfig, backupDirBlobs, backupDirKeys}
+
+// fullBackupResult is the machine-readable summary of a full backup.
+type fullBackupResult struct {
+	Path         string   `json:"path"`
+	Config       bool     `json:"config"`
+	Blobs        int      `json:"blobs"`
+	Keys         int      `json:"keys"`
+	MissingBlobs []string `json:"missing_blobs,omitempty"`
+}
+
+// runFullBackup writes a self-contained tar archive of the state database, the
+// referenced encrypted blobs, and the device/workspace key material (P6-DATA-04).
+// The store is already open; the DB snapshot is taken with VACUUM INTO (a
+// consistent snapshot on a live WAL database — no exclusive lock).
+func runFullBackup(ctx context.Context, opts *options, store *state.Store, out string, stdout io.Writer) error {
+	paths := opts.paths()
+
+	// Stage the DB snapshot in a sibling temp dir so a mid-write failure never
+	// leaves a partial archive next to the requested output path.
+	stageDir, err := os.MkdirTemp(filepath.Dir(out), ".devstrap-backup-")
+	if err != nil {
+		return appError{code: exitInvalidConfig, err: fmt.Errorf("create backup staging dir: %w", err)}
+	}
+	defer func() { _ = os.RemoveAll(stageDir) }()
+
+	tmpDB := filepath.Join(stageDir, backupEntryDB)
+	if err := store.Backup(ctx, tmpDB); err != nil { // VACUUM INTO + chmod 0600 + validate
+		return err
+	}
+
+	refs, err := store.AllBlobRefs(ctx)
+	if err != nil {
+		return err
+	}
+
+	keySourceDir, keyNames, err := stageBackupKeys(ctx, opts, store, filepath.Join(stageDir, backupDirKeys))
+	if err != nil {
+		return err
+	}
+
+	result, err := writeBackupTar(out, tmpDB, paths, refs, keySourceDir, keyNames)
+	if err != nil {
+		return err
+	}
+
+	if len(result.MissingBlobs) > 0 {
+		_, _ = fmt.Fprintf(stdout, "warning: %d referenced blob(s) missing on disk and omitted (run `devstrap doctor`):\n", len(result.MissingBlobs))
+		for _, ref := range result.MissingBlobs {
+			_, _ = fmt.Fprintf(stdout, "  %s\n", ref)
+		}
+	}
+	if result.Keys == 0 {
+		_, _ = fmt.Fprintln(stdout, "warning: no key material captured; this archive cannot decrypt secrets on its own")
+	}
+	if !result.Config {
+		_, _ = fmt.Fprintln(stdout, "warning: no config.yaml found; the hub pointer and custom root will not be restored")
+	}
+	return opts.render(stdout, func(w io.Writer) error {
+		_, err := fmt.Fprintf(w, "full backup written: %s (config: %t, %d blob(s), %d key file(s))\n", result.Path, result.Config, result.Blobs, result.Keys)
+		return err
+	}, result)
+}
+
+// stageBackupKeys resolves this device's key material into a directory tree that
+// mirrors the on-disk KeyDir layout, returning the source directory and the
+// basenames to add under keys/. Under file custody the KeyDir is authoritative
+// and captured verbatim; otherwise (keychain or legacy) the secrets are escrowed
+// out of the active custody backend into keysStage (P6-DATA-04).
+func stageBackupKeys(ctx context.Context, opts *options, store *state.Store, keysStage string) (string, []string, error) {
+	paths := opts.paths()
+	recorded, err := store.KeyCustody(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	device, err := store.CurrentDevice(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	if state.EffectiveKeyCustody(recorded) == devicekeys.CustodyFile {
+		names, err := listRegularFiles(paths.KeyDir())
+		if err != nil {
+			return "", nil, appError{code: exitInvalidConfig, err: fmt.Errorf("read key directory: %w", err)}
+		}
+		// Symmetric with the keychain-escrow branch: a "full" backup must not
+		// silently omit the device identity or signing key just because the
+		// file-custody KeyDir happens to be missing them.
+		present := make(map[string]bool, len(names))
+		for _, n := range names {
+			present[n] = true
+		}
+		for _, want := range []string{device.ID + ".agekey", device.ID + ".signing.key"} {
+			if !present[want] {
+				return "", nil, appError{code: exitInvalidConfig, err: fmt.Errorf("full backup incomplete: key file %s missing from %s", want, paths.KeyDir())}
+			}
+		}
+		return paths.KeyDir(), names, nil
+	}
+
+	workspaceID, err := store.WorkspaceID(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	held, err := store.HeldKeys(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	epochs := make([]devicekeys.BackupEpoch, 0, len(held))
+	for _, k := range held {
+		epochs = append(epochs, devicekeys.BackupEpoch{Epoch: k.Epoch, KID: k.KID})
+	}
+	keyStore, err := resolveKeyStore(ctx, paths, store)
+	if err != nil {
+		return "", nil, err
+	}
+	names, err := keyStore.ExportForBackup(ctx, keysStage, device.ID, workspaceID, epochs)
+	if err != nil {
+		return "", nil, appError{code: exitInvalidConfig, err: fmt.Errorf("escrow key material for full backup: %w", err)}
+	}
+	return keysStage, names, nil
+}
+
+// writeBackupTar assembles the archive. Blob refs whose ciphertext is missing on
+// disk are skipped (not fatal) and reported in the result so the operator learns
+// which captured secrets are already unrecoverable.
+func writeBackupTar(out, dbPath string, paths config.Paths, refs []string, keySourceDir string, keyNames []string) (result fullBackupResult, err error) {
+	//nolint:gosec // out is an explicit user-selected output path.
+	f, err := os.OpenFile(out, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, backupEntryMode)
+	if err != nil {
+		return fullBackupResult{}, appError{code: exitInvalidConfig, err: fmt.Errorf("create backup archive: %w", err)}
+	}
+	closed := false
+	// On any failure, close and remove the partial archive so a truncated file
+	// is never left behind labeled as a backup.
+	defer func() {
+		if !closed {
+			_ = f.Close()
+		}
+		if err != nil {
+			_ = os.Remove(out)
+		}
+	}()
+	if err = os.Chmod(out, backupEntryMode); err != nil {
+		return fullBackupResult{}, fmt.Errorf("secure backup archive: %w", err)
+	}
+
+	tw := tar.NewWriter(f)
+	result = fullBackupResult{Path: out}
+
+	if err := addFileToTar(tw, backupEntryDB, dbPath); err != nil {
+		return fullBackupResult{}, err
+	}
+
+	// config.yaml carries the hub pointer + custom root; capture it if present.
+	// It is non-secret but still written 0600 to match the source file.
+	configSrc := filepath.Join(paths.Home, backupEntryConfig)
+	if _, statErr := os.Stat(configSrc); statErr == nil {
+		if err := addFileToTar(tw, backupEntryConfig, configSrc); err != nil {
+			return fullBackupResult{}, err
+		}
+		result.Config = true
+	}
+
+	blobDir := filepath.Join(paths.Home, backupDirBlobs)
+	for _, ref := range refs {
+		hash, herr := envBlobHash(ref)
+		if herr != nil {
+			result.MissingBlobs = append(result.MissingBlobs, ref)
+			continue
+		}
+		src := filepath.Join(blobDir, hash+".age")
+		if _, serr := os.Stat(src); serr != nil {
+			result.MissingBlobs = append(result.MissingBlobs, ref)
+			continue
+		}
+		if err := addFileToTar(tw, path.Join(backupDirBlobs, hash+".age"), src); err != nil {
+			return fullBackupResult{}, err
+		}
+		result.Blobs++
+	}
+
+	sortedKeys := append([]string(nil), keyNames...)
+	sort.Strings(sortedKeys)
+	for _, name := range sortedKeys {
+		if err := addFileToTar(tw, path.Join(backupDirKeys, name), filepath.Join(keySourceDir, name)); err != nil {
+			return fullBackupResult{}, err
+		}
+		result.Keys++
+	}
+	sort.Strings(result.MissingBlobs)
+
+	if err := tw.Close(); err != nil {
+		return fullBackupResult{}, fmt.Errorf("finalize backup archive: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		return fullBackupResult{}, fmt.Errorf("flush backup archive: %w", err)
+	}
+	closed = true
+	if err := f.Close(); err != nil {
+		return fullBackupResult{}, fmt.Errorf("close backup archive: %w", err)
+	}
+	return result, nil
+}
+
+// addFileToTar copies src into the archive under name with a fixed 0600 mode.
+func addFileToTar(tw *tar.Writer, name, src string) error {
+	//nolint:gosec // src is an internally-derived path under the DevStrap home / staging dir.
+	f, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open %s for backup: %w", name, err)
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat %s for backup: %w", name, err)
+	}
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     name,
+		Mode:     backupEntryMode,
+		Size:     info.Size(),
+		Typeflag: tar.TypeReg,
+	}); err != nil {
+		return fmt.Errorf("write backup header %s: %w", name, err)
+	}
+	if _, err := io.Copy(tw, f); err != nil {
+		return fmt.Errorf("write backup entry %s: %w", name, err)
+	}
+	return nil
+}
+
+// listRegularFiles returns the basenames of the regular files directly under
+// dir, sorted. A missing directory is an error; an empty one returns no names.
+func listRegularFiles(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		// Only capture real files; skip symlinks and other special entries.
+		info, err := e.Info()
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// runRestore extracts a full backup archive and replaces the captured paths
+// (state.db, config.yaml, blobs/, keys/) IN PLACE in the state directory
+// (P6-DATA-04). Anything else already in the state dir — quarantine/, logs/, or
+// any un-captured file — is left intact; a restore is not a wipe. It refuses to
+// overwrite when a captured target already exists unless force is set. Extraction
+// is staged in a sibling temp dir and the DB is validated before any swap, so a
+// corrupt or malicious archive never half-replaces the live state dir.
+func runRestore(ctx context.Context, opts *options, in string, force bool, stdout io.Writer) error {
+	home := opts.paths().Home
+
+	if !force {
+		occupied, err := stateDirHasBackupTargets(home)
+		if err != nil {
+			return appError{code: exitInvalidConfig, err: fmt.Errorf("inspect state dir: %w", err)}
+		}
+		if occupied {
+			return appError{code: exitConflict, err: fmt.Errorf("state dir %s is not empty (already holds restore targets); pass --force to overwrite them", home)}
+		}
+	}
+
+	parent := filepath.Dir(home)
+	if err := os.MkdirAll(parent, backupDirModePerm); err != nil {
+		return appError{code: exitInvalidConfig, err: fmt.Errorf("create state dir parent: %w", err)}
+	}
+	stage, err := os.MkdirTemp(parent, ".devstrap-restore-")
+	if err != nil {
+		return appError{code: exitInvalidConfig, err: fmt.Errorf("create restore staging dir: %w", err)}
+	}
+	defer func() { _ = os.RemoveAll(stage) }()
+
+	//nolint:gosec // in is an explicit user-selected archive path.
+	f, err := os.Open(in)
+	if err != nil {
+		return appError{code: exitInvalidConfig, err: fmt.Errorf("open backup archive: %w", err)}
+	}
+	defer func() { _ = f.Close() }()
+	if err := extractBackupTar(f, stage); err != nil {
+		return err
+	}
+
+	dbPath := filepath.Join(stage, backupEntryDB)
+	if _, err := os.Stat(dbPath); err != nil {
+		return appError{code: exitInvalidConfig, err: fmt.Errorf("backup archive has no %s", backupEntryDB)}
+	}
+	if err := state.ValidateDBFile(ctx, dbPath); err != nil {
+		return appError{code: exitInvalidConfig, err: fmt.Errorf("restored database failed validation: %w", err)}
+	}
+	// Drop any -wal/-shm the validation open may have left so they do not ride
+	// the swap into the live state dir.
+	for _, sfx := range []string{"-wal", "-shm"} {
+		_ = os.Remove(dbPath + sfx)
+	}
+
+	if err := os.MkdirAll(home, backupDirModePerm); err != nil {
+		return appError{code: exitInvalidConfig, err: fmt.Errorf("create state dir: %w", err)}
+	}
+	var restored []string
+	for _, name := range backupTargets {
+		swapped, err := swapBackupTarget(home, stage, name)
+		if err != nil {
+			return err
+		}
+		if swapped {
+			restored = append(restored, name)
+		}
+	}
+
+	warnKeychainCustodyRestore(ctx, opts, stdout)
+	return opts.render(stdout, func(w io.Writer) error {
+		_, err := fmt.Fprintf(w, "restored state dir: %s (%s)\n", home, strings.Join(restored, ", "))
+		return err
+	}, map[string]any{"restored": home, "items": restored})
+}
+
+// warnKeychainCustodyRestore prints the custody-reconciliation guidance when the
+// just-restored DB records keychain custody (P6-DATA-04). A --full archive lands
+// key material as FILES, but a keychain-custody store reads the keychain — which
+// is empty on a fresh machine — so without this warning the wedge is silent.
+func warnKeychainCustodyRestore(ctx context.Context, opts *options, stdout io.Writer) {
+	store, err := opts.openState(ctx)
+	if err != nil {
+		return
+	}
+	defer closeStore(store)
+	recorded, err := store.KeyCustody(ctx)
+	if err != nil {
+		return
+	}
+	if recorded == devicekeys.CustodyKeychain && state.EffectiveKeyCustody(recorded) == devicekeys.CustodyKeychain {
+		_, _ = fmt.Fprintf(stdout, "warning: this workspace records keychain custody, but the restored key material is on disk and the keychain is empty on a fresh machine.\n"+
+			"Run devstrap under %s=1 (file custody) or re-migrate the escrowed keys into the keychain before syncing.\n", platform.NoKeychainEnv)
+	}
+}
+
+// extractBackupTar unpacks an archive into dst. Every entry is validated against
+// path traversal (zip-slip), restricted to the known state.db/config.yaml/blobs/
+// keys layout, and written 0600; non-regular entries (dirs, symlinks) are rejected.
+func extractBackupTar(r io.Reader, dst string) error {
+	tr := tar.NewReader(r)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return appError{code: exitInvalidConfig, err: fmt.Errorf("read backup archive: %w", err)}
+		}
+		name, err := sanitizeBackupEntry(hdr.Name)
+		if err != nil {
+			return appError{code: exitInvalidConfig, err: err}
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			return appError{code: exitInvalidConfig, err: fmt.Errorf("unexpected archive entry type for %q", hdr.Name)}
+		}
+		target := filepath.Join(dst, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(target), backupDirModePerm); err != nil {
+			return fmt.Errorf("create restore subdir: %w", err)
+		}
+		//nolint:gosec // name is zip-slip-guarded by sanitizeBackupEntry (no absolute paths, no ".." components, confined to the state.db/blobs/keys layout) and joined under the caller's staging dir.
+		out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, backupEntryMode)
+		if err != nil {
+			return fmt.Errorf("create restored file %s: %w", name, err)
+		}
+		//nolint:gosec // hdr.Size is bounded by a local, operator-supplied archive.
+		if _, err := io.Copy(out, tr); err != nil {
+			_ = out.Close()
+			return fmt.Errorf("write restored file %s: %w", name, err)
+		}
+		if err := out.Close(); err != nil {
+			return fmt.Errorf("close restored file %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// sanitizeBackupEntry rejects unsafe archive entry names (absolute paths,
+// backslashes, or any ".." component) and confines the result to the archive's
+// known layout: exactly state.db or config.yaml at top level, or a single-level
+// file under blobs/ or keys/.
+func sanitizeBackupEntry(name string) (string, error) {
+	if name == "" || strings.HasPrefix(name, "/") || strings.Contains(name, `\`) || filepath.IsAbs(name) {
+		return "", fmt.Errorf("unsafe archive entry %q", name)
+	}
+	clean := path.Clean(name)
+	parts := strings.Split(clean, "/")
+	for _, p := range parts {
+		if p == ".." || p == "." || p == "" {
+			return "", fmt.Errorf("unsafe archive entry %q", name)
+		}
+	}
+	switch {
+	case len(parts) == 1 && (clean == backupEntryDB || clean == backupEntryConfig):
+		return clean, nil
+	case (strings.HasPrefix(clean, backupDirBlobs+"/") || strings.HasPrefix(clean, backupDirKeys+"/")) && len(parts) == 2:
+		return clean, nil
+	default:
+		return "", fmt.Errorf("unexpected archive entry %q", name)
+	}
+}
+
+// swapBackupTarget replaces home/name with stage/name when the archive carried
+// it, preserving the previous copy under a .bak sibling until the rename
+// succeeds and rolling back on failure. A target absent from the archive is a
+// no-op. Because it swaps a single top-level path (a file or a whole subtree),
+// un-captured siblings in home are never touched. Returns whether it restored.
+func swapBackupTarget(home, stage, name string) (bool, error) {
+	src := filepath.Join(stage, name)
+	if _, err := os.Stat(src); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect staged %s: %w", name, err)
+	}
+	dst := filepath.Join(home, name)
+	aside := dst + ".bak-" + strconv.Itoa(os.Getpid())
+	existed := false
+	if _, err := os.Stat(dst); err == nil {
+		if err := os.Rename(dst, aside); err != nil {
+			return false, fmt.Errorf("move existing %s aside: %w", name, err)
+		}
+		existed = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("inspect existing %s: %w", name, err)
+	}
+	if err := os.Rename(src, dst); err != nil {
+		if existed {
+			_ = os.Rename(aside, dst) // best-effort rollback
+		}
+		return false, fmt.Errorf("promote restored %s: %w", name, err)
+	}
+	if existed {
+		_ = os.RemoveAll(aside)
+	}
+	return true, nil
+}
+
+// stateDirHasBackupTargets reports whether the state dir already holds any of
+// the paths a restore would replace (P6-DATA-04). Scoping the non-empty refusal
+// to the captured targets means un-captured siblings (quarantine/, logs/) never
+// block a restore, and a genuinely fresh state dir restores without --force.
+func stateDirHasBackupTargets(home string) (bool, error) {
+	for _, name := range backupTargets {
+		if _, err := os.Stat(filepath.Join(home, name)); err == nil {
+			return true, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
+	}
+	return false, nil
+}

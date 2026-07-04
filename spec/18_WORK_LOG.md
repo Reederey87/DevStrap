@@ -31,6 +31,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — feat(db): full backup/restore for the whole workspace secret set (P6-DATA-04)
+
+Changed:
+- `internal/cli/db_backup.go` (new): `devstrap db backup --full <out.tar>` captures `state.db` (`VACUUM INTO`, no exclusive lock on the live WAL) + the `blobs/<sha256>.age` files `AllBlobRefs` reports + key material + `config.yaml`, all `0600`. Key capture is custody-aware: file custody copies `KeyDir` (asserting the device age + signing basenames are present — a missing one is a hard error, symmetric with keychain custody); keychain custody escrows via `devicekeys.HybridStore.ExportForBackup` (device age + Ed25519 signing + every held WCK epoch from `HeldKeys` + hub S3 creds; a missing required key is a hard error naming it). `db restore <in.tar>` refuses a non-empty state dir without `--force`, validates the staged DB (`ValidateDBFile` = `quick_check`+`foreign_key_check`) BEFORE promoting, and swaps ONLY the captured targets in place (`swapBackupTarget`: move-aside `.bak-<pid>` + rename + rollback) so un-captured Home contents (`quarantine/`, `logs/`) survive. `sanitizeBackupEntry` is a zip-slip guard (rejects abs paths, any `..`, symlinks/non-regular entries, out-of-layout paths; `O_EXCL` extraction).
+- `internal/cli/db.go`: `--full` flag on `backup`; new `restore` subcommand (render/appError-consistent).
+- `internal/cli/doctor.go`: new `checkDanglingBlobRefs` (every `AllBlobRefs` entry has an on-disk `blobs/<sha>.age`); the two `quick_check` remedies now point at `db backup --full`.
+- `internal/devicekeys/devicekeys.go`: `ExportForBackup`. `internal/state/store.go`: `ValidateDBFile` exported.
+- spec/12 disaster-recovery runbook (what `--full` captures, restore, operator duty to store the archive encrypted since it holds private keys, keychain-custody caveat); spec/13 documents `backup --full`/`restore` + the doctor check.
+
+Validated:
+- `gofmt -l cmd internal` clean; `go build ./...`; **full `go test ./...` green** (`-race` on cli/devicekeys/cmd). Round-trip test: `env capture → db backup --full → wipe Home → db restore → env hydrate` recovers the identical plaintext AND config `hub`/`root` survive; `--force` restore preserves a pre-existing `quarantine/keep.txt`; zip-slip vectors rejected; doctor flags a deleted referenced blob. Independent opus review (one blocking finding — config.yaml omission / whole-Home wipe — fixed; two optional gaps closed: file-custody missing-key hard error, keychain-custody restore warning).
+
+Follow-ups:
+- Keychain-custody restore lands key material as files but the restored DB still records `keychain`; the operator runs under `DEVSTRAP_NO_KEYCHAIN=1` or re-migrates (surfaced at restore + documented in spec/12).
+
 ## 2026-07-04 — feat(run-loop): idempotent scan stage (P6-XP-03)
 
 Changed:
