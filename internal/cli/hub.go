@@ -388,16 +388,23 @@ func parseGitCarrierURI(uri string) (remote, branch string, err error) {
 	if !strings.HasPrefix(strings.ToLower(u.Scheme), "git+") {
 		return "", "", fmt.Errorf("unrecognized git hub %q (want git+ssh://..., git+https://..., git+file://..., or git@host:path.git)", u.Redacted())
 	}
-	if u.User != nil {
-		if _, hasPassword := u.User.Password(); hasPassword {
-			return "", "", fmt.Errorf("git hub uri %q must not contain credentials", u.Redacted())
-		}
-	}
 	realScheme := strings.TrimPrefix(strings.ToLower(u.Scheme), "git+")
 	switch realScheme {
 	case "ssh", "https", "file":
 	default:
 		return "", "", fmt.Errorf("unsupported git hub scheme %q", u.Scheme)
+	}
+	if u.User != nil {
+		// An ssh username (git@) is routing, not a secret. Anything else is a
+		// credential: an https "username" is how tokens ride URIs (PATs), and
+		// the remote URL is persisted verbatim into the carrier clone's
+		// .git/config — the git carrier must never store transport credentials
+		// (auth belongs to the user's agent/credential helper).
+		// Never echo the URI here: url.Redacted masks only passwords, and an
+		// https token typically rides the USERNAME slot.
+		if _, hasPassword := u.User.Password(); hasPassword || realScheme != "ssh" {
+			return "", "", errors.New("git hub uri must not contain credentials (use your ssh agent or git credential helper)")
+		}
 	}
 	if b := u.Query().Get("branch"); b != "" {
 		if !dsgit.SafeBranchName(b) {

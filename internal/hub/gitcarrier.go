@@ -73,9 +73,14 @@ const (
 	// workspaces/ listing prefix, so Hub enumeration never sees it.
 	gitTimesPrefix = ".devstrap-meta/times/"
 	// gitLockStale is when a same-machine cross-process lock is considered
-	// abandoned. Carrier operations can legitimately hold the lock for a long
-	// fetch, so this is far laxer than FileHub's 10s.
-	gitLockStale = 30 * time.Minute
+	// abandoned. A LIVE holder heartbeats the lock file's mtime every
+	// gitLockHeartbeat (even while blocked in a long git subprocess — the
+	// heartbeat is a goroutine), so a lock this stale means its holder died;
+	// age alone would otherwise steal the shared checkout from a holder
+	// legitimately inside a long fetch.
+	gitLockStale = 10 * time.Minute
+	// gitLockHeartbeat is how often a live holder refreshes the lock mtime.
+	gitLockHeartbeat = time.Minute
 	// gitLockWait is how long a second local process waits for the lock.
 	gitLockWait = 2 * time.Minute
 )
@@ -106,6 +111,9 @@ type GitCarrierHub struct {
 	fetchedSHA string
 	// sleep is a test seam for the backoff between push attempts.
 	sleep func(time.Duration)
+	// lockWait/lockHeartbeat are test seams for the cross-process lock timing.
+	lockWait      time.Duration
+	lockHeartbeat time.Duration
 }
 
 // Compile-time assertion that *GitCarrierHub satisfies dssync.Hub.
@@ -134,35 +142,60 @@ func NewGitCarrierHub(remote, branch, workspaceID, cacheRoot string) (*GitCarrie
 	sum := sha256.Sum256([]byte(remote + "\n" + branch))
 	base := filepath.Join(cacheRoot, hex.EncodeToString(sum[:])[:16])
 	dir := filepath.Join(base, "repo")
-	store := &fsObjectStore{root: dir}
+	store := &fsObjectStore{root: dir, obsPath: filepath.Join(base, "observed.json")}
 	return &GitCarrierHub{
-		remote:      remote,
-		branch:      branch,
-		workspaceID: workspaceID,
-		dir:         dir,
-		lockPath:    filepath.Join(base, "repo.lock"),
-		runner:      git.NewRunner(),
-		store:       store,
-		r2:          R2Hub{S3: store, WorkspaceID: workspaceID},
-		sleep:       time.Sleep,
+		remote:        remote,
+		branch:        branch,
+		workspaceID:   workspaceID,
+		dir:           dir,
+		lockPath:      filepath.Join(base, "repo.lock"),
+		runner:        git.NewRunner(),
+		store:         store,
+		r2:            R2Hub{S3: store, WorkspaceID: workspaceID},
+		sleep:         time.Sleep,
+		lockWait:      gitLockWait,
+		lockHeartbeat: gitLockHeartbeat,
 	}, nil
 }
 
 // lock takes the in-process mutex plus the cross-process lock file and returns
 // the release func. The lock file lives OUTSIDE the checkout so git clean can
-// never remove a held lock.
+// never remove a held lock. While held, a heartbeat goroutine refreshes the
+// lock file's mtime every lockHeartbeat, so the gitLockStale breaker can only
+// ever fire on a DEAD holder — a live process blocked in an hour-long fetch
+// keeps its lock warm and can never have the shared checkout stolen and reset
+// underneath it.
 func (g *GitCarrierHub) lock() (func(), error) {
 	g.mu.Lock()
 	if err := os.MkdirAll(filepath.Dir(g.lockPath), 0o700); err != nil {
 		g.mu.Unlock()
 		return nil, fmt.Errorf("create git hub cache dir: %w", err)
 	}
-	deadline := time.Now().Add(gitLockWait)
+	deadline := time.Now().Add(g.lockWait)
 	for {
 		f, err := os.OpenFile(g.lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // lock file under the private hub cache dir
 		if err == nil {
+			_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
 			_ = f.Close()
+			stop := make(chan struct{})
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				ticker := time.NewTicker(g.lockHeartbeat)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-stop:
+						return
+					case <-ticker.C:
+						now := time.Now()
+						_ = os.Chtimes(g.lockPath, now, now)
+					}
+				}
+			}()
 			return func() {
+				close(stop)
+				<-done
 				_ = os.Remove(g.lockPath)
 				g.mu.Unlock()
 			}, nil
@@ -172,7 +205,7 @@ func (g *GitCarrierHub) lock() (func(), error) {
 			return nil, fmt.Errorf("acquire git hub lock %s: %w", g.lockPath, err)
 		}
 		if info, serr := os.Stat(g.lockPath); serr == nil && time.Since(info.ModTime()) > gitLockStale {
-			_ = os.Remove(g.lockPath) // abandoned by a crashed process
+			_ = os.Remove(g.lockPath) // no heartbeat for gitLockStale: the holder is dead
 			continue
 		}
 		if time.Now().After(deadline) {
@@ -395,11 +428,21 @@ func (g *GitCarrierHub) DeleteDeviceStream(ctx context.Context, deviceID string)
 }
 
 // MigrateLegacyEvents is a structural no-op: the git carrier never had the
-// retired HLC-keyed layout. Delegated for symmetric reporting.
+// retired HLC-keyed layout. Delegated for symmetric reporting. A dry run goes
+// through the READ path — the write loop would seed the carrier marker (and,
+// on an empty carrier, create the branch), violating the CLI's
+// report-without-writing dry-run contract.
 func (g *GitCarrierHub) MigrateLegacyEvents(ctx context.Context, dryRun bool) (int, int, error) {
 	var migrated, kept int
+	if dryRun {
+		err := g.readRefresh(ctx, func() (ferr error) {
+			migrated, kept, ferr = g.r2.MigrateLegacyEvents(ctx, true)
+			return ferr
+		})
+		return migrated, kept, err
+	}
 	err := g.writeLoop(ctx, "migrate-events", func() (ferr error) {
-		migrated, kept, ferr = g.r2.MigrateLegacyEvents(ctx, dryRun)
+		migrated, kept, ferr = g.r2.MigrateLegacyEvents(ctx, false)
 		return ferr
 	})
 	return migrated, kept, err
@@ -539,6 +582,17 @@ func (g *GitCarrierHub) GetSweepLock(ctx context.Context) ([]byte, time.Time, er
 		raw, mod, ferr = g.r2.GetSweepLock(ctx)
 		return ferr
 	})
+	// Clamp the lock's age DOWN to this clone's observation floor: a
+	// future-dated sidecar (skewed or hostile holder clock) must not make a
+	// dead holder's lock unbreakable — once THIS reader has watched the lock
+	// for a full TTL, it is stale regardless of its self-reported time. The
+	// opposite direction (modTime's max-floor) intentionally does not apply
+	// here: it protects freshness for gc, while the breaker needs age.
+	if err == nil {
+		if obs, ok := g.store.observedAt(fmt.Sprintf("workspaces/%s/meta/sweep.lock", g.workspaceID)); ok && obs.Before(mod) {
+			mod = obs
+		}
+	}
 	return raw, mod, err
 }
 
@@ -622,12 +676,30 @@ func (g *GitCarrierHub) CompactEventsBelow(ctx context.Context, floors dssync.Cu
 // R2's freshness behavior: an unconditional dedup re-put refreshes the time
 // even though the object bytes are unchanged — and the changed sidecar is what
 // makes the write loop commit and propagate that refresh.
+//
+// Sidecar times are WRITER-reported, and destructive age decisions (the gc
+// grace window) must not trust a skewed writer: a two-days-slow device would
+// otherwise upload a blob whose sidecar already looks past the grace window,
+// and another device's `hub gc` could delete it before its referencing event
+// lands. The store therefore keeps a per-clone OBSERVATION FLOOR
+// (observed.json beside the clone, never inside the repo): the first time this
+// clone sees a key it records its own clock, and every reported LastModified
+// is floored at that observation — no object can ever look older to a reader
+// than the reader has known about it, so "younger than the grace window" is
+// judged against the reader's clock, exactly like R2's server time. The cost
+// is that a fresh clone sees everything as newly-observed and its gc keeps
+// everything for one extra grace window — fail-safe by construction.
 type fsObjectStore struct {
 	root string
+	// obsPath is the per-clone observation index (key -> RFC3339Nano first
+	// seen by THIS clone). Outside the checkout: never committed, never reset.
+	obsPath string
 	// wmu guards concurrent writers within one process (R2Hub's push/pull
 	// fan-out calls S3Client methods concurrently; distinct keys write
 	// distinct files, but MkdirAll+WriteFile pairs stay simplest serialized).
+	// It also guards the observation index.
 	wmu sync.Mutex
+	obs map[string]time.Time
 }
 
 func (s *fsObjectStore) keyPath(key string) (string, error) {
@@ -650,15 +722,76 @@ func (s *fsObjectStore) writeTimestamp(key string) error {
 }
 
 func (s *fsObjectStore) modTime(key string) time.Time {
-	raw, err := os.ReadFile(s.timePath(key))
-	if err != nil {
-		return time.Time{} // no sidecar: zero time reads as "keep" to gc (fail-safe)
+	sidecar := time.Time{}
+	if raw, err := os.ReadFile(s.timePath(key)); err == nil {
+		if t, perr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(raw))); perr == nil {
+			sidecar = t
+		}
 	}
-	t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(raw)))
-	if err != nil {
-		return time.Time{}
+	// Floor at this clone's first observation: a skewed-slow writer's sidecar
+	// can never make an object look older than the READER has known it.
+	obs := s.observe(key)
+	if sidecar.Before(obs) {
+		return obs
 	}
-	return t
+	return sidecar
+}
+
+// observe returns the first time THIS clone saw key, recording now for a key
+// it has never seen. Persisted beside the clone so the floor survives
+// restarts; a lost index only makes everything look newly observed (fail-safe).
+func (s *fsObjectStore) observe(key string) time.Time {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	return s.observeLocked(key, time.Now().UTC())
+}
+
+func (s *fsObjectStore) observeLocked(key string, now time.Time) time.Time {
+	if s.obs == nil {
+		s.obs = map[string]time.Time{}
+		if raw, err := os.ReadFile(s.obsPath); err == nil {
+			_ = json.Unmarshal(raw, &s.obs)
+		}
+	}
+	if t, ok := s.obs[key]; ok {
+		return t
+	}
+	s.obs[key] = now
+	s.saveObsLocked()
+	return now
+}
+
+// observedAt reports the observation floor without recording a new one.
+func (s *fsObjectStore) observedAt(key string) (time.Time, bool) {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	if s.obs == nil {
+		s.obs = map[string]time.Time{}
+		if raw, err := os.ReadFile(s.obsPath); err == nil {
+			_ = json.Unmarshal(raw, &s.obs)
+		}
+	}
+	t, ok := s.obs[key]
+	return t, ok
+}
+
+func (s *fsObjectStore) forgetObservedLocked(key string) {
+	if s.obs == nil {
+		return
+	}
+	delete(s.obs, key)
+	s.saveObsLocked()
+}
+
+func (s *fsObjectStore) saveObsLocked() {
+	raw, err := json.Marshal(s.obs)
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(s.obsPath), 0o700); err != nil {
+		return
+	}
+	_ = os.WriteFile(s.obsPath, raw, 0o600)
 }
 
 func (s *fsObjectStore) PutObject(_ context.Context, key string, body []byte, ifNoneMatch bool) error {
@@ -679,6 +812,7 @@ func (s *fsObjectStore) PutObject(_ context.Context, key string, body []byte, if
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		return fmt.Errorf("write git hub object: %w", err)
 	}
+	s.observeLocked(key, time.Now().UTC())
 	return s.writeTimestamp(key)
 }
 
@@ -724,6 +858,7 @@ func (s *fsObjectStore) DeleteObject(_ context.Context, key string) error {
 	if err := os.Remove(s.timePath(key)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("delete git hub object sidecar: %w", err)
 	}
+	s.forgetObservedLocked(key)
 	return nil
 }
 
@@ -850,6 +985,7 @@ func (s *fsObjectStore) PutObjectIfMatch(_ context.Context, key string, body []b
 	if err := os.WriteFile(path, body, 0o600); err != nil {
 		return fmt.Errorf("write git hub object: %w", err)
 	}
+	s.observeLocked(key, time.Now().UTC())
 	return s.writeTimestamp(key)
 }
 

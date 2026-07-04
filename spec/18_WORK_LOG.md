@@ -44,6 +44,13 @@ Validated:
 - `gofmt -l cmd internal` (clean); `golangci-lint run` (0 issues); `go run ./cmd/spec-drift --base origin/main --head HEAD`.
 - `GOCACHE=/tmp/devstrap-gocache go test -race ./...` including the new git-carrier conformance/race/compact suites and the `sync_git_hub` two-device e2e through the real binary.
 
+Post-review (dual + adversarial, all fixed in-PR):
+- (Codex P1) `git+https://<token>@host` — a token in the https USERNAME slot passed the password-only check and would persist into the carrier clone's `.git/config`; any https userinfo is now rejected, and the rejection error no longer echoes the URI (`url.Redacted` masks only passwords). Pinned by the `https token as username` case (leak-checked).
+- (Codex P2) `hub migrate-events --dry-run` entered the write loop and could seed the marker/branch on an empty carrier; dry-run now rides the read path. Pinned by `TestGitCarrierDryRunMigrateWritesNothing` (`ls-remote` stays empty).
+- (Adversarial HIGH) writer-clock sidecars drove destructive age decisions — a days-slow writer's fresh blob could look past another device's gc grace window and be deleted before its referencing event landed; a future-dated dead holder's sweep lock was unbreakable. Fix: per-clone observation floor (`observed.json` beside the clone; blob times floored UP at first-seen-by-this-reader, sweep-lock time clamped DOWN to it). Pinned by `TestGitCarrierSkewedOldSidecarCannotAgeABlob` / `TestGitCarrierFutureSweepLockIsBreakableAfterObservedTTL` (both via real remote-side sidecar tampering).
+- (Adversarial HIGH) the 30m age-only lock break could steal the shared clone from a live holder blocked in a long fetch; the lock file is now heartbeated (1m) while held with a 10m stale window, so the breaker fires only on dead holders. Pinned by `TestGitCarrierLiveLockIsNotStolenAndDeadLockIs`.
+- The adversarial pass could NOT construct a double-granted sweep lock, a double-succeeding retention CAS, or a compaction schedule that permanently loses a concurrent device's events — the push-ref CAS + refetch-reapply claims held.
+
 Follow-ups:
 - Remaining AD-1 slices (spec/14): quickstart-default swap (README/`init` hints still teach `r2://` first), `devstrap hub init <git-url>` bootstrap, local-folder / cloud-drive-folder carrier, partial-clone cache optimization.
 - Live dogfood against a real private GitHub repo (two-device simulation + `hub compact`), recorded spec/19-§F-style, before the quickstart-default swap.

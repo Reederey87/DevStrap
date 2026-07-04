@@ -89,6 +89,14 @@ func TestParseGitCarrierURIRejectsInvalid(t *testing.T) {
 			notWant: secret,
 		},
 		{
+			// A token often rides the https USERNAME slot (PATs). The remote
+			// URL is persisted into the carrier clone's .git/config, so any
+			// https userinfo is a credential and must be rejected.
+			name:    "https token as username",
+			uri:     "git+https://" + secret + "@host/path.git",
+			notWant: secret,
+		},
+		{
 			name: "empty",
 			uri:  "",
 		},
