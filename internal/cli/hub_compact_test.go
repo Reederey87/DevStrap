@@ -84,7 +84,7 @@ func TestHubCompactHappyPath(t *testing.T) {
 	defer closeStore(store)
 
 	var out bytes.Buffer
-	if err := hubCompact(env.ctx, &out, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 2, 0, false); err != nil {
+	if err := hubCompact(env.ctx, &out, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 2, 0, true, false); err != nil {
 		t.Fatalf("hubCompact: %v", err)
 	}
 	fh := dssync.FileHub{Path: env.hubPath}
@@ -113,7 +113,7 @@ func TestHubCompactHappyPath(t *testing.T) {
 	}
 	// The compactor's own pull cursor was advanced to floor-1, so a re-sync is
 	// incremental (no self-snapshot demand) — a second compact must succeed.
-	if err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 2, 0, false); err != nil {
+	if err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 2, 0, true, false); err != nil {
 		t.Fatalf("second hubCompact: %v", err)
 	}
 }
@@ -125,7 +125,7 @@ func TestHubCompactDryRunWritesNothing(t *testing.T) {
 	defer closeStore(store)
 
 	var out bytes.Buffer
-	if err := hubCompact(env.ctx, &out, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 2, 0, true); err != nil {
+	if err := hubCompact(env.ctx, &out, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 2, 0, true, true); err != nil {
 		t.Fatalf("hubCompact --dry-run: %v", err)
 	}
 	fh := dssync.FileHub{Path: env.hubPath}
@@ -151,7 +151,7 @@ func TestHubCompactMinEventsRefusal(t *testing.T) {
 	defer closeStore(store)
 
 	// Two events would be deleted (floor 3 → seqs 1,2); require 5.
-	err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 2, 5, false)
+	err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 2, 5, true, false)
 	if err == nil || !strings.Contains(err.Error(), "min-events") {
 		t.Fatalf("hubCompact err = %v, want a --min-events refusal", err)
 	}
@@ -169,7 +169,7 @@ func TestHubCompactGateRefusesOnOpenConflict(t *testing.T) {
 	if err := store.InsertConflict(env.ctx, "", dssync.ConflictEventVerification, `{"event_id":"evt_q"}`); err != nil {
 		t.Fatalf("InsertConflict: %v", err)
 	}
-	err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 2, 0, false)
+	err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 2, 0, true, false)
 	if !errors.Is(err, errGCRefused) {
 		t.Fatalf("hubCompact err = %v, want errGCRefused (shared incomplete-view gate)", err)
 	}
@@ -187,7 +187,7 @@ func TestHubCompactGateRefusesOnKeyGrantWait(t *testing.T) {
 	if _, err := store.NoteMissingKeyGrant(env.ctx, 7, strings.Repeat("b", 64)); err != nil {
 		t.Fatalf("NoteMissingKeyGrant: %v", err)
 	}
-	err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 2, 0, false)
+	err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 2, 0, true, false)
 	if !errors.Is(err, errGCRefused) {
 		t.Fatalf("hubCompact err = %v, want errGCRefused on an open key grant wait", err)
 	}
@@ -205,7 +205,7 @@ func TestHubCompactKeylessJoinerRefuses(t *testing.T) {
 	if _, err := addProject(env.ctx, store, env.opts, "git@github.com:acme/api.git", "work/api", "", ""); err != nil {
 		t.Fatalf("addProject: %v", err)
 	}
-	err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 2, 0, false)
+	err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 2, 0, true, false)
 	if err == nil || !strings.Contains(err.Error(), "cannot compact") {
 		t.Fatalf("hubCompact err = %v, want a keyless cannot-compact refusal", err)
 	}
@@ -330,7 +330,7 @@ func TestHubCompactConfirmsBeforeDelete(t *testing.T) {
 	env, store, _ := setupCompact(t)
 	defer closeStore(store)
 	rec := &recordingHub{Hub: env.hub(t, store)}
-	if err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, rec, env.hubID, env.paths, 2, 0, false); err != nil {
+	if err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, rec, env.hubID, env.paths, 2, 0, true, false); err != nil {
 		t.Fatalf("hubCompact: %v", err)
 	}
 	del := firstIndex(rec.calls, "compact")
@@ -363,7 +363,7 @@ func TestHubCompactCASConflictRetriesOnce(t *testing.T) {
 			t.Errorf("inject competing manifest: %v", err)
 		}
 	}
-	if err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, rec, env.hubID, env.paths, 2, 0, false); err != nil {
+	if err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, rec, env.hubID, env.paths, 2, 0, true, false); err != nil {
 		t.Fatalf("hubCompact with one CAS conflict: %v", err)
 	}
 	// The head is now OUR manifest (producer self), and the retry re-put once.
@@ -394,14 +394,14 @@ func TestHubCompactCASConflictRetriesOnce(t *testing.T) {
 func TestHubCompactPrunesOldSnapshots(t *testing.T) {
 	env, store, _ := setupCompact(t)
 	defer closeStore(store)
-	if err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 2, 0, false); err != nil {
+	if err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 2, 0, true, false); err != nil {
 		t.Fatalf("first hubCompact: %v", err)
 	}
 	// A new local project gives the second compaction something to advance.
 	if _, err := addProject(env.ctx, store, env.opts, "git@github.com:acme/cli.git", "work/cli", "", ""); err != nil {
 		t.Fatalf("addProject: %v", err)
 	}
-	if err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 1, 0, false); err != nil {
+	if err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 1, 0, true, false); err != nil {
 		t.Fatalf("second hubCompact: %v", err)
 	}
 	fh := dssync.FileHub{Path: env.hubPath}

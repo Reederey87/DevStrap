@@ -353,6 +353,15 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 				} else if rewrapped > 0 {
 					_, _ = fmt.Fprintf(stderr, "Re-encrypted %d blob(s) to the reduced recipient set\n", rewrapped)
 				}
+				// P4-SYNC-06: drop the revoked device's stale sync ack so it can no
+				// longer be listed by a compactor. Best-effort — a compactor already
+				// ignores acks from non-approved devices, and `hub compact` reclaims
+				// the whole stream, so a failure here is not fatal.
+				if hub != nil {
+					if aerr := hub.DeleteAck(cmd.Context(), args[0]); aerr != nil {
+						_, _ = fmt.Fprintf(stderr, "warning: failed to delete %s's sync ack from the hub: %v\n", args[0], aerr)
+					}
+				}
 				if hub == nil {
 					// P5-PROD-02: the old draft ciphertext is queued (pending_hub_deletes)
 					// and deleted on the next hub-enabled sync — state that plainly

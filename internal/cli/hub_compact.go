@@ -22,6 +22,7 @@ func newHubCompactCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var dryRun bool
 	var keepSnapshots int
 	var minEvents int
+	var gcTombstones bool
 	cmd := &cobra.Command{
 		Use:   "compact",
 		Short: "Publish a full-state snapshot, advance the retention floors, and delete cold events (P4-HUB-11)",
@@ -56,20 +57,21 @@ workspace key.`,
 			if err != nil {
 				return appError{code: exitInvalidConfig, err: err}
 			}
-			return hubCompact(cmd.Context(), stdout, cmd.ErrOrStderr(), opts, store, hub, hubID, opts.paths(), keepSnapshots, minEvents, dryRun)
+			return hubCompact(cmd.Context(), stdout, cmd.ErrOrStderr(), opts, store, hub, hubID, opts.paths(), keepSnapshots, minEvents, gcTombstones, dryRun)
 		},
 	}
 	cmd.Flags().StringVar(&hubFile, "hub-file", "", "file-backed test hub path")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "compute and print the compaction plan without writing anything to the hub")
 	cmd.Flags().IntVar(&keepSnapshots, "keep-snapshots", 2, "snapshot objects to retain on the hub (>=1; the newly published one is always kept)")
 	cmd.Flags().IntVar(&minEvents, "min-events", 0, "refuse to compact unless at least this many events would be deleted (0 = always compact)")
+	cmd.Flags().BoolVar(&gcTombstones, "gc-tombstones", true, "garbage-collect tombstones every approved device has acked (P4-SYNC-06); --gc-tombstones=false retains them")
 	return cmd
 }
 
 // hubCompact publishes a full-state snapshot and advances the hub's per-device
 // retention floors, then deletes the cold events below them (P4-HUB-11). See
 // newHubCompactCommand's Long help for the confirm-before-delete contract.
-func hubCompact(ctx context.Context, stdout, stderr io.Writer, opts *options, store *state.Store, hub dssync.Hub, hubID string, paths config.Paths, keepSnapshots, minEvents int, dryRun bool) error {
+func hubCompact(ctx context.Context, stdout, stderr io.Writer, opts *options, store *state.Store, hub dssync.Hub, hubID string, paths config.Paths, keepSnapshots, minEvents int, gcTombstones, dryRun bool) error {
 	if keepSnapshots < 1 {
 		keepSnapshots = 1
 	}
@@ -154,8 +156,22 @@ func hubCompact(ctx context.Context, stdout, stderr io.Writer, opts *options, st
 		return err
 	}
 
+	// P4-SYNC-06 tombstone-GC plan: derive the safe floor from approved devices'
+	// signed acks. This is read-only; the actual purge runs BELOW, before the
+	// snapshot is built, so GC'd tombstones are excluded from the produced
+	// snapshot.
+	var gcBeforeHLC int64
+	var gcReady bool
+	var gcSkip string
+	if gcTombstones {
+		gcBeforeHLC, gcReady, gcSkip, err = planTombstoneGC(ctx, store, hub, device.ID)
+		if err != nil {
+			return err
+		}
+	}
+
 	if dryRun {
-		return printCompactPlan(ctx, stdout, store, device.ID, hlc, previewFloors, estimate, keepSnapshots)
+		return printCompactPlan(ctx, stdout, store, device.ID, hlc, previewFloors, estimate, keepSnapshots, gcTombstones, gcReady, gcBeforeHLC, gcSkip)
 	}
 
 	// 6. Seal under the CURRENT-epoch WCK (a keyless device cannot compact).
@@ -177,6 +193,23 @@ func hubCompact(ctx context.Context, stdout, stderr io.Writer, opts *options, st
 	signing, _, err := keyStore.EnsureSigning(ctx, device.ID, device.SigningPublicKey)
 	if err != nil {
 		return fmt.Errorf("read local signing identity: %w", err)
+	}
+
+	// 5b. P4-SYNC-06: purge acked tombstones BEFORE building the snapshot, so the
+	// GC'd rows are excluded from the produced snapshot document (BuildSnapshot
+	// reads live tombstones from the store). Purging is idempotent, and a purge
+	// followed by a failed publish is safe: a GC'd tombstone was below the minimum
+	// ack watermark, so no device can resurrect it regardless of the snapshot.
+	tombstonesGCd := 0
+	if gcTombstones {
+		if gcReady {
+			tombstonesGCd, err = store.GCTombstones(ctx, gcBeforeHLC)
+			if err != nil {
+				return err
+			}
+		} else if gcSkip != "" {
+			_, _ = fmt.Fprintf(stderr, "hub compact: retaining tombstones: %s\n", gcSkip)
+		}
 	}
 
 	// 6/7. One publish attempt: reconcile against the given manifest bytes, build
@@ -273,6 +306,14 @@ func hubCompact(ctx context.Context, stdout, stderr io.Writer, opts *options, st
 		}
 	}
 
+	// 9b. P4-SYNC-06 revoked-stream cleanup: for a revoked/lost device whose
+	// stream the compactor fully consumed (present in the committed floors),
+	// reclaim its entire event-log prefix and delete its stale ack.
+	revokedObjs, err := cleanupRevokedStreams(ctx, stderr, store, hub, manifest.Floors)
+	if err != nil {
+		return err
+	}
+
 	// 10. Prune superseded snapshot objects, keeping the manifest-referenced one
 	// plus the newest keepSnapshots-1 others.
 	prunedSnaps, err := pruneSnapshotObjects(ctx, stderr, hub, snapSHA, keepSnapshots)
@@ -280,12 +321,113 @@ func hubCompact(ctx context.Context, stdout, stderr io.Writer, opts *options, st
 		return err
 	}
 
-	_, err = fmt.Fprintf(stdout, "hub compact: published snapshot %s; advanced %d device floor(s); deleted %d cold event(s); pruned %d superseded snapshot(s)\n",
-		shortSHA(snapSHA), len(manifest.Floors), deleted, prunedSnaps)
+	_, err = fmt.Fprintf(stdout, "hub compact: published snapshot %s; advanced %d device floor(s); deleted %d cold event(s); GC'd %d tombstone(s); reclaimed %d revoked-stream object(s); pruned %d superseded snapshot(s)\n",
+		shortSHA(snapSHA), len(manifest.Floors), deleted, tombstonesGCd, revokedObjs, prunedSnaps)
 	if err != nil {
 		return err
 	}
 	return printFloors(stdout, manifest.Floors)
+}
+
+// planTombstoneGC derives the safe tombstone-GC floor from signed sync acks
+// (P4-SYNC-06): the minimum HLC watermark across the LOCAL device's live clock
+// and EVERY approved non-local device's verified ack. Every approved non-local
+// device must have a verified ack, else GC is skipped (ready=false, skip set
+// with a hint) — a tombstone must never be purged before a peer that could still
+// resurrect it has consumed the delete. Acks from non-approved (revoked/lost/
+// pending/unknown) devices and acks that fail verification are ignored: they can
+// neither pin nor advance the floor. Listing the acks is a hub read, so a hub
+// error is classified exitNetwork; local store failures keep the default class.
+func planTombstoneGC(ctx context.Context, store *state.Store, hub dssync.Hub, selfDeviceID string) (beforeHLC int64, ready bool, skip string, err error) {
+	localWatermark, err := store.CurrentHLC(ctx)
+	if err != nil {
+		return 0, false, "", err
+	}
+	workspaceID, err := store.WorkspaceID(ctx)
+	if err != nil {
+		return 0, false, "", err
+	}
+	rawAcks, err := hub.ListAcks(ctx)
+	if err != nil {
+		return 0, false, "", appError{code: exitNetwork, err: fmt.Errorf("list sync acks: %w", err)}
+	}
+	// Verify every ack against the local registry; index the survivors by device.
+	verified := map[string]dssync.AckMarker{}
+	for dev, raw := range rawAcks {
+		if dev == selfDeviceID {
+			continue // the local device contributes its live watermark, not an ack
+		}
+		pub, ok, aerr := store.ApprovedDeviceSigningKey(ctx, dev)
+		if aerr != nil {
+			return 0, false, "", aerr
+		}
+		if !ok {
+			continue // revoked/lost/pending/unknown — ignore
+		}
+		m, perr := dssync.ParseAckMarker(raw)
+		if perr != nil {
+			continue // unparseable — ignore (its owner overwrites it next sync)
+		}
+		if m.DeviceID != dev || m.WorkspaceID != workspaceID {
+			continue // key/payload device mismatch or wrong workspace — ignore
+		}
+		if verr := dssync.VerifyAckMarker(m, pub); verr != nil {
+			continue // bad signature — ignore
+		}
+		verified[dev] = m
+	}
+	// Require a verified ack from every APPROVED non-local device.
+	devices, err := store.ListDevices(ctx)
+	if err != nil {
+		return 0, false, "", err
+	}
+	minWatermark := localWatermark
+	for _, d := range devices {
+		if d.ID == selfDeviceID || d.TrustState != "approved" {
+			continue
+		}
+		m, ok := verified[d.ID]
+		if !ok {
+			return 0, false, fmt.Sprintf("device %s has never written a verified sync ack", d.ID), nil
+		}
+		if m.HLCWatermark < minWatermark {
+			minWatermark = m.HLCWatermark
+		}
+	}
+	return minWatermark, true, "", nil
+}
+
+// cleanupRevokedStreams reclaims the event-log prefix and stale ack of every
+// revoked/lost device whose stream the just-committed floors fully cover
+// (P4-SYNC-06). The device's floor and local pull cursor are deliberately
+// RETAINED: a floor + cursor for a now-empty stream is harmless, and deleting
+// the cursor while the floor stays would reopen the retention gate and force a
+// needless snapshot recovery on the next sync. Best-effort per device — a
+// failure warns and continues. Returns the total object count reclaimed.
+func cleanupRevokedStreams(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync.Hub, floors map[string]int64) (int, error) {
+	devices, err := store.ListDevices(ctx)
+	if err != nil {
+		return 0, err
+	}
+	total := 0
+	for _, d := range devices {
+		if d.TrustState != "revoked" && d.TrustState != "lost" {
+			continue
+		}
+		if floor, ok := floors[d.ID]; !ok || floor <= 0 {
+			continue // never consumed / no floor — nothing safely deletable
+		}
+		n, serr := hub.DeleteDeviceStream(ctx, d.ID)
+		if serr != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: failed to reclaim revoked device %s stream: %v\n", d.ID, serr)
+			continue
+		}
+		if aerr := hub.DeleteAck(ctx, d.ID); aerr != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: failed to delete revoked device %s ack: %v\n", d.ID, aerr)
+		}
+		total += n
+	}
+	return total, nil
 }
 
 // computeCompactFloors derives the base per-device retention floors from the
@@ -428,8 +570,10 @@ func pruneSnapshotObjects(ctx context.Context, stderr io.Writer, hub dssync.Hub,
 }
 
 // printCompactPlan renders the dry-run plan: the per-device floors, the
-// event-delete estimate, the snapshot document size, and the retention policy.
-func printCompactPlan(ctx context.Context, stdout io.Writer, store *state.Store, producedBy string, hlc int64, floors dssync.Cursor, estimate, keepSnapshots int) error {
+// event-delete estimate, the snapshot document size, the retention policy, and
+// the tombstone-GC decision (the safe floor derived from acks, or the reason it
+// is skipped).
+func printCompactPlan(ctx context.Context, stdout io.Writer, store *state.Store, producedBy string, hlc int64, floors dssync.Cursor, estimate, keepSnapshots int, gcTombstones, gcReady bool, gcBeforeHLC int64, gcSkip string) error {
 	snap, err := dssync.BuildSnapshot(ctx, store, producedBy, hlc, floors)
 	if err != nil {
 		return err
@@ -441,6 +585,24 @@ func printCompactPlan(ctx context.Context, stdout io.Writer, store *state.Store,
 	if _, err := fmt.Fprintf(stdout, "hub compact (dry run): would publish a snapshot of %d entr(y/ies), %d tombstone(s), %d anchor(s) (~%d bytes plaintext); would delete ~%d cold event(s); keep %d snapshot(s)\n",
 		len(snap.Entries), len(snap.Tombstones), len(snap.Anchors), len(raw), estimate, keepSnapshots); err != nil {
 		return err
+	}
+	switch {
+	case !gcTombstones:
+		if _, err := fmt.Fprintf(stdout, "tombstone GC: disabled (--gc-tombstones=false)\n"); err != nil {
+			return err
+		}
+	case gcReady:
+		gcable, cerr := store.CountTombstonesBelowHLC(ctx, gcBeforeHLC)
+		if cerr != nil {
+			return cerr
+		}
+		if _, err := fmt.Fprintf(stdout, "tombstone GC: would purge %d tombstone(s) below HLC %d (min ack watermark)\n", gcable, gcBeforeHLC); err != nil {
+			return err
+		}
+	default:
+		if _, err := fmt.Fprintf(stdout, "tombstone GC: skipped (%s)\n", gcSkip); err != nil {
+			return err
+		}
 	}
 	return printFloors(stdout, map[string]int64(floors))
 }

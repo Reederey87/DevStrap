@@ -159,6 +159,11 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 		return ferr
 	}
 
+	// P4-SYNC-06: publish this device's signed sync ack after a fully-clean
+	// cycle so a compactor can safely GC tombstones this device has already
+	// consumed. Best-effort — a failure never fails the sync.
+	maybeWriteSyncAck(ctx, store, hub, hubID, opts.paths(), pull, deferred)
+
 	if namespaceOnly {
 		if deferred {
 			_, err = fmt.Fprintf(stdout, "Synced namespace events: pulled %d; %d local event(s) queued awaiting workspace key grant\n", len(remoteEvents), len(localEvents))
@@ -548,4 +553,118 @@ func blobRefFromEvent(event state.Event) (string, bool) {
 func blobHashHex(ref string) string {
 	hash, _ := envBlobHash(ref)
 	return hash
+}
+
+// syncAckCacheKey keys the local_meta row caching the last-written ack's
+// significant fields (consumed cursor + push watermark), so an unchanged cycle
+// skips a redundant PUT.
+func syncAckCacheKey(hubID string) string { return "sync_ack:" + hubID }
+
+// maybeWriteSyncAck publishes this device's signed sync ack (P4-SYNC-06) after a
+// FULLY-CLEAN cycle: no deferred push, no truncated/skipped/undecryptable pull,
+// no quarantined/cursor-held apply, and no open durable skipped-event rows. Any
+// of those means this device's view is incomplete, so it must not vouch for a
+// watermark. The marker states the per-device transport cursor it has consumed,
+// its push watermark, and its current HLC clock — the tombstone-safety clock a
+// compactor mins over. Writing is best-effort: a PutAck failure logs a warning
+// and never fails the sync (a missing ack only DELAYS a compactor's tombstone
+// GC, never risks integrity).
+func maybeWriteSyncAck(ctx context.Context, store *state.Store, hub dssync.Hub, hubID string, paths config.Paths, pull pullApplyOutcome, deferred bool) {
+	log := logging.Logger(ctx)
+	// Cleanliness gate — mirrors refuseIfIncompleteView's signals.
+	if deferred || pull.stats.Quarantined > 0 || pull.stats.CursorHeld {
+		return
+	}
+	if eh, ok := hub.(dssync.EncryptedHub); ok && eh.Stats != nil {
+		if eh.Stats.Truncated > 0 || eh.Stats.Skipped > 0 || eh.Stats.Undecryptable > 0 {
+			return
+		}
+	}
+	skipped, err := store.OpenSkippedEvents(ctx)
+	if err != nil {
+		log.Warn("sync ack: read skipped events failed; not writing ack", "err", err.Error())
+		return
+	}
+	if len(skipped) > 0 {
+		return
+	}
+	cursor, err := store.HubDeviceCursors(ctx, hubID)
+	if err != nil {
+		log.Warn("sync ack: read cursors failed; not writing ack", "err", err.Error())
+		return
+	}
+	push, err := store.PushSeqCursor(ctx, hubID)
+	if err != nil {
+		log.Warn("sync ack: read push cursor failed; not writing ack", "err", err.Error())
+		return
+	}
+	// Skip a redundant PUT when neither the consumed cursor set nor the push
+	// watermark changed since the last ack. We compare ONLY cursor+push, not the
+	// HLC clock: the clock drifts every cycle (which would defeat the skip), and
+	// an unchanged cursor+push means no event was consumed or produced, so the
+	// previously published watermark still correctly bounds the consumed set.
+	cacheVal := ackCacheValue(cursor, push)
+	if cached, ok, cerr := store.GetLocalMeta(ctx, syncAckCacheKey(hubID)); cerr == nil && ok && cached == cacheVal {
+		return
+	}
+	hlc, err := store.CurrentHLC(ctx)
+	if err != nil {
+		log.Warn("sync ack: read hlc failed; not writing ack", "err", err.Error())
+		return
+	}
+	device, err := store.CurrentDevice(ctx)
+	if err != nil {
+		log.Warn("sync ack: read device failed; not writing ack", "err", err.Error())
+		return
+	}
+	workspaceID, err := store.WorkspaceID(ctx)
+	if err != nil {
+		log.Warn("sync ack: read workspace failed; not writing ack", "err", err.Error())
+		return
+	}
+	marker := dssync.AckMarker{
+		Cursor:           cursor,
+		DeviceID:         device.ID,
+		HLCWatermark:     hlc,
+		ProducedAt:       hlc,
+		PushedThroughSeq: push,
+		WorkspaceID:      workspaceID,
+	}
+	keyStore, err := resolveKeyStore(ctx, paths, store)
+	if err != nil {
+		log.Warn("sync ack: resolve key store failed; not writing ack", "err", err.Error())
+		return
+	}
+	signing, _, err := keyStore.EnsureSigning(ctx, device.ID, device.SigningPublicKey)
+	if err != nil {
+		log.Warn("sync ack: read signing identity failed; not writing ack", "err", err.Error())
+		return
+	}
+	if err := dssync.SignAckMarker(&marker, signing.Private); err != nil {
+		log.Warn("sync ack: sign failed; not writing ack", "err", err.Error())
+		return
+	}
+	raw, err := json.Marshal(marker)
+	if err != nil {
+		log.Warn("sync ack: marshal failed; not writing ack", "err", err.Error())
+		return
+	}
+	if err := hub.PutAck(ctx, device.ID, raw); err != nil {
+		log.Warn("sync ack: put failed (best-effort; tombstone GC only delayed)", "err", err.Error())
+		return
+	}
+	if err := store.SetLocalMeta(ctx, syncAckCacheKey(hubID), cacheVal); err != nil {
+		log.Warn("sync ack: cache last-ack marker failed", "err", err.Error())
+	}
+}
+
+// ackCacheValue is the canonical local_meta cache form of the fields whose
+// change forces a new ack write: the consumed per-device cursor and the push
+// watermark.
+func ackCacheValue(cursor map[string]int64, push int64) string {
+	raw, _ := json.Marshal(struct {
+		Cursor map[string]int64 `json:"cursor"`
+		Push   int64            `json:"push"`
+	}{Cursor: cursor, Push: push})
+	return string(raw)
 }

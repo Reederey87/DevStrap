@@ -116,6 +116,16 @@ type BlobInfo struct {
 //     floor (Seq < floors[dev]). Callers must have durably published a
 //     superseding snapshot + manifest FIRST — the hub does not enforce the
 //     ordering; the compactor's confirm-before-delete protocol does.
+//
+// Ack plane (P4-SYNC-06):
+//   - PutAck writes one device's signed sync-ack marker at
+//     meta/acks/<device_id>.json. It is single-writer-per-key (only the owning
+//     device writes its own ack) and last-writer-wins (unconditional overwrite).
+//   - ListAcks returns every ack currently on the hub keyed by device id.
+//   - DeleteAck removes one device's ack (idempotent) — used on device revoke.
+//   - DeleteDeviceStream removes an entire origin device's event-log prefix
+//     (idempotent), reclaiming a revoked device's stream after a compaction has
+//     folded its state into the snapshot. It returns the object count deleted.
 type Hub interface {
 	Push(ctx context.Context, events []state.Event) error
 	Pull(ctx context.Context, after Cursor) ([]state.Event, error)
@@ -133,6 +143,25 @@ type Hub interface {
 	ListSnapshotObjects(ctx context.Context) ([]BlobInfo, error)
 	DeleteSnapshotObject(ctx context.Context, sha256Hex string) error
 	CompactEventsBelow(ctx context.Context, floors Cursor) (deleted int, err error)
+	PutAck(ctx context.Context, deviceID string, raw []byte) error
+	ListAcks(ctx context.Context) (map[string][]byte, error)
+	DeleteAck(ctx context.Context, deviceID string) error
+	DeleteDeviceStream(ctx context.Context, deviceID string) (deleted int, err error)
+}
+
+// validateDeviceID rejects a device id that could escape its meta/acks or
+// eventlog key prefix. Device ids are locally-minted dev_<uuidv7> tokens, but
+// PutAck/DeleteAck/DeleteDeviceStream also take ids that were read back off the
+// hub key listing, so a defensive check keeps a malformed or hostile key from
+// traversing outside the workspace prefix.
+func validateDeviceID(deviceID string) error {
+	if deviceID == "" {
+		return fmt.Errorf("%w: empty device id", ErrInvalidBlobKey)
+	}
+	if strings.ContainsAny(deviceID, `/\`) || strings.Contains(deviceID, "..") {
+		return fmt.Errorf("%w: device id contains a path separator", ErrInvalidBlobKey)
+	}
+	return nil
 }
 
 // FileHub is a file-backed test Hub (HUB-01). The event log is a single JSON
@@ -562,6 +591,88 @@ func (h FileHub) CompactEventsBelow(ctx context.Context, floors Cursor) (int, er
 	return deleted, nil
 }
 
+// PutAck writes a device's signed sync-ack marker (P4-SYNC-06). Last-writer-wins:
+// each device writes only its own ack, so an unconditional overwrite is correct.
+func (h FileHub) PutAck(_ context.Context, deviceID string, raw []byte) error {
+	if err := validateDeviceID(deviceID); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(h.acksDir(), 0o700); err != nil {
+		return fmt.Errorf("create hub acks dir: %w", err)
+	}
+	if err := os.WriteFile(h.ackPath(deviceID), raw, 0o600); err != nil {
+		return fmt.Errorf("write ack marker: %w", err)
+	}
+	return nil
+}
+
+// ListAcks returns every device's sync-ack marker keyed by device id.
+func (h FileHub) ListAcks(_ context.Context) (map[string][]byte, error) {
+	entries, err := os.ReadDir(h.acksDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string][]byte{}, nil
+		}
+		return nil, fmt.Errorf("list hub acks: %w", err)
+	}
+	out := map[string][]byte{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		deviceID := strings.TrimSuffix(e.Name(), ".json")
+		if validateDeviceID(deviceID) != nil {
+			continue
+		}
+		raw, rerr := os.ReadFile(h.ackPath(deviceID))
+		if rerr != nil {
+			return nil, fmt.Errorf("read ack marker %s: %w", deviceID, rerr)
+		}
+		out[deviceID] = raw
+	}
+	return out, nil
+}
+
+// DeleteAck removes a device's sync-ack marker (idempotent).
+func (h FileHub) DeleteAck(_ context.Context, deviceID string) error {
+	if err := validateDeviceID(deviceID); err != nil {
+		return err
+	}
+	if err := os.Remove(h.ackPath(deviceID)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete ack marker: %w", err)
+	}
+	return nil
+}
+
+// DeleteDeviceStream removes an entire origin device's events from the log
+// (idempotent). FileHub stores every event in one array, so this filters the
+// device's rows out; it returns the count removed.
+func (h FileHub) DeleteDeviceStream(_ context.Context, deviceID string) (int, error) {
+	if err := validateDeviceID(deviceID); err != nil {
+		return 0, err
+	}
+	all, err := h.read()
+	if err != nil {
+		return 0, err
+	}
+	kept := all[:0]
+	deleted := 0
+	for _, event := range all {
+		if event.DeviceID == deviceID {
+			deleted++
+			continue
+		}
+		kept = append(kept, event)
+	}
+	if deleted == 0 {
+		return 0, nil
+	}
+	if err := h.write(kept); err != nil {
+		return 0, err
+	}
+	return deleted, nil
+}
+
 func (h FileHub) baseName() string {
 	return strings.TrimSuffix(filepath.Base(h.Path), filepath.Ext(h.Path))
 }
@@ -572,6 +683,14 @@ func (h FileHub) metaDir() string {
 
 func (h FileHub) snapshotDir() string {
 	return filepath.Join(filepath.Dir(h.Path), h.baseName()+"-snapshots")
+}
+
+func (h FileHub) acksDir() string {
+	return filepath.Join(h.metaDir(), "acks")
+}
+
+func (h FileHub) ackPath(deviceID string) string {
+	return filepath.Join(h.acksDir(), deviceID+".json")
 }
 
 func (h FileHub) retentionPath() string {

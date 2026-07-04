@@ -31,6 +31,24 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — feat(sync): signed per-device sync acks + tombstone GC + revoked-stream cleanup (P4-SYNC-06 narrowed, P6-HUB-04 completion)
+
+Changed:
+- New `internal/sync/ack.go`: `AckMarker` wire format (`{cursor, device_id, hlc_watermark, produced_at_hlc, pushed_through_seq, v, workspace_id, sig}`, alphabetical json tags mirroring `RetentionManifest`), `SignAckMarker`/`VerifyAckMarker`/`ParseAckMarker` under the reserved `AckSignatureDomain` (`devstrap:ack:v1`); a nil cursor signs over an empty map so a peer-streamless device is canonical.
+- `Hub` interface gains `PutAck`/`ListAcks`/`DeleteAck` (ack head-object plane, `meta/acks/<device_id>.json`) and `DeleteDeviceStream` (reclaim a revoked device's event-log prefix). Implemented on `FileHub` (new `-meta/acks/` dir, array filter for stream delete), `R2Hub` (`workspaces/<ws>/meta/acks/` via the existing S3Client ops; device-id path-safety guard), and `EncryptedHub` (pass-throughs — acks are signed plaintext head objects). Test doubles updated: `recordingHub` (sync) gains an in-memory ack map + stream filter; `recordingHub` (cli) and `faultHub` embed the interface and compile automatically.
+- `internal/cli/sync.go`: `maybeWriteSyncAck` publishes the local device's signed ack after a FULLY-CLEAN cycle (push not deferred; no truncated/skipped/undecryptable pull; no quarantined/cursor-held apply; no open `sync_skipped_events`). Best-effort (a PutAck failure logs a warning, never fails sync). An unchanged cycle (same consumed cursor + push watermark, cached in `local_meta` `sync_ack:<hubID>`) skips the redundant PUT; the HLC clock is excluded from that compare because it drifts every cycle. `HLCWatermark`/`ProducedAt` = `store.CurrentHLC` (the device clock, ≥ every applied event HLC after a clean cycle).
+- `internal/cli/hub_compact.go`: `--gc-tombstones` flag (default true). `planTombstoneGC` derives `beforeHLC = min(local live HLC, every approved non-local device's verified ack watermark)`; a missing approved-device ack SKIPS GC with a naming hint; revoked/lost/pending/unknown or bad-signature/mismatched acks are ignored. GC runs before `BuildSnapshot` (first production caller of `store.GCTombstones`), so purged tombstones are excluded from the produced snapshot. `cleanupRevokedStreams` (after the confirm read-back + `CompactEventsBelow`) reclaims the whole `eventlog/<dev>/` prefix and deletes the ack of every revoked/lost device the committed floors fully cover. `--dry-run` reports the GC decision via new `store.CountTombstonesBelowHLC` without mutating.
+- `internal/cli/devices.go`: revoke/lost best-effort `DeleteAck(revokedID)` when a hub is configured.
+- Specs: 07 (ack plane + checkable tombstone-GC invariant + revoked-stream cleanup; status flip), 12 (`event_delivery`/`sync_cursors` definitively dead, superseded by the ack plane), 13 (sync ack, `compact --gc-tombstones`, revoke ack deletion), 15 (withheld/stale/forged ack is availability-only), 16 (test inventory), this log. Ledger: `P6-HUB-04` shipped, `P4-SYNC-06` closed-as-narrowed.
+
+Shipped-choice deviations (from the PR spec):
+- **Revoked cursor row + floor retained, not deleted.** The spec permitted `prefix-delete + DeleteAck + cursor-row delete` while keeping the floor. Deleting the local pull cursor while the manifest floor stays reopens the retention gate (`after[dev]+1 < floor`), forcing a needless snapshot recovery on the compacting device's next sync. Shipped the safer consistent option: reclaim the stream prefix + delete the ack, and RETAIN both the floor and the cursor (a floor+cursor for an empty stream is harmless). `store.DeleteHubDeviceCursor` was therefore not added.
+- **No tombstone-GC e2e txtar.** Producing an `EventProjectDeleted` tombstone through the real binary needs a user-facing delete command, which does not exist (confirmed in PR3). Tombstone GC + revoked cleanup are driven at the Go level instead (`hub_compact_tombstone_test.go`, `sync_ack_test.go`).
+- **Ack unchanged-skip compares cursor+push only**, not the full payload-minus-sig the spec suggested, because the HLC watermark drifts every cycle and would defeat the skip; an unchanged cursor+push means the last published watermark still bounds the consumed set.
+
+Validated:
+- `gofmt -w cmd internal`; `go vet ./internal/...`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `golangci-lint run`; `DEVSTRAP_NO_KEYCHAIN=1 go test -race ./...` (all green; `internal/git TestCloneTimeout*` is a known flake).
+
 ## 2026-07-03 — feat(hub): hub compact — snapshot producer + floor advance + cold-event deletion (P4-HUB-11)
 
 Changed:

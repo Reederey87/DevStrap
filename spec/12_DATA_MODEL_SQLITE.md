@@ -341,7 +341,7 @@ CREATE TABLE sync_cursors (
 );
 ```
 
-`sync_cursors` was the planned (`DATA-02`, `HUB-*`) per-peer resume point for cursor-based incremental sync. That role is now filled by the shipped `hub_device_cursors` (00017, below): per-origin-device Seq cursors — the cloud hub exposes the same shape as an opaque per-device cursor over its event-log plane (`410 -> snapshot` when a device's cursor falls below its retention floor, see `07_NAMESPACE_AND_SYNC_MODEL.md`). `sync_cursors`/`event_delivery` remain unwired legacy shapes.
+`sync_cursors` was the planned (`DATA-02`, `HUB-*`) per-peer resume point for cursor-based incremental sync. That role is now filled by the shipped `hub_device_cursors` (00017, below): per-origin-device Seq cursors — the cloud hub exposes the same shape as an opaque per-device cursor over its event-log plane (`410 -> snapshot` when a device's cursor falls below its retention floor, see `07_NAMESPACE_AND_SYNC_MODEL.md`). `sync_cursors`/`event_delivery` remain unwired **dead** legacy shapes, now definitively **superseded**: cross-device convergence proof rides the signed **ack plane** (`meta/acks/<device_id>.json`, `P4-SYNC-06` — a hub head object, not a local table) rather than a per-event apply ledger, and the transport resume point is `hub_device_cursors`. Neither table is scheduled to be wired; they are candidates for a future drop migration.
 
 ### hub_cursors (legacy — frozen since 00017)
 
