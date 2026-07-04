@@ -368,10 +368,19 @@ func (h FileHub) GetRetention(_ context.Context) ([]byte, string, error) {
 // PutRetention writes the retention manifest with compare-and-swap semantics:
 // ifMatchETag "" requires that no manifest exists yet; otherwise the current
 // bytes must still hash to ifMatchETag. A lost race is ErrRetentionConflict.
+// The read-check-write section is serialized by an O_EXCL lock file so two
+// concurrent writers — in one process or across `--hub-file` processes — can
+// never both pass the etag check and silently overwrite each other
+// (post-#65 Codex review, P2).
 func (h FileHub) PutRetention(_ context.Context, raw []byte, ifMatchETag string) error {
 	if err := os.MkdirAll(h.metaDir(), 0o700); err != nil {
 		return fmt.Errorf("create hub meta dir: %w", err)
 	}
+	unlock, err := acquireLockFile(h.retentionPath() + ".lock")
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	current, err := os.ReadFile(h.retentionPath())
 	switch {
 	case os.IsNotExist(err):
@@ -388,10 +397,57 @@ func (h FileHub) PutRetention(_ context.Context, raw []byte, ifMatchETag string)
 			return fmt.Errorf("%w: etag mismatch", ErrRetentionConflict)
 		}
 	}
-	if err := os.WriteFile(h.retentionPath(), raw, 0o600); err != nil {
-		return fmt.Errorf("write retention manifest: %w", err)
+	tmp, err := os.CreateTemp(h.metaDir(), ".retention-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create retention temp: %w", err)
 	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(raw); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write retention temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close retention temp: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		return fmt.Errorf("secure retention temp: %w", err)
+	}
+	if err := os.Rename(tmpPath, h.retentionPath()); err != nil {
+		return fmt.Errorf("install retention manifest: %w", err)
+	}
+	cleanup = false
 	return nil
+}
+
+// acquireLockFile takes an O_CREATE|O_EXCL lock file, retrying briefly and
+// breaking locks older than 10s (a crashed process must not wedge the hub
+// file forever). Returns the release func.
+func acquireLockFile(path string) (func(), error) {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // lock file under the hub meta dir
+		if err == nil {
+			_ = f.Close()
+			return func() { _ = os.Remove(path) }, nil
+		}
+		if !os.IsExist(err) {
+			return nil, fmt.Errorf("acquire hub lock %s: %w", path, err)
+		}
+		if info, serr := os.Stat(path); serr == nil && time.Since(info.ModTime()) > 10*time.Second {
+			_ = os.Remove(path) // stale lock from a crashed holder
+			continue
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("acquire hub lock %s: timed out (held by another process?)", path)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // PutSnapshotObject stores a sealed snapshot object keyed by the sha256 of its

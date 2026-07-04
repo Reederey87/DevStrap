@@ -211,3 +211,41 @@ func TestR2CompactEventsBelowBothLayouts(t *testing.T) {
 		}
 	}
 }
+
+// TestR2PutRetentionOwnCommitReadBack pins the post-#65 P2 fix: a conditional
+// PUT that already committed (retry after an ambiguous failure) 412s against
+// its own success; the read-back byte comparison must classify that as
+// success, and only a genuinely different current manifest as a conflict.
+func TestR2PutRetentionOwnCommitReadBack(t *testing.T) {
+	ctx := context.Background()
+	h, _ := testR2SnapshotHub()
+	if err := h.PutRetention(ctx, r2ManifestBytes(t, map[string]int64{"dev_a": 1}), ""); err != nil {
+		t.Fatal(err)
+	}
+	_, etag, err := h.GetRetention(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := r2ManifestBytes(t, map[string]int64{"dev_a": 2})
+	if err := h.PutRetention(ctx, next, etag); err != nil {
+		t.Fatal(err)
+	}
+	// Same bytes, stale etag — models the retry-after-own-commit: success.
+	if err := h.PutRetention(ctx, next, etag); err != nil {
+		t.Fatalf("re-put of own committed bytes must be success, got %v", err)
+	}
+	// Different bytes, stale etag — a real lost race: conflict.
+	if err := h.PutRetention(ctx, r2ManifestBytes(t, map[string]int64{"dev_a": 3}), etag); !errors.Is(err, dssync.ErrRetentionConflict) {
+		t.Fatalf("got %v, want ErrRetentionConflict", err)
+	}
+	// Create-only retry after own commit: same bytes with "" etag while the
+	// object exists — also success via read-back.
+	h2, _ := testR2SnapshotHub()
+	first := r2ManifestBytes(t, map[string]int64{"dev_b": 1})
+	if err := h2.PutRetention(ctx, first, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := h2.PutRetention(ctx, first, ""); err != nil {
+		t.Fatalf("create-only re-put of own committed bytes must be success, got %v", err)
+	}
+}

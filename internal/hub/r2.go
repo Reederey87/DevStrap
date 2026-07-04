@@ -35,6 +35,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -525,6 +526,13 @@ func (h R2Hub) GetRetention(ctx context.Context) ([]byte, string, error) {
 // ifMatchETag "" is create-only (If-None-Match: *); otherwise If-Match. A lost
 // race in either mode is dssync.ErrRetentionConflict — the caller must
 // re-read, re-derive floors, and retry or refuse.
+//
+// A conditional PUT retried after an ambiguous failure (the first attempt
+// committed but the response was lost to a transient network/5xx error) would
+// 412 against its OWN success — the object's ETag already changed. So a 412
+// is disambiguated by a read-back: if the current manifest bytes equal what
+// this call was writing, the write already happened and this is success, not
+// a lost race (post-#65 Codex review, P2).
 func (h R2Hub) PutRetention(ctx context.Context, raw []byte, ifMatchETag string) error {
 	var err error
 	if ifMatchETag == "" {
@@ -534,6 +542,9 @@ func (h R2Hub) PutRetention(ctx context.Context, raw []byte, ifMatchETag string)
 	}
 	if err != nil {
 		if errors.Is(err, ErrPreconditionFailed) {
+			if current, _, gerr := h.GetRetention(ctx); gerr == nil && bytes.Equal(current, raw) {
+				return nil // our own earlier attempt committed
+			}
 			return fmt.Errorf("%w: %w", dssync.ErrRetentionConflict, err)
 		}
 		return fmt.Errorf("put retention manifest: %w", err)

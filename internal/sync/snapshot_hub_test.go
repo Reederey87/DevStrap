@@ -196,3 +196,53 @@ func makeTestEvent(id, dev string, hlc, seq int64) state.Event {
 		ContentHash: state.ContentHash(payload),
 	}
 }
+
+// TestFileHubPullFailsClosedOnHollowManifest pins the structural half of the
+// fail-closed rule at the Pull gate: {} parses as JSON but has no floors map,
+// and must be a hard error, not "no floor".
+func TestFileHubPullFailsClosedOnHollowManifest(t *testing.T) {
+	ctx := context.Background()
+	h := testFileHub(t)
+	if err := h.PutRetention(ctx, []byte(`{}`), ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.Pull(ctx, nil); err == nil || errors.Is(err, ErrSnapshotRequired) {
+		t.Fatalf("hollow manifest must be a hard error, got %v", err)
+	}
+}
+
+// TestFileHubPutRetentionConcurrentCAS pins the lock-file serialization
+// (post-#65 P2): of two concurrent writers holding the same etag, exactly one
+// wins; the other must observe ErrRetentionConflict, never a silent overwrite.
+func TestFileHubPutRetentionConcurrentCAS(t *testing.T) {
+	ctx := context.Background()
+	h := testFileHub(t)
+	if err := h.PutRetention(ctx, manifestBytes(t, map[string]int64{"dev_a": 1}), ""); err != nil {
+		t.Fatal(err)
+	}
+	_, etag, err := h.GetRetention(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		floor := int64(2 + i)
+		go func() {
+			results <- h.PutRetention(ctx, manifestBytes(t, map[string]int64{"dev_a": floor}), etag)
+		}()
+	}
+	var wins, conflicts int
+	for i := 0; i < 2; i++ {
+		switch err := <-results; {
+		case err == nil:
+			wins++
+		case errors.Is(err, ErrRetentionConflict):
+			conflicts++
+		default:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if wins != 1 || conflicts != 1 {
+		t.Fatalf("wins=%d conflicts=%d, want exactly 1/1", wins, conflicts)
+	}
+}

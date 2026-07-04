@@ -244,3 +244,28 @@ func TestParseRetentionFloorsFailsClosedOnGarbage(t *testing.T) {
 		t.Fatal("garbled manifest must not parse as no-floor")
 	}
 }
+
+// TestParseRetentionManifestStructuralFailClosed pins the post-#65 P1 fix: a
+// syntactically-valid but hollow or malformed manifest must be an ERROR, never
+// "no floor" — otherwise a hub could garble its own marker into serving a
+// partial post-compaction log as complete.
+func TestParseRetentionManifestStructuralFailClosed(t *testing.T) {
+	cases := map[string]string{
+		"empty object":   `{}`,
+		"null floors":    `{"v":1,"workspace_id":"ws_test","floors":null}`,
+		"wrong version":  `{"v":9,"workspace_id":"ws_test","floors":{"dev_a":1}}`,
+		"zero version":   `{"workspace_id":"ws_test","floors":{"dev_a":1}}`,
+		"negative floor": `{"v":1,"workspace_id":"ws_test","floors":{"dev_a":-2}}`,
+		"empty device":   `{"v":1,"workspace_id":"ws_test","floors":{"":3}}`,
+	}
+	for name, raw := range cases {
+		if _, err := ParseRetentionFloors([]byte(raw)); err == nil {
+			t.Errorf("%s: parsed without error, want structural fail-closed error", name)
+		}
+	}
+	// An explicitly empty (but present) floors map is valid: "compacted, no
+	// devices floored" is a real state.
+	if _, err := ParseRetentionFloors([]byte(`{"v":1,"workspace_id":"ws_test","floors":{}}`)); err != nil {
+		t.Errorf("empty floors map must parse: %v", err)
+	}
+}

@@ -404,20 +404,36 @@ func VerifyRetentionManifest(m RetentionManifest, publicSigningKey string) error
 // signature. Backends use it on the pull path to read floors (they hold no
 // device registry; an unverified floor can only FORCE the snapshot path,
 // where the fail-closed verification lives), and the importer uses it before
-// verification.
+// verification. Structural validation IS performed: a syntactically-valid but
+// hollow object ({} decodes with Floors == nil) must not read as "no floor" —
+// that would let a hub that garbles or truncates its own marker serve a
+// partial post-compaction log as if it were complete.
 func ParseRetentionManifest(raw []byte) (RetentionManifest, error) {
 	var m RetentionManifest
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return RetentionManifest{}, fmt.Errorf("parse retention manifest: %w", err)
 	}
+	if m.V != snapshotVersion {
+		return RetentionManifest{}, fmt.Errorf("parse retention manifest: version %d, want %d", m.V, snapshotVersion)
+	}
+	if m.Floors == nil {
+		return RetentionManifest{}, errors.New("parse retention manifest: missing floors map")
+	}
+	for dev, floor := range m.Floors {
+		if dev == "" {
+			return RetentionManifest{}, errors.New("parse retention manifest: empty device id in floors")
+		}
+		if floor < 0 {
+			return RetentionManifest{}, fmt.Errorf("parse retention manifest: negative floor %d for device %s", floor, dev)
+		}
+	}
 	return m, nil
 }
 
-// ParseRetentionFloors extracts just the per-device floors from raw manifest
-// bytes, tolerating nothing else: any parse failure returns an error so the
-// pull path treats a garbled marker as a hard error rather than "no floor"
-// (fail closed — a hub that can garble the marker into "no floor" could
-// otherwise hide its own truncation).
+// ParseRetentionFloors extracts the per-device floors from raw manifest
+// bytes with the same structural fail-closed validation as
+// ParseRetentionManifest: any parse or shape failure is an error so the pull
+// path treats a garbled marker as a hard error rather than "no floor".
 func ParseRetentionFloors(raw []byte) (map[string]int64, error) {
 	m, err := ParseRetentionManifest(raw)
 	if err != nil {
