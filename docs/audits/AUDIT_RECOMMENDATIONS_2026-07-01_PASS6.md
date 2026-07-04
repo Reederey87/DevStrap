@@ -20,6 +20,8 @@ Findings were produced by a verification-driven multi-agent workflow against the
 
 ## Executive summary
 
+> **Note (2026-07-04):** every P1 risk cluster described below — hub-trust (`P6-SEC-01`/`P6-SYNC-01`), GC-deletes-live-data (`P6-HUB-01`/`P6-DATA-01`), and the git timeout (`P6-GIT-01`) — has since shipped; see the status banner in "Findings at a glance." This summary is retained as-found at audit time.
+
 PR #25's envelope-encryption foundation is a real advance — the namespace map is no longer plaintext on the hub, the WCK epoch keyring reuses the shipped keychain custody, and grants are age-wrapped per recipient. But it is **new code written fast against an explicitly untrusted hub**, and this pass found that the trust boundary is not yet closed end-to-end. The crypto cluster is the headline: the hub can still substitute keys, wedge sync, and — through the pre-approval join flow — silently strand a joining device's data fleet-wide. Separately, the now-live R2 backend exposes two data-loss paths in the shipped GC, and a universal 2-minute git timeout quietly breaks the eager-materialization promise for exactly the large repos it exists for.
 
 Risk clusters in five themes:
@@ -50,6 +52,8 @@ The near-term imperative: **close the grant/verification trust boundary before t
 | Cross-Platform, Ignore & Scan | 0 | 5 | 1 | 6 |
 | Specs, Docs & Process | 0 | 2 | 2 | 4 |
 | **Total** | **5** | **25** | **13** | **43** |
+
+> **Status as of 2026-07-04:** 37 of 43 findings have shipped (all five P1s included). Open: `P6-DOC-01` (test-hardening residual), `P6-CLI-03`, `P6-CLI-04`, `P6-GIT-06`, `P6-HUB-03`, `P6-XP-06`. The live status ledger is `docs/audits/README.md`; the counts and prose below are as-found at audit time (2026-07-01) and are retained as history.
 
 ## Prioritized roadmap
 
@@ -122,7 +126,7 @@ The near-term imperative: **close the grant/verification trust boundary before t
 
 PR #25's envelope layer reuses the shipped keychain custody well and age-wraps grants per recipient, but the trust boundary against the explicitly-untrusted hub is not closed: grants are consumed before verification, joiners self-bootstrap a key the fleet can't use, and never-granted epochs wedge sync.
 
-### P6-SEC-01 — Unauthenticated `device.key.granted` ingestion lets an untrusted hub substitute a device's WCK, defeating envelope encryption
+### P6-SEC-01 — Unauthenticated `device.key.granted` ingestion lets an untrusted hub substitute a device's WCK, defeating envelope encryption — SHIPPED 2026-07-02 (PRs #31/#33/#34)
 
 **Severity / Effort / Category:** P1 / M / security · crypto · confidentiality · _new (PR #25)_
 
@@ -140,7 +144,7 @@ PR #25's envelope layer reuses the shipped keychain custody well and age-wraps g
 
 **References:** age is "not in the business of authentication" — any age blob can be replaced by a fresh valid one, so decrypted artifacts must be bound to a trusted signature ([Valsorda](https://words.filippo.io/age-authentication/)); Keybase advertises each key generation in a signed, strictly-sequential chain so clients detect suppressed/rolled-back rotations ([Keybase PUK](https://book.keybase.io/docs/teams/puk)).
 
-### P6-SEC-02 — Every `devstrap init` self-bootstraps epoch 1, so the documented join flow silently loses the joiner's pre-approval data fleet-wide
+### P6-SEC-02 — Every `devstrap init` self-bootstraps epoch 1, so the documented join flow silently loses the joiner's pre-approval data fleet-wide — SHIPPED 2026-07-02 (PRs #32/#33)
 
 **Severity / Effort / Category:** P2 / M / security · data-loss · _new (PR #25); sharpens open `P4-SEC-07`_
 
@@ -157,7 +161,7 @@ PR #25's envelope layer reuses the shipped keychain custody well and age-wraps g
 
 **References:** Keybase provisions a new device from an *existing* device over a mutually-authenticated OOB channel — the server never introduces a device key ([Keybase key-exchange](https://book.keybase.io/docs/crypto/key-exchange)); KMS ciphertext records which key version protected it so colliding versions never alias ([GCP KMS rotation](https://docs.cloud.google.com/kms/docs/cmek-rotation)).
 
-### P6-SEC-03 — `Pull` truncates permanently on a never-granted epoch, wedging all sync for a validly-approved device
+### P6-SEC-03 — `Pull` truncates permanently on a never-granted epoch, wedging all sync for a validly-approved device — SHIPPED 2026-07-03 (`fix/never-granted-epoch-grace`)
 
 **Severity / Effort / Category:** P2 / L / security · availability · _new (PR #25)_
 
@@ -178,7 +182,7 @@ PR #25's envelope layer reuses the shipped keychain custody well and age-wraps g
 
 The HLC primitives remain correct, but the new envelope decorator and the shipped-but-untested revocation flow reintroduce whole-batch aborts, cursor-advance-past-loss, and unauthenticated-carrier gaps one layer above the fixes PASS4/PASS5 landed.
 
-### P6-SYNC-01 — Any signature/trust failure in `ApplyEvents` aborts the whole batch and permanently wedges the pull cursor
+### P6-SYNC-01 — Any signature/trust failure in `ApplyEvents` aborts the whole batch and permanently wedges the pull cursor — SHIPPED 2026-07-02 (PR #30)
 
 **Severity / Effort / Category:** P1 / M / sync · availability · _new (reachable once revoke+Rotate shipped)_
 
@@ -212,7 +216,7 @@ The HLC primitives remain correct, but the new envelope decorator and the shippe
 2. Add the quarantine table + `status`/`doctor` surfacing + `sync --replay-skipped`.
 3. Test: a device holding only epoch 2, batch starting with an unrecoverable object, must not silently strand later same-device events.
 
-### P6-SYNC-03 — Revoking the last approved device reopens the bootstrap window; the revoked device's events are accepted again
+### P6-SYNC-03 — Revoking the last approved device reopens the bootstrap window; the revoked device's events are accepted again — SHIPPED 2026-07-03 (PR #38)
 
 **Severity / Effort / Category:** P2 / S / sync · security · _new (inverse of open `P4-SEC-04`)_
 
@@ -226,7 +230,7 @@ The HLC primitives remain correct, but the new envelope decorator and the shippe
 1. Change the `hasEnrolledDevices` predicate (option a) or add the sticky flag (option b).
 2. Test: approve B, revoke B, then a signed `project.added` from B must be rejected (and, with `P6-SYNC-01`, recorded as a conflict rather than applied or aborting).
 
-### P6-SYNC-04 — `enc.v1` carrier `DeviceID`/`Seq`/`HLC` are bound by neither the AEAD AAD nor the signature, so the hub can mutate them at the crypto layer
+### P6-SYNC-04 — `enc.v1` carrier `DeviceID`/`Seq`/`HLC` are bound by neither the AEAD AAD nor the signature, so the hub can mutate them at the crypto layer — SHIPPED 2026-07-03 (PR #44)
 
 **Severity / Effort / Category:** P2 / S / sync · integrity · _new (PR #25)_
 
@@ -248,7 +252,7 @@ The HLC primitives remain correct, but the new envelope decorator and the shippe
 
 The R2/S3 adapter (PR #24) is now the live sync backend, which turns previously-latent hub findings into reachable ones: GC deletes live data, credential custody diverges from spec, push is serial, and the retention floor has no hub-side representation.
 
-### P6-HUB-01 — `hub gc` sweeps against the stale local replica with no pre-GC sync, no grace window, and an encryption-truncated mark set — it deletes other devices' live draft blobs
+### P6-HUB-01 — `hub gc` sweeps against the stale local replica with no pre-GC sync, no grace window, and an encryption-truncated mark set — it deletes other devices' live draft blobs — SHIPPED 2026-07-02 (PR #36)
 
 **Severity / Effort / Category:** P1 / M / hub · data-loss · _new (defect in shipped `P5-HUB-02`)_
 
@@ -265,7 +269,7 @@ The R2/S3 adapter (PR #24) is now the live sync backend, which turns previously-
 
 **References:** GC on an object-store log must handle the mark/write race with an age-based grace window and delete only below a manifest watermark ([OSWALD](https://nvartolomei.com/oswald/)); coordinate exclusive maintenance via `PUT If-None-Match` lock objects so two devices don't sweep concurrently ([Morling/S3 leader election](https://www.morling.dev/blog/leader-election-with-s3-conditional-writes/)).
 
-### P6-HUB-02 — Hub S3 credential custody contradicts spec/19: only plaintext env/config works; the promised keychain/`op://`/age-blob resolution does not exist
+### P6-HUB-02 — Hub S3 credential custody contradicts spec/19: only plaintext env/config works; the promised keychain/`op://`/age-blob resolution does not exist — SHIPPED 2026-07-03 (`fix/p6-hub-02`)
 
 **Severity / Effort / Category:** P2 / M / hub · security · spec-drift · _new (defect in shipped `P5-HUB-01`)_
 
@@ -299,7 +303,7 @@ The R2/S3 adapter (PR #24) is now the live sync backend, which turns previously-
 
 **References:** every mature object-store log fans out and compacts small per-record objects rather than serial round-trips ([WarpStream](https://docs.warpstream.com/warpstream/overview/architecture)).
 
-### P6-HUB-04 — The retention horizon has no hub-side representation, so the shipped `ErrSnapshotRequired` guard can never fire against a real hub
+### P6-HUB-04 — The retention horizon has no hub-side representation, so the shipped `ErrSnapshotRequired` guard can never fire against a real hub — SHIPPED 2026-07-04 (PR #75)
 
 **Severity / Effort / Category:** P3 / M / hub · correctness · _new (unshipped half of `P5-HUB-03`)_
 
@@ -322,7 +326,7 @@ The R2/S3 adapter (PR #24) is now the live sync backend, which turns previously-
 
 The eager-materialize and agent paths carry a universal timeout that breaks the headline promise, ignore the stored LFS policy, expose the project's decrypted `.env` to lifecycle scripts, and leak worktrees on the error paths.
 
-### P6-GIT-01 — A universal 2-minute git timeout makes materialization of any large repo permanently impossible, and the retry loop re-downloads three times
+### P6-GIT-01 — A universal 2-minute git timeout makes materialization of any large repo permanently impossible, and the retry loop re-downloads three times — SHIPPED 2026-07-02 (`fix/p6-git-01`)
 
 **Severity / Effort / Category:** P1 / M / git · reliability · _new (post-`GIT-02` interaction)_
 
@@ -339,7 +343,7 @@ The eager-materialize and agent paths carry a universal timeout that breaks the 
 
 **References:** blobless partial clone is the right long-lived default, but users going offline should pre-fetch (`git backfill`) rather than hit on-demand fetch storms — a longer, class-specific timeout is the precondition ([GitHub clone study](https://github.blog/open-source/git/git-clone-a-data-driven-study-on-cloning-behaviors/), [git backfill](https://git-scm.com/docs/git-backfill)).
 
-### P6-GIT-02 — `agentDiffSummary` only sees uncommitted changes, so any agent that commits its work records "(no changes)" and a diff-less PR body
+### P6-GIT-02 — `agentDiffSummary` only sees uncommitted changes, so any agent that commits its work records "(no changes)" and a diff-less PR body — SHIPPED 2026-07-03 (`fix/p6-git-02`)
 
 **Severity / Effort / Category:** P2 / S / git · agents · _new_
 
@@ -353,7 +357,7 @@ The eager-materialize and agent paths carry a universal timeout that breaks the 
 1. Change the signature to take the worktree; compute base-vs-HEAD + uncommitted, labeled.
 2. Test: agent command runs `git commit -am x` in the worktree; assert the summary contains the committed file stat.
 
-### P6-GIT-03 — Dependency rebuild runs untrusted postinstall scripts *after* the decrypted `.env` is hydrated into the project, with `$HOME` pointing at it
+### P6-GIT-03 — Dependency rebuild runs untrusted postinstall scripts *after* the decrypted `.env` is hydrated into the project, with `$HOME` pointing at it — SHIPPED 2026-07-03 (PR #69)
 
 **Severity / Effort / Category:** P2 / S / git · security · spec-drift · _new (post-`P5-SEC-03`)_
 
@@ -369,7 +373,7 @@ The eager-materialize and agent paths carry a universal timeout that breaks the 
 3. Reconcile the spec/08 ask-gate/log claims with the code.
 4. Test: `.env` does not exist at rebuild time in the materialize flow.
 
-### P6-GIT-04 — Eager materialize/hydrate ignore the stored `lfs_policy`; an `lfs-policy=always` repo materializes as pointer files with zero warning
+### P6-GIT-04 — Eager materialize/hydrate ignore the stored `lfs_policy`; an `lfs-policy=always` repo materializes as pointer files with zero warning — SHIPPED 2026-07-04 (`fix/p6-git-04`)
 
 **Severity / Effort / Category:** P2 / M / git · fidelity · _new (materialize-path gap)_
 
@@ -384,7 +388,7 @@ The eager-materialize and agent paths carry a universal timeout that breaks the 
 2. Record available/clean only after the LFS decision.
 3. Testscript: a fake-LFS repo with `always` pulls; with `auto` warns.
 
-### P6-GIT-05 — `createFreshWorktree` leaks a live, DB-invisible worktree + branch when LFS pull or the DB insert fails after `git worktree add`
+### P6-GIT-05 — `createFreshWorktree` leaks a live, DB-invisible worktree + branch when LFS pull or the DB insert fails after `git worktree add` — SHIPPED 2026-07-03 (`fix/p6-git-05`)
 
 **Severity / Effort / Category:** P2 / S / git · resource-leak · _new (normal-error-path, distinct from `P4-GIT-04`)_
 
@@ -422,7 +426,7 @@ The eager-materialize and agent paths carry a universal timeout that breaks the 
 
 The command layer is disciplined on exit codes and redaction, but several commands quietly disagree with their own help/spec: re-`init` forks the root, `scan --adopt` accepts any directory, usage errors don't use the documented code, `--quiet` no-ops, and onboarding still points at the test-only hub.
 
-### P6-CLI-01 — Re-running `devstrap init` with a new root creates a silent split-brain: DB root updates, config.yaml does not
+### P6-CLI-01 — Re-running `devstrap init` with a new root creates a silent split-brain: DB root updates, config.yaml does not — SHIPPED 2026-07-03 (PR #72)
 
 **Severity / Effort / Category:** P2 / S / cli · correctness · _new_
 
@@ -437,7 +441,7 @@ The command layer is disciplined on exit codes and redaction, but several comman
 2. Longer term, make the DB workspace row the single source of truth for root; config is bootstrap only.
 3. Testscript: `init A`, `init B`; assert `scan` and `status` agree.
 
-### P6-CLI-02 — `scan <dir> --adopt` accepts any directory and poisons the shared namespace with out-of-tree projects
+### P6-CLI-02 — `scan <dir> --adopt` accepts any directory and poisons the shared namespace with out-of-tree projects — SHIPPED 2026-07-03 (`fix/p6-cli-02`)
 
 **Severity / Effort / Category:** P2 / S / cli · data-integrity · _new_
 
@@ -480,7 +484,7 @@ The command layer is disciplined on exit codes and redaction, but several comman
 1. Add `progressf`; route summary/progress lines through it.
 2. Or reword the flag help to verbosity-only (spec-consistent).
 
-### P6-CLI-05 — README and the init next-steps hint steer users to the test-only file hub; the shipped `r2://` path is undocumented
+### P6-CLI-05 — README and the init next-steps hint steer users to the test-only file hub; the shipped `r2://` path is undocumented — SHIPPED 2026-07-03 (`fix/p6-cli-05`)
 
 **Severity / Effort / Category:** P3 / S / cli · docs · _new (post-PR-#24 staleness)_
 
@@ -501,7 +505,7 @@ The command layer is disciplined on exit codes and redaction, but several comman
 
 The schema is robust, but this pass's TOCTOU/atomicity focus surfaced a data-loss GC interaction, a broken shipped query, a dual-write divergence gap, an incomplete backup, a missing hot-path index, and a half-applied singleton invariant.
 
-### P6-DATA-01 — The origin device never records its own draft snapshot row, so routine sync GC and `hub gc` delete the live draft bundle blob
+### P6-DATA-01 — The origin device never records its own draft snapshot row, so routine sync GC and `hub gc` delete the live draft bundle blob — SHIPPED 2026-07-02 (PR #35)
 
 **Severity / Effort / Category:** P1 / S / data · data-loss · _new_
 
@@ -516,7 +520,7 @@ The schema is robust, but this pass's TOCTOU/atomicity focus surfaced a data-los
 2. Audit `emitSupersedingDraftSnapshot` for the same missing-row assumption.
 3. Test: create snapshot on A → `sync` + `hub gc` on A → assert `LatestDraftSnapshot` non-nil and the blob still exists locally and on the hub.
 
-### P6-DATA-02 — `ClearRotationForProject` filters on a non-existent `env_profiles.namespace_id` column, so `devstrap env rotate <path>` always fails
+### P6-DATA-02 — `ClearRotationForProject` filters on a non-existent `env_profiles.namespace_id` column, so `devstrap env rotate <path>` always fails — SHIPPED 2026-07-03 (`fix/p6-data-02`)
 
 **Severity / Effort / Category:** P2 / S / data · correctness · _new (defect in shipped `P5-PROD-03`)_
 
@@ -545,7 +549,7 @@ The schema is robust, but this pass's TOCTOU/atomicity focus surfaced a data-los
 2. (Optional) re-apply-on-duplicate in `ApplyEvents`.
 3. Test: simulate a crash between the two commits; assert the origin either heals on retry or never diverges.
 
-### P6-DATA-04 — `db backup` produces an incomplete workspace backup: local-only env secret blobs and file-fallback keys are excluded, and there is no restore path
+### P6-DATA-04 — `db backup` produces an incomplete workspace backup: local-only env secret blobs and file-fallback keys are excluded, and there is no restore path — SHIPPED 2026-07-04 (`fix/p6-data-04`)
 
 **Severity / Effort / Category:** P2 / M / data · disaster-recovery · _new_
 
@@ -627,7 +631,7 @@ The drift gate, the release pipeline, and the one real-backend hub test each loo
 
 **References:** the 2025 tj-actions compromise left SHA-pinned workflows untouched; the baseline is pinned actions + least-privilege `permissions:` + Scorecard's pinned-dependencies/token-permissions checks ([Wiz](https://www.wiz.io/blog/github-action-tj-actions-changed-files-supply-chain-attack-cve-2025-30066)); publish SLSA provenance / cosign-signed checksums so the tagged-commit binary is verifiable ([goreleaser SLSA](https://goreleaser.com/blog/slsa-generation-for-your-artifacts/)).
 
-### P6-QUAL-03 — The production S3/R2 adapter's only real-backend integration test is env-gated and never executed by CI
+### P6-QUAL-03 — The production S3/R2 adapter's only real-backend integration test is env-gated and never executed by CI — SHIPPED 2026-07-03 (`fix/p6-qual-03`)
 
 **Severity / Effort / Category:** P2 / S / ci · testing · _new (follow-through gap of shipped `P5-HUB-01`)_
 
@@ -641,7 +645,7 @@ The drift gate, the release pipeline, and the one real-backend hub test each loo
 1. Add the `docker run` MinIO conformance job (digest-pinned).
 2. Run non-required initially; promote to required after it proves stable.
 
-### P6-QUAL-04 — SSH-alias forge tests shell out to the real `ssh -G`, which reads the machine's real ssh config; the `ssh -G` branch is never deterministically tested
+### P6-QUAL-04 — SSH-alias forge tests shell out to the real `ssh -G`, which reads the machine's real ssh config; the `ssh -G` branch is never deterministically tested — SHIPPED 2026-07-03 (`fix/p6-qual-04`)
 
 **Severity / Effort / Category:** P3 / S / testing · hermeticity · _new (defect in shipped `P5-CLI-04`)_
 
@@ -655,7 +659,7 @@ The drift gate, the release pipeline, and the one real-backend hub test each loo
 1. Add `stubSSH` PATH-shim helper.
 2. Test the `ssh -G` branch and the fallback deterministically.
 
-### P6-QUAL-05 — CI runs the full 5-job matrix twice per PR commit (push on `**` + pull_request) with no concurrency cancellation
+### P6-QUAL-05 — CI runs the full 5-job matrix twice per PR commit (push on `**` + pull_request) with no concurrency cancellation — SHIPPED 2026-07-03 (`fix/p6-qual-05`)
 
 **Severity / Effort / Category:** P3 / S / ci · cost · _new_
 
@@ -680,7 +684,7 @@ concurrency:
 
 Six findings converge on the same theme: the ignore/prune compiler, the portable `run-loop`, headless key custody, and `scan`'s onboarding-time behavior each silently diverge from their own documented contracts — dropping content, minting a second identity, or hanging on the network — without ever raising an error the user can act on.
 
-### P6-XP-01 — `ShouldPruneDir`'s bare-name fallback silently defeats anchored and negation patterns, dropping re-included content from draft bundles
+### P6-XP-01 — `ShouldPruneDir`'s bare-name fallback silently defeats anchored and negation patterns, dropping re-included content from draft bundles — SHIPPED 2026-07-03 (`fix/p6-xp-01`)
 
 **Severity / Effort / Category:** P2 / S / ignore-compiler · draft-bundle · prune-semantics · silent-data-loss · _new (no prior pass audits prune/compiler semantics — fuzzing only checked non-panic)_
 
@@ -709,7 +713,7 @@ func (m *Matcher) ShouldPruneDir(name, relSlash string) bool {
 
 ---
 
-### P6-XP-02 — The ignore compiler diverges from the gitignore semantics it advertises (middle-slash anchoring, bracket classes, whole-file failure)
+### P6-XP-02 — The ignore compiler diverges from the gitignore semantics it advertises (middle-slash anchoring, bracket classes, whole-file failure) — SHIPPED 2026-07-04 (`fix/p6-xp-02`)
 
 **Severity / Effort / Category:** P2 / M / ignore-compiler · gitignore-semantics · draft-sync · _new (no prior pass audits pattern-compiler semantics; spec/11 claims gitignore-compatibility without caveats)_
 
@@ -737,7 +741,7 @@ Add a differential test that runs the Matcher against `git check-ignore --verbos
 
 ---
 
-### P6-XP-03 — `run-loop` never runs its advertised scan stage, so new local projects on device A never reach the hub
+### P6-XP-03 — `run-loop` never runs its advertised scan stage, so new local projects on device A never reach the hub — SHIPPED 2026-07-04 (`fix/p6-xp-03`)
 
 **Severity / Effort / Category:** P2 / M / run-loop · sync-engine · spec-drift · _new (P5-QUAL-02/03 and P5-CLI-05 touched run-loop for tests/jitter/stderr but none noticed the missing scan stage; the original XP-02 spec explicitly required it)_
 
@@ -813,7 +817,7 @@ Add a one-time availability probe at init that records the chosen custody backen
 
 ---
 
-### P6-XP-05 — `scan` makes a serial per-repo network call (`set-head --auto`), so onboarding stalls for minutes-to-hours offline
+### P6-XP-05 — `scan` makes a serial per-repo network call (`set-head --auto`), so onboarding stalls for minutes-to-hours offline — SHIPPED 2026-07-04 (`fix/p6-xp-05`)
 
 **Severity / Effort / Category:** P2 / M / scan · git-network · onboarding-performance · _new (no ledger item covers scan-time network use; P4-GIT-07 covers materialize, not scan)_
 
@@ -868,7 +872,7 @@ if err != nil {
 
 The gates and specs built to catch documentation staleness are themselves drifting: the shipped command-doc check still misses an undocumented command, the audit ledger that is supposed to be pass 6's single source of truth self-contradicts on what shipped, spec/00 re-drifted inside the very PR that last fixed it, and the newest crypto subsystem shipped with no granular spec owner to keep its docs honest.
 
-### P6-DOC-01 — spec/13's status block is false in both directions and the command-doc gate silently misses `env rotate`
+### P6-DOC-01 — spec/13's status block is false in both directions and the command-doc gate silently misses `env rotate` — doc portion applied; test-hardening residual OPEN
 
 **Severity / Effort / Category:** P2 / S / docs · ci · _new (relates `P5-DX-02`)_
 
@@ -896,7 +900,7 @@ This alone would fail today on `"env rotate"`.
 
 ---
 
-### P6-DOC-02 — The audit ledger self-contradicts on P4-SEC-05 and leaves shipped rows (P4-SEC-02) inside "still open," violating its own convention #3
+### P6-DOC-02 — The audit ledger self-contradicts on P4-SEC-05 and leaves shipped rows (P4-SEC-02) inside "still open," violating its own convention #3 — SHIPPED 2026-07-01 (PR #28)
 
 **Severity / Effort / Category:** P2 / S / process · docs · _new (beyond `P5-PROC-01`)_
 
@@ -913,7 +917,7 @@ This alone would fail today on `"env rotate"`.
 
 ---
 
-### P6-DOC-03 — spec/00 re-drifted immediately after P5-DOC-02: a "planned" sync comment, a missing command, and a wrong tested-package inventory
+### P6-DOC-03 — spec/00 re-drifted immediately after P5-DOC-02: a "planned" sync comment, a missing command, and a wrong tested-package inventory — SHIPPED 2026-07-01 (PR #28)
 
 **Severity / Effort / Category:** P3 / S / docs · entry-point · _new (recurrence after `P5-DOC-02`)_
 
@@ -936,7 +940,7 @@ Add `recipient` to the `:131` devices list; revisit `:148`'s reconciliation line
 
 ---
 
-### P6-DOC-04 — The new `workspacekeys` keyring has no granular spec owner, so its lifecycle/forward-secrecy docs can rot without tripping the drift gate
+### P6-DOC-04 — The new `workspacekeys` keyring has no granular spec owner, so its lifecycle/forward-secrecy docs can rot without tripping the drift gate — SHIPPED 2026-07-03 (PR #71)
 
 **Severity / Effort / Category:** P3 / S / process · ci · spec-mapping · _new (gap `P5-DX-02` can't close)_
 
