@@ -21,6 +21,8 @@ func TestMatchDefaults(t *testing.T) {
 		{"__pycache__/foo.pyc", false, true},
 		{".venv/bin/python", false, true},
 		{"target/release/app", false, true},
+		{"data/raw", true, true},             // default now `**/data/raw/` → pruned at root…
+		{"experiments/data/raw", true, true}, // …and at any depth (prune-anywhere intent preserved)
 		{"README.md", false, false},
 	}
 	for _, tc := range tests {
