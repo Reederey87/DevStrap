@@ -31,6 +31,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-04 — fix(doctor): probe git-carrier hubs in the --remote workspace-id check
+
+Changed:
+- `internal/cli/doctor.go`: treat `git:<workspace-id>` hub ids as remote workspace-id-keyed hubs for the joiner workspace-id mismatch heuristic (`isRemoteHubID` now matches `git:` alongside `r2:`/`s3:`), and update the nearby comments to name the r2/s3/git set. The gap was observed live in the git-carrier dogfood (`spec/19` §F.2 step 8): `doctor --remote` on a git-carrier device reported reachability but silently skipped the joiner "never pulled / workspace id match" probe. `GitCarrierHub` keys objects by workspace id exactly like R2 and implements `HasEvents`, so the heuristic applies unchanged.
+- `internal/cli/doctor_test.go`: add git-carrier table coverage for the warning path plus founder and advanced-cursor non-warning cases.
+- `spec/13_CLI_DAEMON_API.md`: document that the `workspace id match` warning applies to R2/S3 and the git carrier.
+
+Validated:
+- `gofmt -l cmd internal`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+- `go test ./internal/cli -run 'ShouldWarn|CheckHubHealth' -count=1`; `GOCACHE=/tmp/devstrap-gocache go test -race ./...`.
+- Implemented by gpt-5.5 (codex) from a line-level spec; diff transplanted onto a fresh `origin/main` worktree and line-by-line reviewed.
+
+Follow-ups:
+- None
+
 ## 2026-07-04 — docs(hub): live git-carrier GitHub dogfood — two-device sync + compact + snapshot bootstrap PASS (spec/19 §F.2)
 
 Changed:
