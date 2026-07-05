@@ -31,6 +31,27 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — feat(agent): Linux Landlock fallback sandbox for agent run (P4-GIT-03 slice 3)
+
+Changed:
+- `internal/platform`: Linux sandboxing is now a lazy chooser: bubblewrap first, Landlock fallback second, unsupported last. `DEVSTRAP_SANDBOX_BACKEND=bwrap|landlock` forces a backend and never silently falls back, so forced failures surface honestly to `--sandbox require`.
+- `internal/platform/sandbox_landlock.go` + `internal/cli/sandbox_helper.go`: added the Landlock backend and hidden `devstrap sandbox-helper` re-exec shim. The shim applies Landlock to its own process, then `execve()`s the agent argv in the same PID so context-kill and child exit-code behavior are preserved; shim failures exit 125 and surface through the parent as `childExitBase+125`.
+- Landlock policy: strict ABI v3 floor because v3 handles `TRUNCATE` and avoids the raw `truncate(2)` outside-worktree bypass; read+execute remains allowed everywhere; writes are confined to worktree + per-run tmp with `REFER` for Git object renames; device-node writes are allowed where shell/pty plumbing needs them; the log dir stays child-unwritable. The backend is additive-allow by design, so credential reads are NOT denied; network denial is TCP bind/connect only on ABI >= 4.
+- `platform.SandboxCapabilities` and `agent run` resolution now surface reduced guarantees with one notice line, accept Landlock as satisfying `--sandbox require` for write confinement, and fail closed under `require` when `readonly`/`cautious` ask for a network deny the selected backend cannot enforce.
+- Tests cover pure all-platform helper/limitation contracts, Linux chooser and Landlock adapter paths, hidden CLI shim behavior, capability resolution, and the env-gated kernel E2E. CI adds a hard-fail Landlock runner probe plus real-binary `sandbox-helper` smoke before the env-gated test can skip.
+- `go.mod` / `go.sum`: added `github.com/landlock-lsm/go-landlock v0.9.0`.
+
+Validated:
+- Darwin: `gofmt -w cmd internal`; `test -z "$(gofmt -l cmd internal)"`; `go vet ./...`; `go build ./...`; `golangci-lint run`; `GOCACHE=/tmp/devstrap-gocache go test -race ./...`; `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+- Linux: `GOOS=linux go vet ./...`; `GOOS=linux go build ./...`; `golangci-lint run` for the linux-tagged platform/cli packages; full `go test -race ./...` on the Ubuntu runner.
+- Kernel E2E: `DEVSTRAP_SANDBOX_E2E=1 go test ./internal/platform/ -run TestLandlockSandboxEnforcement` on Linux Docker kernel 6.12 proved outside-write denial, raw `truncate(2)` denial, `/dev/null` allowed, log-dir denial, credential read still succeeding (documented degrade), exit-code fidelity through the shim, and TCP deny at ABI >= 4.
+
+Follow-ups:
+- Seccomp.
+- `sandbox.violation` telemetry.
+- Tighter read confinement.
+- Seatbelt symlink-leaf parity (next PR).
+
 ## 2026-07-05 — fix(agent): bubblewrap credential masks fail closed on resolution errors (P4-GIT-03 follow-up)
 
 Changed:

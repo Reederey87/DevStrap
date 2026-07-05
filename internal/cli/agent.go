@@ -86,6 +86,13 @@ func resolveAgentSandbox(mode, policy string, stderr io.Writer, devstrapHome str
 	}
 	sb := sandboxBackend()
 	if err := sb.Available(); err != nil {
+		// A mistyped DEVSTRAP_SANDBOX_BACKEND is an explicit-config error, not
+		// a host capability gap: degrading it to the advisory warning would
+		// let a typo silently disable the OS sandbox. Fail closed in every
+		// mode (Codex review P1).
+		if errors.Is(err, platform.ErrInvalidSandboxBackend) {
+			return launch, appError{code: exitInvalidConfig, err: err}
+		}
 		if mode == "require" {
 			return launch, appError{code: exitPolicy, err: fmt.Errorf("OS sandbox required but unavailable: %w", err)}
 		}
@@ -95,6 +102,29 @@ func resolveAgentSandbox(mode, policy string, stderr io.Writer, devstrapHome str
 	launch.sandbox = sb
 	launch.enabled = true
 	launch.denyNetwork = policy == "readonly" || policy == "cautious"
+	// A degraded backend (the Linux landlock fallback) is still a kernel
+	// write-confinement boundary, so it satisfies `require` — except when the
+	// policy's network deny cannot be enforced at all: running a "no network"
+	// policy with the network open would break the policy's promise. A
+	// TCP-only deny satisfies `require` but must never read as netns-grade
+	// isolation, so it warns (adversarial review P2).
+	if caps, ok := sb.(platform.SandboxCapabilities); ok {
+		if launch.denyNetwork {
+			switch caps.NetworkDenyEnforcement() {
+			case platform.NetworkDenyNone:
+				if mode == "require" {
+					return launch, appError{code: exitPolicy, err: fmt.Errorf("policy %s requires a network deny but OS sandbox %s cannot enforce it; use --policy guarded, enable bubblewrap, or --sandbox off", policy, sb.Name())}
+				}
+				_, _ = fmt.Fprintf(stderr, "warning: OS sandbox %s cannot enforce the %s network deny; the child network stays open\n", sb.Name(), policy)
+			case platform.NetworkDenyPartialTCP:
+				_, _ = fmt.Fprintf(stderr, "warning: OS sandbox %s enforces the %s network deny for TCP bind/connect only; UDP, QUIC, and unix-domain sockets stay open\n", sb.Name(), policy)
+			case platform.NetworkDenyTotal:
+			}
+		}
+		if lims := caps.Limitations(); len(lims) > 0 {
+			_, _ = fmt.Fprintf(stderr, "notice: OS sandbox %s active with reduced guarantees: %s\n", sb.Name(), strings.Join(lims, "; "))
+		}
+	}
 	return launch, nil
 }
 
@@ -221,7 +251,7 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&taskName, "task", "", "task description")
 	cmd.Flags().StringVar(&commandFlag, "command", "", "generic command to run, split on whitespace; args after -- are preferred")
 	cmd.Flags().StringVar(&policy, "policy", "guarded", "agent command policy: readonly, cautious, guarded, or yolo-local (argv/file checks are advisory; combine with the OS sandbox for real confinement)")
-	cmd.Flags().StringVar(&sandboxMode, "sandbox", defaultSandboxMode(), "OS sandbox mode: auto (sandbox when the host supports it; macOS Seatbelt, Linux bubblewrap), require (refuse to run unsandboxed), or off (env: DEVSTRAP_SANDBOX)")
+	cmd.Flags().StringVar(&sandboxMode, "sandbox", defaultSandboxMode(), "OS sandbox mode: auto (sandbox when the host supports it; macOS Seatbelt, Linux bubblewrap with a landlock fallback — force one via DEVSTRAP_SANDBOX_BACKEND), require (refuse to run unsandboxed), or off (env: DEVSTRAP_SANDBOX)")
 	return cmd
 }
 

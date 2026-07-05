@@ -100,6 +100,20 @@ jobs:
           # --disable-userns first, plain userns if the flag is unsupported.
           bwrap --unshare-user --disable-userns --unshare-pid --ro-bind / / --proc /proc --dev /dev true \
             || bwrap --unshare-user --unshare-pid --ro-bind / / --proc /proc --dev /dev true
+      - name: Landlock runner probe (hard fail) + helper smoke
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          # The landlock enforcement test skips when Available() fails — fail
+          # HERE (loudly) if this runner's kernel cannot enforce Landlock so a
+          # silent skip can't mask regressions. Doubles as a real-binary smoke
+          # of the hidden sandbox-helper re-exec shim.
+          go build -o "$RUNNER_TEMP/devstrap" ./cmd/devstrap
+          spec="{\"WorktreeDir\":\"$PWD\",\"TmpDir\":\"$RUNNER_TEMP\"}"
+          "$RUNNER_TEMP/devstrap" sandbox-helper --spec "$spec" -- /usr/bin/true
+          if "$RUNNER_TEMP/devstrap" sandbox-helper --spec "$spec" -- /usr/bin/touch "$HOME/landlock-denied-probe"; then
+            echo "landlock did not confine writes outside the worktree"; exit 1
+          fi
+          test ! -e "$HOME/landlock-denied-probe"
       - name: Test
         run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
       - name: Fuzz smoke (Decide convergence property)

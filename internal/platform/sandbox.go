@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -49,10 +50,51 @@ type Sandbox interface {
 	Command(ctx context.Context, spec SandboxSpec, argv []string) ([]string, func(), error)
 }
 
+// ErrInvalidSandboxBackend marks a sandbox backend override whose VALUE is
+// invalid (e.g. a typo in DEVSTRAP_SANDBOX_BACKEND). It is deliberately
+// distinct from ErrUnsupported: an unsupported host may degrade to advisory
+// mode, but a mistyped explicit configuration knob must fail closed — treating
+// it as a capability gap would let a typo silently disable the OS sandbox.
+var ErrInvalidSandboxBackend = errors.New("invalid sandbox backend")
+
+// NetworkEnforcement grades how completely a Sandbox can enforce
+// SandboxSpec.DenyNetwork. A plain boolean overclaims: Landlock's "deny"
+// covers only TCP bind/connect, which must not read as netns-grade isolation
+// (adversarial review P2 — DNS/QUIC/unix-socket exfiltration stays possible).
+type NetworkEnforcement int
+
+const (
+	// NetworkDenyNone means the deny cannot be kernel-enforced at all; a
+	// `require`-mode run whose policy demands a network deny refuses to
+	// launch.
+	NetworkDenyNone NetworkEnforcement = iota
+	// NetworkDenyPartialTCP denies only TCP bind/connect — UDP, QUIC, and
+	// unix-domain sockets stay open (Landlock ABI >= 4). Satisfies `require`
+	// but is surfaced as a warning, never as a full deny.
+	NetworkDenyPartialTCP
+	// NetworkDenyTotal removes the child's network entirely (bubblewrap's
+	// network namespace).
+	NetworkDenyTotal
+)
+
+// SandboxCapabilities is an optional interface a Sandbox implements when its
+// confinement can be weaker than the platform's full-fidelity backend.
+// Absence of the interface (or an empty Limitations) means full fidelity.
+// Encoding this in Available()'s error would be wrong — available-but-degraded
+// is not an error — and Name() is not structured.
+type SandboxCapabilities interface {
+	// Limitations returns human-readable degrade notes for the selected
+	// backend; callers print them as one notice line.
+	Limitations() []string
+	// NetworkDenyEnforcement reports how completely SandboxSpec.DenyNetwork
+	// will be kernel-enforced for the selected backend.
+	NetworkDenyEnforcement() NetworkEnforcement
+}
+
 // UnsupportedSandbox is the explicit no-sandbox placeholder for platforms
-// without an implemented adapter (macOS Seatbelt and Linux bubblewrap are
-// implemented; see spec/14 for remaining slices). Callers treat
-// Available() != nil as "run unconfined and say so".
+// without an implemented adapter (macOS Seatbelt and Linux
+// bubblewrap-then-landlock are implemented; see spec/14 for remaining
+// slices). Callers treat Available() != nil as "run unconfined and say so".
 type UnsupportedSandbox struct {
 	Platform string
 }
