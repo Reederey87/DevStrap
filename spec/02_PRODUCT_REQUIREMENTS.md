@@ -274,7 +274,7 @@ For future product use:
 
 Distribution and OSS onboarding are the current adoption bottleneck (`AD-8`) — no release tags exist yet, so the README install path is empty, and the mandatory spec-drift + work-log gate will bounce drive-by contributors. Recorded as goals/backlog, not shipped:
 
-- cut `v0.1.0` through the existing GoReleaser pipeline; add a Homebrew tap, a `curl | sh` installer, and shell completions;
+- cut `v0.1.0` through the existing GoReleaser pipeline (the packaging half **shipped 2026-07-05**: Homebrew cask publishing to `Reederey87/homebrew-devstrap`, the checksum-verifying `scripts/install.sh`, and completions in every archive — the README documents brew-first install; the tag itself is the remaining step);
 - make the spec-drift/work-log gate advisory on fork PRs (the maintainer completes the bookkeeping at merge), with a documented "small fix" fast path;
 - extract a short user-facing `docs/` tier (install / quickstart / self-hosting) distinct from the `spec/` design corpus, plus a 2–3 page human `ARCHITECTURE.md`;
 - enable GitHub Discussions and good-first-issue labels; reframe `AGENTS.md` as the maintainer's agent workflow, not a contributor obligation; plan for bus-factor by recruiting a second write-access maintainer.

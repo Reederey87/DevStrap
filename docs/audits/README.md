@@ -164,7 +164,7 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P4-QUAL-05 | P2 | SBOM + build provenance beyond `checksums.txt` |
 | P4-QUAL-07 | P3 | Enable resource/context-leak linters (`bodyclose`, `sqlclosecheck`, `contextcheck`, …) |
 | P4-PROD-04 | P2 | `devstrap service install` (LaunchAgent/systemd unit wrapping `run-loop`) |
-| P4-PROD-05 | P2 | Distribution: Homebrew tap + `curl\|sh` installer + shell completions (P5-DX-01 is a prerequisite) |
+| P4-PROD-05 | P2 | Distribution: Homebrew tap + `curl\|sh` installer + shell completions — **partial 2026-07-05**: cask publishing (`homebrew_casks` → `Reederey87/homebrew-devstrap`, `skip_upload: auto`), checksum-verifying `scripts/install.sh`, and completions-in-archives shipped; closes when the `v0.1.0` tag publishes them (P5-DX-01 completions shipped earlier) |
 
 ### Pass 3 (2026-06-28 cloud-sync) — residual
 

@@ -3,6 +3,16 @@
 version: 2
 project_name: devstrap
 
+before:
+  hooks:
+    # Pre-generate shell completions so every archive (and the Homebrew cask)
+    # ships them. Generation is stateless: cobra prints the script without
+    # touching DevStrap state.
+    - sh -c "rm -rf completions && mkdir -p completions"
+    - sh -c "go run ./cmd/devstrap completion bash > completions/devstrap.bash"
+    - sh -c "go run ./cmd/devstrap completion zsh > completions/_devstrap"
+    - sh -c "go run ./cmd/devstrap completion fish > completions/devstrap.fish"
+
 builds:
   - id: devstrap
     main: ./cmd/devstrap
@@ -28,9 +38,46 @@ archives:
     formats:
       - tar.gz
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - completions/*
 
 checksum:
   name_template: "checksums.txt"
+
+# Homebrew tap publishing (P4-PROD-05 / AD-8). Casks, not formulae: goreleaser
+# deprecated `brews:` in v2.16 and casks now cover Linux too. The tap repo is
+# Reederey87/homebrew-devstrap, so users run:
+#   brew install Reederey87/devstrap/devstrap
+homebrew_casks:
+  - name: devstrap
+    binaries:
+      - devstrap
+    completions:
+      bash: completions/devstrap.bash
+      zsh: completions/_devstrap
+      fish: completions/devstrap.fish
+    homepage: https://github.com/Reederey87/DevStrap
+    description: "Workspace Passport: one identical, managed ~/Code namespace on every machine and AI agent"
+    # Pre-release tags (v0.1.0-rc.1) publish a GitHub prerelease but never
+    # touch the tap; only stable tags update the cask.
+    skip_upload: auto
+    # The binaries are not Apple-signed/notarized (tracked with cosign/SLSA
+    # under P4-SEC-05/P4-QUAL-05). Homebrew quarantines cask artifacts, so
+    # Gatekeeper would refuse the unsigned binary; stripping the quarantine
+    # bit post-install is goreleaser's documented pattern for unsigned CLIs.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/devstrap"]
+          end
+    repository:
+      owner: Reederey87
+      name: homebrew-devstrap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
 
 changelog:
   use: github
@@ -50,4 +97,5 @@ release:
   name_template: "{{ .Tag }}"
   footer: |
     ---
-    Built with GoReleaser. Verify downloads against `checksums.txt`.
+    Built with GoReleaser. Verify downloads against `checksums.txt`, or install via
+    `brew install Reederey87/devstrap/devstrap` or the `scripts/install.sh` one-liner.

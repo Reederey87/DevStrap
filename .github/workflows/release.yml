@@ -66,3 +66,6 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Fine-grained PAT scoped to Reederey87/homebrew-devstrap (Contents:
+          # Read+Write) — the default GITHUB_TOKEN cannot push to another repo.
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}

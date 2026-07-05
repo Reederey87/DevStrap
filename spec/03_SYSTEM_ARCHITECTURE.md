@@ -1,6 +1,6 @@
 ---
 last_reviewed: 2026-07-03
-tracks_code: [cmd/**, internal/**, internal/config/**, .github/**]
+tracks_code: [cmd/**, internal/**, internal/config/**, .github/**, .goreleaser.yaml, scripts/**]
 ---
 # System Architecture
 
@@ -396,6 +396,30 @@ The codebase should be written as:
 ```
 
 That keeps Mac-first work from painting Linux into a corner.
+
+## Distribution (AD-8 / P4-PROD-05)
+
+Releases are cut by GoReleaser on `v*` tags (`.goreleaser.yaml`, gated by `release.yml`'s
+verify job; see `RELEASING.md`). The distribution surface, in the order users should reach
+for it:
+
+1. **Homebrew tap** — `brew install Reederey87/devstrap/devstrap`. GoReleaser publishes a
+   **cask** (not a formula: `brews:` is deprecated since GoReleaser v2.16, and casks now
+   cover Linux) into `Reederey87/homebrew-devstrap` on stable tags only (`skip_upload:
+   auto`). The binaries are not Apple-notarized yet (cosign/SLSA tracked under
+   `P4-SEC-05`/`P4-QUAL-05`), so the cask strips the quarantine bit in a documented
+   post-install hook. Shell completions install with the cask.
+2. **`curl | sh` installer** — `scripts/install.sh`, served raw from `main`. POSIX sh; picks
+   os/arch, resolves the latest tag (or `DEVSTRAP_VERSION`), verifies the tarball against
+   `checksums.txt` **before** extraction, installs into `/usr/local/bin` or `~/.local/bin`
+   (`DEVSTRAP_INSTALL_DIR` overrides), and never invokes sudo.
+3. **Release tarballs** — binary + LICENSE + README + pre-generated bash/zsh/fish
+   completions (a `before` hook runs `devstrap completion <shell>`; generation is stateless).
+4. **Build from source / `go install …@main`** for the bleeding edge.
+
+`.goreleaser.yaml` and `scripts/**` are tracked by this spec and work-log-gated in
+`internal/specdrift` (`TestReleaseTierFilesRequireWorkLog`) — a lone packaging change is
+still a behavior change.
 
 ## Implementation status
 
