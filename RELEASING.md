@@ -102,6 +102,46 @@ done
 A passing check proves the tarball was produced by this repository's release workflow at that tag and signed
 keyless (its Fulcio identity is recorded in the Rekor transparency log) — not rebuilt or swapped by a third party.
 
+## Enabling notarization (dormant until Apple enrollment lands)
+
+The release binaries are ad-hoc signed today, so `brew install --cask`'s quarantine bit would
+block them — the cask strips it in a post-install hook. Homebrew **removes support for
+Gatekeeper-failing casks on 2026-09-01**, so Developer ID signing + notarization must be live
+before then. The `.goreleaser.yaml` `notarize:` block is already wired and self-activates when
+the secrets below exist (`isEnvSet "MACOS_SIGN_P12"`); nothing else changes.
+
+One-time enrollment checklist:
+
+1. Enroll in the [Apple Developer Program](https://developer.apple.com/programs/) ($99/yr).
+2. Create a **Developer ID Application** certificate; import to Keychain, export as `.p12`
+   with a password.
+3. Create an [App Store Connect API key](https://appstoreconnect.apple.com/access/integrations/api)
+   (`.p8`) with Developer access for the notary service.
+4. Set the five Actions secrets (base64-encode the two key files):
+
+   ```bash
+   gh secret set MACOS_SIGN_P12        --repo Reederey87/DevStrap --body "$(base64 -i devid.p12)"
+   gh secret set MACOS_SIGN_PASSWORD   --repo Reederey87/DevStrap
+   gh secret set MACOS_NOTARY_KEY      --repo Reederey87/DevStrap --body "$(base64 -i AuthKey.p8)"
+   gh secret set MACOS_NOTARY_KEY_ID   --repo Reederey87/DevStrap
+   gh secret set MACOS_NOTARY_ISSUER_ID --repo Reederey87/DevStrap
+   ```
+
+   Set **all five in one sitting**: with only `MACOS_SIGN_P12` present, GoReleaser signs but
+   silently skips notarization — Gatekeeper still fails, while the binaries stop being ad-hoc
+   signed. All-or-nothing.
+
+5. Cut an rc; on the published darwin binaries verify Gatekeeper acceptance:
+
+   ```bash
+   codesign -dv ./devstrap        # TeamIdentifier set, not "adhoc"
+   spctl -a -vvv -t install ./devstrap
+   ```
+
+6. Remove the cask's `xattr -dr com.apple.quarantine` post-install hook from
+   `.goreleaser.yaml` (and this file's smoke-checklist mention of it) in the same PR that
+   confirms a notarized release — that closes `P4-SEC-05`.
+
 ## When to use a release branch
 
 Use a release branch only when you need to stabilize a release while `main` keeps moving, or to back-port fixes to an

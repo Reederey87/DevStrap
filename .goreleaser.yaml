@@ -59,6 +59,26 @@ signs:
     artifacts: checksum
     output: true
 
+# Apple Developer ID signing + notarization (the P4-SEC-05 remainder). DORMANT
+# by design: `enabled` templates to false until the MACOS_SIGN_P12 secret
+# exists in the release workflow env, so this block is inert today and
+# self-activates the moment the five MACOS_* Actions secrets are set — no
+# config change needed. Enrollment checklist + activation steps live in
+# RELEASING.md ("Enabling notarization"). Once active, remove the cask's
+# quarantine-strip hook below. Deadline: Homebrew drops support for
+# Gatekeeper-failing casks 2026-09-01.
+notarize:
+  macos:
+    - enabled: '{{ isEnvSet "MACOS_SIGN_P12" }}'
+      sign:
+        certificate: '{{ index .Env "MACOS_SIGN_P12" }}' # base64 .p12
+        password: '{{ index .Env "MACOS_SIGN_PASSWORD" }}'
+      notarize:
+        key: '{{ index .Env "MACOS_NOTARY_KEY" }}' # base64 App Store Connect .p8
+        key_id: '{{ index .Env "MACOS_NOTARY_KEY_ID" }}'
+        issuer_id: '{{ index .Env "MACOS_NOTARY_ISSUER_ID" }}'
+        wait: true
+
 # Homebrew tap publishing (P4-PROD-05 / AD-8). Casks, not formulae: goreleaser
 # deprecated `brews:` in v2.16 and casks now cover Linux too. The tap repo is
 # Reederey87/homebrew-devstrap, so users run:
