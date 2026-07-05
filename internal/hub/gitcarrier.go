@@ -72,17 +72,17 @@ const (
 	// gitTimesPrefix is the timestamp-sidecar tree. It sorts outside every
 	// workspaces/ listing prefix, so Hub enumeration never sees it.
 	gitTimesPrefix = ".devstrap-meta/times/"
-	// gitLockStale is when a same-machine cross-process lock is considered
-	// abandoned. A LIVE holder heartbeats the lock file's mtime every
-	// gitLockHeartbeat (even while blocked in a long git subprocess — the
-	// heartbeat is a goroutine), so a lock this stale means its holder died;
-	// age alone would otherwise steal the shared checkout from a holder
-	// legitimately inside a long fetch.
-	gitLockStale = 10 * time.Minute
-	// gitLockHeartbeat is how often a live holder refreshes the lock mtime.
-	gitLockHeartbeat = time.Minute
-	// gitLockWait is how long a second local process waits for the lock.
-	gitLockWait = 2 * time.Minute
+	// fsLockStale is when a same-machine cross-process lock (shared by the git
+	// and folder carriers via fsLock) is considered abandoned. A LIVE holder
+	// heartbeats the lock file's mtime every fsLockHeartbeat (even while blocked
+	// in a long git subprocess — the heartbeat is a goroutine), so a lock this
+	// stale means its holder died; age alone would otherwise steal the shared
+	// checkout from a holder legitimately inside a long fetch.
+	fsLockStale = 10 * time.Minute
+	// fsLockHeartbeat is how often a live holder refreshes the lock mtime.
+	fsLockHeartbeat = time.Minute
+	// fsLockWait is how long a second local process waits for the lock.
+	fsLockWait = 2 * time.Minute
 )
 
 // gitCarrierMarker is the content of gitMarkerFile.
@@ -153,8 +153,8 @@ func NewGitCarrierHub(remote, branch, workspaceID, cacheRoot string) (*GitCarrie
 		store:         store,
 		r2:            R2Hub{S3: store, WorkspaceID: workspaceID},
 		sleep:         time.Sleep,
-		lockWait:      gitLockWait,
-		lockHeartbeat: gitLockHeartbeat,
+		lockWait:      fsLockWait,
+		lockHeartbeat: fsLockHeartbeat,
 	}, nil
 }
 
@@ -166,54 +166,14 @@ func NewGitCarrierHub(remote, branch, workspaceID, cacheRoot string) (*GitCarrie
 // keeps its lock warm and can never have the shared checkout stolen and reset
 // underneath it.
 func (g *GitCarrierHub) lock() (func(), error) {
-	g.mu.Lock()
-	if err := os.MkdirAll(filepath.Dir(g.lockPath), 0o700); err != nil {
-		g.mu.Unlock()
-		return nil, fmt.Errorf("create git hub cache dir: %w", err)
-	}
-	deadline := time.Now().Add(g.lockWait)
-	for {
-		f, err := os.OpenFile(g.lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // lock file under the private hub cache dir
-		if err == nil {
-			_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
-			_ = f.Close()
-			stop := make(chan struct{})
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				ticker := time.NewTicker(g.lockHeartbeat)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-stop:
-						return
-					case <-ticker.C:
-						now := time.Now()
-						_ = os.Chtimes(g.lockPath, now, now)
-					}
-				}
-			}()
-			return func() {
-				close(stop)
-				<-done
-				_ = os.Remove(g.lockPath)
-				g.mu.Unlock()
-			}, nil
-		}
-		if !os.IsExist(err) {
-			g.mu.Unlock()
-			return nil, fmt.Errorf("acquire git hub lock %s: %w", g.lockPath, err)
-		}
-		if info, serr := os.Stat(g.lockPath); serr == nil && time.Since(info.ModTime()) > gitLockStale {
-			_ = os.Remove(g.lockPath) // no heartbeat for gitLockStale: the holder is dead
-			continue
-		}
-		if time.Now().After(deadline) {
-			g.mu.Unlock()
-			return nil, fmt.Errorf("acquire git hub lock %s: timed out (another devstrap process is using this hub?)", g.lockPath)
-		}
-		g.sleep(50 * time.Millisecond)
-	}
+	return fsLock{
+		mu:        &g.mu,
+		path:      g.lockPath,
+		wait:      g.lockWait,
+		heartbeat: g.lockHeartbeat,
+		stale:     fsLockStale,
+		sleep:     g.sleep,
+	}.acquire()
 }
 
 // ensureRepoLocked initializes the working clone on first use: a plain `git

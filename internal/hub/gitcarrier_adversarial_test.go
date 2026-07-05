@@ -101,7 +101,7 @@ func TestGitCarrierLiveLockIsNotStolenAndDeadLockIs(t *testing.T) {
 	}
 	// Age the lock file past the stale window; the heartbeat must refresh it
 	// so a waiter's stale-break never fires on a LIVE holder.
-	old := time.Now().Add(-2 * gitLockStale)
+	old := time.Now().Add(-2 * fsLockStale)
 	if err := os.Chtimes(holder.lockPath, old, old); err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestGitCarrierLiveLockIsNotStolenAndDeadLockIs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("live lock vanished: %v", err)
 	}
-	if time.Since(info.ModTime()) > gitLockStale {
+	if time.Since(info.ModTime()) > fsLockStale {
 		t.Fatal("heartbeat did not refresh the held lock; a waiter would steal the checkout")
 	}
 	release()
