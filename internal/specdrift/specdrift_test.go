@@ -253,6 +253,21 @@ func TestAdvisoryModeExitsCleanWithWarnings(t *testing.T) {
 	}
 }
 
+func TestAdvisoryAnnotationsEscapeWorkflowCommandBytes(t *testing.T) {
+	// A finding must never terminate or forge a workflow command: %, CR, and
+	// LF are percent-encoded per the actions/toolkit escapeData rules.
+	report := Report{Findings: []string{"evil\n::error::forged %25 path\r"}}
+	var stdout, stderr bytes.Buffer
+
+	if exitNonZero := PrintReport(&stdout, &stderr, report, true); exitNonZero {
+		t.Fatal("advisory mode must not request a non-zero exit")
+	}
+	want := "::warning::spec-drift (advisory on fork PRs): evil%0A::error::forged %2525 path%0D\n"
+	if !strings.Contains(stdout.String(), want) {
+		t.Fatalf("stdout = %q, want escaped annotation %q", stdout.String(), want)
+	}
+}
+
 func TestPrintReportPassingSummaryBothModes(t *testing.T) {
 	// A passing report behaves identically in both modes: the one-line
 	// summary on stdout, nothing on stderr, exit 0.

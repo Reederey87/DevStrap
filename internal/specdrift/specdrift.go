@@ -63,11 +63,11 @@ func PrintReport(stdout, stderr io.Writer, report Report, advisory bool) (exitNo
 	}
 	if advisory {
 		// Findings embed fork-controlled file paths, so this line is a
-		// workflow-command sink. It stays injection-safe only because git's
-		// default core.quotePath=true renders control bytes in paths as one
-		// quoted token — never disable quotePath in the CI checkout.
+		// workflow-command sink. escapeAnnotationData is the primary guard;
+		// git's default core.quotePath=true (control bytes in paths render as
+		// one quoted token) is the second layer — keep both.
 		for _, finding := range report.Findings {
-			_, _ = fmt.Fprintf(stdout, "::warning::spec-drift (advisory on fork PRs): %s\n", finding)
+			_, _ = fmt.Fprintf(stdout, "::warning::spec-drift (advisory on fork PRs): %s\n", escapeAnnotationData(finding))
 		}
 		_, _ = fmt.Fprintln(stdout, "spec drift check found issues (advisory on fork PRs, not blocking):")
 		for _, finding := range report.Findings {
@@ -80,6 +80,16 @@ func PrintReport(stdout, stderr io.Writer, report Report, advisory bool) (exitNo
 		_, _ = fmt.Fprintf(stderr, "- %s\n", finding)
 	}
 	return true
+}
+
+// escapeAnnotationData applies the actions/toolkit escapeData rules (%→%25,
+// CR→%0D, LF→%0A) so finding text can never terminate or forge a GitHub
+// Actions workflow command.
+func escapeAnnotationData(s string) string {
+	s = strings.ReplaceAll(s, "%", "%25")
+	s = strings.ReplaceAll(s, "\r", "%0D")
+	s = strings.ReplaceAll(s, "\n", "%0A")
+	return s
 }
 
 func Check(ctx context.Context, opts Options) (Report, error) {
