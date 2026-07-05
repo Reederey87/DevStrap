@@ -116,6 +116,7 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newAgentCommand(stdout, opts))
 	cmd.AddCommand(newDevicesCommand(stdout, opts))
 	cmd.AddCommand(newConflictsCommand(stdout, opts))
+	cmd.AddCommand(newSandboxHelperCommand())
 
 	attachShellCompletions(cmd, opts)
 	return cmd

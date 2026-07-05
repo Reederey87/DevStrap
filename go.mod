@@ -9,6 +9,7 @@ require (
 	github.com/aws/smithy-go v1.27.3
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/google/uuid v1.6.0
+	github.com/landlock-lsm/go-landlock v0.9.0
 	github.com/pressly/goose/v3 v3.27.1
 	github.com/rogpeppe/go-internal v1.15.0
 	github.com/spf13/cobra v1.10.2
@@ -53,6 +54,7 @@ require (
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/tools v0.45.0 // indirect
+	kernel.org/pub/linux/libs/security/libcap/psx v1.2.77 // indirect
 	modernc.org/libc v1.73.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect

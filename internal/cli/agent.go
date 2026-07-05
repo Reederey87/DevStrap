@@ -95,6 +95,21 @@ func resolveAgentSandbox(mode, policy string, stderr io.Writer, devstrapHome str
 	launch.sandbox = sb
 	launch.enabled = true
 	launch.denyNetwork = policy == "readonly" || policy == "cautious"
+	// A degraded backend (the Linux landlock fallback) is still a kernel
+	// write-confinement boundary, so it satisfies `require` — except when the
+	// policy's network deny cannot be enforced at all: running a "no network"
+	// policy with the network open would break the policy's promise.
+	if caps, ok := sb.(platform.SandboxCapabilities); ok {
+		if launch.denyNetwork && !caps.EnforcesNetworkDeny() {
+			if mode == "require" {
+				return launch, appError{code: exitPolicy, err: fmt.Errorf("policy %s requires a network deny but OS sandbox %s cannot enforce it; use --policy guarded, enable bubblewrap, or --sandbox off", policy, sb.Name())}
+			}
+			_, _ = fmt.Fprintf(stderr, "warning: OS sandbox %s cannot enforce the %s network deny; the child network stays open\n", sb.Name(), policy)
+		}
+		if lims := caps.Limitations(); len(lims) > 0 {
+			_, _ = fmt.Fprintf(stderr, "notice: OS sandbox %s active with reduced guarantees: %s\n", sb.Name(), strings.Join(lims, "; "))
+		}
+	}
 	return launch, nil
 }
 
@@ -221,7 +236,7 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&taskName, "task", "", "task description")
 	cmd.Flags().StringVar(&commandFlag, "command", "", "generic command to run, split on whitespace; args after -- are preferred")
 	cmd.Flags().StringVar(&policy, "policy", "guarded", "agent command policy: readonly, cautious, guarded, or yolo-local (argv/file checks are advisory; combine with the OS sandbox for real confinement)")
-	cmd.Flags().StringVar(&sandboxMode, "sandbox", defaultSandboxMode(), "OS sandbox mode: auto (sandbox when the host supports it; macOS Seatbelt, Linux bubblewrap), require (refuse to run unsandboxed), or off (env: DEVSTRAP_SANDBOX)")
+	cmd.Flags().StringVar(&sandboxMode, "sandbox", defaultSandboxMode(), "OS sandbox mode: auto (sandbox when the host supports it; macOS Seatbelt, Linux bubblewrap with a landlock fallback — force one via DEVSTRAP_SANDBOX_BACKEND), require (refuse to run unsandboxed), or off (env: DEVSTRAP_SANDBOX)")
 	return cmd
 }
 

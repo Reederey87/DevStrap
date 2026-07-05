@@ -49,10 +49,25 @@ type Sandbox interface {
 	Command(ctx context.Context, spec SandboxSpec, argv []string) ([]string, func(), error)
 }
 
+// SandboxCapabilities is an optional interface a Sandbox implements when its
+// confinement can be weaker than the platform's full-fidelity backend.
+// Absence of the interface (or an empty Limitations) means full fidelity.
+// Encoding this in Available()'s error would be wrong — available-but-degraded
+// is not an error — and Name() is not structured.
+type SandboxCapabilities interface {
+	// Limitations returns human-readable degrade notes for the selected
+	// backend; callers print them as one notice line.
+	Limitations() []string
+	// EnforcesNetworkDeny reports whether SandboxSpec.DenyNetwork will be
+	// kernel-enforced; a `require`-mode run whose policy demands a network
+	// deny refuses to launch when this is false.
+	EnforcesNetworkDeny() bool
+}
+
 // UnsupportedSandbox is the explicit no-sandbox placeholder for platforms
-// without an implemented adapter (macOS Seatbelt and Linux bubblewrap are
-// implemented; see spec/14 for remaining slices). Callers treat
-// Available() != nil as "run unconfined and say so".
+// without an implemented adapter (macOS Seatbelt and Linux
+// bubblewrap-then-landlock are implemented; see spec/14 for remaining
+// slices). Callers treat Available() != nil as "run unconfined and say so".
 type UnsupportedSandbox struct {
 	Platform string
 }
