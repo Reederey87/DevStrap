@@ -76,7 +76,7 @@ cosign verify-blob \
   --certificate-identity "https://github.com/Reederey87/DevStrap/.github/workflows/release.yml@refs/tags/v0.1.0" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --bundle checksums.txt.sigstore.json checksums.txt
-sha256sum --ignore-missing -c checksums.txt
+shasum -a 256 --ignore-missing -c checksums.txt   # Linux: sha256sum --ignore-missing -c checksums.txt
 ```
 
 The GitHub release assets should include `checksums.txt.sigstore.json` and one `<archive>.sbom.json`
