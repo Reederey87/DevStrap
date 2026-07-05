@@ -27,6 +27,32 @@ func withFakeSandbox(t *testing.T, sb platform.Sandbox) {
 	t.Cleanup(func() { sandboxBackend = prev })
 }
 
+// TestAgentSandboxSpecFailsClosedWithoutUserHome pins the post-merge review
+// fix on PR #107: when the real user home cannot be resolved, the run must
+// fail rather than render a profile whose home-anchored credential denies
+// silently vanished.
+func TestAgentSandboxSpecFailsClosedWithoutUserHome(t *testing.T) {
+	t.Setenv("HOME", "")
+	if _, err := agentSandboxSpec("/wt", "/tmp/run", "/log", agentSandboxLaunch{devstrapHome: "/dsh"}); err == nil {
+		t.Fatal("agentSandboxSpec succeeded without a resolvable user home; want fail-closed error")
+	}
+}
+
+func TestAgentSandboxSpecAnchorsRealUserHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	spec, err := agentSandboxSpec("/wt", "/tmp/run", "/log", agentSandboxLaunch{devstrapHome: "/dsh", denyNetwork: true})
+	if err != nil {
+		t.Fatalf("agentSandboxSpec: %v", err)
+	}
+	if spec.UserHome != home {
+		t.Fatalf("UserHome = %q, want the real home %q (not the worktree-repointed child HOME)", spec.UserHome, home)
+	}
+	if !spec.DenySensitiveReads || !spec.DenyNetwork || spec.WorktreeDir != "/wt" || spec.TmpDir != "/tmp/run" || spec.LogDir != "/log" || spec.DevstrapHome != "/dsh" {
+		t.Fatalf("spec fields not threaded through: %+v", spec)
+	}
+}
+
 func TestResolveAgentSandboxMatrix(t *testing.T) {
 	unavailable := fakeSandbox{availableErr: errors.New("no adapter on this host")}
 	available := fakeSandbox{}

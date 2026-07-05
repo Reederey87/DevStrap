@@ -33,6 +33,29 @@ type agentSandboxLaunch struct {
 	devstrapHome string
 }
 
+// agentSandboxSpec builds the SandboxSpec for one agent run. The child env
+// repoints HOME to the worktree (SECU-02), but the sensitive-read denies
+// anchor on the REAL user home — the dotfiles are still on disk regardless of
+// what $HOME says. It fails closed when that home cannot be resolved: an
+// empty anchor would silently drop every home-anchored credential deny while
+// still reporting the run as sandboxed (post-merge review, PR #107).
+// `--sandbox off` is the explicit escape hatch.
+func agentSandboxSpec(worktreeDir, perRunTmp, logDir string, launch agentSandboxLaunch) (platform.SandboxSpec, error) {
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		return platform.SandboxSpec{}, fmt.Errorf("resolve user home for sandbox credential denies (use --sandbox off to run unconfined): %w", err)
+	}
+	return platform.SandboxSpec{
+		WorktreeDir:        worktreeDir,
+		TmpDir:             perRunTmp,
+		LogDir:             logDir,
+		UserHome:           userHome,
+		DevstrapHome:       launch.devstrapHome,
+		DenyNetwork:        launch.denyNetwork,
+		DenySensitiveReads: true,
+	}, nil
+}
+
 // resolveAgentSandbox turns --sandbox mode x policy x host availability into
 // a launch decision (P4-GIT-03 slice 1). Modes:
 //
@@ -561,22 +584,9 @@ func runAgentProcess(ctx context.Context, wt state.Worktree, run state.AgentRun,
 		}
 		defer func() { _ = os.RemoveAll(perRunTmp) }()
 		envOverrides["TMPDIR"] = perRunTmp
-		// AGEN-03: wrap the argv in the OS sandbox. The child env repoints
-		// HOME to the worktree, but the sensitive-read denies anchor on the
-		// REAL user home — the dotfiles are still on disk regardless of what
-		// $HOME says.
-		userHome, err := os.UserHomeDir()
+		spec, err := agentSandboxSpec(wt.Path, perRunTmp, filepath.Dir(run.LogPath), sandboxLaunch)
 		if err != nil {
-			userHome = ""
-		}
-		spec := platform.SandboxSpec{
-			WorktreeDir:        wt.Path,
-			TmpDir:             perRunTmp,
-			LogDir:             filepath.Dir(run.LogPath),
-			UserHome:           userHome,
-			DevstrapHome:       sandboxLaunch.devstrapHome,
-			DenyNetwork:        sandboxLaunch.denyNetwork,
-			DenySensitiveReads: true,
+			return err
 		}
 		wrapped, cleanup, err := sandboxLaunch.sandbox.Command(ctx, spec, args)
 		if err != nil {
