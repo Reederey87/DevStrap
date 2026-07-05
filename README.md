@@ -160,6 +160,22 @@ install -m 0755 ./devstrap ~/.local/bin/devstrap
 devstrap version
 ```
 
+### Verify a download
+
+Every release publishes a keyless cosign signature over `checksums.txt` (Fulcio cert + Rekor
+transparency log, no long-lived signing key) and an SPDX SBOM per archive (`<archive>.sbom.json`):
+
+```bash
+cosign verify-blob \
+  --certificate-identity "https://github.com/Reederey87/DevStrap/.github/workflows/release.yml@refs/tags/vX.Y.Z" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --bundle checksums.txt.sigstore.json checksums.txt
+shasum -a 256 --ignore-missing -c checksums.txt   # Linux: sha256sum --ignore-missing -c checksums.txt
+```
+
+The signature ties `checksums.txt` — and transitively every archive it lists — to a run of this
+repo's release workflow, not to a possibly-compromised uploader.
+
 ### Build from source
 
 ```bash

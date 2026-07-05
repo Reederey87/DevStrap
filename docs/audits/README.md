@@ -147,7 +147,7 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 |---|---|---|
 | P4-SEC-02 | — | **Shipped PR #25** — moved to _Recently shipped_ above (was here in violation of convention #3; fixed by `P6-DOC-02`). |
 | P4-SEC-04 | — | **Shipped 2026-07-03** (parts 1+2, PRs #54/#57) — moved to _Recently shipped_ above. |
-| P4-SEC-05 | P1 | Sign release binaries — **partial 2026-06-30**: `goreleaser-action` SHA-pinned (`release.yml`); cosign keyless signing + SLSA provenance + SBOM still open (fold into `P4-QUAL-05`; see `P6-QUAL-02`) |
+| P4-SEC-05 | P1 | Sign release binaries — **narrowed 2026-07-05**: cosign keyless signing (Fulcio/Rekor, GitHub OIDC) over `checksums.txt` + per-archive SPDX SBOMs shipped (`.goreleaser.yaml` `sboms`/`signs`, `release.yml` `id-token: write` + cosign/syft installs); SLSA build provenance lands in a sibling PR. Remaining open scope: Apple Developer ID signing + notarization for the macOS binary (deadline: Homebrew drops Gatekeeper-failing casks 2026-09-01) |
 | P4-SEC-07 | — | **Shipped 2026-07-03** (foundation PR #25 + pairing wave + periodic rotation PR #56) — moved to _Recently shipped_ above. |
 | P4-SEC-08 | P2 | Hosted-mode prefix-scoped/temporary credentials + object immutability |
 | P4-SYNC-03 | P2 | Raise `epochFloorMS` above 0; past-direction quarantine |
@@ -162,7 +162,7 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P4-GIT-04 | P2 | Worktree GC that reaps squash/rebase-merged worktrees |
 | P4-GIT-07 | P3 | Persisted per-project materialize failure record, resume, progress detail |
 | P4-QUAL-04 | P2 | Enforce coverage in CI + add a Windows build (P5-QUAL-04 is the concrete sub-step) |
-| P4-QUAL-05 | P2 | SBOM + build provenance beyond `checksums.txt` |
+| P4-QUAL-05 | P2 | SBOM + build provenance beyond `checksums.txt` — **narrowed 2026-07-05**: per-archive SPDX SBOM half shipped (see `P4-SEC-05`); build provenance (SLSA) half lands in a sibling PR |
 | P4-QUAL-07 | P3 | Enable resource/context-leak linters (`bodyclose`, `sqlclosecheck`, `contextcheck`, …) |
 | P4-PROD-04 | P2 | `devstrap service install` (LaunchAgent/systemd unit wrapping `run-loop`) |
 | P4-PROD-05 | — | **Shipped v0.1.0 (2026-07-05)** — moved to _Recently shipped_ above. |

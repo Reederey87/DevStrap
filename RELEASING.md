@@ -69,6 +69,19 @@ DEVSTRAP_VERSION=v0.1.0-rc.1 sh scripts/install.sh
 
 Confirm the tap repo got exactly one new commit (`Casks/devstrap.rb`) and that rc tags produced **no** tap commit.
 
+Also verify the release's cosign signature and SBOMs are present:
+
+```bash
+cosign verify-blob \
+  --certificate-identity "https://github.com/Reederey87/DevStrap/.github/workflows/release.yml@refs/tags/v0.1.0" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --bundle checksums.txt.sigstore.json checksums.txt
+shasum -a 256 --ignore-missing -c checksums.txt   # Linux: sha256sum --ignore-missing -c checksums.txt
+```
+
+The GitHub release assets should include `checksums.txt.sigstore.json` and one `<archive>.sbom.json`
+per archive.
+
 ## When to use a release branch
 
 Use a release branch only when you need to stabilize a release while `main` keeps moving, or to back-port fixes to an
