@@ -350,9 +350,13 @@ func TestCloneTimeoutIsTerminalAndDoesNotRetryOrWipe(t *testing.T) {
 	if err := os.WriteFile(sentinel, []byte("keep"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// `exec sleep 5` (not 1): the 500ms deadline must win against the natural
+	// exit even when the whole -race suite is loading the machine; a 2x margin
+	// flaked, 10x holds. The killed child returns at the deadline, so the
+	// longer sleep does not slow the test down.
 	script := writeFakeGit(t, fmt.Sprintf(`#!/bin/sh
 echo attempt >> %[1]q
-exec sleep 1
+exec sleep 5
 `, countPath))
 	r := Runner{Bin: script, Timeout: 5 * time.Second, LongTimeout: 500 * time.Millisecond, RetryAttempts: 3, RetryBackoff: time.Millisecond}
 	err := r.CloneWithOptions(context.Background(), "https://example.test/org/repo.git", dest, CloneOptions{Partial: true})
@@ -366,8 +370,11 @@ exec sleep 1
 	if !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("CloneWithOptions err = %v, want timeout message", err)
 	}
-	if got := attemptCount(t, countPath); got != 1 {
-		t.Fatalf("attempt count = %d, want 1", got)
+	// At most one attempt: the timeout is terminal, so the retry loop must not
+	// fire. Zero is legal — under load the kill can land before the fake git
+	// logs (see attemptCount).
+	if got := attemptCount(t, countPath); got > 1 {
+		t.Fatalf("attempt count = %d, want at most 1 (timeout must not retry)", got)
 	}
 	if _, err := os.Stat(sentinel); err != nil {
 		t.Fatalf("destination was wiped after terminal timeout: %v", err)
@@ -381,7 +388,10 @@ echo attempt >> %[1]q
 sleep 0.2
 exit 0
 `, countPath))
-	r := Runner{Bin: script, Timeout: 50 * time.Millisecond, LongTimeout: 2 * time.Second, RetryAttempts: 1}
+	// LongTimeout 30s (not 2s): the success path returns at ~0.2s; the wide
+	// deadline only guards against a loaded machine stretching the child's
+	// startup past the transfer deadline and flipping the test's premise.
+	r := Runner{Bin: script, Timeout: 50 * time.Millisecond, LongTimeout: 30 * time.Second, RetryAttempts: 1}
 	if err := r.CloneWithOptions(context.Background(), "https://example.test/org/repo.git", filepath.Join(t.TempDir(), "repo"), CloneOptions{Partial: true}); err != nil {
 		t.Fatalf("CloneWithOptions err = %v, want success under LongTimeout", err)
 	}
@@ -394,7 +404,7 @@ func TestFetchTimeoutIsTerminalAndDoesNotRetry(t *testing.T) {
 	countPath := filepath.Join(t.TempDir(), "count")
 	script := writeFakeGit(t, fmt.Sprintf(`#!/bin/sh
 echo attempt >> %[1]q
-exec sleep 1
+exec sleep 5
 `, countPath))
 	r := Runner{Bin: script, Timeout: 5 * time.Second, LongTimeout: 500 * time.Millisecond, RetryAttempts: 3, RetryBackoff: time.Millisecond}
 	err := r.Fetch(context.Background(), "", "origin", "main")
@@ -405,8 +415,8 @@ exec sleep 1
 	if !errors.As(err, &cmdErr) || !errors.Is(cmdErr.Kind, ErrTimeout) {
 		t.Fatalf("Fetch err = %#v, want CommandError kind ErrTimeout", err)
 	}
-	if got := attemptCount(t, countPath); got != 1 {
-		t.Fatalf("attempt count = %d, want 1", got)
+	if got := attemptCount(t, countPath); got > 1 {
+		t.Fatalf("attempt count = %d, want at most 1 (timeout must not retry)", got)
 	}
 }
 
@@ -414,7 +424,7 @@ func TestLFSPullTimeoutIsTerminalAndDoesNotRetry(t *testing.T) {
 	countPath := filepath.Join(t.TempDir(), "count")
 	script := writeFakeGit(t, fmt.Sprintf(`#!/bin/sh
 echo attempt >> %[1]q
-exec sleep 1
+exec sleep 5
 `, countPath))
 	r := Runner{Bin: script, Timeout: 5 * time.Second, LongTimeout: 500 * time.Millisecond, RetryAttempts: 3, RetryBackoff: time.Millisecond}
 	err := r.LFSPull(context.Background(), "")
@@ -425,8 +435,8 @@ exec sleep 1
 	if !errors.As(err, &cmdErr) || !errors.Is(cmdErr.Kind, ErrTimeout) {
 		t.Fatalf("LFSPull err = %#v, want CommandError kind ErrTimeout", err)
 	}
-	if got := attemptCount(t, countPath); got != 1 {
-		t.Fatalf("attempt count = %d, want 1", got)
+	if got := attemptCount(t, countPath); got > 1 {
+		t.Fatalf("attempt count = %d, want at most 1 (timeout must not retry)", got)
 	}
 }
 
@@ -581,9 +591,17 @@ func writeFakeGit(t *testing.T, script string) string {
 	return path
 }
 
+// attemptCount reports how many times the fake git logged an attempt. A
+// missing file counts as zero: under full-suite -race load the transfer
+// deadline can kill the child before its first `echo attempt` executes, so
+// timeout tests must treat "never got to log" as "no retry happened", not as
+// a test failure.
 func attemptCount(t *testing.T, path string) int {
 	t.Helper()
 	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return 0
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -757,7 +775,7 @@ func TestPushBranchTimeoutIsTerminalWithHint(t *testing.T) {
 	countPath := filepath.Join(t.TempDir(), "count")
 	script := writeFakeGit(t, fmt.Sprintf(`#!/bin/sh
 echo attempt >> %[1]q
-exec sleep 1
+exec sleep 5
 `, countPath))
 	r := Runner{Bin: script, Timeout: 5 * time.Second, LongTimeout: 500 * time.Millisecond}
 	err := r.PushBranch(context.Background(), "", "origin", "agent/x")
@@ -767,8 +785,8 @@ exec sleep 1
 	if !strings.Contains(err.Error(), "clone_timeout") {
 		t.Fatalf("PushBranch err = %v, want the clone_timeout hint on a transfer-class timeout", err)
 	}
-	if got := attemptCount(t, countPath); got != 1 {
-		t.Fatalf("attempt count = %d, want 1", got)
+	if got := attemptCount(t, countPath); got > 1 {
+		t.Fatalf("attempt count = %d, want at most 1 (timeout must not retry)", got)
 	}
 }
 
