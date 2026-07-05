@@ -229,6 +229,25 @@ func TestLandlockSandboxEnforcement(t *testing.T) {
 		t.Logf("seccomp filters unsupported on this kernel: denylist sub-assertion skipped (the documented degrade)")
 	}
 
+	// Read confinement (opt-in) closes the additive-allow degrade above: with
+	// ReadConfine the fake home's .ssh is NOT among the read roots, so the same
+	// credential read that succeeded above is now kernel-DENIED, while a file
+	// inside the worktree (a read root) stays readable. The shim re-execs THIS
+	// test binary, so its directory must be a read root — hence ReadAllowExtra.
+	rcSpec := spec
+	rcSpec.ReadConfine = true
+	rcSpec.ReadAllowExtra = []string{filepath.Dir(self)}
+	readable := filepath.Join(worktree, "readable.txt")
+	if err := os.WriteFile(readable, []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(rcSpec, cat, readable); err != nil {
+		t.Fatalf("read of a worktree file blocked under read confinement: %v", err)
+	}
+	if err := run(rcSpec, cat, secret); err == nil {
+		t.Fatal("credential read succeeded under read confinement, want kernel denial (the Landlock read-confine boundary)")
+	}
+
 	abi, err := probeLandlock()
 	if err != nil {
 		t.Fatal(err)

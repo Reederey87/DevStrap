@@ -21,6 +21,13 @@ type SeatbeltSandbox struct{}
 
 func (s SeatbeltSandbox) Name() string { return "seatbelt" }
 
+// ReadConfineEnforcement implements SandboxReadConfinement: the SBPL profile
+// denies all reads and re-allows only the confinement roots, so Seatbelt can
+// always kernel-enforce read confinement.
+func (s SeatbeltSandbox) ReadConfineEnforcement() ReadConfineEnforcement {
+	return ReadConfineEnforced
+}
+
 func (s SeatbeltSandbox) Available() error {
 	info, err := os.Stat(sandboxExecPath)
 	if err != nil {

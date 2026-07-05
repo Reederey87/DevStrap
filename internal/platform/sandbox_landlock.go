@@ -35,6 +35,15 @@ type LandlockSandbox struct{}
 
 func (LandlockSandbox) Name() string { return "landlock" }
 
+// ReadConfineEnforcement implements SandboxReadConfinement: under read
+// confinement the additive-allow RODirs grant is restricted to the roots (the
+// strict V3 floor covers read+execute), so Landlock kernel-enforces read
+// confinement — and, unlike its default additive-allow reads, this finally
+// gives it a credential-read boundary.
+func (LandlockSandbox) ReadConfineEnforcement() ReadConfineEnforcement {
+	return ReadConfineEnforced
+}
+
 var probeLandlock = sync.OnceValues(func() (int, error) {
 	// One landlock_create_ruleset(LANDLOCK_CREATE_RULESET_VERSION) syscall —
 	// no subprocess launch needed, unlike the bwrap probe.
@@ -90,9 +99,21 @@ func applyLandlockPolicy(spec SandboxSpec) error {
 	if err != nil {
 		return err
 	}
-	// Allow-default reads and execute everywhere — the read-only-root
-	// analogue of bwrap's `--ro-bind / /`.
-	rules := []landlock.Rule{landlock.RODirs("/")}
+	// Read roots: allow-default (read+execute everywhere, the analogue of
+	// bwrap's `--ro-bind / /`) unless read confinement restricts reads to the
+	// allow-list. Landlock is additive-allow, so restricting the RODirs grant
+	// to the roots IS the confinement — and because the credential dirs are not
+	// among the roots, read confinement finally gives the Landlock backend a
+	// credential-read boundary it otherwise lacks. IgnoreIfMissing so an absent
+	// root (e.g. /nix, /snap) does not fail the whole ruleset.
+	var rules []landlock.Rule
+	if spec.ReadConfine {
+		for _, root := range readConfineRoots(spec) {
+			rules = append(rules, landlock.RODirs(root).IgnoreIfMissing())
+		}
+	} else {
+		rules = []landlock.Rule{landlock.RODirs("/")}
+	}
 	var rw []string
 	for _, dir := range []string{spec.WorktreeDir, spec.TmpDir} {
 		if dir != "" {

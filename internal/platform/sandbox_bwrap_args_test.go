@@ -4,6 +4,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -140,6 +141,40 @@ func TestBwrapSensitivePathsMirrorsSeatbeltDenyList(t *testing.T) {
 	})
 	if !reflect.DeepEqual(dirs, []string{"/devstrap/keys"}) || files != nil {
 		t.Fatalf("empty UserHome paths = %v, %v; want devstrap keys only", dirs, files)
+	}
+}
+
+func TestBwrapArgsReadConfineEnumeratesRootsAndSkipsMasks(t *testing.T) {
+	spec := SandboxSpec{
+		WorktreeDir:        "/work/tree",
+		TmpDir:             "/tmp/run",
+		UserHome:           "/home/dev",
+		DenySensitiveReads: true,
+		ReadConfine:        true,
+	}
+	dirs, files := bwrapSensitivePaths(spec)
+	args := bwrapArgs(spec, dirs, files, bwrapOptions{})
+	joined := strings.Join(args, " ")
+
+	// The whole-filesystem `--ro-bind / /` must be GONE under read confinement.
+	if indexSequence(args, "--ro-bind", "/", "/") >= 0 {
+		t.Fatalf("read-confine still exposes the whole filesystem: %v", args)
+	}
+	// Roots are enumerated with --ro-bind-try (never fails on absent source).
+	if indexSequence(args, "--ro-bind-try", "/usr", "/usr") < 0 {
+		t.Fatalf("read-confine missing --ro-bind-try /usr: %v", args)
+	}
+	if indexSequence(args, "--ro-bind-try", "/work/tree", "/work/tree") < 0 {
+		t.Fatalf("read-confine missing worktree root: %v", args)
+	}
+	// Worktree/tmp still bound read-write.
+	if indexSequence(args, "--bind", "/work/tree", "/work/tree") < 0 {
+		t.Fatalf("worktree read-write bind dropped: %v", args)
+	}
+	// Credential masks are subsumed by read confinement and must be skipped
+	// (their parents may not exist in the confined namespace).
+	if strings.Contains(joined, "--tmpfs /home/dev/.ssh") || strings.Contains(joined, "/dev/null /home/dev/.netrc") {
+		t.Fatalf("credential masks should be skipped under read confinement: %v", args)
 	}
 }
 

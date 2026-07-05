@@ -47,6 +47,16 @@ type SandboxSpec struct {
 	// <tag>)` so post-run log correlation can attribute denials to this run;
 	// empty disables tagging.
 	ViolationTag string
+	// ReadConfine restricts the child's reads to ReadConfineRoots (the
+	// worktree/tmp, the OS toolchain/system roots, the $HOME build caches, and
+	// ReadAllowExtra) instead of the allow-default / read-only-root model, so
+	// the rest of $HOME and other projects become unreadable. Opt-in — the CLI
+	// turns it on by default only for the readonly policy. Credential denies
+	// still stack on top (defense in depth).
+	ReadConfine bool
+	// ReadAllowExtra are additional absolute read roots (repeatable
+	// --read-allow) folded into the read-confinement allow-list.
+	ReadAllowExtra []string
 }
 
 // Sandbox wraps an agent argv in an OS-enforced confinement (AGEN-03 /
@@ -130,6 +140,27 @@ type SandboxCapabilities interface {
 	// NetworkDenyEnforcement reports how completely SandboxSpec.DenyNetwork
 	// will be kernel-enforced for the selected backend.
 	NetworkDenyEnforcement() NetworkEnforcement
+}
+
+// ReadConfineEnforcement grades whether a Sandbox can honor
+// SandboxSpec.ReadConfine. Like NetworkEnforcement, this is a capability the
+// caller checks before promising `--read-confine on` under `--sandbox
+// require`: an explicit knob must never silently no-op.
+type ReadConfineEnforcement int
+
+const (
+	// ReadConfineNone means the backend cannot restrict reads to an allow-list
+	// (no such backend exists today; reserved for a future degraded adapter).
+	ReadConfineNone ReadConfineEnforcement = iota
+	// ReadConfineEnforced means reads are kernel-confined to ReadConfineRoots.
+	ReadConfineEnforced
+)
+
+// SandboxReadConfinement is an optional interface a Sandbox implements when it
+// can enforce SandboxSpec.ReadConfine. Kept separate from SandboxCapabilities
+// so adding it does not break that interface's existing implementers.
+type SandboxReadConfinement interface {
+	ReadConfineEnforcement() ReadConfineEnforcement
 }
 
 // UnsupportedSandbox is the explicit no-sandbox placeholder for platforms

@@ -49,11 +49,22 @@ func bwrapSensitivePaths(spec SandboxSpec) (dirs, files []string) {
 // deny-default-writes profile. Args are discrete argv elements, so paths with
 // spaces need no quoting or escaping (unlike SBPL strings).
 func bwrapArgs(spec SandboxSpec, maskDirs, maskFiles []string, opts bwrapOptions) []string {
-	args := []string{
-		"--ro-bind", "/", "/",
-		"--proc", "/proc",
-		"--dev", "/dev",
+	var args []string
+	if spec.ReadConfine {
+		// Read confinement: expose ONLY the allow-list roots read-only instead
+		// of the whole `--ro-bind / /` filesystem, so the rest of $HOME and
+		// other projects are simply not in the mount namespace. --ro-bind-try
+		// never fails on an absent source (a missing /nix/snap is skipped),
+		// avoiding the enumerate-and-hard-fail trap. Credential masks are
+		// omitted below — every credential path is outside the allow-list, so
+		// read confinement already subsumes them.
+		for _, root := range readConfineRoots(spec) {
+			args = append(args, "--ro-bind-try", root, root)
+		}
+	} else {
+		args = append(args, "--ro-bind", "/", "/")
 	}
+	args = append(args, "--proc", "/proc", "--dev", "/dev")
 	if spec.WorktreeDir != "" {
 		args = append(args, "--bind", spec.WorktreeDir, spec.WorktreeDir)
 	}
@@ -61,14 +72,19 @@ func bwrapArgs(spec SandboxSpec, maskDirs, maskFiles []string, opts bwrapOptions
 		args = append(args, "--bind", spec.TmpDir, spec.TmpDir)
 	}
 	// Mount ops are processed sequentially and later mounts override earlier
-	// ones, so credential masks MUST come after the read-write binds.
-	for _, dir := range maskDirs {
-		args = append(args, "--tmpfs", dir)
-	}
-	// Read-masking diverges from Seatbelt: hidden/empty instead of EPERM.
-	// Directories become empty tmpfs mounts; files become /dev/null.
-	for _, file := range maskFiles {
-		args = append(args, "--ro-bind", "/dev/null", file)
+	// ones, so credential masks MUST come after the read-write binds. Under
+	// read confinement the credential paths are already outside the exposed
+	// roots, so the masks are both redundant and unmountable (their parents may
+	// not exist in the namespace) — skip them.
+	if !spec.ReadConfine {
+		for _, dir := range maskDirs {
+			args = append(args, "--tmpfs", dir)
+		}
+		// Read-masking diverges from Seatbelt: hidden/empty instead of EPERM.
+		// Directories become empty tmpfs mounts; files become /dev/null.
+		for _, file := range maskFiles {
+			args = append(args, "--ro-bind", "/dev/null", file)
+		}
 	}
 	// Seccomp filter fd (the compiled syscall denylist) — placed before the
 	// namespace/terminal/chdir args so it reads clearly as part of the sandbox
