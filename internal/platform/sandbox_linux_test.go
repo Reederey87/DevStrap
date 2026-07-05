@@ -78,6 +78,49 @@ func TestBubblewrapCommandWrapsArgvAndCleanupIsSafe(t *testing.T) {
 	cleanup()
 }
 
+// TestExistingRealPathsFailsClosed pins the CodeRabbit review fix: a credential
+// mask must be dropped ONLY when its path genuinely does not exist. A symlink
+// resolving to its real target is masked at the target; a path that exists but
+// cannot be resolved (here: a symlink cycle, standing in for permission/loop/IO
+// errors) must be KEPT — dropping it would leave the credential readable inside
+// the sandbox.
+func TestExistingRealPathsFailsClosed(t *testing.T) {
+	root := t.TempDir()
+
+	realTarget := filepath.Join(root, "real-ssh")
+	if err := os.MkdirAll(realTarget, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "link-ssh")
+	if err := os.Symlink(realTarget, link); err != nil {
+		t.Fatal(err)
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(realTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A self-referential symlink: it exists (Lstat succeeds) but EvalSymlinks
+	// fails with a non-not-exist error — the fail-closed path.
+	loop := filepath.Join(root, "loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(root, "absent")
+
+	got := existingRealPaths([]string{link, loop, missing})
+
+	if !slices.Contains(got, resolvedTarget) {
+		t.Fatalf("resolvable symlink not masked at its target: got %v, want %q", got, resolvedTarget)
+	}
+	if !slices.Contains(got, loop) {
+		t.Fatalf("unresolvable-but-present path dropped (fail-OPEN): got %v, want the literal %q kept", got, loop)
+	}
+	if slices.Contains(got, missing) {
+		t.Fatalf("genuinely absent path kept: got %v, want %q dropped", got, missing)
+	}
+}
+
 // TestBubblewrapSandboxEnforcement proves the kernel actually blocks what the
 // mount namespace denies — writes outside the worktree, reads of sensitive
 // paths, and network when requested — while allowing confined work. Env-gated

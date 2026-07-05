@@ -31,6 +31,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — fix(agent): bubblewrap credential masks fail closed on resolution errors (P4-GIT-03 follow-up)
+
+Changed:
+- `internal/platform/sandbox_linux.go`: `existingRealPaths` previously dropped a credential mask on ANY `EvalSymlinks` error (CodeRabbit Major on PR #121). A mask backs `DenySensitiveReads`, so a non-not-exist error (permission-denied, symlink loop, I/O) silently left the credential path readable inside the sandbox. Now it drops ONLY on `os.ErrNotExist` (nothing to mask) and keeps the literal path on any other error — bwrap resolves the mount dest itself, so the symlink target stays masked; if the dest genuinely cannot be mounted the run errors rather than proceeding with the credential exposed.
+- `internal/platform/sandbox_linux_test.go`: `TestExistingRealPathsFailsClosed` pins the three cases (resolvable symlink → masked at target; present-but-unresolvable → literal kept; absent → dropped).
+- `spec/15_SECURITY_THREAT_MODEL.md`: clarified that permitted non-credential reads are a deliberate allow-default/read-only-root position with read-confinement as a named follow-up, not an uncovered gap (CodeRabbit Minor).
+- `docs/audits/README.md`: recorded a new P4-GIT-03 residual — the macOS Seatbelt credential denies match literal `~/.ssh` while the bwrap masks resolve leaf symlinks; closing that parity needs the pure-`sbplProfile`/darwin-adapter boundary to pass resolved mask paths (mirroring `bwrapArgs`), so it is tracked rather than rushed into shipped macOS security code.
+
+Validated:
+- `gofmt -l cmd internal`; `go vet ./...`; `GOOS=linux go vet ./...`; `go build ./...`; `GOOS=linux go build ./...`; `golangci-lint run` (darwin + `GOOS=linux` platform pkg); `GOCACHE=/tmp/devstrap-gocache go test -race ./...` (the new linux-tagged test runs on the CI ubuntu runner and its `DEVSTRAP_SANDBOX_E2E` enforcement job); `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+- Seatbelt symlink-leaf resolution parity (ledger P4-GIT-03 residual above).
+- Landlock layered fallback, seccomp, `sandbox.violation` telemetry (unchanged).
+
 ## 2026-07-05 — feat(agent): Linux bubblewrap sandbox for agent run (P4-GIT-03 slice 2)
 
 Changed:
