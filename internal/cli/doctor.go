@@ -187,16 +187,17 @@ func checkHubHealth(ctx context.Context, opts *options, hubFile string) []checkR
 
 // shouldWarnWorkspaceIDMismatch reports whether doctor's --remote probe should
 // warn that this device's locally-minted workspace id may not match the
-// founder's for remote (workspace-id-keyed) hubs: r2/s3/git. It is deliberately
-// pure so the heuristic can be table-tested without state or hub I/O
-// (P4-SEC-07 pairing wave).
+// founder's for remote (workspace-id-keyed) hubs: r2/s3/git/folder. It is
+// deliberately pure so the heuristic can be table-tested without state or hub
+// I/O (P4-SEC-07 pairing wave).
 func shouldWarnWorkspaceIDMismatch(role string, hubID string, pullCursor int64, hasEvents bool) bool {
 	isJoinerRole := strings.EqualFold(strings.TrimSpace(role), "joiner")
 	return isJoinerRole && isRemoteHubID(hubID) && pullCursor == 0 && !hasEvents
 }
 
 func isRemoteHubID(hubID string) bool {
-	return strings.HasPrefix(hubID, "r2:") || strings.HasPrefix(hubID, "s3:") || strings.HasPrefix(hubID, "git:")
+	return strings.HasPrefix(hubID, "r2:") || strings.HasPrefix(hubID, "s3:") ||
+		strings.HasPrefix(hubID, "git:") || strings.HasPrefix(hubID, "folder:")
 }
 
 // runDoctorChecks collects all health checks into a graded result list (PROD-02).

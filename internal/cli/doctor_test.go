@@ -90,6 +90,22 @@ func TestShouldWarnWorkspaceIDMismatch(t *testing.T) {
 			hasEvents:  false,
 			want:       false,
 		},
+		{
+			name:       "joiner folder cursor zero no events",
+			role:       "joiner",
+			hubID:      "folder:ws_test",
+			pullCursor: 0,
+			hasEvents:  false,
+			want:       true,
+		},
+		{
+			name:       "founder folder cursor zero no events",
+			role:       "founder",
+			hubID:      "folder:ws_test",
+			pullCursor: 0,
+			hasEvents:  false,
+			want:       false,
+		},
 	}
 
 	for _, tt := range tests {

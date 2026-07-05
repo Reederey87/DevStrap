@@ -165,6 +165,24 @@ func selectBackendHub(ctx context.Context, opts *options, store *state.Store, hu
 		// Hub-id keys per-hub sync cursors; "r2:"+ws is anticipated by migration
 		// 00008. Zero Retry => R2Hub's default retry policy (HUB-10).
 		return hub.R2Hub{S3: adapter, WorkspaceID: ws}, "r2:" + ws, nil
+	case strings.HasPrefix(uri, "folder:"):
+		path, err := parseFolderURI(uri)
+		if err != nil {
+			return nil, "", err
+		}
+		ws, err := store.WorkspaceID(ctx)
+		if err != nil {
+			if errors.Is(err, state.ErrNotInitialized) {
+				return nil, "", fmt.Errorf("folder hub requires an initialized workspace: run `devstrap init`")
+			}
+			return nil, "", err
+		}
+		cacheRoot := filepath.Join(filepath.Dir(opts.paths().KeyDir()), "hub-folder")
+		folderHub, err := hub.NewFolderHub(path, ws, cacheRoot)
+		if err != nil {
+			return nil, "", err
+		}
+		return folderHub, "folder:" + ws, nil
 	case isGitCarrierURI(uri):
 		remote, branch, err := parseGitCarrierURI(uri)
 		if err != nil {
@@ -184,7 +202,7 @@ func selectBackendHub(ctx context.Context, opts *options, store *state.Store, hu
 		}
 		return gitHub, "git:" + ws, nil
 	default:
-		return nil, "", fmt.Errorf("unrecognized hub %q (want file:<path>, r2://..., or git+ssh://...)", uri)
+		return nil, "", fmt.Errorf("unrecognized hub %q (want file:<path>, r2://..., git+ssh://..., or folder:<abs-path>)", uri)
 	}
 }
 
@@ -464,14 +482,41 @@ func hubConfigured(opts *options, hubFile string) error {
 			return err
 		}
 		return nil
+	case strings.HasPrefix(uri, "folder:"):
+		if _, err := parseFolderURI(uri); err != nil {
+			return err
+		}
+		return nil
 	case isGitCarrierURI(uri):
 		if _, _, err := parseGitCarrierURI(uri); err != nil {
 			return err
 		}
 		return nil
 	default:
-		return fmt.Errorf("unrecognized hub %q (want file:<path>, r2://..., or git+ssh://...)", uri)
+		return fmt.Errorf("unrecognized hub %q (want file:<path>, r2://..., git+ssh://..., or folder:<abs-path>)", uri)
 	}
+}
+
+// parseFolderURI parses a folder-carrier hub URI of the form
+// folder:<abs-path>. The path must be absolute (a relative path would resolve
+// differently on each device and cannot be a stable shared carrier), non-empty,
+// and free of query parameters (the folder carrier has no ?branch=/?endpoint=
+// knobs — the whole value after the scheme is the directory path).
+func parseFolderURI(uri string) (string, error) {
+	if !strings.HasPrefix(uri, "folder:") {
+		return "", fmt.Errorf("not a folder hub uri %q (want folder:<abs-path>)", uri)
+	}
+	path := strings.TrimPrefix(uri, "folder:")
+	if path == "" {
+		return "", fmt.Errorf("folder hub uri must include an absolute path (folder:<abs-path>)")
+	}
+	if strings.ContainsRune(path, '?') {
+		return "", fmt.Errorf("folder hub uri %q must not contain query parameters", uri)
+	}
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("folder hub path %q must be absolute", path)
+	}
+	return path, nil
 }
 
 func newHubCommand(stdout io.Writer, opts *options) *cobra.Command {
