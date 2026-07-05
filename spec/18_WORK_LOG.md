@@ -31,6 +31,19 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — docs(audits): Pass-6 closure banner + ledger truth-up + multi-device wave direction
+
+Changed:
+- `docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`: the "Status as of 2026-07-04" banner now states the final 43/43 closure (it still listed six findings as open that shipped 2026-07-04).
+- `docs/audits/README.md`: `P4-QUAL-04` narrowed — the coverage-in-CI half shipped (ci.yml 50% `go tool cover -func` floor, closing `P5-QUAL-04`, whose Pass-5 row is now annotated shipped); remaining scope is the Windows build only. Intro pointer to the chosen next wave.
+- `spec/14_MVP_ROADMAP_AND_BACKLOG.md`: new `DIRECTION — multi-device completeness wave (2026-07-05)` bullet with backlog rows `ENV-SYNC-01` (synced env-bundle exchange) and `TRUST-01` (synced device-trust propagation) — direction workstream IDs, not audit finding IDs, per the pass-scoped-ID convention.
+
+Validated:
+- Docs-only change; ledger header counts re-derived from their tables (open-count invariant holds).
+
+Follow-ups:
+- Implement `ENV-SYNC-01` then `TRUST-01` (next PRs in this wave).
+
 ## 2026-07-05 — feat(agent): tighter read confinement for the OS sandbox (P4-GIT-03 slice 6, COMPLETES P4-GIT-03)
 
 Changed:

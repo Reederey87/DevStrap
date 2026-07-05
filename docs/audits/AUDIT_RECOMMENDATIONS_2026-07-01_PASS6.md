@@ -53,7 +53,7 @@ The near-term imperative: **close the grant/verification trust boundary before t
 | Specs, Docs & Process | 0 | 2 | 2 | 4 |
 | **Total** | **5** | **25** | **13** | **43** |
 
-> **Status as of 2026-07-04:** 37 of 43 findings have shipped (all five P1s included). Open: `P6-DOC-01` (test-hardening residual), `P6-CLI-03`, `P6-CLI-04`, `P6-GIT-06`, `P6-HUB-03`, `P6-XP-06`. The live status ledger is `docs/audits/README.md`; the counts and prose below are as-found at audit time (2026-07-01) and are retained as history.
+> **Status as of 2026-07-04 (final):** 43 of 43 findings have shipped — **Pass 6 is fully closed** (the last finding, `P6-GIT-06`, shipped 2026-07-04). The live status ledger is `docs/audits/README.md`; the counts and prose below are as-found at audit time (2026-07-01) and are retained as history.
 
 ## Prioritized roadmap
 
