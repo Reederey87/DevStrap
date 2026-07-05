@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 )
 
 // SandboxSpec describes the confinement an agent child process should run
@@ -42,6 +43,10 @@ type SandboxSpec struct {
 	// degrades to a limitation, not an error. macOS ignores it (Seatbelt has
 	// no seccomp analogue).
 	DenyDangerousSyscalls bool
+	// ViolationTag, when set, macOS SBPL deny rules embed `(with message
+	// <tag>)` so post-run log correlation can attribute denials to this run;
+	// empty disables tagging.
+	ViolationTag string
 }
 
 // Sandbox wraps an agent argv in an OS-enforced confinement (AGEN-03 /
@@ -70,6 +75,20 @@ type SandboxCommand struct {
 	// Cleanup is always non-nil-safe to call once the command has completed: it
 	// closes ExtraFiles and removes any generated profile file.
 	Cleanup func()
+}
+
+// SandboxViolation is one kernel denial parsed from an OS sandbox's audit log.
+type SandboxViolation struct {
+	Operation string
+	Path      string
+	Detail    string // the raw (unscrubbed) log line; caller scrubs before persist
+}
+
+// SandboxViolationReporter is implemented by backends that can enumerate the
+// denials a completed run triggered. tag is the SandboxSpec.ViolationTag the
+// run was launched with; since bounds the log query to this run's window.
+type SandboxViolationReporter interface {
+	CollectViolations(ctx context.Context, tag string, since time.Time) ([]SandboxViolation, error)
 }
 
 // ErrInvalidSandboxBackend marks a sandbox backend override whose VALUE is

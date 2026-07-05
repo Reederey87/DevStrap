@@ -230,6 +230,7 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 			results = append(results, checkWorkspaceKeyAge(ctx, opts, store)...)
 			results = append(results, checkForgeCLIs(ctx, opts, store)...)
 			results = append(results, checkAgentRunSweep(ctx, opts, store)...)
+			results = append(results, checkSandboxViolations(ctx, store)...)
 			results = append(results, checkBloblessCaveat(ctx, store)...)
 		}
 	} else if os.IsNotExist(err) {
@@ -260,6 +261,22 @@ func checkAgentRunSweep(ctx context.Context, opts *options, store *state.Store) 
 		result.Remedy = "review interrupted runs with `devstrap agent show`; rerun the agent before PR unless using --allow-incomplete"
 	}
 	return []checkResult{result}
+}
+
+func checkSandboxViolations(ctx context.Context, store *state.Store) []checkResult {
+	n, err := store.CountRunsWithSandboxViolations(ctx)
+	if err != nil {
+		return nil
+	}
+	if n == 0 {
+		return []checkResult{{Name: "agent sandbox violations", Status: checkOK, Detail: "0"}}
+	}
+	return []checkResult{{
+		Name:   "agent sandbox violations",
+		Status: checkWarn,
+		Detail: fmt.Sprintf("%d run(s) with denials", n),
+		Remedy: "inspect with `devstrap agent show <run-id>`; a denial means the agent tried an operation the OS sandbox blocked — expected for hostile/buggy tools, investigate unexpected ones",
+	}}
 }
 
 func checkTool(name string, required bool) checkResult {

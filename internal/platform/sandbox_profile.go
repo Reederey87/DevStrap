@@ -43,7 +43,13 @@ func sbplProfile(spec SandboxSpec, denyReadDirs, denyReadFiles []string) string 
 	// Deliberately NOT writable: spec.LogDir — the agent log is written by the
 	// PARENT process (the child only inherits pipes), so granting the child
 	// LogDir would let it tamper with its own 0600 log and the profile file.
-	b.WriteString("(deny file-write*)\n")
+	if spec.ViolationTag == "" {
+		b.WriteString("(deny file-write*)\n")
+	} else {
+		b.WriteString("(deny file-write*\n")
+		b.WriteString(sbplWithMessage(spec.ViolationTag))
+		b.WriteString(")\n")
+	}
 	b.WriteString("(allow file-write*\n")
 	for _, dir := range []string{spec.WorktreeDir, spec.TmpDir} {
 		if dir == "" {
@@ -69,14 +75,28 @@ func sbplProfile(spec SandboxSpec, denyReadDirs, denyReadFiles []string) string 
 		for _, file := range denyReadFiles {
 			b.WriteString("  (literal " + sbplQuote(file) + ")\n")
 		}
+		b.WriteString(sbplWithMessage(spec.ViolationTag))
 		b.WriteString(")\n")
 	}
 
 	if spec.DenyNetwork {
-		b.WriteString("(deny network*)\n")
+		if spec.ViolationTag == "" {
+			b.WriteString("(deny network*)\n")
+		} else {
+			b.WriteString("(deny network*\n")
+			b.WriteString(sbplWithMessage(spec.ViolationTag))
+			b.WriteString(")\n")
+		}
 	}
 
 	return b.String()
+}
+
+func sbplWithMessage(tag string) string {
+	if tag == "" {
+		return ""
+	}
+	return "  (with message " + sbplQuote(tag) + ")\n"
 }
 
 // sbplQuote renders a path as an SBPL double-quoted string literal. SBPL is a
