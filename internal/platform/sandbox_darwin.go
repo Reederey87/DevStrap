@@ -1,0 +1,90 @@
+//go:build darwin
+
+package platform
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+)
+
+const sandboxExecPath = "/usr/bin/sandbox-exec"
+
+// SeatbeltSandbox confines agent children with macOS Seatbelt via
+// /usr/bin/sandbox-exec (AGEN-03 first slice). sandbox-exec is deprecated by
+// Apple but ships on every macOS release and is what current agent harnesses
+// (Claude Code, Codex CLI, VT Code) use; if Apple ever removes it,
+// Available() starts failing and `auto` mode degrades to a loud warning
+// instead of breaking agent runs.
+type SeatbeltSandbox struct{}
+
+func (s SeatbeltSandbox) Name() string { return "seatbelt" }
+
+func (s SeatbeltSandbox) Available() error {
+	info, err := os.Stat(sandboxExecPath)
+	if err != nil {
+		return fmt.Errorf("%w: %s not found: %w", ErrUnsupported, sandboxExecPath, err)
+	}
+	if info.IsDir() || info.Mode()&0o111 == 0 {
+		return fmt.Errorf("%w: %s is not executable", ErrUnsupported, sandboxExecPath)
+	}
+	return nil
+}
+
+func (s SeatbeltSandbox) Command(_ context.Context, spec SandboxSpec, argv []string) ([]string, func(), error) {
+	if len(argv) == 0 {
+		return nil, func() {}, fmt.Errorf("seatbelt: empty argv")
+	}
+	if err := s.Available(); err != nil {
+		return nil, func() {}, err
+	}
+	resolved, err := resolveSandboxSpecPaths(spec)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	// The profile lives in the run's log dir (0700) with the same 0600 mode
+	// as the agent log; the caller removes it via cleanup after the child
+	// exits.
+	profilePath := filepath.Join(resolved.LogDir, "sandbox-"+filepath.Base(resolved.WorktreeDir)+".sb")
+	if err := os.WriteFile(profilePath, []byte(sbplProfile(resolved)), 0o600); err != nil {
+		return nil, func() {}, fmt.Errorf("write seatbelt profile: %w", err)
+	}
+	cleanup := func() { _ = os.Remove(profilePath) }
+	wrapped := append([]string{sandboxExecPath, "-f", profilePath}, argv...)
+	return wrapped, cleanup, nil
+}
+
+// resolveSandboxSpecPaths symlink-resolves every path in the spec. Seatbelt
+// matches kernel-real paths: /tmp is /private/tmp and TMPDIR lives under
+// /private/var/folders, so an unresolved allow-list would silently confine
+// nothing (or worse, deny the temp dir and break the child).
+func resolveSandboxSpecPaths(spec SandboxSpec) (SandboxSpec, error) {
+	out := spec
+	for name, field := range map[string]*string{
+		"worktree": &out.WorktreeDir,
+		"tmp":      &out.TmpDir,
+		"log":      &out.LogDir,
+	} {
+		if *field == "" {
+			continue
+		}
+		real, err := filepath.EvalSymlinks(*field)
+		if err != nil {
+			return SandboxSpec{}, fmt.Errorf("resolve sandbox %s dir %q: %w", name, *field, err)
+		}
+		*field = real
+	}
+	// Deny anchors may legitimately not exist (no ~/.kube); resolve when
+	// possible, keep the literal path otherwise — a deny on a nonexistent
+	// path is harmless.
+	for _, field := range []*string{&out.UserHome, &out.DevstrapHome} {
+		if *field == "" {
+			continue
+		}
+		if real, err := filepath.EvalSymlinks(*field); err == nil {
+			*field = real
+		}
+	}
+	return out, nil
+}

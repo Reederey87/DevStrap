@@ -14,10 +14,66 @@ import (
 	"github.com/Reederey87/DevStrap/internal/childenv"
 	dsgit "github.com/Reederey87/DevStrap/internal/git"
 	"github.com/Reederey87/DevStrap/internal/id"
+	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/redact"
 	"github.com/Reederey87/DevStrap/internal/state"
 	"github.com/spf13/cobra"
 )
+
+// sandboxBackend resolves the platform sandbox adapter; a test seam like
+// init.go's keychainBackend.
+var sandboxBackend = func() platform.Sandbox { return platform.Detect().Sandbox }
+
+// agentSandboxLaunch carries the resolved sandbox decision from flag/policy
+// resolution into runAgentProcess.
+type agentSandboxLaunch struct {
+	sandbox      platform.Sandbox
+	enabled      bool
+	denyNetwork  bool
+	devstrapHome string
+}
+
+// resolveAgentSandbox turns --sandbox mode x policy x host availability into
+// a launch decision (P4-GIT-03 slice 1). Modes:
+//
+//	auto    — sandbox when the host adapter is available; otherwise warn once
+//	          and run with today's advisory-only behavior.
+//	require — refuse to run (policy exit class) when unavailable.
+//	off     — never sandbox, no warning.
+//
+// yolo-local keeps its existing "explicit personal override" semantics: the
+// sandbox is off, and combining it with --sandbox require is a config error.
+// readonly/cautious additionally deny the child network access; guarded and
+// ephemeral-ci sandbox the filesystem but keep the network open.
+func resolveAgentSandbox(mode, policy string, stderr io.Writer, devstrapHome string) (agentSandboxLaunch, error) {
+	launch := agentSandboxLaunch{devstrapHome: devstrapHome}
+	switch mode {
+	case "auto", "off", "require":
+	default:
+		return launch, appError{code: exitInvalidConfig, err: fmt.Errorf("unsupported --sandbox mode %q (want auto, off, or require)", mode)}
+	}
+	if policy == "yolo-local" {
+		if mode == "require" {
+			return launch, appError{code: exitInvalidConfig, err: fmt.Errorf("--sandbox require conflicts with --policy yolo-local (yolo-local runs unconfined by definition)")}
+		}
+		return launch, nil
+	}
+	if mode == "off" {
+		return launch, nil
+	}
+	sb := sandboxBackend()
+	if err := sb.Available(); err != nil {
+		if mode == "require" {
+			return launch, appError{code: exitPolicy, err: fmt.Errorf("OS sandbox required but unavailable: %w", err)}
+		}
+		_, _ = fmt.Fprintf(stderr, "warning: OS sandbox unavailable (%v); agent policy remains advisory (AGEN-01)\n", err)
+		return launch, nil
+	}
+	launch.sandbox = sb
+	launch.enabled = true
+	launch.denyNetwork = policy == "readonly" || policy == "cautious"
+	return launch, nil
+}
 
 func newAgentCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
@@ -36,6 +92,7 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var taskName string
 	var commandFlag string
 	var policy string
+	var sandboxMode string
 	cmd := &cobra.Command{
 		Use:   "run <path> [-- command [args...]]",
 		Short: "Run a generic agent command in a fresh worktree",
@@ -54,6 +111,14 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 			}
 			policy = strings.ToLower(strings.TrimSpace(policy))
 			if err := enforceAgentCommandPolicy(policy, agentCommand); err != nil {
+				return err
+			}
+			// Resolve the sandbox decision BEFORE any state is created so
+			// `--sandbox require` on an unsupported host fails cheaply with
+			// no orphan worktree/DB row to clean up.
+			sandboxMode = strings.ToLower(strings.TrimSpace(sandboxMode))
+			sandboxLaunch, err := resolveAgentSandbox(sandboxMode, policy, cmd.ErrOrStderr(), opts.paths().Home)
+			if err != nil {
 				return err
 			}
 			store, err := opts.openState(cmd.Context())
@@ -106,7 +171,7 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			commandErr := runAgentProcess(cmd.Context(), wt, run, agentCommand, stdout)
+			commandErr := runAgentProcess(cmd.Context(), wt, run, agentCommand, stdout, sandboxLaunch)
 			diffSummary := agentDiffSummary(cmd.Context(), wt.Path, wt.BaseSHA)
 			status := "complete"
 			testSummary := "command exited 0"
@@ -132,8 +197,18 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&engine, "engine", "generic", "agent engine")
 	cmd.Flags().StringVar(&taskName, "task", "", "task description")
 	cmd.Flags().StringVar(&commandFlag, "command", "", "generic command to run, split on whitespace; args after -- are preferred")
-	cmd.Flags().StringVar(&policy, "policy", "guarded", "agent command policy: readonly, cautious, guarded, or yolo-local (advisory only — not a security boundary until OS sandboxing lands; AGEN-01)")
+	cmd.Flags().StringVar(&policy, "policy", "guarded", "agent command policy: readonly, cautious, guarded, or yolo-local (argv/file checks are advisory; combine with the OS sandbox for real confinement)")
+	cmd.Flags().StringVar(&sandboxMode, "sandbox", defaultSandboxMode(), "OS sandbox mode: auto (sandbox when the host supports it; macOS Seatbelt today), require (refuse to run unsandboxed), or off (env: DEVSTRAP_SANDBOX)")
 	return cmd
+}
+
+// defaultSandboxMode lets DEVSTRAP_SANDBOX set the --sandbox default; the
+// explicit flag still wins because cobra parses it over the default.
+func defaultSandboxMode() string {
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("DEVSTRAP_SANDBOX"))); v != "" {
+		return v
+	}
+	return "auto"
 }
 
 func newAgentListCommand(stdout io.Writer, opts *options) *cobra.Command {
@@ -460,7 +535,7 @@ func pathWithin(root, path string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
-func runAgentProcess(ctx context.Context, wt state.Worktree, run state.AgentRun, args []string, stdout io.Writer) error {
+func runAgentProcess(ctx context.Context, wt state.Worktree, run state.AgentRun, args []string, stdout io.Writer, sandboxLaunch agentSandboxLaunch) error {
 	if err := os.MkdirAll(filepath.Dir(run.LogPath), 0o700); err != nil {
 		return fmt.Errorf("create agent log dir: %w", err)
 	}
@@ -469,11 +544,48 @@ func runAgentProcess(ctx context.Context, wt state.Worktree, run state.AgentRun,
 		return fmt.Errorf("create agent log: %w", err)
 	}
 	defer func() { _ = logFile.Close() }()
-	env, err := childenv.FromOS(childenv.AgentAllowlist(), map[string]string{
+	envOverrides := map[string]string{
 		"DEVSTRAP_AGENT_RUN_ID": run.ID,
 		"DEVSTRAP_WORKTREE_ID":  wt.ID,
 		"HOME":                  wt.Path, // SECU-02: repoint HOME to worktree so agent tooling cannot reach user dotfiles.
-	})
+	}
+	if sandboxLaunch.enabled {
+		// The write allow-list must not include the machine-wide shared
+		// $TMPDIR (review P1): the child gets a PER-RUN scratch dir instead,
+		// created here and torn down after the run, and its TMPDIR env is
+		// repointed to match — so the kernel grant is scoped to this run,
+		// never to other processes' temp files.
+		perRunTmp := filepath.Join(os.TempDir(), "devstrap-agent-"+run.ID)
+		if err := os.MkdirAll(perRunTmp, 0o700); err != nil {
+			return fmt.Errorf("create agent tmp dir: %w", err)
+		}
+		defer func() { _ = os.RemoveAll(perRunTmp) }()
+		envOverrides["TMPDIR"] = perRunTmp
+		// AGEN-03: wrap the argv in the OS sandbox. The child env repoints
+		// HOME to the worktree, but the sensitive-read denies anchor on the
+		// REAL user home — the dotfiles are still on disk regardless of what
+		// $HOME says.
+		userHome, err := os.UserHomeDir()
+		if err != nil {
+			userHome = ""
+		}
+		spec := platform.SandboxSpec{
+			WorktreeDir:        wt.Path,
+			TmpDir:             perRunTmp,
+			LogDir:             filepath.Dir(run.LogPath),
+			UserHome:           userHome,
+			DevstrapHome:       sandboxLaunch.devstrapHome,
+			DenyNetwork:        sandboxLaunch.denyNetwork,
+			DenySensitiveReads: true,
+		}
+		wrapped, cleanup, err := sandboxLaunch.sandbox.Command(ctx, spec, args)
+		if err != nil {
+			return fmt.Errorf("prepare OS sandbox: %w", err)
+		}
+		defer cleanup()
+		args = wrapped
+	}
+	env, err := childenv.FromOS(childenv.AgentAllowlist(), envOverrides)
 	if err != nil {
 		return err
 	}

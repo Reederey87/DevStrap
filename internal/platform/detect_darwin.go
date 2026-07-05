@@ -8,5 +8,6 @@ func Detect() Set {
 		NativeWatcher{},
 		UnsupportedServiceManager{Platform: "darwin", Target: "launchd"},
 		SystemKeychain{Platform: "darwin", Target: "keychain"},
+		SeatbeltSandbox{},
 	)
 }

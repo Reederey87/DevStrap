@@ -8,5 +8,6 @@ func Detect() Set {
 		NativeWatcher{},
 		UnsupportedServiceManager{Platform: "linux", Target: "systemd-user"},
 		SystemKeychain{Platform: "linux", Target: "secret-service"},
+		UnsupportedSandbox{Platform: "linux"},
 	)
 }

@@ -78,9 +78,10 @@ type Set struct {
 	Service  ServiceManager
 	Keychain Keychain
 	Editor   EditorAdapter
+	Sandbox  Sandbox
 }
 
-func newSet(goos string, watcher Watcher, service ServiceManager, keychain Keychain) Set {
+func newSet(goos string, watcher Watcher, service ServiceManager, keychain Keychain, sandbox Sandbox) Set {
 	if os.Getenv(NoKeychainEnv) == "1" {
 		keychain = UnsupportedKeychain{Platform: goos, Target: "disabled"}
 	}
@@ -90,6 +91,7 @@ func newSet(goos string, watcher Watcher, service ServiceManager, keychain Keych
 		Service:  service,
 		Keychain: keychain,
 		Editor:   SystemEditor{},
+		Sandbox:  sandbox,
 	}
 }
 

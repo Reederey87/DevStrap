@@ -60,6 +60,10 @@ jobs:
       # Headless CI runners have no usable OS keychain / Secret Service; force
       # the file-backed device-key store so key operations do not block or fail.
       DEVSTRAP_NO_KEYCHAIN: "1"
+      # Run the real Seatbelt kernel-enforcement test on macos-latest (the
+      # test self-skips where sandbox-exec is absent, so this is a no-op on
+      # ubuntu). Without it the sandbox's central guarantee has no CI coverage.
+      DEVSTRAP_SANDBOX_E2E: "1"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
