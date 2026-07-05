@@ -1,7 +1,6 @@
 package platform
 
 import (
-	"path/filepath"
 	"strings"
 )
 
@@ -23,12 +22,19 @@ var sensitiveHomeFiles = []string{".netrc", ".npmrc", ".pypirc", ".gitconfig"}
 //
 //   - writes are confined to the worktree, the per-run temp dir, and a small
 //     set of device nodes (the log dir is deliberately parent-only);
-//   - reads of credential-bearing paths are denied when DenySensitiveReads;
+//   - reads of credential-bearing paths are denied when DenySensitiveReads —
+//     the caller supplies the deny lists (denyReadDirs as (subpath ...),
+//     denyReadFiles as (literal ...)) already resolved for leaf symlinks;
 //   - all network access is denied when DenyNetwork.
+//
+// The credential deny lists are parameters rather than derived from
+// spec.UserHome here: Seatbelt matches the kernel-real path, so the darwin
+// adapter must resolve leaf symlinks (~/.ssh -> /elsewhere) before this pure
+// builder runs. Mirrors the bubblewrap pure-builder / adapter split.
 //
 // Paths must already be symlink-resolved by the caller: Seatbelt matches the
 // kernel-real path, and /tmp -> /private/tmp, TMPDIR -> /private/var/folders.
-func sbplProfile(spec SandboxSpec) string {
+func sbplProfile(spec SandboxSpec, denyReadDirs, denyReadFiles []string) string {
 	var b strings.Builder
 	b.WriteString("(version 1)\n")
 	b.WriteString("(allow default)\n")
@@ -53,18 +59,15 @@ func sbplProfile(spec SandboxSpec) string {
 	b.WriteString("  (regex #\"^/dev/ttys[0-9]+$\")\n")
 	b.WriteString(")\n")
 
-	if spec.DenySensitiveReads {
+	// A bare "(deny file-read*)" with no filter denies ALL reads, so only emit
+	// the block when there is at least one anchor to deny.
+	if spec.DenySensitiveReads && (len(denyReadDirs) > 0 || len(denyReadFiles) > 0) {
 		b.WriteString("(deny file-read*\n")
-		if spec.UserHome != "" {
-			for _, rel := range sensitiveHomeDirs {
-				b.WriteString("  (subpath " + sbplQuote(filepath.Join(spec.UserHome, rel)) + ")\n")
-			}
-			for _, rel := range sensitiveHomeFiles {
-				b.WriteString("  (literal " + sbplQuote(filepath.Join(spec.UserHome, rel)) + ")\n")
-			}
+		for _, dir := range denyReadDirs {
+			b.WriteString("  (subpath " + sbplQuote(dir) + ")\n")
 		}
-		if spec.DevstrapHome != "" {
-			b.WriteString("  (subpath " + sbplQuote(filepath.Join(spec.DevstrapHome, "keys")) + ")\n")
+		for _, file := range denyReadFiles {
+			b.WriteString("  (literal " + sbplQuote(file) + ")\n")
 		}
 		b.WriteString(")\n")
 	}
