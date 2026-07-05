@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -48,6 +49,13 @@ type Sandbox interface {
 	// function (always safe to call) that removes any generated profile file.
 	Command(ctx context.Context, spec SandboxSpec, argv []string) ([]string, func(), error)
 }
+
+// ErrInvalidSandboxBackend marks a sandbox backend override whose VALUE is
+// invalid (e.g. a typo in DEVSTRAP_SANDBOX_BACKEND). It is deliberately
+// distinct from ErrUnsupported: an unsupported host may degrade to advisory
+// mode, but a mistyped explicit configuration knob must fail closed — treating
+// it as a capability gap would let a typo silently disable the OS sandbox.
+var ErrInvalidSandboxBackend = errors.New("invalid sandbox backend")
 
 // SandboxCapabilities is an optional interface a Sandbox implements when its
 // confinement can be weaker than the platform's full-fidelity backend.

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -325,5 +326,28 @@ func TestSandboxHelperCommandIsHiddenAndFailsClosed(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "sandbox-helper") {
 		t.Fatalf("err = %v, want sandbox-helper prefix", err)
+	}
+}
+
+// TestResolveAgentSandboxInvalidBackendFailsClosed pins the Codex-review P1:
+// a mistyped DEVSTRAP_SANDBOX_BACKEND is explicit configuration, not a host
+// capability gap — `auto` must NOT degrade to the advisory warning (which
+// would let a typo silently disable the OS sandbox); every mode fails closed
+// with the invalid-config exit class.
+func TestResolveAgentSandboxInvalidBackendFailsClosed(t *testing.T) {
+	invalid := fmt.Errorf("%w: DEVSTRAP_SANDBOX_BACKEND=\"landlok\" (want bwrap or landlock)", platform.ErrInvalidSandboxBackend)
+	for _, mode := range []string{"auto", "require"} {
+		t.Run(mode, func(t *testing.T) {
+			withFakeSandbox(t, fakeSandbox{availableErr: invalid})
+			var stderr bytes.Buffer
+			_, err := resolveAgentSandbox(mode, "guarded", &stderr, "/tmp/devstrap-home")
+			var app appError
+			if !errors.As(err, &app) || app.code != exitInvalidConfig {
+				t.Fatalf("mode %s: err = %v, want appError code %d", mode, err, exitInvalidConfig)
+			}
+			if strings.Contains(stderr.String(), "advisory") {
+				t.Fatalf("mode %s: degraded to advisory warning instead of failing closed: %q", mode, stderr.String())
+			}
+		})
 	}
 }

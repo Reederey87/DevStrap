@@ -43,7 +43,7 @@ func TestChooseLinuxSandbox(t *testing.T) {
 		{name: "forced landlock", backend: "landlock", wantName: "landlock"},
 		{name: "forced landlock returns its own error", backend: "landlock", landlockErr: landlockErr, wantName: "landlock", wantErr: landlockErr},
 		{name: "forced landlock trims and folds", backend: " LANDLOCK ", wantName: "landlock"},
-		{name: "bogus backend", backend: "bogus", wantErrSub: []string{SandboxBackendEnv, "bogus"}},
+		{name: "bogus backend", backend: "bogus", wantErr: ErrInvalidSandboxBackend, wantErrSub: []string{SandboxBackendEnv, "bogus"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

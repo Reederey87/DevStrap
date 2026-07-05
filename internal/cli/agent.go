@@ -86,6 +86,13 @@ func resolveAgentSandbox(mode, policy string, stderr io.Writer, devstrapHome str
 	}
 	sb := sandboxBackend()
 	if err := sb.Available(); err != nil {
+		// A mistyped DEVSTRAP_SANDBOX_BACKEND is an explicit-config error, not
+		// a host capability gap: degrading it to the advisory warning would
+		// let a typo silently disable the OS sandbox. Fail closed in every
+		// mode (Codex review P1).
+		if errors.Is(err, platform.ErrInvalidSandboxBackend) {
+			return launch, appError{code: exitInvalidConfig, err: err}
+		}
 		if mode == "require" {
 			return launch, appError{code: exitPolicy, err: fmt.Errorf("OS sandbox required but unavailable: %w", err)}
 		}

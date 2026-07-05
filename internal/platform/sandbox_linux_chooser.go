@@ -47,7 +47,7 @@ func chooseLinuxSandbox(backend string, bwrap, ll Sandbox) (Sandbox, error) {
 		}
 		return ll, nil
 	default:
-		return nil, fmt.Errorf("invalid %s=%q (want bwrap or landlock)", SandboxBackendEnv, backend)
+		return nil, fmt.Errorf("%w: %s=%q (want bwrap or landlock)", ErrInvalidSandboxBackend, SandboxBackendEnv, backend)
 	}
 }
 
