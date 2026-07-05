@@ -31,6 +31,19 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — fix(release): pin GORELEASER_CURRENT_TAG so the rc → stable flow survives two tags on one commit
+
+Changed:
+- `.github/workflows/release.yml`: the GoReleaser step now sets `GORELEASER_CURRENT_TAG: ${{ github.ref_name }}`. Found live on the first `v0.1.0` attempt: the documented rc → stable flow tags the SAME commit twice (`v0.1.0-rc.1` validated `5b5728d`, then `v0.1.0` was pushed on it), and without the pin GoReleaser derives the current tag from `git tag --points-at HEAD`, where git's version sort ranks `v0.1.0-rc.1` ABOVE `v0.1.0` — the stable run therefore rebuilt `0.1.0-rc.1` artifacts and failed uploading them onto the existing rc release (`422 already_exists` × 5; the rc release was left intact, and no `v0.1.0` release object was created). The rc run itself could never catch this, since the ambiguity only exists once the second tag lands. The broken `v0.1.0` tag must be deleted and re-cut on a commit CONTAINING this fix — the workflow executes from the tag's own tree, so a re-run of the old tag reproduces the failure.
+- `RELEASING.md`: the promote-to-stable step now documents that the stable tag may share the rc's commit and why the pin makes that safe.
+- `spec/03_SYSTEM_ARCHITECTURE.md`: the Distribution section records the `GORELEASER_CURRENT_TAG` pin; the folder-carrier paragraph now states the shipped per-operation root revalidation contract instead of the pre-review "resolved once" wording (the PR #106 CodeRabbit thread — the sentence predated the review-round fix that made revalidation use-time).
+
+Validated:
+- Failure mode reproduced from the run 28738481083 logs (rc-named artifacts + `already_exists` against the rc release id). `go run ./cmd/spec-drift --base origin/main --head HEAD` (post-commit). The real proof is the re-cut `v0.1.0` tag publishing correctly, recorded in the release smoke.
+
+Follow-ups:
+- None (the re-tag itself is release execution, not repo content).
+
 ## 2026-07-05 — feat(agent): macOS Seatbelt sandbox for agent run (P4-GIT-03 slice 1)
 
 Changed:
