@@ -127,6 +127,10 @@ One-time enrollment checklist:
    gh secret set MACOS_NOTARY_ISSUER_ID --repo Reederey87/DevStrap
    ```
 
+   Set **all five in one sitting**: with only `MACOS_SIGN_P12` present, GoReleaser signs but
+   silently skips notarization — Gatekeeper still fails, while the binaries stop being ad-hoc
+   signed. All-or-nothing.
+
 5. Cut an rc; on the published darwin binaries verify Gatekeeper acceptance:
 
    ```bash
