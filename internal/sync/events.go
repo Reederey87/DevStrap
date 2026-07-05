@@ -23,7 +23,9 @@ const (
 	EventConflictCreated      = "conflict.created"
 	EventConflictResolved     = "conflict.resolved"      // PROD-06
 	EventDraftSnapshotCreated = "draft.snapshot.created" // DRAFT-02
-	EventDeviceKeyGranted     = "device.key.granted"     // P4-SEC-07: age-wrapped WCK epoch grant
+	// ENV-SYNC-01: captured/bound env profile metadata; supersedes the planned "env.profile.bound".
+	EventEnvProfileUpdated = "env.profile.updated"
+	EventDeviceKeyGranted  = "device.key.granted" // P4-SEC-07: age-wrapped WCK epoch grant
 )
 
 // Conflict type identifiers, exported so the CLI resolver can branch on them
@@ -96,6 +98,20 @@ type DraftSnapshotPayload struct {
 	BlobRef   string `json:"blob_ref"`
 	ByteSize  int64  `json:"byte_size"`
 	FileCount int64  `json:"file_count"`
+}
+
+// EnvProfilePayload describes a captured or provider-bound env profile.
+// Payloads ride the enc.v2 envelope, so var names are not visible to the hub;
+// they are required so the apply path can populate secret_bindings without
+// decrypting the value blob (ENV-SYNC-01).
+type EnvProfilePayload struct {
+	Path     string            `json:"path"`
+	Profile  string            `json:"profile"`
+	Provider string            `json:"provider"`            // devstrap_encrypted or a provider name (e.g. 1password)
+	Mode     string            `json:"mode"`                // hydrate_or_runtime | runtime_only
+	BlobRef  string            `json:"blob_ref,omitempty"`  // devstrap_encrypted only
+	VarNames []string          `json:"var_names,omitempty"` // devstrap_encrypted only
+	Refs     map[string]string `json:"refs,omitempty"`      // provider profiles only (var -> op:// ref)
 }
 
 // DeviceKeyGrant carries a device.key.granted event (P4-SEC-07): a Workspace
@@ -239,6 +255,17 @@ func createProjectEvent(ctx context.Context, st *state.Store, tx *state.Tx, typ 
 func NewDraftSnapshotEvent(typ, payloadJSON string) state.Event {
 	return state.Event{
 		Type:        typ,
+		PayloadJSON: payloadJSON,
+		ContentHash: state.ContentHash(payloadJSON),
+	}
+}
+
+// NewEnvProfileEvent builds an unsigned env.profile.updated event from a
+// pre-marshaled payload (ENV-SYNC-01). The store stamps HLC, seq, device id,
+// and the device signature on InsertLocalEvent.
+func NewEnvProfileEvent(payloadJSON string) state.Event {
+	return state.Event{
+		Type:        EventEnvProfileUpdated,
 		PayloadJSON: payloadJSON,
 		ContentHash: state.ContentHash(payloadJSON),
 	}
@@ -750,6 +777,42 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 			return fmt.Errorf("draft snapshot for unknown project %q: %w", payload.Path, err)
 		}
 		return tx.RecordDraftSnapshotTx(ctx, project.ID, payload.BlobRef, payload.ByteSize, payload.FileCount, event)
+	case EventEnvProfileUpdated:
+		var payload EnvProfilePayload
+		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+			return fmt.Errorf("decode event %s: %w", event.ID, err)
+		}
+		pk, err := pathkey.Clean(payload.Path)
+		if err != nil {
+			return fmt.Errorf("env profile path %q: %w", payload.Path, err)
+		}
+		project, err := tx.ProjectByPath(ctx, pk.Display)
+		if err != nil {
+			// ENV-SYNC-01: the project may have been deleted by a winning tombstone
+			// or not yet applied; dropping the env pointer is safe (a later
+			// re-capture re-emits) and a hard error here would abort the whole
+			// pull batch.
+			return nil
+		}
+		hlc, deviceID, eventID, ok, err := tx.EnvProfileSourceCoords(ctx, project.ID)
+		if err != nil {
+			return err
+		}
+		if ok && !envCoordLess(hlc, deviceID, eventID, event) {
+			return nil
+		}
+		params := state.EnvProfileParams{
+			Name:     payload.Profile,
+			Provider: payload.Provider,
+			Mode:     payload.Mode,
+			BlobRef:  payload.BlobRef,
+			VarNames: payload.VarNames,
+			Refs:     payload.Refs,
+		}
+		if _, err := tx.UpsertEnvProfileTx(ctx, project.ID, params, event); err != nil {
+			return fmt.Errorf("apply env profile for %q: %w", payload.Path, err)
+		}
+		return nil
 	case EventDeviceKeyGranted:
 		// P4-SEC-07: record the grant audit row transactionally with the event
 		// insert. The secret WCK is ingested into the keychain by the
@@ -767,6 +830,15 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 	default:
 		return nil
 	}
+}
+
+// envCoordLess uses the same highest-(HLC, deviceID, eventID)-wins ordering as
+// samePathLess so env profile LWW converges with namespace reconciliation.
+func envCoordLess(hlc int64, deviceID, eventID string, event state.Event) bool {
+	return samePathLess(
+		samePathCandidate{hlc: hlc, deviceID: deviceID, eventID: eventID},
+		samePathCandidate{hlc: event.HLC, deviceID: event.DeviceID, eventID: event.ID},
+	)
 }
 
 // loadNamespaceProjection loads the projection slice Decide needs for a

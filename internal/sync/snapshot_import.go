@@ -95,7 +95,14 @@ func importEntryTx(ctx context.Context, tx *state.Tx, entry SnapshotEntry) error
 		incomingWins = samePathLess(cur, inc)
 	}
 	if !incomingWins {
-		return nil // stored coordinates dominate → stale snapshot row, skip
+		// Stored project coordinates dominate → stale snapshot row for the entry
+		// itself. The env pointer's coordinate is INDEPENDENT (a capture can
+		// postdate the project row that carries it in the snapshot), so it still
+		// merges by its own LWW compare against the surviving local row.
+		if entry.Env != nil {
+			return importEnvTx(ctx, tx, existing.ID, entry.Env)
+		}
+		return nil
 	}
 	ns, err := tx.UpsertProject(ctx, upsertParamsForSnapshotEntry(entry))
 	if err != nil {
@@ -115,6 +122,39 @@ func importEntryTx(ctx context.Context, tx *state.Tx, entry SnapshotEntry) error
 		if err := tx.RecordDraftSnapshotTx(ctx, ns.ID, entry.Draft.BlobRef, entry.Draft.ByteSize, entry.Draft.FileCount, draftEvent); err != nil {
 			return err
 		}
+	}
+	if entry.Env != nil {
+		return importEnvTx(ctx, tx, ns.ID, entry.Env)
+	}
+	return nil
+}
+
+// importEnvTx merges one snapshot env-profile pointer by the same
+// highest-(HLC, deviceID, eventID)-wins rule the env.profile.updated apply path
+// uses (ENV-SYNC-01), synthesizing the source event from the shipped
+// coordinates so UpsertEnvProfileTx stamps them and re-import stays idempotent.
+func importEnvTx(ctx context.Context, tx *state.Tx, namespaceID string, env *SnapshotEnv) error {
+	envEvent := state.Event{
+		ID:       env.SourceEventID,
+		DeviceID: env.SourceEventDeviceID,
+		HLC:      env.SourceEventHLC,
+	}
+	hlc, deviceID, eventID, ok, err := tx.EnvProfileSourceCoords(ctx, namespaceID)
+	if err != nil {
+		return err
+	}
+	if ok && !envCoordLess(hlc, deviceID, eventID, envEvent) {
+		return nil // local profile coordinates dominate → stale snapshot pointer
+	}
+	if _, err := tx.UpsertEnvProfileTx(ctx, namespaceID, state.EnvProfileParams{
+		Name:     env.Name,
+		Provider: env.Provider,
+		Mode:     env.Mode,
+		BlobRef:  env.BlobRef,
+		VarNames: env.VarNames,
+		Refs:     env.Refs,
+	}, envEvent); err != nil {
+		return fmt.Errorf("import env profile for namespace %s: %w", namespaceID, err)
 	}
 	return nil
 }

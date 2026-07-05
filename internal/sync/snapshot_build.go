@@ -72,6 +72,19 @@ func BuildSnapshot(ctx context.Context, st *state.Store, producedBy string, hlc 
 				SourceEventID:       r.Draft.SourceEventID,
 			}
 		}
+		if r.Env != nil {
+			entry.Env = &SnapshotEnv{
+				Name:                r.Env.Name,
+				Provider:            r.Env.Provider,
+				Mode:                r.Env.Mode,
+				BlobRef:             r.Env.BlobRef,
+				VarNames:            r.Env.VarNames,
+				Refs:                r.Env.Refs,
+				SourceEventHLC:      r.Env.SourceEventHLC,
+				SourceEventDeviceID: r.Env.SourceEventDeviceID,
+				SourceEventID:       r.Env.SourceEventID,
+			}
+		}
 		snap.Entries = append(snap.Entries, entry)
 	}
 	for _, ts := range tombstones {

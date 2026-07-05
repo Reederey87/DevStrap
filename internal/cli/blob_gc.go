@@ -52,16 +52,15 @@ func rewrapBlobsOnRevoke(ctx context.Context, store *state.Store, opts *options,
 	}
 	rewrapped := 0
 
-	// P5-SEC-04: env secret blobs are local-only — they are never pushed to or
-	// synced through the hub (synced encrypted env-bundle exchange is not built).
-	// Rewrap them in place; never PutBlob/DeleteBlob them on the hub, and never
-	// orphan them with an event.
+	// P5-SEC-04/ENV-SYNC-01: env secret blobs now sync through the hub blob
+	// plane. Rewrap emits superseding env.profile.updated events before hub
+	// cleanup, matching draft blob ordering.
 	envRefs, err := store.EnvBlobRefs(ctx)
 	if err != nil {
 		return rewrapped, err
 	}
 	for _, ref := range envRefs {
-		if ok, ferr := rewrapLocalEnvBlob(ctx, store, opts, identity.Private, recipients, ref); ferr != nil {
+		if ok, ferr := rewrapEnvBlob(ctx, store, opts, hub, identity.Private, recipients, ref); ferr != nil {
 			return rewrapped, ferr
 		} else if ok {
 			rewrapped++
@@ -89,13 +88,25 @@ func rewrapBlobsOnRevoke(ctx context.Context, store *state.Store, opts *options,
 	return rewrapped, nil
 }
 
-// rewrapLocalEnvBlob re-encrypts a local-only env blob to the reduced recipient
-// set in place (P5-SEC-04). It never touches the hub. Returns (rewrapped, err).
-func rewrapLocalEnvBlob(ctx context.Context, store *state.Store, opts *options, identity string, recipients []string, ref string) (bool, error) {
+// rewrapEnvBlob re-encrypts an env blob and makes the new ref discoverable
+// before the old ciphertext is reclaimed (ENV-SYNC-01).
+func rewrapEnvBlob(ctx context.Context, store *state.Store, opts *options, hub dssync.Hub, identity string, recipients []string, ref string) (bool, error) {
+	profiles, err := store.EnvProfilesForBlobRef(ctx, ref)
+	if err != nil {
+		return false, err
+	}
 	ciphertext, err := readEnvBlob(opts.paths(), ref)
 	if err != nil {
-		logging.Logger(ctx).Warn("rewrap: env blob not cached locally, skipping", "ref", ref, "err", err.Error())
-		return false, nil
+		if hub == nil {
+			logging.Logger(ctx).Warn("rewrap: env blob not cached locally and no hub provided, skipping", "ref", ref)
+			return false, nil
+		}
+		fetched, ferr := fetchBlobForRewrap(ctx, hub, ref)
+		if ferr != nil {
+			logging.Logger(ctx).Warn("rewrap: could not fetch env blob from hub, skipping", "ref", ref, "err", ferr.Error())
+			return false, nil
+		}
+		ciphertext = fetched
 	}
 	newCiphertext, newRef, err := envbundle.Rewrap(ciphertext, identity, recipients)
 	if err != nil {
@@ -105,8 +116,27 @@ func rewrapLocalEnvBlob(ctx context.Context, store *state.Store, opts *options, 
 	if err := writeEnvBlob(opts.paths(), newRef, newCiphertext); err != nil {
 		return false, fmt.Errorf("write rewrapped env blob: %w", err)
 	}
+	var events []state.Event
+	for _, profile := range profiles {
+		ev, eerr := emitSupersedingEnvProfile(ctx, store, profile, newRef)
+		if eerr != nil {
+			return false, fmt.Errorf("emit superseding env profile for %s: %w", profile.Path, eerr)
+		}
+		events = append(events, ev)
+	}
+	// EnvProfilesForBlobRef only sees ACTIVE projects, but bindings on
+	// tombstoned entries can still hold the old ref; without this catch-all
+	// they would dangle and EnvBlobRefs would re-offer the dead ref on every
+	// future revoke. Idempotent: rows already repointed above are untouched.
 	if err := store.UpdateBlobRef(ctx, ref, newRef); err != nil {
-		return false, fmt.Errorf("update env blob ref: %w", err)
+		return false, fmt.Errorf("update env blob refs: %w", err)
+	}
+	if hub != nil {
+		rewrapHubCleanup(ctx, hub, store, ref, newRef, newCiphertext, events)
+	} else {
+		if qerr := store.QueuePendingHubDelete(ctx, ref); qerr != nil {
+			logging.Logger(ctx).Warn("rewrap: failed to queue old ref for hub deletion", "ref", ref, "err", qerr.Error())
+		}
 	}
 	return true, nil
 }
@@ -194,6 +224,41 @@ func emitSupersedingDraftSnapshot(ctx context.Context, store *state.Store, names
 			return err
 		}
 		return tx.RecordDraftSnapshotTx(ctx, namespaceID, newRef, byteSize, fileCount, ev)
+	})
+	if err != nil {
+		return state.Event{}, err
+	}
+	return ev, nil
+}
+
+func emitSupersedingEnvProfile(ctx context.Context, store *state.Store, ref state.EnvProfileRef, newRef string) (state.Event, error) {
+	payload := dssync.EnvProfilePayload{
+		Path:     ref.Path,
+		Profile:  ref.Name,
+		Provider: ref.Provider,
+		Mode:     ref.Mode,
+		BlobRef:  newRef,
+		VarNames: ref.VarNames,
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return state.Event{}, err
+	}
+	var ev state.Event
+	err = store.WithTx(ctx, func(tx *state.Tx) error {
+		var err error
+		ev, err = store.InsertLocalEventTx(ctx, tx, dssync.NewEnvProfileEvent(string(raw)))
+		if err != nil {
+			return err
+		}
+		_, err = tx.UpsertEnvProfileTx(ctx, ref.NamespaceID, state.EnvProfileParams{
+			Name:     ref.Name,
+			Provider: ref.Provider,
+			Mode:     ref.Mode,
+			BlobRef:  newRef,
+			VarNames: ref.VarNames,
+		}, ev)
+		return err
 	})
 	if err != nil {
 		return state.Event{}, err

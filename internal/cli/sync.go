@@ -554,17 +554,25 @@ func verifyBlobContentHash(ref string, ciphertext []byte) error {
 // blobRefFromEvent extracts an age_blob:<sha256> reference from an event
 // payload, if the event type carries one (DRAFT-02).
 func blobRefFromEvent(event state.Event) (string, bool) {
-	if event.Type != dssync.EventDraftSnapshotCreated {
+	switch event.Type {
+	case dssync.EventDraftSnapshotCreated:
+		var payload dssync.DraftSnapshotPayload
+		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+			return "", false
+		}
+		if payload.BlobRef == "" {
+			return "", false
+		}
+		return payload.BlobRef, true
+	case dssync.EventEnvProfileUpdated:
+		var payload dssync.EnvProfilePayload
+		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+			return "", false
+		}
+		return payload.BlobRef, payload.BlobRef != ""
+	default:
 		return "", false
 	}
-	var payload dssync.DraftSnapshotPayload
-	if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
-		return "", false
-	}
-	if payload.BlobRef == "" {
-		return "", false
-	}
-	return payload.BlobRef, true
 }
 
 func blobHashHex(ref string) string {

@@ -426,6 +426,180 @@ func projEvent(t *testing.T, dev, typ string, hlc int64, nsPath, key string) sta
 	return ev
 }
 
+func envProfileEvent(t *testing.T, id, dev string, seq, hlc int64, payload EnvProfilePayload) state.Event {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state.Event{
+		ID:          id,
+		DeviceID:    dev,
+		Seq:         seq,
+		HLC:         hlc << hlcLogicalBits,
+		Type:        EventEnvProfileUpdated,
+		PayloadJSON: string(raw),
+		ContentHash: state.ContentHash(string(raw)),
+	}
+}
+
+func signedEnvProfileEvent(t *testing.T, signing devicekeys.SigningIdentity, id, dev string, seq, hlc int64, payload EnvProfilePayload) state.Event {
+	t.Helper()
+	ev := envProfileEvent(t, id, dev, seq, hlc, payload)
+	sig, err := devicekeys.Sign(signing.Private, "devstrap:event:v2", state.EventSignaturePayloadV2(ev))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev.DeviceSig = sig
+	return ev
+}
+
+func TestApplyEnvProfileEventCreatesProfileAndBindings(t *testing.T) {
+	ctx := context.Background()
+	st, device := newSyncStore(t)
+	signing := addRemoteDeviceForApplyTest(t, st, "device-env", "approved")
+	now := time.Now().UnixMilli()
+	add := projEvent(t, device.ID, EventProjectAdded, now, "work/acme/api", "github.com/acme/api")
+	env := signedEnvProfileEvent(t, signing, "evt_env", "device-env", 1, now+1, EnvProfilePayload{
+		Path:     "work/acme/api",
+		Profile:  "default",
+		Provider: "devstrap_encrypted",
+		Mode:     "hydrate_or_runtime",
+		BlobRef:  "age_blob:deadbeef",
+		VarNames: []string{"API_TOKEN", "DB_URL"},
+	})
+	if _, err := ApplyEvents(ctx, st, []state.Event{add, env}); err != nil {
+		t.Fatal(err)
+	}
+	project, err := st.ProjectByPath(ctx, "work/acme/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, bindings, err := st.EnvProfileForProject(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.Provider != "devstrap_encrypted" || len(bindings) != 2 || bindings[0].EncryptedValueRef != "age_blob:deadbeef" {
+		t.Fatalf("profile=%#v bindings=%#v", profile, bindings)
+	}
+}
+
+func TestApplyEnvProfileEventDuplicateIdempotent(t *testing.T) {
+	ctx := context.Background()
+	st, device := newSyncStore(t)
+	signing := addRemoteDeviceForApplyTest(t, st, "device-env", "approved")
+	now := time.Now().UnixMilli()
+	add := projEvent(t, device.ID, EventProjectAdded, now, "work/acme/api", "github.com/acme/api")
+	env := signedEnvProfileEvent(t, signing, "evt_env", "device-env", 1, now+1, EnvProfilePayload{
+		Path:     "work/acme/api",
+		Profile:  "default",
+		Provider: "devstrap_encrypted",
+		Mode:     "hydrate_or_runtime",
+		BlobRef:  "age_blob:deadbeef",
+		VarNames: []string{"API_TOKEN"},
+	})
+	if _, err := ApplyEvents(ctx, st, []state.Event{add, env}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyEvents(ctx, st, []state.Event{env}); err != nil {
+		t.Fatal(err)
+	}
+	project, err := st.ProjectByPath(ctx, "work/acme/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, bindings, err := st.EnvProfileForProject(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 1 || bindings[0].VarName != "API_TOKEN" {
+		t.Fatalf("bindings=%#v, want one idempotent binding", bindings)
+	}
+}
+
+func TestApplyEnvProfileEventUnknownProjectSoftSkips(t *testing.T) {
+	ctx := context.Background()
+	st, device := newSyncStore(t)
+	signing := addRemoteDeviceForApplyTest(t, st, "device-env", "approved")
+	now := time.Now().UnixMilli()
+	env := signedEnvProfileEvent(t, signing, "evt_env_missing", "device-env", 1, now, EnvProfilePayload{
+		Path:     "work/acme/missing",
+		Profile:  "default",
+		Provider: "devstrap_encrypted",
+		Mode:     "hydrate_or_runtime",
+		BlobRef:  "age_blob:deadbeef",
+		VarNames: []string{"API_TOKEN"},
+	})
+	add := projEvent(t, device.ID, EventProjectAdded, now+1, "work/acme/valid", "github.com/acme/valid")
+	add.Seq = 1
+	safe, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{env, add}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Quarantined != 0 || stats.CursorHeld {
+		t.Fatalf("stats=%+v, want both events consumed without quarantine", stats)
+	}
+	if safe.After("device-env") != 1 || safe.After(device.ID) != 1 {
+		t.Fatalf("safe cursor=%v, want both devices advanced", safe)
+	}
+	if _, err := st.ProjectByPath(ctx, "work/acme/valid"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestApplyEnvProfileEventLWWConvergesBothOrders(t *testing.T) {
+	ctx := context.Background()
+	for _, order := range []string{"low-then-high", "high-then-low"} {
+		t.Run(order, func(t *testing.T) {
+			st, device := newSyncStore(t)
+			signingA := addRemoteDeviceForApplyTest(t, st, "device-a", "approved")
+			signingB := addRemoteDeviceForApplyTest(t, st, "device-b", "approved")
+			now := time.Now().UnixMilli()
+			add := projEvent(t, device.ID, EventProjectAdded, now, "work/acme/api", "github.com/acme/api")
+			if _, err := ApplyEvents(ctx, st, []state.Event{add}); err != nil {
+				t.Fatal(err)
+			}
+			low := signedEnvProfileEvent(t, signingA, "evt_env_low", "device-a", 1, now+1, EnvProfilePayload{
+				Path:     "work/acme/api",
+				Profile:  "default",
+				Provider: "devstrap_encrypted",
+				Mode:     "hydrate_or_runtime",
+				BlobRef:  "age_blob:low",
+				VarNames: []string{"LOW"},
+			})
+			high := signedEnvProfileEvent(t, signingB, "evt_env_high", "device-b", 1, now+2, EnvProfilePayload{
+				Path:     "work/acme/api",
+				Profile:  "default",
+				Provider: "devstrap_encrypted",
+				Mode:     "hydrate_or_runtime",
+				BlobRef:  "age_blob:high",
+				VarNames: []string{"HIGH"},
+			})
+			first, second := low, high
+			if order == "high-then-low" {
+				first, second = high, low
+			}
+			if _, err := ApplyEvents(ctx, st, []state.Event{first}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ApplyEvents(ctx, st, []state.Event{second}); err != nil {
+				t.Fatal(err)
+			}
+			project, err := st.ProjectByPath(ctx, "work/acme/api")
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, bindings, err := st.EnvProfileForProject(ctx, project.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(bindings) != 1 || bindings[0].VarName != "HIGH" || bindings[0].EncryptedValueRef != "age_blob:high" {
+				t.Fatalf("bindings=%#v, want high event to win", bindings)
+			}
+		})
+	}
+}
+
 func TestApplyEventsQuarantinesVerificationFailureAndAdvancesCursor(t *testing.T) {
 	ctx := context.Background()
 	st, _ := newSyncStore(t)

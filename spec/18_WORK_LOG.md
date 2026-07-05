@@ -31,6 +31,23 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — feat(env): cross-device env-profile exchange (ENV-SYNC-01)
+
+Changed:
+- `internal/sync`: added `env.profile.updated` payload/event helpers and apply handling. Env profile replay is LWW by source-event coordinate, duplicates/stale events are idempotent, missing projects soft-skip, and the event is signature-gated as trust-affecting.
+- `internal/state`: migration `00023_env_profile_source_events.sql` adds `env_profiles.source_event_hlc/source_event_device_id/source_event_id`; env profile saves now share `Tx.UpsertEnvProfileTx`, stamp event coords, keep legacy wrappers for tests/callers, and expose `EnvProfileSourceCoords` plus `EnvProfilesForBlobRef`.
+- `internal/cli`: `env capture` and `env bind` emit `env.profile.updated` in the same transaction as the profile upsert; sync blob discovery includes env profile blob refs; hydrate missing local blobs now carries a `devstrap sync` remedy; revoke rewrap emits superseding env profile events before hub cleanup.
+- Snapshot plane (coordinator follow-up in the same PR): `SnapshotEnv` pointer on `SnapshotEntry` (state read `snapshotEnvForProject` skips never-synced NULL-coord profiles), `BuildSnapshot` mapping, `importEnvTx` merging by the pointer's OWN coordinate even when the entry row loses the project LWW, and `recoverFromSnapshot` step 8 pulls imported env blobs alongside draft blobs.
+- Review fixes (coordinator line-by-line): `rewrapEnvBlob` regained the catch-all `UpdateBlobRef` so bindings on tombstoned entries repoint too (EnvProfilesForBlobRef only sees active projects); `UpsertEnvProfileTx` dropped an unreachable provider branch.
+- Specs: `spec/00`, `spec/07`, `spec/09`, `spec/12`, and `spec/16` now describe shipped env-profile exchange, the snapshot env pointer, and migration 00023.
+
+Validated:
+- Added state, sync, and CLI unit coverage for env profile source coords, blob-ref lookup, apply idempotency/LWW/soft-skip, local capture event emission, env blob discovery, and revoke rewrap superseding events.
+- Focused package run: `GOCACHE=/tmp/devstrap-gocache go test ./internal/state/... ./internal/sync/... ./internal/cli/...`.
+
+Follow-ups:
+- file the draft-apply batch-abort finding (a draft.snapshot.created or malformed-but-verified env payload for an unknown project can still abort a whole pull batch; the env apply path soft-skips the unknown-project case by design).
+
 ## 2026-07-05 — docs(audits): Pass-6 closure banner + ledger truth-up + multi-device wave direction
 
 Changed:

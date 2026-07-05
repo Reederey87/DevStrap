@@ -363,10 +363,10 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 					}
 				}
 				if hub == nil {
-					// P5-PROD-02: the old draft ciphertext is queued (pending_hub_deletes)
+					// P5-PROD-02: the old synced ciphertext is queued (pending_hub_deletes)
 					// and deleted on the next hub-enabled sync — state that plainly
 					// instead of promising a cleanup that never ran.
-					_, _ = fmt.Fprintf(stderr, "note: no hub configured; old draft ciphertext is queued and removed on the next 'devstrap sync --hub-file'. Rotate the affected secrets at their source regardless.\n")
+					_, _ = fmt.Fprintf(stderr, "note: no hub configured; old synced ciphertext is queued and removed on the next 'devstrap sync --hub-file'. Rotate the affected secrets at their source regardless.\n")
 				}
 			}
 			return nil

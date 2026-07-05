@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -213,6 +214,97 @@ func TestRewrapDraftBlobRecordsOriginSupersedingSnapshot(t *testing.T) {
 	}
 	if !slices.Contains(refs, latest.BlobRef) {
 		t.Fatalf("DraftBlobRefs = %v, want rewrapped ref %s", refs, latest.BlobRef)
+	}
+}
+
+func TestRewrapEnvBlobEmitsSupersedingProfileEvent(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	root := filepath.Join(t.TempDir(), "Code")
+	paths := config.Paths{Home: home, Root: root}
+	st, err := state.Open(ctx, paths.StateDB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureWorkspace(ctx, "test", root); err != nil {
+		t.Fatal(err)
+	}
+	device, err := st.EnsureDevice(ctx, "device-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, _, err := devicekeys.NewHybridStore(paths.KeyDir(), platform.Detect().Keychain).Ensure(ctx, device.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetDevicePublicKey(ctx, device.ID, identity.Recipient); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.UpsertProject(ctx, state.UpsertProjectParams{Path: "work/env", Type: "git_repo", RemoteKey: "github.com/acme/env"}); err != nil {
+		t.Fatalf("UpsertProject: %v", err)
+	}
+	proj, err := st.ProjectByPath(ctx, "work/env")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ciphertext, oldRef, err := envbundle.Encrypt([]envfile.Binding{{Name: "API_TOKEN", Value: "one", Line: 1}}, []string{identity.Recipient})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeEnvBlob(paths, oldRef, ciphertext); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveCapturedEnvProfile(ctx, proj.ID, "default", []string{"API_TOKEN"}, oldRef); err != nil {
+		t.Fatal(err)
+	}
+	opts := &options{v: viper.New()}
+	opts.v.Set("home", home)
+	opts.v.Set("root", root)
+
+	ok, err := rewrapEnvBlob(ctx, st, opts, nil, identity.Private, []string{identity.Recipient}, oldRef)
+	if err != nil {
+		t.Fatalf("rewrapEnvBlob: %v", err)
+	}
+	if !ok {
+		t.Fatal("rewrapEnvBlob returned false")
+	}
+	_, bindings, err := st.EnvProfileForProject(ctx, proj.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 1 || bindings[0].EncryptedValueRef == oldRef {
+		t.Fatalf("bindings after rewrap = %#v, want new ref", bindings)
+	}
+	events, err := st.PendingEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, event := range events {
+		if event.Type != dssync.EventEnvProfileUpdated {
+			continue
+		}
+		var payload dssync.EnvProfilePayload
+		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.BlobRef == bindings[0].EncryptedValueRef && payload.Path == "work/env" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("pending events = %#v, want superseding env.profile.updated", events)
+	}
+	queued, err := st.PendingHubDeletes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(queued, oldRef) {
+		t.Fatalf("pending deletes = %v, want %s", queued, oldRef)
 	}
 }
 

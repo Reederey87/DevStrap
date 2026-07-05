@@ -156,7 +156,7 @@ Implemented in this repository:
 Not implemented yet (genuinely unbuilt — features that are partly shipped are listed under "now built" below, never here):
 
 - the bespoke **HTTP/SSE relay** (full-state snapshot exchange is now SHIPPED — sealed snapshots, signed retention manifest, `hub compact`, fail-closed import; the live R2/S3 backend is shipped: the `aws-sdk-go-v2` S3 adapter is wired behind the `hubFromOptions` `r2://` seam, with the `Hub` interface, R2 keying/retry/conditional-put logic, blob GC, retention floor, and content-hash verification all shipped and unit-tested, and the same conformance contract proven against MinIO via an env-gated integration test);
-- production **remote device registration** and out-of-band fingerprint confirmation (the local trust plane and device-revoke rewrap are shipped); synced encrypted **env-bundle** exchange (draft-bundle exchange is shipped);
+- production **remote device registration** and out-of-band fingerprint confirmation (the local trust plane, synced encrypted env/draft bundle exchange, and device-revoke rewrap are shipped);
 - daemon, local socket API, FSEvents-specific Mac watcher, LaunchAgent/systemd installers;
 - OS-enforced agent sandboxing, project-env allowlists, and non-generic engine adapters;
 - cross-machine working-state sync — git-state validation plane (`repo.gitstate.observed`) and WIP refs (`refs/devstrap/wip/*`); the encrypted draft-bundle layer (Layer C) is shipped;
@@ -206,12 +206,11 @@ The first killer loop (eager-clone Workspace Passport):
 ```text
 1. Add or create a project on Machine A.
 2. DevStrap records it in the signed HLC namespace map (path, remote, env profile, policy),
-   and pushes any non-git/draft content as age-encrypted blobs to the hub (env-bundle hub
-   exchange is not yet shipped — env blobs are still local-only).
+   and pushes any env/non-git/draft content as age-encrypted blobs to the hub. Captured
+   profiles emit `env.profile.updated`; draft bundles emit `draft.snapshot.created`.
 3. Machine B runs `devstrap sync` and pulls the updated namespace map.
 4. Sync eagerly materializes the whole tree: every repo is blobless/partial-cloned from its
-   existing remote, draft folders are pulled from encrypted blobs; env profiles hydrate from
-   locally captured blobs (cross-device env exchange pending).
+   existing remote, env and draft blobs are pulled from the encrypted blob plane, and env profiles hydrate.
    (.git is never file-synced; node_modules/build artifacts are rebuilt, not synced.)
 5. The same folder paths are really present on disk — no skeleton to "open" first.
 6. Agent work starts from a fresh remote default branch, not a stale local default branch.

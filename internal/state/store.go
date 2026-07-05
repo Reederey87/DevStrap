@@ -103,6 +103,17 @@ type EnvProfile struct {
 	Mode        string `json:"mode"`
 }
 
+// EnvProfileParams carries the full desired state of a project's env profile
+// for the transactional upsert (ENV-SYNC-01).
+type EnvProfileParams struct {
+	Name     string
+	Provider string            // devstrap_encrypted or provider name
+	Mode     string            // hydrate_or_runtime | runtime_only
+	BlobRef  string            // devstrap_encrypted only
+	VarNames []string          // devstrap_encrypted only
+	Refs     map[string]string // provider profiles only
+}
+
 type SecretBinding struct {
 	ID                string `json:"id"`
 	EnvProfileID      string `json:"env_profile_id"`
@@ -1546,83 +1557,21 @@ UPDATE git_repos SET forge_kind = ?, updated_at = ? WHERE namespace_id = ?;
 	return nil
 }
 
+// SaveCapturedEnvProfile stores an encrypted env profile without emitting a
+// sync event. Production CLI paths must use the event-emitting transaction in
+// internal/cli so the profile syncs; this wrapper exists for tests/legacy callers.
 func (s *Store) SaveCapturedEnvProfile(ctx context.Context, namespaceID, name string, varNames []string, encryptedValueRef string) (EnvProfile, error) {
-	if namespaceID == "" {
-		return EnvProfile{}, fmt.Errorf("namespace id must not be empty")
-	}
-	if name == "" {
-		name = "default"
-	}
-	if len(varNames) == 0 {
-		return EnvProfile{}, fmt.Errorf("env profile must contain at least one binding")
-	}
-	if !strings.HasPrefix(encryptedValueRef, "age_blob:") {
-		return EnvProfile{}, fmt.Errorf("encrypted value ref must use age_blob: prefix")
-	}
 	var profile EnvProfile
 	err := s.WithTx(ctx, func(tx *Tx) error {
-		var existingID string
-		err := tx.tx.QueryRowContext(ctx, `
-SELECT COALESCE(env_profile_id, '')
-FROM namespace_entries
-WHERE id = ? AND workspace_id = ? AND status = 'active';
-`, namespaceID, tx.workspaceID).Scan(&existingID)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("unknown namespace id %q", namespaceID)
-			}
-			return fmt.Errorf("read namespace env profile: %w", err)
-		}
-		now := timestampNow()
-		if existingID == "" {
-			var err error
-			existingID, err = id.New("env")
-			if err != nil {
-				return err
-			}
-			if _, err := tx.tx.ExecContext(ctx, `
-INSERT INTO env_profiles (id, workspace_id, name, provider, mode, created_at, updated_at)
-VALUES (?, ?, ?, 'devstrap_encrypted', 'hydrate_or_runtime', ?, ?);
-`, existingID, tx.workspaceID, name, now, now); err != nil {
-				return fmt.Errorf("insert env profile: %w", err)
-			}
-			if _, err := tx.tx.ExecContext(ctx, `
-UPDATE namespace_entries SET env_profile_id = ?, updated_at = ? WHERE id = ?;
-`, existingID, now, namespaceID); err != nil {
-				return fmt.Errorf("attach env profile: %w", err)
-			}
-		} else {
-			if _, err := tx.tx.ExecContext(ctx, `
-UPDATE env_profiles
-SET name = ?, provider = 'devstrap_encrypted', mode = 'hydrate_or_runtime', updated_at = ?
-WHERE id = ?;
-`, name, now, existingID); err != nil {
-				return fmt.Errorf("update env profile: %w", err)
-			}
-			if _, err := tx.tx.ExecContext(ctx, `DELETE FROM secret_bindings WHERE env_profile_id = ?;`, existingID); err != nil {
-				return fmt.Errorf("replace env bindings: %w", err)
-			}
-		}
-		for _, varName := range varNames {
-			bindingID, err := id.New("sec")
-			if err != nil {
-				return err
-			}
-			if _, err := tx.tx.ExecContext(ctx, `
-INSERT INTO secret_bindings (id, env_profile_id, var_name, encrypted_value_ref, required, created_at, updated_at)
-VALUES (?, ?, ?, ?, 1, ?, ?);
-`, bindingID, existingID, varName, encryptedValueRef, now, now); err != nil {
-				return fmt.Errorf("insert secret binding %s: %w", varName, err)
-			}
-		}
-		profile = EnvProfile{
-			ID:          existingID,
-			WorkspaceID: tx.workspaceID,
-			Name:        name,
-			Provider:    "devstrap_encrypted",
-			Mode:        "hydrate_or_runtime",
-		}
-		return nil
+		var err error
+		profile, err = tx.UpsertEnvProfileTx(ctx, namespaceID, EnvProfileParams{
+			Name:     name,
+			Provider: "devstrap_encrypted",
+			Mode:     "hydrate_or_runtime",
+			BlobRef:  encryptedValueRef,
+			VarNames: varNames,
+		}, Event{})
+		return err
 	})
 	if err != nil {
 		return EnvProfile{}, err
@@ -1630,99 +1579,167 @@ VALUES (?, ?, ?, ?, 1, ?, ?);
 	return profile, nil
 }
 
+// SaveProviderEnvProfile stores a provider env profile without emitting a sync
+// event. Production CLI paths must use the event-emitting transaction in
+// internal/cli so the profile syncs; this wrapper exists for tests/legacy callers.
 func (s *Store) SaveProviderEnvProfile(ctx context.Context, namespaceID, name, provider string, refs map[string]string) (EnvProfile, error) {
-	if namespaceID == "" {
-		return EnvProfile{}, fmt.Errorf("namespace id must not be empty")
-	}
-	if name == "" {
-		name = "default"
-	}
-	if provider == "" {
-		return EnvProfile{}, fmt.Errorf("provider must not be empty")
-	}
-	if len(refs) == 0 {
-		return EnvProfile{}, fmt.Errorf("env profile must contain at least one binding")
-	}
-	varNames := make([]string, 0, len(refs))
-	for varName, ref := range refs {
-		if varName == "" {
-			return EnvProfile{}, fmt.Errorf("env variable name must not be empty")
-		}
-		if strings.TrimSpace(ref) == "" {
-			return EnvProfile{}, fmt.Errorf("provider ref for %s must not be empty", varName)
-		}
-		varNames = append(varNames, varName)
-	}
-	sort.Strings(varNames)
 	var profile EnvProfile
 	err := s.WithTx(ctx, func(tx *Tx) error {
-		var existingID string
-		err := tx.tx.QueryRowContext(ctx, `
-SELECT COALESCE(env_profile_id, '')
-FROM namespace_entries
-WHERE id = ? AND workspace_id = ? AND status = 'active';
-`, namespaceID, tx.workspaceID).Scan(&existingID)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("unknown namespace id %q", namespaceID)
-			}
-			return fmt.Errorf("read namespace env profile: %w", err)
-		}
-		now := timestampNow()
-		if existingID == "" {
-			var err error
-			existingID, err = id.New("env")
-			if err != nil {
-				return err
-			}
-			if _, err := tx.tx.ExecContext(ctx, `
-INSERT INTO env_profiles (id, workspace_id, name, provider, mode, created_at, updated_at)
-VALUES (?, ?, ?, ?, 'runtime_only', ?, ?);
-`, existingID, tx.workspaceID, name, provider, now, now); err != nil {
-				return fmt.Errorf("insert provider env profile: %w", err)
-			}
-			if _, err := tx.tx.ExecContext(ctx, `
-UPDATE namespace_entries SET env_profile_id = ?, updated_at = ? WHERE id = ?;
-`, existingID, now, namespaceID); err != nil {
-				return fmt.Errorf("attach env profile: %w", err)
-			}
-		} else {
-			if _, err := tx.tx.ExecContext(ctx, `
-UPDATE env_profiles
-SET name = ?, provider = ?, mode = 'runtime_only', updated_at = ?
-WHERE id = ?;
-`, name, provider, now, existingID); err != nil {
-				return fmt.Errorf("update provider env profile: %w", err)
-			}
-			if _, err := tx.tx.ExecContext(ctx, `DELETE FROM secret_bindings WHERE env_profile_id = ?;`, existingID); err != nil {
-				return fmt.Errorf("replace env bindings: %w", err)
-			}
-		}
-		for _, varName := range varNames {
-			bindingID, err := id.New("sec")
-			if err != nil {
-				return err
-			}
-			if _, err := tx.tx.ExecContext(ctx, `
-INSERT INTO secret_bindings (id, env_profile_id, var_name, provider_ref, required, created_at, updated_at)
-VALUES (?, ?, ?, ?, 1, ?, ?);
-`, bindingID, existingID, varName, refs[varName], now, now); err != nil {
-				return fmt.Errorf("insert provider secret binding %s: %w", varName, err)
-			}
-		}
-		profile = EnvProfile{
-			ID:          existingID,
-			WorkspaceID: tx.workspaceID,
-			Name:        name,
-			Provider:    provider,
-			Mode:        "runtime_only",
-		}
-		return nil
+		var err error
+		profile, err = tx.UpsertEnvProfileTx(ctx, namespaceID, EnvProfileParams{
+			Name:     name,
+			Provider: provider,
+			Mode:     "runtime_only",
+			Refs:     refs,
+		}, Event{})
+		return err
 	})
 	if err != nil {
 		return EnvProfile{}, err
 	}
 	return profile, nil
+}
+
+func (tx *Tx) UpsertEnvProfileTx(ctx context.Context, namespaceID string, p EnvProfileParams, event Event) (EnvProfile, error) {
+	if namespaceID == "" {
+		return EnvProfile{}, fmt.Errorf("namespace id must not be empty")
+	}
+	if p.Name == "" {
+		p.Name = "default"
+	}
+	if p.Provider == "" {
+		return EnvProfile{}, fmt.Errorf("provider must not be empty")
+	}
+	// Exactly two shapes exist: devstrap_encrypted (one blob ref shared by all
+	// var names) and provider profiles (a per-var provider_ref map).
+	encrypted := p.Provider == "devstrap_encrypted"
+	if encrypted {
+		if p.Mode == "" {
+			p.Mode = "hydrate_or_runtime"
+		}
+		if p.Mode != "hydrate_or_runtime" {
+			return EnvProfile{}, fmt.Errorf("encrypted env profile mode must be hydrate_or_runtime")
+		}
+		if len(p.VarNames) == 0 {
+			return EnvProfile{}, fmt.Errorf("env profile must contain at least one binding")
+		}
+		if !strings.HasPrefix(p.BlobRef, "age_blob:") {
+			return EnvProfile{}, fmt.Errorf("encrypted value ref must use age_blob: prefix")
+		}
+		if len(p.Refs) != 0 {
+			return EnvProfile{}, fmt.Errorf("encrypted env profile must not contain provider refs")
+		}
+		for _, varName := range p.VarNames {
+			if varName == "" {
+				return EnvProfile{}, fmt.Errorf("env variable name must not be empty")
+			}
+		}
+	} else {
+		if p.Mode == "" {
+			p.Mode = "runtime_only"
+		}
+		if p.Mode != "runtime_only" {
+			return EnvProfile{}, fmt.Errorf("provider env profile mode must be runtime_only")
+		}
+		if len(p.Refs) == 0 {
+			return EnvProfile{}, fmt.Errorf("env profile must contain at least one binding")
+		}
+		if p.BlobRef != "" || len(p.VarNames) != 0 {
+			return EnvProfile{}, fmt.Errorf("provider env profile must not contain encrypted blob refs")
+		}
+	}
+	varNames := append([]string(nil), p.VarNames...)
+	if !encrypted {
+		varNames = make([]string, 0, len(p.Refs))
+		for varName, ref := range p.Refs {
+			if varName == "" {
+				return EnvProfile{}, fmt.Errorf("env variable name must not be empty")
+			}
+			if strings.TrimSpace(ref) == "" {
+				return EnvProfile{}, fmt.Errorf("provider ref for %s must not be empty", varName)
+			}
+			varNames = append(varNames, varName)
+		}
+	}
+	sort.Strings(varNames)
+	var eventHLC any
+	var eventDeviceID any
+	var eventID any
+	if event.HLC != 0 || event.DeviceID != "" || event.ID != "" {
+		eventHLC = event.HLC
+		eventDeviceID = event.DeviceID
+		eventID = event.ID
+	}
+	var existingID string
+	err := tx.tx.QueryRowContext(ctx, `
+SELECT COALESCE(env_profile_id, '')
+FROM namespace_entries
+WHERE id = ? AND workspace_id = ? AND status = 'active';
+`, namespaceID, tx.workspaceID).Scan(&existingID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return EnvProfile{}, fmt.Errorf("unknown namespace id %q", namespaceID)
+		}
+		return EnvProfile{}, fmt.Errorf("read namespace env profile: %w", err)
+	}
+	now := timestampNow()
+	if existingID == "" {
+		var err error
+		existingID, err = id.New("env")
+		if err != nil {
+			return EnvProfile{}, err
+		}
+		if _, err := tx.tx.ExecContext(ctx, `
+INSERT INTO env_profiles (id, workspace_id, name, provider, mode, source_event_hlc, source_event_device_id, source_event_id, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+`, existingID, tx.workspaceID, p.Name, p.Provider, p.Mode, eventHLC, eventDeviceID, eventID, now, now); err != nil {
+			return EnvProfile{}, fmt.Errorf("insert env profile: %w", err)
+		}
+		if _, err := tx.tx.ExecContext(ctx, `
+UPDATE namespace_entries SET env_profile_id = ?, updated_at = ? WHERE id = ?;
+`, existingID, now, namespaceID); err != nil {
+			return EnvProfile{}, fmt.Errorf("attach env profile: %w", err)
+		}
+	} else {
+		if _, err := tx.tx.ExecContext(ctx, `
+UPDATE env_profiles
+SET name = ?, provider = ?, mode = ?, source_event_hlc = ?, source_event_device_id = ?, source_event_id = ?, updated_at = ?
+WHERE id = ?;
+`, p.Name, p.Provider, p.Mode, eventHLC, eventDeviceID, eventID, now, existingID); err != nil {
+			return EnvProfile{}, fmt.Errorf("update env profile: %w", err)
+		}
+		if _, err := tx.tx.ExecContext(ctx, `DELETE FROM secret_bindings WHERE env_profile_id = ?;`, existingID); err != nil {
+			return EnvProfile{}, fmt.Errorf("replace env bindings: %w", err)
+		}
+	}
+	for _, varName := range varNames {
+		bindingID, err := id.New("sec")
+		if err != nil {
+			return EnvProfile{}, err
+		}
+		if encrypted {
+			if _, err := tx.tx.ExecContext(ctx, `
+INSERT INTO secret_bindings (id, env_profile_id, var_name, encrypted_value_ref, required, created_at, updated_at)
+VALUES (?, ?, ?, ?, 1, ?, ?);
+`, bindingID, existingID, varName, p.BlobRef, now, now); err != nil {
+				return EnvProfile{}, fmt.Errorf("insert secret binding %s: %w", varName, err)
+			}
+		} else {
+			if _, err := tx.tx.ExecContext(ctx, `
+INSERT INTO secret_bindings (id, env_profile_id, var_name, provider_ref, required, created_at, updated_at)
+VALUES (?, ?, ?, ?, 1, ?, ?);
+`, bindingID, existingID, varName, p.Refs[varName], now, now); err != nil {
+				return EnvProfile{}, fmt.Errorf("insert provider secret binding %s: %w", varName, err)
+			}
+		}
+	}
+	return EnvProfile{
+		ID:          existingID,
+		WorkspaceID: tx.workspaceID,
+		Name:        p.Name,
+		Provider:    p.Provider,
+		Mode:        p.Mode,
+	}, nil
 }
 
 func (s *Store) EnvProfileForProject(ctx context.Context, namespaceID string) (EnvProfile, []SecretBinding, error) {
@@ -1765,6 +1782,36 @@ ORDER BY var_name;
 		bindings = append(bindings, binding)
 	}
 	return profile, bindings, rows.Err()
+}
+
+func (tx *Tx) EnvProfileSourceCoords(ctx context.Context, namespaceID string) (hlc int64, deviceID, eventID string, ok bool, err error) {
+	var nHLC sql.NullInt64
+	var nDeviceID, nEventID sql.NullString
+	err = tx.tx.QueryRowContext(ctx, `
+SELECT e.source_event_hlc, e.source_event_device_id, e.source_event_id
+FROM namespace_entries n
+JOIN env_profiles e ON e.id = n.env_profile_id
+WHERE n.id = ? AND n.workspace_id = ? AND n.status = 'active';
+`, namespaceID, tx.workspaceID).Scan(&nHLC, &nDeviceID, &nEventID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, "", "", false, nil
+		}
+		return 0, "", "", false, fmt.Errorf("read env profile source coords: %w", err)
+	}
+	if !nHLC.Valid && (!nDeviceID.Valid || nDeviceID.String == "") && (!nEventID.Valid || nEventID.String == "") {
+		return 0, "", "", false, nil
+	}
+	if nHLC.Valid {
+		hlc = nHLC.Int64
+	}
+	if nDeviceID.Valid {
+		deviceID = nDeviceID.String
+	}
+	if nEventID.Valid {
+		eventID = nEventID.String
+	}
+	return hlc, deviceID, eventID, true, nil
 }
 
 // MarkEncryptedBindingsNeedingRotation flags every encrypted secret binding as
@@ -2024,8 +2071,8 @@ WHERE id IN (
 }
 
 // EnvBlobRefs returns the distinct age_blob refs held by encrypted env bindings
-// (P5-SEC-04). These blobs are local-only and are never pushed to the hub, so
-// the revoke rewrap must not upload or delete them there.
+// (P5-SEC-04). Env blobs sync through the hub blob plane and are rewrapped with
+// superseding env.profile.updated events on revoke.
 func (s *Store) EnvBlobRefs(ctx context.Context) ([]string, error) {
 	return s.scanRefs(ctx, `SELECT DISTINCT encrypted_value_ref FROM secret_bindings WHERE encrypted_value_ref LIKE 'age_blob:%';`)
 }
@@ -2085,6 +2132,83 @@ WHERE ds.blob_ref = ?;
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+type EnvProfileRef struct {
+	NamespaceID string
+	Path        string
+	Name        string
+	Provider    string
+	Mode        string
+	VarNames    []string
+}
+
+// EnvProfilesForBlobRef returns every active project env profile whose
+// encrypted bindings reference ref, so revoke rewrap can emit superseding
+// env.profile.updated events before old hub ciphertext is deleted (ENV-SYNC-01).
+func (s *Store) EnvProfilesForBlobRef(ctx context.Context, ref string) ([]EnvProfileRef, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT DISTINCT n.id, n.path, e.name, e.provider, e.mode, e.id
+FROM namespace_entries n
+JOIN env_profiles e ON e.id = n.env_profile_id
+JOIN secret_bindings b ON b.env_profile_id = e.id
+WHERE n.status = 'active' AND b.encrypted_value_ref = ?
+ORDER BY n.path, e.name;
+`, ref)
+	if err != nil {
+		return nil, fmt.Errorf("read env profiles for blob: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	type profileRow struct {
+		ref          EnvProfileRef
+		envProfileID string
+	}
+	var profileRows []profileRow
+	for rows.Next() {
+		var r profileRow
+		if err := rows.Scan(&r.ref.NamespaceID, &r.ref.Path, &r.ref.Name, &r.ref.Provider, &r.ref.Mode, &r.envProfileID); err != nil {
+			return nil, fmt.Errorf("scan env profile ref: %w", err)
+		}
+		profileRows = append(profileRows, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close env profile refs: %w", err)
+	}
+	out := make([]EnvProfileRef, 0, len(profileRows))
+	for _, row := range profileRows {
+		varNames, err := s.envProfileVarNamesForRef(ctx, row.envProfileID, ref)
+		if err != nil {
+			return nil, err
+		}
+		row.ref.VarNames = varNames
+		out = append(out, row.ref)
+	}
+	return out, nil
+}
+
+func (s *Store) envProfileVarNamesForRef(ctx context.Context, envProfileID, ref string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT var_name
+FROM secret_bindings
+WHERE env_profile_id = ? AND encrypted_value_ref = ?
+ORDER BY var_name;
+`, envProfileID, ref)
+	if err != nil {
+		return nil, fmt.Errorf("read env profile vars: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var varNames []string
+	for rows.Next() {
+		var varName string
+		if err := rows.Scan(&varName); err != nil {
+			return nil, fmt.Errorf("scan env profile var: %w", err)
+		}
+		varNames = append(varNames, varName)
+	}
+	return varNames, rows.Err()
 }
 
 // QueuePendingHubDelete records a blob ref orphaned by a local-only revoke
@@ -3131,10 +3255,11 @@ SELECT COUNT(*) FROM devices WHERE trust_state IN ('approved', 'revoked', 'lost'
 // mustVerifyEvent reports whether an event type is destructive or
 // trust-affecting and therefore requires a valid signature from a known,
 // approved device (SECU-03). Unknown devices and devices with no signing key
-// must not be able to inject these events.
+// must not be able to inject these events. Env payloads feed hydrated files and
+// lifecycle-script environments, so they are trust-affecting.
 func mustVerifyEvent(eventType string) bool {
 	switch eventType {
-	case "project.deleted", "project.renamed":
+	case "project.deleted", "project.renamed", "env.profile.updated":
 		return true
 	default:
 		return false
