@@ -31,6 +31,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — feat(ci): make the spec-drift/work-log gate advisory on fork PRs (AD-8, B1)
+
+Changed:
+- `internal/specdrift/specdrift.go`: extracted the CLI-output/exit-code logic that used to live inline in `cmd/spec-drift/main.go` into `PrintReport(stdout, stderr io.Writer, report Report, advisory bool) bool` so it's independently testable. Strict mode (`advisory=false`) is byte-identical to the pre-existing behavior — pass prints the one-line summary to stdout, fail prints `spec drift check failed:` plus each finding to stderr and asks for exit 1. Advisory mode never asks for a non-zero exit: a report with findings additionally prints one `::warning::spec-drift (advisory on fork PRs): <finding>` annotation per finding to stdout (so GitHub Actions surfaces them in the UI) ahead of the same human-readable finding list.
+- `cmd/spec-drift/main.go`: added an `--advisory` bool flag (default false) wired straight into `specdrift.PrintReport`; `main` now just calls `os.Exit(1)` when it returns true.
+- `.github/workflows/ci.yml`: the `spec-drift` job's "Check spec drift" step now appends `--advisory` only when the PR's head repo differs from the base repo (`github.event.pull_request.head.repo.full_name != github.repository`) — i.e. fork PRs. Same-repo PRs and pushes to `main` keep the gate blocking.
+- `CONTRIBUTING.md`: added a "Spec Drift and the Work Log" section documenting the work-log rule itself (previously undocumented there), that fork PRs run the gate in advisory mode (contributors may add the work-log/spec entries but aren't required to — the maintainer completes bookkeeping at merge), and that small fixes need no spec/work-log changes at all on fork PRs.
+- `spec/14_MVP_ROADMAP_AND_BACKLOG.md`: the AD-8 direction bullet marks the fork-advisory drift-gate goal SHIPPED 2026-07-05.
+
+Validated:
+- New tests `TestAdvisoryModeExitsCleanWithWarnings` and `TestStrictModeUnchanged` in `internal/specdrift/specdrift_test.go`.
+- `gofmt -w cmd internal`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOCACHE=/tmp/devstrap-gocache go test -race ./...`.
+
+Follow-ups:
+- None.
+
 ## 2026-07-05 — feat(release): SLSA v1 build provenance for release artifacts (P4-SEC-05 / P4-QUAL-05)
 
 Changed:
