@@ -50,6 +50,11 @@ jobs:
     permissions:
       contents: write # create the GitHub Release and upload binaries
       id-token: write # OIDC token for cosign keyless signing (P4-SEC-05)
+    # Carry the built-artifact digests to the provenance job. checksums.txt is
+    # already in sha256sum format — exactly the subjects the SLSA generic
+    # generator signs (base64-encoded).
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -81,3 +86,25 @@ jobs:
           # stable run then rebuilds rc artifacts and fails uploading them onto
           # the existing rc release (observed on the first v0.1.0 attempt).
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+      - name: Compute provenance subjects
+        id: hash
+        # checksums.txt is already in sha256sum format — exactly the subjects
+        # file the SLSA generic generator expects, base64-encoded.
+        run: echo "hashes=$(base64 -w0 dist/checksums.txt)" >> "$GITHUB_OUTPUT"
+
+  provenance:
+    name: SLSA provenance
+    needs: goreleaser
+    permissions:
+      actions: read # read the workflow run to record the builder
+      id-token: write # sign the provenance via Fulcio (keyless)
+      contents: write # upload multiple.intoto.jsonl to the release
+    # NOTE: this reusable workflow MUST be referenced by TAG, not SHA —
+    # slsa-verifier resolves the builder identity from the tag, and the
+    # generator refuses to run from an unexpected ref. Exempt from the repo's
+    # SHA-pin convention (P4-SEC-05) for that reason; do not "fix" this in a
+    # future pin sweep.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.goreleaser.outputs.hashes }}
+      upload-assets: true
