@@ -48,6 +48,7 @@ The idea is deliberately boring and robust: `~/Code` is a **real folder**, and D
 - [Quickstart](#quickstart)
 - [Command reference](#command-reference)
 - [Architecture](#architecture)
+- [Documentation](#documentation)
 - [Roadmap](#roadmap)
 - [Security](#security)
 - [Contributing](#contributing)
@@ -130,171 +131,41 @@ Optional:
 
 ## Install
 
-### Homebrew (macOS and Linux)
+The two happy paths:
 
 ```bash
+# Homebrew (macOS and Linux) — installs a cask + bash/zsh/fish completions
 brew install Reederey87/devstrap/devstrap
-devstrap version
-```
 
-Shell completions (bash/zsh/fish) are installed automatically.
-
-### One-line installer
-
-```bash
+# or the one-line installer — verifies against checksums.txt before extracting, no sudo
 curl -fsSL https://raw.githubusercontent.com/Reederey87/DevStrap/main/scripts/install.sh | sh
 ```
 
-The script detects your OS/arch, verifies the download against `checksums.txt` before
-extracting, and installs into `/usr/local/bin` (or `~/.local/bin` if that isn't writable).
-It never uses sudo. Overrides: `DEVSTRAP_VERSION=v0.1.0` pins a release,
-`DEVSTRAP_INSTALL_DIR=~/bin` picks the destination.
-
-### Download a release binary
-
-Prebuilt binaries for macOS and Linux are published on the [Releases](https://github.com/Reederey87/DevStrap/releases) page (built via GoReleaser). Each tarball ships the binary plus bash/zsh/fish completions. Download, extract, verify against `checksums.txt`, and put `devstrap` on your `PATH`.
-
-```bash
-# example: install a downloaded release binary into ~/.local/bin
-install -m 0755 ./devstrap ~/.local/bin/devstrap
-devstrap version
-```
-
-### Verify a download
-
-Every release publishes a keyless cosign signature over `checksums.txt` (Fulcio cert + Rekor
-transparency log, no long-lived signing key) and an SPDX SBOM per archive (`<archive>.sbom.json`):
-
-```bash
-cosign verify-blob \
-  --certificate-identity "https://github.com/Reederey87/DevStrap/.github/workflows/release.yml@refs/tags/vX.Y.Z" \
-  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  --bundle checksums.txt.sigstore.json checksums.txt
-shasum -a 256 --ignore-missing -c checksums.txt   # Linux: sha256sum --ignore-missing -c checksums.txt
-```
-
-The signature ties `checksums.txt` — and transitively every archive it lists — to a run of this
-repo's release workflow, not to a possibly-compromised uploader.
-
-### Build from source
-
-```bash
-git clone git@github.com:Reederey87/DevStrap.git
-cd DevStrap
-go build -o bin/devstrap ./cmd/devstrap
-./bin/devstrap version
-```
+Then `devstrap version` to confirm. Release binaries + checksums, cosign signature and SBOM
+verification, `go install …@main`, and build-from-source are all covered in
+**[docs/install.md](docs/install.md)**.
 
 ## Quickstart
 
+The zero-infrastructure default loop — any private git repo you can push to *is* the hub:
+
 ```bash
-# 1. Initialize a managed workspace at ~/Code
-devstrap init ~/Code --workspace-name personal
-
-# 2. Adopt the repos you already have on disk
-devstrap scan ~/Code --adopt
-devstrap status
-
-# 3. Add a new repo and materialize it in one command
-devstrap clone git@github.com:acme/api.git work/acme/api --open
-# (or the explicit two-step form: devstrap add … then devstrap hydrate …)
-
-# 4. Capture and re-hydrate its environment (encrypted at rest)
-devstrap env capture work/acme/api .env
-devstrap env hydrate work/acme/api --write .env.local
-
-# 5. Start agent work from a fresh remote default branch
-devstrap worktree new work/acme/api --fresh-upstream --name fix-tests
-devstrap agent run work/acme/api --engine generic --task "run tests" -- npm test
-devstrap agent pr <run-id> --dry-run
-
-# 6. Point at a hub, then sync the namespace map + materialize the tree.
-#    Zero infrastructure: any private git repo you can push to IS the hub.
-#    Create an empty private repo:
-gh repo create you/devstrap-hub --private
-#    then configure it once in ~/.devstrap/config.yaml:
-#      hub: "git@github.com:you/devstrap-hub.git"
-#    Auth is your existing ssh key / git credential helper, running non-interactively
-#    (load the key with `ssh-add`). No bucket, no token plane, no `hub login`.
-devstrap sync
-
-# Run `devstrap hub compact` periodically: deleting files never shrinks a git repo —
-# compact squashes the carrier to a single commit so the host can GC old history.
-# GitHub hard limits apply to the carrier: 100 MB/object (large env/draft blobs need
-# an S3-compatible hub — see "Scaling up" below) and ~2 GiB/push.
-
-# For local testing without any remote, a file-backed hub still works:
-#   devstrap sync --hub-file /tmp/devstrap-hub/events.json
+devstrap init ~/Code --workspace-name personal   # 1. found a managed workspace
+devstrap scan ~/Code --adopt                      # 2. adopt the repos already on disk
+devstrap status                                   # 3. see what DevStrap manages
+gh repo create you/devstrap-hub --private         # 4. an empty private repo = the hub
+devstrap hub init git@github.com:you/devstrap-hub.git   # 5. point at it (writes config.yaml)
+devstrap sync                                     # 6. push the map + materialize the tree
+devstrap open work/acme/api --cursor              # 7. the folders are really on disk now
+devstrap run-loop                                 # 8. optional: converge on an interval, no daemon
 ```
+
+Load your SSH key first (`ssh-add ~/.ssh/<key>`) — git runs non-interactively. For a
+shared-folder or S3/R2 hub, pairing a second device, and the full agent loop, see
+**[docs/quickstart.md](docs/quickstart.md)**; for choosing and operating a hub, see
+**[docs/self-hosting.md](docs/self-hosting.md)**.
 
 Prefer not to install? Every command also works via `go run ./cmd/devstrap <cmd> …`.
-
-### Scaling up: S3-compatible hubs (R2/S3)
-
-The git carrier is the recommended default — the hub only ever holds ciphertext plus signed
-events, so a plain private repo is a safe zero-knowledge boundary. Reach for an S3-compatible
-bucket instead when you need blobs over GitHub's 100 MB object limit, higher push rates, or
-object-storage economics:
-
-```bash
-# ~/.devstrap/config.yaml
-#   hub: r2://<bucket>
-export DEVSTRAP_HUB_S3_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
-export DEVSTRAP_HUB_S3_ACCESS_KEY_ID=…      # falls back to AWS_ACCESS_KEY_ID
-export DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY=…  # falls back to AWS_SECRET_ACCESS_KEY
-# (credentials can also be stored via `devstrap hub login` or a 1Password `op://` ref)
-devstrap sync
-```
-
-See [`spec/19_CLOUD_PROVISIONING_GUIDE.md`](spec/19_CLOUD_PROVISIONING_GUIDE.md) for the full
-R2 setup, credential custody options, and the multi-device runbook.
-
-### Pair a second device
-
-Remote hubs (the git carrier and R2/S3) key everything under `workspaces/<workspace_id>/`,
-so devices converge only when
-they share **one** workspace id. The **founder** mints it at `init`; every later device
-**adopts** it — a bare `devstrap init` mints a *fresh* id and keys a disjoint prefix, so it
-never sees the founder's content. The workspace id is a non‑secret prefix selector (excluded
-from event signatures); it is exchanged out‑of‑band alongside the founder's public keys, and
-authorization comes from the key exchange, not the id.
-
-Pairing is a **two‑paste ceremony** (founder code → joiner, joiner code → founder) plus one
-out‑of‑band fingerprint read in each direction — the `devstrap-pair1:` code is non‑secret, but
-the fingerprint (read aloud over a trusted channel) is what authorizes the keys.
-
-```bash
-# Founder — found the workspace and print the pairing code
-devstrap init ~/Code
-# set `hub: "git@github.com:you/devstrap-hub.git"` in ~/.devstrap/config.yaml — step 6 above
-devstrap sync                               # founds the workspace, pushes the namespace map
-devstrap devices pairing-code               # stdout: devstrap-pair1:...  stderr: founder fingerprint
-
-# Joiner — adopt the id and pin the founder in one step
-# (fleets >2 devices: pin every existing device the same way — unpinned signers'
-#  events quarantine and replay once approved)
-devstrap init ~/Code --join --code '<founder-code>' --fingerprint <founder-fingerprint>
-# joiner needs the same `hub:` config.yaml entry as the founder
-# (R2/S3 hubs only: run `devstrap hub login` on each device AFTER its id-adopting init —
-#  the credential slot keys on the workspace id. The git carrier needs no login.)
-devstrap devices pairing-code               # the joiner's own code + fingerprint, sent back to the founder
-
-# Founder — approve the joiner in one command, then both sync
-devstrap devices enroll --code '<joiner-code>' --approve --fingerprint <joiner-fingerprint>
-devstrap sync                               # pushes the key grants
-
-# Joiner — sync once more; the whole tree materializes
-devstrap sync
-```
-
-The workspace key rotates automatically during `sync` once its active epoch is older than
-`keys.rotate_max_age` (default 90 days); `devstrap keys rotate` forces it, and `devstrap
-devices revoke` is the response to a *known* key compromise.
-
-> The workspace id **cannot** be changed on an already‑initialized store — remove the DevStrap
-> home (`~/.devstrap`) and re‑run `init --join --code`. This is safe: no repo content lives
-> there. See [`spec/19_CLOUD_PROVISIONING_GUIDE.md`](spec/19_CLOUD_PROVISIONING_GUIDE.md) §E for
-> the full runbook, including rotation cadence and wedge recovery.
 
 ## Command reference
 
@@ -343,7 +214,17 @@ Components:
 - **`devstrapd`** — a local daemon for reconciliation, watchers, and a local API (planned).
 - **DevStrap Hub** — a two‑plane zero‑knowledge sync service: a signed HLC namespace‑map event log plus a content‑addressed encrypted blob store, through any private git repo (the zero‑infra carrier) or Cloudflare R2/S3, behind one pluggable `Hub` interface (shipped; a hosted control plane for device enrollment is still planned).
 
-The full design corpus lives under [`spec/`](spec/) — start with [`spec/00_START_HERE.md`](spec/00_START_HERE.md).
+Start with **[ARCHITECTURE.md](ARCHITECTURE.md)** for the big picture — why a managed physical
+namespace, how the two‑plane hub works, and what is deliberately not built. The full design
+corpus lives under [`spec/`](spec/), beginning with [`spec/00_START_HERE.md`](spec/00_START_HERE.md).
+
+## Documentation
+
+- **[docs/](docs/)** — user guides: [install.md](docs/install.md), [quickstart.md](docs/quickstart.md),
+  and [self-hosting.md](docs/self-hosting.md) (choosing and operating a hub).
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — the big picture, bridging this README and the spec.
+- **[`spec/`](spec/)** — the design corpus (one file per subsystem); depth pointers throughout ARCHITECTURE.md.
+- **[docs/audits/](docs/audits/)** — the standing design/implementation audit archive and open backlog.
 
 ## Roadmap
 
