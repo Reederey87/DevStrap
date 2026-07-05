@@ -31,6 +31,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — feat(release): SLSA v1 build provenance for release artifacts (P4-SEC-05 / P4-QUAL-05)
+
+Changed:
+- `.github/workflows/release.yml`: the `goreleaser` job now exposes a `hashes` output (base64 of `dist/checksums.txt`, already in sha256sum subject format) via a new `Compute provenance subjects` step, and a new `provenance` job runs the SLSA generic generator (`slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0`) to attach a keyless-signed `multiple.intoto.jsonl` attestation to the release (`base64-subjects` from the goreleaser output, `upload-assets: true`). The generator is referenced by **tag, not SHA** — slsa-verifier resolves builder identity from the tag and the generator refuses an unexpected ref; a comment records this as a deliberate exemption from the `P4-SEC-05` SHA-pin convention so a future pin sweep does not break it.
+- `RELEASING.md`: new "Verifying build provenance (SLSA)" section with the `gh release download` + `slsa-verifier verify-artifact` recipe and one line on what a passing check proves (artifact built by this repo's release workflow at that tag, signed keyless with the Fulcio identity in Rekor).
+- `docs/audits/README.md`: `P4-SEC-05` and `P4-QUAL-05` annotated — SLSA v1 build provenance shipped in this PR, pending live-release verification; both rows STAY open (P4-SEC-05 remainder: cosign artifact signing + notarization; P4-QUAL-05 remainder: SBOM). Open counts unchanged.
+- `spec/14_MVP_ROADMAP_AND_BACKLOG.md`: the release/signing backlog row records SLSA provenance as shipped.
+
+Validated:
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOCACHE=/tmp/devstrap-gocache go test -race ./...`.
+
+Follow-ups:
+- Live-release verification of the attestation (run `slsa-verifier` against the next real release). Remaining under `P4-SEC-05`/`P4-QUAL-05`: cosign keyless artifact signing, macOS notarization, and a syft SBOM.
+
 ## 2026-07-05 — feat(release): cosign keyless signing + SBOMs in the release pipeline (P4-SEC-05 / P4-QUAL-05)
 
 Changed:

@@ -82,6 +82,24 @@ shasum -a 256 --ignore-missing -c checksums.txt   # Linux: sha256sum --ignore-mi
 The GitHub release assets should include `checksums.txt.sigstore.json` and one `<archive>.sbom.json`
 per archive.
 
+## Verifying build provenance (SLSA)
+
+Every release run also attaches a SLSA v1 provenance attestation (`multiple.intoto.jsonl`), signed keyless
+via Sigstore/Fulcio and logged in Rekor by the `provenance` job. Verify that a downloaded artifact was built by
+this repo's release workflow at the expected tag:
+
+```bash
+gh release download vX.Y.Z -R Reederey87/DevStrap -p "multiple.intoto.jsonl" -p "*.tar.gz"
+slsa-verifier verify-artifact \
+  --provenance-path multiple.intoto.jsonl \
+  --source-uri github.com/Reederey87/DevStrap \
+  --source-tag vX.Y.Z \
+  devstrap_*.tar.gz
+```
+
+A passing check proves the tarball was produced by this repository's release workflow at that tag and signed
+keyless (its Fulcio identity is recorded in the Rekor transparency log) — not rebuilt or swapped by a third party.
+
 ## When to use a release branch
 
 Use a release branch only when you need to stabilize a release while `main` keeps moving, or to back-port fixes to an
