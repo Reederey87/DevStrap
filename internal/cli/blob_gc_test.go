@@ -27,12 +27,15 @@ import (
 type faultHub struct {
 	dssync.Hub
 	putErr  error
+	pushErr error
 	Puts    int
 	Deletes int
+	Ops     []string
 }
 
 func (f *faultHub) PutBlob(ctx context.Context, hash string, r io.Reader) error {
 	f.Puts++
+	f.Ops = append(f.Ops, "PutBlob")
 	if f.putErr != nil {
 		return f.putErr
 	}
@@ -41,7 +44,16 @@ func (f *faultHub) PutBlob(ctx context.Context, hash string, r io.Reader) error 
 
 func (f *faultHub) DeleteBlob(ctx context.Context, hash string) error {
 	f.Deletes++
+	f.Ops = append(f.Ops, "DeleteBlob")
 	return f.Hub.DeleteBlob(ctx, hash)
+}
+
+func (f *faultHub) Push(ctx context.Context, events []state.Event) error {
+	f.Ops = append(f.Ops, "Push")
+	if f.pushErr != nil {
+		return f.pushErr
+	}
+	return f.Hub.Push(ctx, events)
 }
 
 func newRewrapTestStore(t *testing.T) *state.Store {
@@ -95,6 +107,32 @@ func TestRewrapHubCleanupDeletesOldBlobOnSuccess(t *testing.T) {
 	}
 	if hub.Deletes != 1 {
 		t.Fatalf("DeleteBlob calls = %d, want 1 (old ciphertext deleted on success)", hub.Deletes)
+	}
+}
+
+// TestRewrapHubCleanupUploadsBlobBeforeEvent (Codex review P2, ENV-SYNC-01):
+// the superseding event must never be visible on the hub before the ciphertext
+// it names is durable — a peer that applies the event must be able to fetch
+// the blob. On an event-push failure the new blob is already uploaded, the old
+// ciphertext is kept, and the next sync cycle re-delivers the event.
+func TestRewrapHubCleanupUploadsBlobBeforeEvent(t *testing.T) {
+	ctx := context.Background()
+	st := newRewrapTestStore(t)
+	ev := state.Event{ID: "evt_order", DeviceID: "device-a", Type: dssync.EventEnvProfileUpdated, PayloadJSON: "{}"}
+
+	hub := &faultHub{Hub: dssync.FileHub{Path: filepath.Join(t.TempDir(), "hub.json")}}
+	rewrapHubCleanup(ctx, hub, st, "age_blob:"+hex64a, "age_blob:"+hex64b, []byte("rewrapped"), []state.Event{ev})
+	if len(hub.Ops) < 2 || hub.Ops[0] != "PutBlob" || hub.Ops[1] != "Push" {
+		t.Fatalf("ops = %v, want PutBlob before Push", hub.Ops)
+	}
+
+	failing := &faultHub{Hub: dssync.FileHub{Path: filepath.Join(t.TempDir(), "hub2.json")}, pushErr: errors.New("push failed")}
+	rewrapHubCleanup(ctx, failing, st, "age_blob:"+hex64a, "age_blob:"+hex64b, []byte("rewrapped"), []state.Event{ev})
+	if failing.Puts != 1 {
+		t.Fatalf("PutBlob calls = %d, want 1 (blob durable before the failed event push)", failing.Puts)
+	}
+	if failing.Deletes != 0 {
+		t.Fatalf("DeleteBlob calls = %d, want 0 (old ciphertext kept on event-push failure)", failing.Deletes)
 	}
 }
 

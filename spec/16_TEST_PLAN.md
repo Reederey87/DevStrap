@@ -280,7 +280,7 @@ This is the most important test.
 
 ```text
 1. state: UpsertEnvProfileTx stamps source-event coordinates, switches encrypted/provider shapes, legacy wrappers leave NULL coords, and EnvProfilesForBlobRef returns affected profiles/vars
-2. sync: apply env.profile.updated creates bindings, duplicates are idempotent, unknown projects soft-skip without aborting the batch, and LWW converges in both delivery orders
+2. sync: apply env.profile.updated creates bindings, duplicates are idempotent, a tombstoned project drops the pointer without quarantine, an absent project quarantines as env_pending_project without aborting the batch and replays to recovery once the project applies, LWW converges in both delivery orders, and rewrapHubCleanup uploads the new blob before pushing the superseding event
 3. cli: blobRefFromEvent extracts env blob refs for encrypted profiles but not provider profiles
 4. txtar: env_exchange.txtar enrolls two homes, syncs through --hub-file, and hydrates captured values on the second device with no conflicts
 5. `TestSnapshotRoundTripsEnvProfile` proves BuildSnapshot -> ImportSnapshot carries the env pointer into a fresh store idempotently; `TestImportSnapshotEnvLWW` proves the pointer merges by its own coordinate (an older pointer never regresses, a newer pointer wins even on a losing entry row)

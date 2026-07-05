@@ -443,6 +443,19 @@ func envProfileEvent(t *testing.T, id, dev string, seq, hlc int64, payload EnvPr
 	}
 }
 
+func signedProjEvent(t *testing.T, signing devicekeys.SigningIdentity, id, dev string, seq, hlc int64, typ, nsPath, key string) state.Event {
+	t.Helper()
+	ev := projEvent(t, dev, typ, hlc, nsPath, key)
+	ev.ID = id
+	ev.Seq = seq
+	sig, err := devicekeys.Sign(signing.Private, "devstrap:event:v2", state.EventSignaturePayloadV2(ev))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev.DeviceSig = sig
+	return ev
+}
+
 func signedEnvProfileEvent(t *testing.T, signing devicekeys.SigningIdentity, id, dev string, seq, hlc int64, payload EnvProfilePayload) state.Event {
 	t.Helper()
 	ev := envProfileEvent(t, id, dev, seq, hlc, payload)
@@ -517,7 +530,12 @@ func TestApplyEnvProfileEventDuplicateIdempotent(t *testing.T) {
 	}
 }
 
-func TestApplyEnvProfileEventUnknownProjectSoftSkips(t *testing.T) {
+// TestApplyEnvProfileEventUnknownProjectQuarantinesWithoutAbort: an env event
+// for an absent (NOT tombstoned) project must not abort the batch, must not be
+// silently consumed, and must leave a replayable env_pending_project
+// quarantine; ReplayPendingEnvProfileConflicts recovers it once the project
+// applies (Codex review P2 on the original soft-skip).
+func TestApplyEnvProfileEventUnknownProjectQuarantinesWithoutAbort(t *testing.T) {
 	ctx := context.Background()
 	st, device := newSyncStore(t)
 	signing := addRemoteDeviceForApplyTest(t, st, "device-env", "approved")
@@ -536,14 +554,105 @@ func TestApplyEnvProfileEventUnknownProjectSoftSkips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.Quarantined != 0 || stats.CursorHeld {
-		t.Fatalf("stats=%+v, want both events consumed without quarantine", stats)
+	if stats.Quarantined != 1 || stats.CursorHeld {
+		t.Fatalf("stats=%+v, want exactly the env event quarantined and no held cursor", stats)
 	}
 	if safe.After("device-env") != 1 || safe.After(device.ID) != 1 {
-		t.Fatalf("safe cursor=%v, want both devices advanced", safe)
+		t.Fatalf("safe cursor=%v, want both devices advanced (quarantine consumes the slot)", safe)
 	}
 	if _, err := st.ProjectByPath(ctx, "work/acme/valid"); err != nil {
 		t.Fatal(err)
+	}
+	conflicts, err := st.OpenConflictsByType(ctx, ConflictEventVerification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range conflicts {
+		var d eventVerificationConflictDetails
+		if json.Unmarshal([]byte(c.DetailsJSON), &d) == nil && d.Kind == EventConflictKindEnvPendingProject && d.EventID == "evt_env_missing" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("want an env_pending_project quarantine for evt_env_missing, got %#v", conflicts)
+	}
+
+	// Replay before the project exists: row stays open, nothing recovered.
+	if n, err := ReplayPendingEnvProfileConflicts(ctx, st); err != nil || n != 0 {
+		t.Fatalf("premature replay: n=%d err=%v", n, err)
+	}
+
+	// The missing project arrives (same origin device as the env event, next
+	// seq), then the per-cycle replay recovers the profile and resolves the
+	// quarantine.
+	addMissing := signedProjEvent(t, signing, "evt_add_missing", "device-env", 2, now+2, EventProjectAdded, "work/acme/missing", "github.com/acme/missing")
+	if _, err := ApplyEvents(ctx, st, []state.Event{addMissing}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := ReplayPendingEnvProfileConflicts(ctx, st); err != nil || n != 1 {
+		t.Fatalf("replay after project applied: n=%d err=%v", n, err)
+	}
+	project, err := st.ProjectByPath(ctx, "work/acme/missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, bindings, err := st.EnvProfileForProject(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.Provider != "devstrap_encrypted" || len(bindings) != 1 || bindings[0].EncryptedValueRef != "age_blob:deadbeef" {
+		t.Fatalf("recovered profile=%#v bindings=%#v", profile, bindings)
+	}
+	open, err := st.OpenConflictsByType(ctx, ConflictEventVerification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range open {
+		var d eventVerificationConflictDetails
+		if json.Unmarshal([]byte(c.DetailsJSON), &d) == nil && d.Kind == EventConflictKindEnvPendingProject {
+			t.Fatalf("env_pending_project conflict should be resolved after replay: %#v", c)
+		}
+	}
+}
+
+// TestApplyEnvProfileEventTombstonedProjectDrops: a winning delete drops the
+// env pointer silently — no quarantine, no batch abort (a re-add + re-capture
+// is the documented recovery).
+func TestApplyEnvProfileEventTombstonedProjectDrops(t *testing.T) {
+	ctx := context.Background()
+	st, device := newSyncStore(t)
+	signing := addRemoteDeviceForApplyTest(t, st, "device-env", "approved")
+	now := time.Now().UnixMilli()
+	add := projEvent(t, device.ID, EventProjectAdded, now, "work/acme/gone", "github.com/acme/gone")
+	del := projEvent(t, device.ID, EventProjectDeleted, now+1, "work/acme/gone", "github.com/acme/gone")
+	if _, err := ApplyEvents(ctx, st, []state.Event{add, del}); err != nil {
+		t.Fatal(err)
+	}
+	env := signedEnvProfileEvent(t, signing, "evt_env_gone", "device-env", 1, now+2, EnvProfilePayload{
+		Path:     "work/acme/gone",
+		Profile:  "default",
+		Provider: "devstrap_encrypted",
+		Mode:     "hydrate_or_runtime",
+		BlobRef:  "age_blob:deadbeef",
+		VarNames: []string{"API_TOKEN"},
+	})
+	_, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{env}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Quarantined != 0 {
+		t.Fatalf("stats=%+v, want the tombstoned env pointer dropped without quarantine", stats)
+	}
+	conflicts, err := st.OpenConflictsByType(ctx, ConflictEventVerification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range conflicts {
+		var d eventVerificationConflictDetails
+		if json.Unmarshal([]byte(c.DetailsJSON), &d) == nil && d.Kind == EventConflictKindEnvPendingProject {
+			t.Fatalf("tombstoned drop must not quarantine: %#v", c)
+		}
 	}
 }
 

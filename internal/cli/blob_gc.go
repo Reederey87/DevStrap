@@ -343,15 +343,21 @@ func blobRefStillReferenced(ctx context.Context, store *state.Store, ref string)
 // neither a usable event nor a usable blob. Failures are logged, not fatal, so a
 // single blob's hub hiccup does not abort the whole revoke rewrap pass.
 func rewrapHubCleanup(ctx context.Context, hub dssync.Hub, store *state.Store, oldRef, newRef string, newCiphertext []byte, events []state.Event) {
+	// Codex review P2 (ENV-SYNC-01): make the NEW blob durable BEFORE the
+	// superseding event is visible, mirroring normal sync ordering (a peer
+	// that applies the event must be able to fetch the ciphertext it names).
+	// Either failure is safe: the old hub ciphertext is kept, and the
+	// superseding events are ordinary local events, so the next sync cycle
+	// delivers both the blob (pushReferencedBlobs) and the event anyway.
+	if err := hub.PutBlob(ctx, blobHashHex(newRef), bytes.NewReader(newCiphertext)); err != nil {
+		logging.Logger(ctx).Warn("rewrap: failed to push rewrapped blob to hub; keeping old ciphertext", "ref", newRef, "err", err.Error())
+		return
+	}
 	if len(events) > 0 {
 		if err := hub.Push(ctx, events); err != nil {
 			logging.Logger(ctx).Warn("rewrap: failed to push superseding event(s) to hub; keeping old ciphertext", "ref", newRef, "err", err.Error())
 			return
 		}
-	}
-	if err := hub.PutBlob(ctx, blobHashHex(newRef), bytes.NewReader(newCiphertext)); err != nil {
-		logging.Logger(ctx).Warn("rewrap: failed to push rewrapped blob to hub; keeping old ciphertext", "ref", newRef, "err", err.Error())
-		return
 	}
 	if blobRefStillReferenced(ctx, store, oldRef) {
 		logging.Logger(ctx).Warn("rewrap: old blob still referenced, not deleting from hub", "ref", oldRef)

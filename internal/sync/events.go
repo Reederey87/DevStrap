@@ -191,6 +191,11 @@ const (
 	EventConflictKindVerification  = "verification"
 	EventConflictKindDivergent     = "divergent"
 	EventConflictKindUndecryptable = "undecryptable"
+	// EventConflictKindEnvPendingProject quarantines a verified
+	// env.profile.updated whose project has not applied yet (ENV-SYNC-01
+	// review): recoverable ordering, e.g. the project's origin device is not
+	// pinned here yet. Replayed by ReplayPendingEnvProfileConflicts.
+	EventConflictKindEnvPendingProject = "env_pending_project"
 )
 
 type eventVerificationConflictDetails struct {
@@ -562,6 +567,18 @@ func ApplyEventsWithStats(ctx context.Context, st *state.Store, events []state.E
 				record(event, true)
 				continue
 			}
+			if errors.Is(err, errEnvProjectPending) {
+				if conflictErr := insertEnvPendingProjectConflict(ctx, st, event, err); conflictErr != nil {
+					return nil, stats, errors.Join(err, conflictErr)
+				}
+				stats.Quarantined++
+				// Consumed for the cursor like verification quarantines:
+				// re-delivery would hit the same missing project, and the full
+				// event is preserved in the conflict for the per-cycle replay
+				// (ReplayPendingEnvProfileConflicts) once the project applies.
+				record(event, true)
+				continue
+			}
 			return nil, stats, err
 		}
 		// Applied, or deduped (already inserted): both consume the slot.
@@ -641,6 +658,20 @@ func insertEventHashChainConflict(ctx context.Context, st *state.Store, event st
 		return err
 	}
 	return st.InsertConflict(ctx, "", ConflictEventHashChain, string(raw))
+}
+
+// errEnvProjectPending marks a verified env.profile.updated event whose
+// project row is absent WITHOUT a tombstone (ENV-SYNC-01 review, Codex P2):
+// the ordering is recoverable — most commonly the project.added author is not
+// pinned on this device yet, so its event sits in a verification quarantine —
+// and consuming the env event silently would lose the profile even after the
+// project later replays. The apply loop quarantines it for replay instead.
+var errEnvProjectPending = errors.New("env profile project not yet applied")
+
+// insertEnvPendingProjectConflict preserves the full env event for replay once
+// its project applies (ReplayPendingEnvProfileConflicts).
+func insertEnvPendingProjectConflict(ctx context.Context, st *state.Store, event state.Event, cause error) error {
+	return insertEventConflictOnce(ctx, st, event, EventConflictKindEnvPendingProject, cause.Error())
 }
 
 func insertEventVerificationConflict(ctx context.Context, st *state.Store, event state.Event, cause error) error {
@@ -788,11 +819,18 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 		}
 		project, err := tx.ProjectByPath(ctx, pk.Display)
 		if err != nil {
-			// ENV-SYNC-01: the project may have been deleted by a winning tombstone
-			// or not yet applied; dropping the env pointer is safe (a later
-			// re-capture re-emits) and a hard error here would abort the whole
-			// pull batch.
-			return nil
+			// ENV-SYNC-01: distinguish a WINNING DELETE from a project that has
+			// not applied yet (Codex review P2). A tombstoned path drops the
+			// pointer (the delete won; a re-add + re-capture re-emits). An
+			// absent path without a tombstone is recoverable ordering — the
+			// batch loop quarantines the event for replay instead of consuming
+			// it, and a hard error here would abort the whole pull batch.
+			if _, ok, terr := tx.TombstoneHLC(ctx, pk.Display); terr != nil {
+				return terr
+			} else if ok {
+				return nil
+			}
+			return fmt.Errorf("%w: %s", errEnvProjectPending, payload.Path)
 		}
 		hlc, deviceID, eventID, ok, err := tx.EnvProfileSourceCoords(ctx, project.ID)
 		if err != nil {
@@ -839,6 +877,49 @@ func envCoordLess(hlc int64, deviceID, eventID string, event state.Event) bool {
 		samePathCandidate{hlc: hlc, deviceID: deviceID, eventID: eventID},
 		samePathCandidate{hlc: event.HLC, deviceID: event.DeviceID, eventID: event.ID},
 	)
+}
+
+// ReplayPendingEnvProfileConflicts re-attempts every open env_pending_project
+// quarantine (ENV-SYNC-01 review, Codex P2): a verified env.profile.updated
+// whose project had not applied yet was preserved here instead of being
+// consumed. Once the project lands — a later pull window, or a quarantined
+// project.added replayed by `devices approve` — the stored event applies
+// through the normal verified path and the conflict resolves. A still-missing
+// project re-quarantines as a dedup no-op and the row stays open (visible,
+// bounded). The conflict resolves only AFTER a successful apply, mirroring
+// ReplayUndecryptableConflicts' resolve-after-apply rule.
+func ReplayPendingEnvProfileConflicts(ctx context.Context, st *state.Store) (int, error) {
+	conflicts, err := st.OpenConflictsByType(ctx, ConflictEventVerification)
+	if err != nil {
+		return 0, err
+	}
+	replayed := 0
+	for _, c := range conflicts {
+		var details eventVerificationConflictDetails
+		if json.Unmarshal([]byte(c.DetailsJSON), &details) != nil || details.Kind != EventConflictKindEnvPendingProject {
+			continue
+		}
+		var restored state.Event
+		if err := json.Unmarshal([]byte(details.EventJSON), &restored); err != nil {
+			logging.Logger(ctx).Warn("env-pending replay: conflict carries unparseable event JSON",
+				"conflict_id", c.ID, "event_id", details.EventID, "err", err.Error())
+			continue
+		}
+		_, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{restored}, nil)
+		if err != nil {
+			return replayed, err // conflict stays open; retried next cycle
+		}
+		if stats.Quarantined > 0 {
+			continue // project still missing (or a fresh verification failure); row stays open
+		}
+		if err := st.ResolveConflict(ctx, c.ID, `{"action":"auto","reason":"project applied after env-pending hold (ENV-SYNC-01 replay)"}`); err != nil {
+			return replayed, err
+		}
+		logging.Logger(ctx).Info("env-pending replay: quarantined env profile recovered",
+			"event_id", details.EventID, "device_id", details.DeviceID)
+		replayed++
+	}
+	return replayed, nil
 }
 
 // loadNamespaceProjection loads the projection slice Decide needs for a
