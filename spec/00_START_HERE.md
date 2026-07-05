@@ -120,7 +120,7 @@ Why Go: one portable binary, good process management, solid cross-platform files
 
 ## Current repository state
 
-Last validated: `2026-07-03`.
+Last validated: `2026-07-05`.
 
 Implemented in this repository:
 
@@ -151,7 +151,7 @@ Implemented in this repository:
 - A `DEVSTRAP_NO_KEYCHAIN` gate forcing the file-backed key store for headless/CI runs.
 - Focused tests for every internal package (including `internal/id`, whose canonical-shape validator backs `--workspace-id`), plus a `rogpeppe/go-internal` testscript end-to-end harness exercising `cmd/devstrap` through the real binary.
 - Spec frontmatter and a Go-based `cmd/spec-drift` CI gate that maps changed code/config paths to tracked spec files and requires the work log on code/spec/doc changes, plus a command-doc drift test that keeps the spec command list in sync with the binary, and a product-naming ADR at `spec/adr/0001-product-naming.md`.
-- README, MIT license, `.gitignore`, GitHub Actions CI with separate spec-drift, test, and golangci-lint jobs, `CONTRIBUTING.md`, `SECURITY.md`, `CODEOWNERS`, Dependabot, issue/PR templates, and concise `AGENTS.md`.
+- README, MIT license, `.gitignore`, GitHub Actions CI with separate spec-drift, test, and golangci-lint jobs, `CONTRIBUTING.md`, `SECURITY.md`, `CODEOWNERS`, Dependabot, issue/PR templates, and concise `AGENTS.md`. The README's Install section now includes a "Verify a download" subsection documenting the release pipeline's cosign keyless signature + per-archive SBOM (`P4-SEC-05`/`P4-QUAL-05`; see `03_SYSTEM_ARCHITECTURE.md` Distribution).
 
 Not implemented yet (genuinely unbuilt — features that are partly shipped are listed under "now built" below, never here):
 

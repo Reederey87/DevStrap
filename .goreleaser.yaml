@@ -46,6 +46,19 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+# SBOMs + keyless signing (P4-SEC-05 / P4-QUAL-05). Cosign signs checksums.txt
+# via GitHub OIDC (Fulcio cert + Rekor transparency log, no stored key); the
+# signature transitively covers every artifact listed in it.
+sboms:
+  - artifacts: archive
+
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    args: ["sign-blob", "--bundle=${signature}", "${artifact}", "--yes"]
+    artifacts: checksum
+    output: true
+
 # Homebrew tap publishing (P4-PROD-05 / AD-8). Casks, not formulae: goreleaser
 # deprecated `brews:` in v2.16 and casks now cover Linux too. The tap repo is
 # Reederey87/homebrew-devstrap, so users run:
@@ -99,3 +112,5 @@ release:
     ---
     Built with GoReleaser. Verify downloads against `checksums.txt`, or install via
     `brew install Reederey87/devstrap/devstrap` or the `scripts/install.sh` one-liner.
+    `checksums.txt` is keylessly signed with cosign (Fulcio cert + Rekor log) and every
+    archive ships an SPDX SBOM — see "Verify a download" in the README.

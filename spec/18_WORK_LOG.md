@@ -31,6 +31,26 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — feat(release): cosign keyless signing + SBOMs in the release pipeline (P4-SEC-05 / P4-QUAL-05)
+
+Changed:
+- `.goreleaser.yaml`: new `sboms` stanza (`artifacts: archive`) generates an SPDX SBOM per archive; new `signs` stanza runs `cosign sign-blob --bundle=... checksums.txt --yes` in keyless mode, producing `checksums.txt.sigstore.json` — the signature transitively covers every artifact `checksums.txt` lists. The `release.footer` now points at the README verification steps.
+- `.github/workflows/release.yml`: the `goreleaser` job gains `permissions: { contents: write, id-token: write }` (the OIDC token cosign exchanges for a short-lived Fulcio cert; no stored signing key) and two SHA-pinned install steps ahead of the GoReleaser step (`sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6` / v4.1.2, `anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610` / v0.24.0), matching the repo's SHA+comment pin style.
+- `README.md`: new "Verify a download" subsection under Install with the `cosign verify-blob` + `sha256sum -c` sequence.
+- `RELEASING.md`: the post-release smoke checklist now verifies the cosign signature and SBOM release assets are present.
+- `docs/audits/README.md`: `P4-SEC-05` and `P4-QUAL-05` narrowed (not moved to *Recently shipped* — SLSA provenance lands in a sibling PR, and `P4-SEC-05`'s Apple Developer ID + notarization scope stays open, deadline Homebrew's Gatekeeper-failing-cask cutoff 2026-09-01).
+- `spec/03_SYSTEM_ARCHITECTURE.md`: Distribution section gains a "Supply-chain verification" list item describing the keyless-signing + SBOM mechanism; renumbered the surrounding list.
+- `spec/00_START_HERE.md`: `Last validated` bumped to 2026-07-05; the README bullet now notes the "Verify a download" subsection.
+- `spec/14_MVP_ROADMAP_AND_BACKLOG.md`: the "code signing/notarization" backlog row flipped `[ ]` → `[~]` with a shipped/remaining-scope note.
+
+Validated:
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...` (no Go source changed; kept green).
+
+Follow-ups:
+- SLSA build provenance (sibling PR, same finding IDs).
+- Apple Developer ID signing + notarization for the macOS binary, ahead of Homebrew's 2026-09-01 Gatekeeper-failing-cask cutoff.
+
 ## 2026-07-05 — chore(community): Discussions + good-first-issues + AGENTS.md reframe (AD-8)
 
 Changed:

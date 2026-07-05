@@ -411,16 +411,24 @@ above `v0.1.0`, making the stable run rebuild rc artifacts (observed live on the
 1. **Homebrew tap** — `brew install Reederey87/devstrap/devstrap`. GoReleaser publishes a
    **cask** (not a formula: `brews:` is deprecated since GoReleaser v2.16, and casks now
    cover Linux) into `Reederey87/homebrew-devstrap` on stable tags only (`skip_upload:
-   auto`). The binaries are not Apple-notarized yet (cosign/SLSA tracked under
-   `P4-SEC-05`/`P4-QUAL-05`), so the cask strips the quarantine bit in a documented
-   post-install hook. Shell completions install with the cask.
-2. **`curl | sh` installer** — `scripts/install.sh`, served raw from `main`. POSIX sh; picks
+   auto`). The binary is not Apple-notarized yet (tracked under `P4-SEC-05`), so the
+   cask strips the quarantine bit in a documented post-install hook. Shell completions
+   install with the cask.
+2. **Supply-chain verification (P4-SEC-05 / P4-QUAL-05)** — the `goreleaser` job signs
+   `checksums.txt` with cosign in keyless mode (job `id-token: write` mints a GitHub OIDC
+   token; cosign exchanges it for a short-lived Fulcio cert and logs the signature to the
+   public Rekor transparency log, so no signing key is stored) and generates an SPDX SBOM
+   per archive via syft. The signature transitively covers every artifact listed in
+   `checksums.txt`. README documents the `cosign verify-blob` + `sha256sum -c` verification
+   flow; SLSA build provenance is a separate, not-yet-shipped follow-up under the same
+   finding IDs.
+3. **`curl | sh` installer** — `scripts/install.sh`, served raw from `main`. POSIX sh; picks
    os/arch, resolves the latest tag (or `DEVSTRAP_VERSION`), verifies the tarball against
    `checksums.txt` **before** extraction, installs into `/usr/local/bin` or `~/.local/bin`
    (`DEVSTRAP_INSTALL_DIR` overrides), and never invokes sudo.
-3. **Release tarballs** — binary + LICENSE + README + pre-generated bash/zsh/fish
+4. **Release tarballs** — binary + LICENSE + README + pre-generated bash/zsh/fish
    completions (a `before` hook runs `devstrap completion <shell>`; generation is stateless).
-4. **Build from source / `go install …@main`** for the bleeding edge.
+5. **Build from source / `go install …@main`** for the bleeding edge.
 
 `.goreleaser.yaml` and `scripts/**` are tracked by this spec and work-log-gated in
 `internal/specdrift` (`TestReleaseTierFilesRequireWorkLog`) — a lone packaging change is
