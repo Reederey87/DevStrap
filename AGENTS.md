@@ -1,5 +1,7 @@
 # Agent Instructions
 
+> **Scope (AD-8):** this file is the *maintainer's* agent workflow — the conventions coding agents follow when working on DevStrap on the maintainer's behalf. It is not a contributor obligation: external contributors only need `CONTRIBUTING.md`, and the spec-drift/work-log bookkeeping described here is completed by the maintainer at merge for fork PRs.
+
 Read `spec/00_START_HERE.md` before changing behavior. Core stays in Go; keep Mac-specific behavior behind adapters so Linux remains viable. Never log secrets or overwrite dirty worktrees.
 
 ## Branches & worktrees (trunk-based)

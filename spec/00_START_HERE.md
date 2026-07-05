@@ -217,7 +217,7 @@ The first killer loop (eager-clone Workspace Passport):
 6. Agent work starts from a fresh remote default branch, not a stale local default branch.
 ```
 
-The branch workflow that backs this invariant — trunk-based development on a single protected `main`, all changes via pull request, and the rule that agents and worktrees always base from the fetched `origin/main`, never any local branch — is defined canonically in `AGENTS.md`. Refer to it there rather than restating the model here.
+The branch workflow that backs this invariant — trunk-based development on a single protected `main`, all changes via pull request, and the rule that agents and worktrees always base from the fetched `origin/main`, never any local branch — is defined canonically in `AGENTS.md`. Refer to it there rather than restating the model here. (`AGENTS.md` is the *maintainer's* agent workflow, per the AD-8 reframe — external contributors follow `CONTRIBUTING.md`, and the maintainer completes the spec-drift/work-log bookkeeping at merge for fork PRs.)
 
 ## Document map
 
