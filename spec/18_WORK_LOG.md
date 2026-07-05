@@ -44,6 +44,7 @@ Key decisions:
 - Credential masks are omitted under read confinement (every credential path is outside the allow-list, so read confinement subsumes them; their parents may not even exist in the confined namespace).
 - Default-on only for `readonly` — the profile already meant to be strictly read-scoped; extending to cautious/guarded waits until telemetry proves the allow-list survives real toolchains.
 - A global `(allow file-read-metadata)` is a deliberate, documented path-existence leak; the alternative breaks nearly every tool that stats `$HOME`.
+- Dual-review (Codex) fixes: (1) an explicit `--read-confine on` now fails closed when NO sandbox is available (it previously degraded to an advisory run in `auto` mode — an explicit knob must not silently no-op); (2) a `--read-allow` root that overlaps a protected credential path is refused pre-worktree — read confinement drops bwrap's masks and Landlock cannot subtract from an allowed root, so such a root would otherwise re-expose the credential (`FirstReadAllowCredentialConflict`).
 
 Tests:
 - All-platform: `TestReadConfineRoots`, `TestSBPLProfileReadConfineOrdering` (+ `TestSBPLProfileReadConfineOffIsUnchanged` keeps the non-confined profile byte-identical), `TestBwrapArgsReadConfineEnumeratesRootsAndSkipsMasks`, `TestResolveAgentSandboxReadConfineMatrix`.
