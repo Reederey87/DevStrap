@@ -31,6 +31,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — fix(agent): fail closed when the sandbox home anchor cannot resolve (PR #107 post-merge review)
+
+Changed:
+- `internal/cli/agent.go`: the sandbox spec construction moved into `agentSandboxSpec`, which now REFUSES the run when `os.UserHomeDir()` fails instead of silently passing an empty `UserHome` — with an empty anchor the generated Seatbelt profile dropped every home-anchored credential deny (`~/.ssh`, `~/.aws`, `.netrc`, …) while still reporting the run as sandboxed (CodeRabbit post-merge finding on PR #107). `--sandbox off` is the explicit escape hatch, and the error says so. Pinned by `TestAgentSandboxSpecFailsClosedWithoutUserHome` + `TestAgentSandboxSpecAnchorsRealUserHome`.
+- `docs/audits/README.md`: escaped the literal pipes in the `P4-GIT-03` row's `--sandbox auto\|off\|require` code span — unescaped they split the markdown table row into 5 cells (CodeRabbit MD056). The other `auto|off|require` occurrences are prose, not tables, and stay as-is.
+- `spec/10_AGENT_WORKSPACES_AND_POLICIES.md`: the sandbox paragraph states the fail-closed home-anchor contract.
+- `spec/18_WORK_LOG.md` housekeeping (review): five historical blocks (2026-06-24/25/26) sat out of strict newest-first order — an old parallel-rebase artifact; blocks stable-reordered by date descending with same-day relative order preserved, content untouched.
+
+Validated:
+- `gofmt -w cmd internal`; `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run`; `GOCACHE=/tmp/devstrap-gocache go test -race ./internal/cli/`; full `-race` suite; `go run ./cmd/spec-drift --base origin/main --head HEAD` (post-commit).
+
+Follow-ups:
+- None
+
 ## 2026-07-05 — fix(release): pin GORELEASER_CURRENT_TAG so the rc → stable flow survives two tags on one commit
 
 Changed:
@@ -1830,83 +1844,113 @@ Follow-ups:
 - Implement service installers and evaluate a native FSEvents watcher; wire tombstone GC to approved sync-cursor watermarks once cursor tracking lands.
 - Accepted-for-now (raised in review): the local `git_repos.remote_url` keeps any embedded credential so local hydrate still works with credential-in-URL setups (the synced event strips it, so no cross-device/hub leak); and the agent-log scrubber is line-buffered, so a multi-line PEM body echoed by a tool is only header-matched in the owner-only `0600` log.
 
-## 2026-06-24 — Audit hardening and spec refresh
+## 2026-06-26 — Provider env file hydration
 
 Changed:
-- Hardened the SQLite state layer with DSN pragmas, WAL, busy timeout, single-writer pool, secure DB permissions, backup/status helpers, and reversible event-ordering migrations.
-- Added `devstrap db migrate/status/backup/down` and tests for CLI, config, state, migration, and status behavior.
-- Hardened CI with read-only permissions, SHA-pinned actions, vet/build/race tests, vuln scanning, module hygiene, and a guard against vacuous package tests.
-- Renamed the repository default branch to `main`, removed legacy branch-name references, and documented local clone update steps.
-- Reviewed and updated all files under `spec/` for current implementation state, local-first sync design, SQLite behavior, secrets/security, platform service behavior, scan scale, release/backup gates, and future web/admin surface best practices.
+- Extended `devstrap env hydrate` so 1Password provider profiles resolve `op://` refs through `op inject` into a temporary `0600` file, then install the requested target through the existing atomic write and overwrite guard.
+- Added CLI coverage with a fake `op` for provider `run`, provider `hydrate`, output mode `0600`, `.gitignore` updates, and overwrite refusal before secrets are resolved.
+- Added `devstrap agent run/list/show/pr` for the thin generic runner: fresh worktree creation, sanitized no-secret command env, wrapper-level command policy profiles, `0600` logs, persisted `agent_runs`, Git status/diff summaries, and stale-base-gated PR dry-run/create flow.
+- Added integration coverage for agent policy denial, run metadata, log capture, diff summary, and `agent pr` stale-base refusal/override.
+- Added `devstrap devices list/approve/revoke/lost/rename`, state helpers for device trust-state changes, local-device revocation refusal, and CLI coverage for list/rename/refusal behavior.
+- Added `devstrap sync --hub-file` for the file-backed test hub, including namespace-only/dry-run output and CLI coverage for the dry-run path.
+- Stabilized fake-Git error-classification tests under race instrumentation by increasing their test-only subprocess timeout.
+- Re-sequenced the roadmap/spec recommendation so the thin agent runner milestone follows the fresh worktree manager instead of waiting behind daemon, Linux, and hub work.
+- Added the trust-plane dependency gate before hub encrypted-blob sync and clarified that device revocation requires secret value rotation in addition to bundle re-encryption.
+- Updated README and affected start-here, architecture, Mac/Linux, secrets/env, agent, security, SQLite data-model, CLI/API, roadmap, and test-plan specs after reviewing the spec folder.
 
 Validated:
+- Exa best-practice research for 1Password `op inject --file-mode 0600`, `op run --env-file`, and provider-reference workflows.
 - `gofmt -w cmd internal`
-- `go vet ./...`
-- `go build ./...`
-- `go test ./...`
-- `go test -race ./...`
-- `go mod tidy`
-- `git diff --check`
-- spec stale-reference sweeps for old branch/worktree/test/security wording.
-
-Follow-ups:
-- (done in later cycles) scanner/adoption workflow, real generated device IDs, and the structured `slog` redaction choke point.
-- Keep this work log updated at the end of each code-modifying agent cycle.
-
-## 2026-06-24 — Work-log process requirement
-
-Changed:
-- Added this tracking file.
-- Updated `AGENTS.md` to require concise end-of-cycle summaries in this file after codebase-modifying work.
-- Updated `AGENTS.md` to require a final spec-folder review/update after the last codebase modification in a session.
-- Added this file to the `spec/00_START_HERE.md` document map.
-
-Validated:
-- `git diff --check`
-
-Follow-ups:
-- None.
-
-## 2026-06-24 — Scan, Git hydration, sync spike, and worktrees
-
-Changed:
-- Added redacted structured logging, generated `dev_<uuidv7>` IDs, stable local device persistence, namespace path normalization, and expanded state-store methods for projects, events, conflicts, and worktrees.
-- Implemented `devstrap scan`, `add`, `hydrate`, `open`, and `worktree new/status/list/remove/cleanup`, including skeleton directories, partial clone by default, local bare remote support, dirty-target refusal, duplicate remote reporting, and fresh upstream worktree base resolution.
-- Added `internal/git`, `internal/scan`, `internal/pathkey`, and `internal/sync` primitives for remote normalization, bounded scanner pruning, HLC ordering, idempotent event replay, conflict creation, and a file-backed test hub.
-- Updated README and affected specs to reflect implemented commands and remaining daemon/env/hub follow-ups.
-
-Validated:
-- `gofmt -w cmd internal`
-- `GOCACHE=/tmp/devstrap-gocache go test ./...`
-- `GOCACHE=/tmp/devstrap-gocache go vet ./...`
-- `GOCACHE=/tmp/devstrap-gocache go build ./...`
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/cli ./internal/state`
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./internal/git ./internal/cli`
+- `GOCACHE=/tmp/devstrap-gocache go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run`
+- `GOCACHE=/tmp/devstrap-gocache go run ./cmd/spec-drift --base origin/main --head HEAD`
 - `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
-- `GOCACHE=/tmp/devstrap-gocache go mod tidy`
-- `git diff --check`
 
 Follow-ups:
-- Add a user-facing `devstrap sync` command, remote device registration/approval, full snapshot fallback, and real skeleton reconciliation across roots.
-- Enforce stale-base checks before PR/finalization workflows once that lifecycle command exists.
-- Implement env run, daemon/watchers, and agent runner policy enforcement.
+- Continue remaining audit items: OS keychain/approval, native watcher/service adapters, agent file policy enforcement, non-generic agent adapters, and real PR execution smoke tests with `gh`.
 
-## 2026-06-24 — Git and HLC audit hardening
+## 2026-06-26 — Agent file policy and native watcher hardening
 
 Changed:
-- Hardened git subprocess execution with bounded default timeouts, disabled prompts, sanitized environment, protocol policy, remote URL validation, `--` separators for clone/worktree add, explicit default-branch errors, and URL credential redaction in git errors.
-- Added `devstrap worktree status <id>` plus reusable base-drift detection that re-fetches the recorded base ref and reports fresh vs stale state.
-- Reworked the HLC implementation to use a mutex, explicit physical/logical packing, 16-bit logical overflow handling, and max-skew rejection.
-- Updated README and affected specs after reviewing the spec folder for stale command, HLC, security, test-plan, and roadmap text.
+- Added wrapper-level agent file path policy for non-`yolo-local` runs, denying explicit sensitive-path and outside-worktree arguments before the generic agent command executes.
+- Added non-dry `devstrap agent pr` coverage with a fake `gh` executable to verify `gh pr create` receives the expected base/head/title/body argv after the stale-base gate.
+- Added an fsnotify-backed Darwin/Linux watcher adapter that recursively watches directories, skips generated trees, debounces bursty filesystem events, and emits reconciliation hints through the existing platform interface.
+- Updated README and reviewed/updated every spec file so implementation status, roadmap items, security notes, test plan, and references reflect the new agent policy and watcher behavior.
+
+Validated:
+- Exa best-practice research for OS keychain storage, fsnotify watcher semantics/debouncing, agent sandbox/file policy layering, and hermetic `gh pr create` testing.
+- `gofmt -w cmd internal`
+- `go test ./internal/cli ./internal/platform`
+- `GOCACHE=/tmp/devstrap-gocache go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run`
+- `GOCACHE=/tmp/devstrap-gocache go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
+
+Follow-ups:
+- Implement automatic remote device enrollment, fingerprint confirmation, and bundle re-encryption hooks.
+- Add OS-enforced agent sandboxing/project-env allowlists and non-generic agent engine adapters.
+- Implement service installers and evaluate whether the Darwin fsnotify/kqueue watcher should be replaced by a native FSEvents adapter.
+
+## 2026-06-26 — OS keychain-backed device identities
+
+Changed:
+- Added a platform `SystemKeychain` adapter backed by `github.com/zalando/go-keyring`, using macOS Keychain on Darwin and Secret Service/keyring on Linux through the existing platform seam.
+- Added a `devicekeys.HybridStore` that prefers OS keychain storage for age X25519 and Ed25519 private identities and falls back to the existing `0600` file store when the keyring is unavailable.
+- Wired init, env hydrate/run, doctor, and local event signing through the hybrid store so private identities remain out of SQLite/config while using OS-protected storage when available.
+- Added mocked keyring and hybrid-store coverage so tests do not touch the developer's real keychain.
+- Updated README and all affected specs to mark OS keychain/Secret Service storage implemented with file fallback and to keep remote approval as the remaining trust-plane gap.
+
+Validated:
+- Exa best-practice research for OS keychain/Secret Service storage, documented file fallback behavior, and mocked keyring tests.
+- `gofmt -w cmd internal`
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/devicekeys ./internal/platform ./internal/state ./internal/cli`
+- `GOCACHE=/tmp/devstrap-gocache go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run`
+- `GOCACHE=/tmp/devstrap-gocache go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
+
+Follow-ups:
+- Implement automatic remote device enrollment, fingerprint confirmation, and bundle re-encryption hooks.
+- Add OS-enforced agent sandboxing/project-env allowlists and non-generic agent engine adapters.
+- Implement service installers and evaluate whether the Darwin fsnotify/kqueue watcher should be replaced by a native FSEvents adapter.
+
+## 2026-06-26 — Manual device approval for env recipients
+
+Changed:
+- Added `devstrap devices enroll <device-id>` with required name, OS, arch, age recipient, optional signing public key, and `--approve` support for manually registering remote device records.
+- Added `state.UpsertDevice` for non-local device enrollment while refusing to overwrite the current local device identity.
+- Changed encrypted env capture to include the local age recipient plus approved remote device age recipients, excluding pending/revoked/lost devices.
+- Added CLI coverage proving an approved remote device can decrypt a captured env blob and that capture reports the recipient count.
+- Updated README and affected specs to mark manual per-device env-decryption approval implemented while keeping automatic enrollment, fingerprint confirmation, and bundle re-encryption as future production hub work.
 
 Validated:
 - `gofmt -w cmd internal`
-- `GOCACHE=/tmp/devstrap-gocache go test ./internal/git ./internal/sync ./internal/scan ./internal/cli`
-- `GOCACHE=/tmp/devstrap-gocache go test ./internal/git ./internal/cli`
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/cli ./internal/state`
+- `GOCACHE=/tmp/devstrap-gocache go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run`
+- `GOCACHE=/tmp/devstrap-gocache go run ./cmd/spec-drift --base origin/main --head HEAD`
 - `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
-- spec stale-text sweep for worktree status, default-branch fallback, logger context, and HLC wording.
 
 Follow-ups:
-- Continue remaining audit items: env run, OS keychain/approval, agent policy enforcement, and future PR command integration.
+- Implement automatic remote device enrollment, fingerprint confirmation, and bundle re-encryption hooks.
+- Add OS-enforced agent sandboxing/project-env allowlists and non-generic agent engine adapters.
+- Implement service installers and evaluate whether the Darwin fsnotify/kqueue watcher should be replaced by a native FSEvents adapter.
 
+## 2026-06-26 — Add/adopt sync event emission
+
+Changed:
+- Fixed `devstrap add` and `scan --adopt` so local namespace writes also stamp signed local project events for `devstrap sync --hub-file` to push.
+- Recorded local namespace source-event HLC/device/id metadata when add/adopt writes project rows.
+- Added CLI regression coverage that scan-adopted projects appear in `sync --hub-file --dry-run` as pending local events.
+- Updated sync and test-plan specs to document add/adopt event emission.
+
+Validated:
+- Code review subagent identified the missing add/adopt event emission as a high-severity blocker before commit.
+- `gofmt -w cmd internal`
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/cli ./internal/sync ./internal/state`
+
+Follow-ups:
+- Implement automatic remote device enrollment, fingerprint confirmation, and bundle re-encryption hooks.
+- Add OS-enforced agent sandboxing/project-env allowlists and non-generic agent engine adapters.
+- Implement service installers and evaluate whether the Darwin fsnotify/kqueue watcher should be replaced by a native FSEvents adapter.
 ## 2026-06-25 — Local age device identity
 
 Changed:
@@ -1922,57 +1966,6 @@ Validated:
 - `go mod tidy`
 - `gofmt -w cmd internal`
 - `GOCACHE=/tmp/devstrap-gocache go test ./internal/devicekeys ./internal/config ./internal/state ./internal/cli`
-- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
-
-Follow-ups:
-- Continue remaining audit items: env run, OS keychain/approval, agent policy enforcement, and future PR command integration.
-
-## 2026-06-24 — Transactional sync event apply
-
-Changed:
-- Added a state transaction facade and switched sync replay to claim each event and apply project/conflict side effects in the same SQLite transaction.
-- Event insertion now computes/verifies payload content hashes, treats exact duplicate deliveries as no-ops, rejects divergent reuse of an event ID, and stores absent per-device sequence numbers as `NULL` instead of colliding on `seq=0`.
-- Made conflict insertion idempotent for identical open conflicts and added deterministic `(hlc, device_id, id)` event ordering in the store, sync replay, and file-backed hub.
-- Removed mutable delivery/apply state from the insert-only `events` schema; delivery state remains in `event_delivery`.
-- Updated affected specs after reviewing sync/data schema text and test-plan coverage.
-
-Validated:
-- `gofmt -w cmd internal`
-- `GOCACHE=/tmp/devstrap-gocache go test ./internal/state ./internal/sync`
-- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
-
-Follow-ups:
-- Continue remaining audit items: env run, OS keychain/approval, agent policy enforcement, and future PR command integration.
-
-## 2026-06-24 — Unicode path and scan safety coverage
-
-Changed:
-- Normalized namespace paths to Unicode NFC before validation, display storage, and case-folded key generation.
-- Added direct `internal/scan` coverage for generated-directory pruning, secret-looking filename warnings, symlink escape warnings, duplicate remote reporting, and avoiding descent into pruned Git repos.
-- Made `golang.org/x/text` a direct dependency for Unicode normalization.
-- Updated affected specs after reviewing path normalization, scanner safety, and test-plan text.
-
-Validated:
-- `gofmt -w cmd internal`
-- `GOCACHE=/tmp/devstrap-gocache go test ./internal/pathkey ./internal/scan`
-- `GOCACHE=/tmp/devstrap-gocache go mod tidy`
-- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
-
-Follow-ups:
-- Continue remaining audit items: env run, OS keychain/approval, agent policy enforcement, and future PR command integration.
-
-## 2026-06-24 — Repo operation lock hardening
-
-Changed:
-- Replaced bare repo lockfiles with metadata-backed lock records containing PID, hostname, and acquisition time.
-- Added stale lock recovery for dead same-host owners and over-age lockfiles, with double-read removal before deleting stale markers.
-- Put `hydrate` under the per-project repo operation lock and changed `worktree new` to hold the same lock through hydrate, fetch, default-branch update, and worktree creation.
-- Added CLI tests for active lock refusal and stale-owner reclamation.
-- Updated affected specs and reconciled older work-log follow-ups that still listed repo lock extension as remaining.
-
-Validated:
-- `gofmt -w cmd internal`
-- `GOCACHE=/tmp/devstrap-gocache go test ./internal/cli`
 - `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
 
 Follow-ups:
@@ -1995,22 +1988,6 @@ Validated:
 Follow-ups:
 - Continue remaining audit items: env run, OS keychain/approval, agent policy enforcement, and future PR command integration.
 
-## 2026-06-24 — Open command and init detection hardening
-
-Changed:
-- Changed `devstrap open` to start `cursor`/`code` without binding the editor lifetime to the CLI context and to release the child process handle after launch.
-- Replaced uninitialized SQLite detection based on `"no such table"` string matching with explicit `sqlite_master` table checks.
-- Expanded state tests so summary, current-device, and project-list reads all return `ErrNotInitialized` before migrations.
-- Updated affected CLI/API and test-plan specs.
-
-Validated:
-- `gofmt -w cmd internal`
-- `GOCACHE=/tmp/devstrap-gocache go test ./internal/cli ./internal/state`
-- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
-
-Follow-ups:
-- Continue remaining audit items: env run, OS keychain/approval, agent policy enforcement, and future PR command integration.
-
 ## 2026-06-25 — Git LFS policy for agent worktrees
 
 Changed:
@@ -2024,41 +2001,6 @@ Validated:
 - Exa best-practice research for Git LFS skip-smudge/pull behavior and pointer-file warnings.
 - `gofmt -w cmd internal`
 - `GOCACHE=/tmp/devstrap-gocache go test ./internal/git ./internal/state ./internal/cli`
-- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
-
-Follow-ups:
-- Continue remaining audit items: env run, OS keychain/approval, agent policy enforcement, and future PR command integration.
-
-## 2026-06-24 — Persisted local event clock
-
-Changed:
-- Added `device_sync_state` to persist each local device's last HLC and next sequence number.
-- Added `Store.InsertLocalEvent`, which stamps local events with the current local device, monotonic HLC, and per-device sequence in the same SQLite transaction that inserts the event.
-- Added `sync.CreateProjectEvent` for local project events so callers no longer need to supply HLC/sequence manually.
-- Seeded missing local clock state from existing max local `events` rows to avoid timestamp or sequence regression after restart or partial state loss.
-- Added state and sync tests for persisted HLC/sequence behavior across reopen and for local project event creation.
-- Updated affected specs and reconciled work-log follow-ups that still listed persisted HLC state as remaining.
-
-Validated:
-- `gofmt -w cmd internal`
-- `GOCACHE=/tmp/devstrap-gocache go test ./internal/state ./internal/sync`
-- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
-
-Follow-ups:
-- Continue remaining audit items: env run, OS keychain/approval, agent policy enforcement, and future PR command integration.
-
-## 2026-06-24 — HLC-gated project tombstones
-
-Changed:
-- Implemented `project.deleted` replay as an HLC-stamped namespace tombstone instead of an immediate purge.
-- Added tombstone checks so older `project.added`/`project.updated` events are ignored and newer add/update events restore the project.
-- Reset tombstones when a newer active project event wins.
-- Added sync replay coverage for delete plus older/newer restore ordering.
-- Updated affected specs and reconciled work-log follow-ups that still listed tombstone/delete semantics as remaining.
-
-Validated:
-- `gofmt -w cmd internal`
-- `GOCACHE=/tmp/devstrap-gocache go test ./internal/state ./internal/sync`
 - `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
 
 Follow-ups:
@@ -2396,110 +2338,182 @@ Unable:
 Follow-ups:
 - Continue remaining audit items: OS keychain/approval, native watcher/service adapters, agent policy enforcement, and future PR command integration.
 
-## 2026-06-26 — Provider env file hydration
+## 2026-06-24 — Audit hardening and spec refresh
 
 Changed:
-- Extended `devstrap env hydrate` so 1Password provider profiles resolve `op://` refs through `op inject` into a temporary `0600` file, then install the requested target through the existing atomic write and overwrite guard.
-- Added CLI coverage with a fake `op` for provider `run`, provider `hydrate`, output mode `0600`, `.gitignore` updates, and overwrite refusal before secrets are resolved.
-- Added `devstrap agent run/list/show/pr` for the thin generic runner: fresh worktree creation, sanitized no-secret command env, wrapper-level command policy profiles, `0600` logs, persisted `agent_runs`, Git status/diff summaries, and stale-base-gated PR dry-run/create flow.
-- Added integration coverage for agent policy denial, run metadata, log capture, diff summary, and `agent pr` stale-base refusal/override.
-- Added `devstrap devices list/approve/revoke/lost/rename`, state helpers for device trust-state changes, local-device revocation refusal, and CLI coverage for list/rename/refusal behavior.
-- Added `devstrap sync --hub-file` for the file-backed test hub, including namespace-only/dry-run output and CLI coverage for the dry-run path.
-- Stabilized fake-Git error-classification tests under race instrumentation by increasing their test-only subprocess timeout.
-- Re-sequenced the roadmap/spec recommendation so the thin agent runner milestone follows the fresh worktree manager instead of waiting behind daemon, Linux, and hub work.
-- Added the trust-plane dependency gate before hub encrypted-blob sync and clarified that device revocation requires secret value rotation in addition to bundle re-encryption.
-- Updated README and affected start-here, architecture, Mac/Linux, secrets/env, agent, security, SQLite data-model, CLI/API, roadmap, and test-plan specs after reviewing the spec folder.
+- Hardened the SQLite state layer with DSN pragmas, WAL, busy timeout, single-writer pool, secure DB permissions, backup/status helpers, and reversible event-ordering migrations.
+- Added `devstrap db migrate/status/backup/down` and tests for CLI, config, state, migration, and status behavior.
+- Hardened CI with read-only permissions, SHA-pinned actions, vet/build/race tests, vuln scanning, module hygiene, and a guard against vacuous package tests.
+- Renamed the repository default branch to `main`, removed legacy branch-name references, and documented local clone update steps.
+- Reviewed and updated all files under `spec/` for current implementation state, local-first sync design, SQLite behavior, secrets/security, platform service behavior, scan scale, release/backup gates, and future web/admin surface best practices.
 
 Validated:
-- Exa best-practice research for 1Password `op inject --file-mode 0600`, `op run --env-file`, and provider-reference workflows.
+- `gofmt -w cmd internal`
+- `go vet ./...`
+- `go build ./...`
+- `go test ./...`
+- `go test -race ./...`
+- `go mod tidy`
+- `git diff --check`
+- spec stale-reference sweeps for old branch/worktree/test/security wording.
+
+Follow-ups:
+- (done in later cycles) scanner/adoption workflow, real generated device IDs, and the structured `slog` redaction choke point.
+- Keep this work log updated at the end of each code-modifying agent cycle.
+
+## 2026-06-24 — Work-log process requirement
+
+Changed:
+- Added this tracking file.
+- Updated `AGENTS.md` to require concise end-of-cycle summaries in this file after codebase-modifying work.
+- Updated `AGENTS.md` to require a final spec-folder review/update after the last codebase modification in a session.
+- Added this file to the `spec/00_START_HERE.md` document map.
+
+Validated:
+- `git diff --check`
+
+Follow-ups:
+- None.
+
+## 2026-06-24 — Scan, Git hydration, sync spike, and worktrees
+
+Changed:
+- Added redacted structured logging, generated `dev_<uuidv7>` IDs, stable local device persistence, namespace path normalization, and expanded state-store methods for projects, events, conflicts, and worktrees.
+- Implemented `devstrap scan`, `add`, `hydrate`, `open`, and `worktree new/status/list/remove/cleanup`, including skeleton directories, partial clone by default, local bare remote support, dirty-target refusal, duplicate remote reporting, and fresh upstream worktree base resolution.
+- Added `internal/git`, `internal/scan`, `internal/pathkey`, and `internal/sync` primitives for remote normalization, bounded scanner pruning, HLC ordering, idempotent event replay, conflict creation, and a file-backed test hub.
+- Updated README and affected specs to reflect implemented commands and remaining daemon/env/hub follow-ups.
+
+Validated:
+- `gofmt -w cmd internal`
+- `GOCACHE=/tmp/devstrap-gocache go test ./...`
+- `GOCACHE=/tmp/devstrap-gocache go vet ./...`
+- `GOCACHE=/tmp/devstrap-gocache go build ./...`
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
+- `GOCACHE=/tmp/devstrap-gocache go mod tidy`
+- `git diff --check`
+
+Follow-ups:
+- Add a user-facing `devstrap sync` command, remote device registration/approval, full snapshot fallback, and real skeleton reconciliation across roots.
+- Enforce stale-base checks before PR/finalization workflows once that lifecycle command exists.
+- Implement env run, daemon/watchers, and agent runner policy enforcement.
+
+## 2026-06-24 — Git and HLC audit hardening
+
+Changed:
+- Hardened git subprocess execution with bounded default timeouts, disabled prompts, sanitized environment, protocol policy, remote URL validation, `--` separators for clone/worktree add, explicit default-branch errors, and URL credential redaction in git errors.
+- Added `devstrap worktree status <id>` plus reusable base-drift detection that re-fetches the recorded base ref and reports fresh vs stale state.
+- Reworked the HLC implementation to use a mutex, explicit physical/logical packing, 16-bit logical overflow handling, and max-skew rejection.
+- Updated README and affected specs after reviewing the spec folder for stale command, HLC, security, test-plan, and roadmap text.
+
+Validated:
+- `gofmt -w cmd internal`
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/git ./internal/sync ./internal/scan ./internal/cli`
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/git ./internal/cli`
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
+- spec stale-text sweep for worktree status, default-branch fallback, logger context, and HLC wording.
+
+Follow-ups:
+- Continue remaining audit items: env run, OS keychain/approval, agent policy enforcement, and future PR command integration.
+
+## 2026-06-24 — Transactional sync event apply
+
+Changed:
+- Added a state transaction facade and switched sync replay to claim each event and apply project/conflict side effects in the same SQLite transaction.
+- Event insertion now computes/verifies payload content hashes, treats exact duplicate deliveries as no-ops, rejects divergent reuse of an event ID, and stores absent per-device sequence numbers as `NULL` instead of colliding on `seq=0`.
+- Made conflict insertion idempotent for identical open conflicts and added deterministic `(hlc, device_id, id)` event ordering in the store, sync replay, and file-backed hub.
+- Removed mutable delivery/apply state from the insert-only `events` schema; delivery state remains in `event_delivery`.
+- Updated affected specs after reviewing sync/data schema text and test-plan coverage.
+
+Validated:
+- `gofmt -w cmd internal`
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/state ./internal/sync`
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
+
+Follow-ups:
+- Continue remaining audit items: env run, OS keychain/approval, agent policy enforcement, and future PR command integration.
+
+## 2026-06-24 — Unicode path and scan safety coverage
+
+Changed:
+- Normalized namespace paths to Unicode NFC before validation, display storage, and case-folded key generation.
+- Added direct `internal/scan` coverage for generated-directory pruning, secret-looking filename warnings, symlink escape warnings, duplicate remote reporting, and avoiding descent into pruned Git repos.
+- Made `golang.org/x/text` a direct dependency for Unicode normalization.
+- Updated affected specs after reviewing path normalization, scanner safety, and test-plan text.
+
+Validated:
+- `gofmt -w cmd internal`
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/pathkey ./internal/scan`
+- `GOCACHE=/tmp/devstrap-gocache go mod tidy`
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
+
+Follow-ups:
+- Continue remaining audit items: env run, OS keychain/approval, agent policy enforcement, and future PR command integration.
+
+## 2026-06-24 — Repo operation lock hardening
+
+Changed:
+- Replaced bare repo lockfiles with metadata-backed lock records containing PID, hostname, and acquisition time.
+- Added stale lock recovery for dead same-host owners and over-age lockfiles, with double-read removal before deleting stale markers.
+- Put `hydrate` under the per-project repo operation lock and changed `worktree new` to hold the same lock through hydrate, fetch, default-branch update, and worktree creation.
+- Added CLI tests for active lock refusal and stale-owner reclamation.
+- Updated affected specs and reconciled older work-log follow-ups that still listed repo lock extension as remaining.
+
+Validated:
+- `gofmt -w cmd internal`
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/cli`
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
+
+Follow-ups:
+- Continue remaining audit items: env run, OS keychain/approval, agent policy enforcement, and future PR command integration.
+
+## 2026-06-24 — Open command and init detection hardening
+
+Changed:
+- Changed `devstrap open` to start `cursor`/`code` without binding the editor lifetime to the CLI context and to release the child process handle after launch.
+- Replaced uninitialized SQLite detection based on `"no such table"` string matching with explicit `sqlite_master` table checks.
+- Expanded state tests so summary, current-device, and project-list reads all return `ErrNotInitialized` before migrations.
+- Updated affected CLI/API and test-plan specs.
+
+Validated:
 - `gofmt -w cmd internal`
 - `GOCACHE=/tmp/devstrap-gocache go test ./internal/cli ./internal/state`
-- `GOCACHE=/tmp/devstrap-gocache go test -race ./internal/git ./internal/cli`
-- `GOCACHE=/tmp/devstrap-gocache go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run`
-- `GOCACHE=/tmp/devstrap-gocache go run ./cmd/spec-drift --base origin/main --head HEAD`
 - `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
 
 Follow-ups:
-- Continue remaining audit items: OS keychain/approval, native watcher/service adapters, agent file policy enforcement, non-generic agent adapters, and real PR execution smoke tests with `gh`.
+- Continue remaining audit items: env run, OS keychain/approval, agent policy enforcement, and future PR command integration.
 
-## 2026-06-26 — Agent file policy and native watcher hardening
+## 2026-06-24 — Persisted local event clock
 
 Changed:
-- Added wrapper-level agent file path policy for non-`yolo-local` runs, denying explicit sensitive-path and outside-worktree arguments before the generic agent command executes.
-- Added non-dry `devstrap agent pr` coverage with a fake `gh` executable to verify `gh pr create` receives the expected base/head/title/body argv after the stale-base gate.
-- Added an fsnotify-backed Darwin/Linux watcher adapter that recursively watches directories, skips generated trees, debounces bursty filesystem events, and emits reconciliation hints through the existing platform interface.
-- Updated README and reviewed/updated every spec file so implementation status, roadmap items, security notes, test plan, and references reflect the new agent policy and watcher behavior.
+- Added `device_sync_state` to persist each local device's last HLC and next sequence number.
+- Added `Store.InsertLocalEvent`, which stamps local events with the current local device, monotonic HLC, and per-device sequence in the same SQLite transaction that inserts the event.
+- Added `sync.CreateProjectEvent` for local project events so callers no longer need to supply HLC/sequence manually.
+- Seeded missing local clock state from existing max local `events` rows to avoid timestamp or sequence regression after restart or partial state loss.
+- Added state and sync tests for persisted HLC/sequence behavior across reopen and for local project event creation.
+- Updated affected specs and reconciled work-log follow-ups that still listed persisted HLC state as remaining.
 
 Validated:
-- Exa best-practice research for OS keychain storage, fsnotify watcher semantics/debouncing, agent sandbox/file policy layering, and hermetic `gh pr create` testing.
 - `gofmt -w cmd internal`
-- `go test ./internal/cli ./internal/platform`
-- `GOCACHE=/tmp/devstrap-gocache go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run`
-- `GOCACHE=/tmp/devstrap-gocache go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/state ./internal/sync`
 - `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
 
 Follow-ups:
-- Implement automatic remote device enrollment, fingerprint confirmation, and bundle re-encryption hooks.
-- Add OS-enforced agent sandboxing/project-env allowlists and non-generic agent engine adapters.
-- Implement service installers and evaluate whether the Darwin fsnotify/kqueue watcher should be replaced by a native FSEvents adapter.
+- Continue remaining audit items: env run, OS keychain/approval, agent policy enforcement, and future PR command integration.
 
-## 2026-06-26 — OS keychain-backed device identities
+## 2026-06-24 — HLC-gated project tombstones
 
 Changed:
-- Added a platform `SystemKeychain` adapter backed by `github.com/zalando/go-keyring`, using macOS Keychain on Darwin and Secret Service/keyring on Linux through the existing platform seam.
-- Added a `devicekeys.HybridStore` that prefers OS keychain storage for age X25519 and Ed25519 private identities and falls back to the existing `0600` file store when the keyring is unavailable.
-- Wired init, env hydrate/run, doctor, and local event signing through the hybrid store so private identities remain out of SQLite/config while using OS-protected storage when available.
-- Added mocked keyring and hybrid-store coverage so tests do not touch the developer's real keychain.
-- Updated README and all affected specs to mark OS keychain/Secret Service storage implemented with file fallback and to keep remote approval as the remaining trust-plane gap.
+- Implemented `project.deleted` replay as an HLC-stamped namespace tombstone instead of an immediate purge.
+- Added tombstone checks so older `project.added`/`project.updated` events are ignored and newer add/update events restore the project.
+- Reset tombstones when a newer active project event wins.
+- Added sync replay coverage for delete plus older/newer restore ordering.
+- Updated affected specs and reconciled work-log follow-ups that still listed tombstone/delete semantics as remaining.
 
 Validated:
-- Exa best-practice research for OS keychain/Secret Service storage, documented file fallback behavior, and mocked keyring tests.
 - `gofmt -w cmd internal`
-- `GOCACHE=/tmp/devstrap-gocache go test ./internal/devicekeys ./internal/platform ./internal/state ./internal/cli`
-- `GOCACHE=/tmp/devstrap-gocache go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run`
-- `GOCACHE=/tmp/devstrap-gocache go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/state ./internal/sync`
 - `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
 
 Follow-ups:
-- Implement automatic remote device enrollment, fingerprint confirmation, and bundle re-encryption hooks.
-- Add OS-enforced agent sandboxing/project-env allowlists and non-generic agent engine adapters.
-- Implement service installers and evaluate whether the Darwin fsnotify/kqueue watcher should be replaced by a native FSEvents adapter.
+- Continue remaining audit items: env run, OS keychain/approval, agent policy enforcement, and future PR command integration.
 
-## 2026-06-26 — Manual device approval for env recipients
-
-Changed:
-- Added `devstrap devices enroll <device-id>` with required name, OS, arch, age recipient, optional signing public key, and `--approve` support for manually registering remote device records.
-- Added `state.UpsertDevice` for non-local device enrollment while refusing to overwrite the current local device identity.
-- Changed encrypted env capture to include the local age recipient plus approved remote device age recipients, excluding pending/revoked/lost devices.
-- Added CLI coverage proving an approved remote device can decrypt a captured env blob and that capture reports the recipient count.
-- Updated README and affected specs to mark manual per-device env-decryption approval implemented while keeping automatic enrollment, fingerprint confirmation, and bundle re-encryption as future production hub work.
-
-Validated:
-- `gofmt -w cmd internal`
-- `GOCACHE=/tmp/devstrap-gocache go test ./internal/cli ./internal/state`
-- `GOCACHE=/tmp/devstrap-gocache go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run`
-- `GOCACHE=/tmp/devstrap-gocache go run ./cmd/spec-drift --base origin/main --head HEAD`
-- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
-
-Follow-ups:
-- Implement automatic remote device enrollment, fingerprint confirmation, and bundle re-encryption hooks.
-- Add OS-enforced agent sandboxing/project-env allowlists and non-generic agent engine adapters.
-- Implement service installers and evaluate whether the Darwin fsnotify/kqueue watcher should be replaced by a native FSEvents adapter.
-
-## 2026-06-26 — Add/adopt sync event emission
-
-Changed:
-- Fixed `devstrap add` and `scan --adopt` so local namespace writes also stamp signed local project events for `devstrap sync --hub-file` to push.
-- Recorded local namespace source-event HLC/device/id metadata when add/adopt writes project rows.
-- Added CLI regression coverage that scan-adopted projects appear in `sync --hub-file --dry-run` as pending local events.
-- Updated sync and test-plan specs to document add/adopt event emission.
-
-Validated:
-- Code review subagent identified the missing add/adopt event emission as a high-severity blocker before commit.
-- `gofmt -w cmd internal`
-- `GOCACHE=/tmp/devstrap-gocache go test ./internal/cli ./internal/sync ./internal/state`
-
-Follow-ups:
-- Implement automatic remote device enrollment, fingerprint confirmation, and bundle re-encryption hooks.
-- Add OS-enforced agent sandboxing/project-env allowlists and non-generic agent engine adapters.
-- Implement service installers and evaluate whether the Darwin fsnotify/kqueue watcher should be replaced by a native FSEvents adapter.

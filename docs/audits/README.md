@@ -157,7 +157,7 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P4-HUB-14 | P2 | Emit hub metrics/traces + op/byte counters _(narrowed 2026-07-04: the `doctor --remote` health-probe half shipped via P5-PROD-05; the metrics/op-byte-counter half remains fully open — no counters exist anywhere in `internal/hub`)_ |
 | P4-HUB-15 | P2 | Cost controls, quotas, rate limiting |
 | P4-HUB-16 | P2 | At-rest versioning/Object-Lock + backup/replication runbook |
-| P4-GIT-03 | P1 | OS-enforced agent sandbox (XL) — **partial 2026-07-05**: macOS Seatbelt wrap for `agent run` shipped (`--sandbox auto|off|require`, default-on where available; write-confine (worktree/tmp only; log stays parent-only) + credential-read denies + policy-scoped network deny); remaining slices: Linux bubblewrap/landlock/seccomp, `sandbox.violation` telemetry, tighter read confinement (P5-SEC-03 env sanitization shipped earlier) |
+| P4-GIT-03 | P1 | OS-enforced agent sandbox (XL) — **partial 2026-07-05**: macOS Seatbelt wrap for `agent run` shipped (`--sandbox auto\|off\|require`, default-on where available; write-confine (worktree/tmp only; log stays parent-only) + credential-read denies + policy-scoped network deny); remaining slices: Linux bubblewrap/landlock/seccomp, `sandbox.violation` telemetry, tighter read confinement (P5-SEC-03 env sanitization shipped earlier) |
 | P4-GIT-04 | P2 | Worktree GC that reaps squash/rebase-merged worktrees |
 | P4-GIT-07 | P3 | Persisted per-project materialize failure record, resume, progress detail |
 | P4-QUAL-04 | P2 | Enforce coverage in CI + add a Windows build (P5-QUAL-04 is the concrete sub-step) |
