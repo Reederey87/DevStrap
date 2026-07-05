@@ -31,6 +31,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — feat(release): dormant Apple notarization config + enrollment runbook (P4-SEC-05 remainder)
+
+Changed:
+- `.goreleaser.yaml`: a `notarize.macos` block wired to quill-style Developer ID signing + notary submission, DORMANT by design — `enabled: '{{ isEnvSet "MACOS_SIGN_P12" }}'` templates to false until the secret exists, and every credential field reads via `index .Env` so the block is inert with the secrets unset. Validated with `goreleaser check` at v2.17.0 (the same major the release action resolves). Once active, the cask's quarantine-strip hook gets removed (step 6 of the runbook).
+- `.github/workflows/release.yml`: the GoReleaser step passes the five `MACOS_*` Actions secrets as env (empty today), so activation is purely "set the secrets".
+- `RELEASING.md`: new "Enabling notarization" runbook — Apple Developer Program enrollment, Developer ID Application `.p12`, App Store Connect API `.p8`, the five `gh secret set` commands, `codesign`/`spctl` verification on an rc, and the hook-removal PR that closes `P4-SEC-05`. Records the hard deadline: Homebrew drops Gatekeeper-failing casks 2026-09-01.
+- `spec/03_SYSTEM_ARCHITECTURE.md`: the supply-chain bullet now reflects shipped SLSA provenance (PR #117) and the dormant notarize block (its "SLSA not-yet-shipped" sentence was stale).
+- `spec/18_WORK_LOG.md` housekeeping: corrected the PR #117 entry's remaining-scope prose, which predated the rebase onto #115 (CodeRabbit post-merge finding, replied on the PR).
+
+Validated:
+- `go run github.com/goreleaser/goreleaser/v2@v2.17.0 check` (config valid with the dormant block); `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+- Maintainer: complete Apple Developer enrollment and set the five secrets (in progress, per the wave decision 2026-07-05); then the rc + hook-removal PR closes `P4-SEC-05`.
+
 ## 2026-07-05 — docs: human ARCHITECTURE.md + user-facing docs/ tier (AD-8)
 
 Changed:
@@ -67,14 +82,14 @@ Follow-ups:
 Changed:
 - `.github/workflows/release.yml`: the `goreleaser` job now exposes a `hashes` output (base64 of `dist/checksums.txt`, already in sha256sum subject format) via a new `Compute provenance subjects` step, and a new `provenance` job runs the SLSA generic generator (`slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0`) to attach a keyless-signed `multiple.intoto.jsonl` attestation to the release (`base64-subjects` from the goreleaser output, `upload-assets: true`). The generator is referenced by **tag, not SHA** — slsa-verifier resolves builder identity from the tag and the generator refuses an unexpected ref; a comment records this as a deliberate exemption from the `P4-SEC-05` SHA-pin convention so a future pin sweep does not break it.
 - `RELEASING.md`: new "Verifying build provenance (SLSA)" section with the `gh release download` + `slsa-verifier verify-artifact` recipe and one line on what a passing check proves (artifact built by this repo's release workflow at that tag, signed keyless with the Fulcio identity in Rekor).
-- `docs/audits/README.md`: `P4-SEC-05` and `P4-QUAL-05` annotated — SLSA v1 build provenance shipped in this PR, pending live-release verification; both rows STAY open (P4-SEC-05 remainder: cosign artifact signing + notarization; P4-QUAL-05 remainder: SBOM). Open counts unchanged.
+- `docs/audits/README.md`: `P4-SEC-05` and `P4-QUAL-05` annotated — SLSA v1 build provenance shipped in this PR, pending live-release verification; both rows STAY open (P4-SEC-05 remainder: Apple Developer ID + notarization — cosign signing + SBOMs shipped in PR #115; P4-QUAL-05 remainder: live-release verification only). Open counts unchanged. *(Corrected post-merge: the original text predated the rebase onto #115 — CodeRabbit finding on PR #117.)*
 - `spec/14_MVP_ROADMAP_AND_BACKLOG.md`: the release/signing backlog row records SLSA provenance as shipped.
 
 Validated:
 - `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOCACHE=/tmp/devstrap-gocache go test -race ./...`.
 
 Follow-ups:
-- Live-release verification of the attestation (run `slsa-verifier` against the next real release). Remaining under `P4-SEC-05`/`P4-QUAL-05`: cosign keyless artifact signing, macOS notarization, and a syft SBOM.
+- Live-release verification of the attestation (run `slsa-verifier` against the next real release). Remaining under `P4-SEC-05`: Apple Developer ID + macOS notarization (cosign signing + SBOMs shipped in PR #115). *(Corrected post-merge — CodeRabbit finding on PR #117.)*
 
 ## 2026-07-05 — feat(release): cosign keyless signing + SBOMs in the release pipeline (P4-SEC-05 / P4-QUAL-05)
 

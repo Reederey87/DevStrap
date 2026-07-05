@@ -86,6 +86,15 @@ jobs:
           # stable run then rebuilds rc artifacts and fails uploading them onto
           # the existing rc release (observed on the first v0.1.0 attempt).
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+          # Dormant notarization (P4-SEC-05 remainder): these are empty until
+          # the Apple Developer enrollment lands and the secrets are set —
+          # .goreleaser.yaml's notarize block self-enables via isEnvSet on
+          # MACOS_SIGN_P12 (see RELEASING.md, "Enabling notarization").
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
       - name: Compute provenance subjects
         id: hash
         # checksums.txt is already in sha256sum format — exactly the subjects
