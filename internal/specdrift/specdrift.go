@@ -62,6 +62,10 @@ func PrintReport(stdout, stderr io.Writer, report Report, advisory bool) (exitNo
 		return false
 	}
 	if advisory {
+		// Findings embed fork-controlled file paths, so this line is a
+		// workflow-command sink. It stays injection-safe only because git's
+		// default core.quotePath=true renders control bytes in paths as one
+		// quoted token — never disable quotePath in the CI checkout.
 		for _, finding := range report.Findings {
 			_, _ = fmt.Fprintf(stdout, "::warning::spec-drift (advisory on fork PRs): %s\n", finding)
 		}

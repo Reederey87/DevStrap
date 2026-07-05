@@ -248,6 +248,27 @@ func TestAdvisoryModeExitsCleanWithWarnings(t *testing.T) {
 	if stderr.Len() != 0 {
 		t.Fatalf("advisory mode wrote to stderr: %q", stderr.String())
 	}
+	if !strings.Contains(out, "spec drift check found issues (advisory on fork PRs, not blocking):\n- finding one\n- finding two\n") {
+		t.Fatalf("stdout = %q, want the human-readable advisory footer", out)
+	}
+}
+
+func TestPrintReportPassingSummaryBothModes(t *testing.T) {
+	// A passing report behaves identically in both modes: the one-line
+	// summary on stdout, nothing on stderr, exit 0.
+	report := Report{Specs: make([]Spec, 3), ChangedFiles: []string{"a", "b"}}
+	for _, advisory := range []bool{false, true} {
+		var stdout, stderr bytes.Buffer
+		if exitNonZero := PrintReport(&stdout, &stderr, report, advisory); exitNonZero {
+			t.Fatalf("advisory=%v: passing report must not request a non-zero exit", advisory)
+		}
+		if got, want := stdout.String(), "spec drift check passed: 3 specs, 2 changed files\n"; got != want {
+			t.Fatalf("advisory=%v: stdout = %q, want %q", advisory, got, want)
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("advisory=%v: passing report wrote to stderr: %q", advisory, stderr.String())
+		}
+	}
 }
 
 func TestStrictModeUnchanged(t *testing.T) {
