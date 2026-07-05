@@ -31,6 +31,19 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — chore: v0.1.0 released — distribution ledger/backlog bookkeeping
+
+Changed:
+- **v0.1.0 is live** (release execution, recorded here; the shipped code landed in PRs #103–#109). Flow: `v0.1.0-rc.1` on `5b5728d` validated the pipeline (prerelease, 4 archives + checksums, completions in archives, installer smoke on darwin/arm64 incl. version normalization, NO tap commit under `skip_upload: auto`); the first stable attempt on the same commit then failed and exposed the two-tags-one-commit GoReleaser bug fixed in PR #108 (`GORELEASER_CURRENT_TAG` pin) — the broken tag was deleted and the release re-cut as `v0.1.0-rc.2` on `257b137` (post-#109 main) followed by `v0.1.0` on the SAME commit, live-verifying the fixed promotion path. Stable smoke all green: `brew install Reederey87/devstrap/devstrap` links the binary + bash/zsh/fish completions and `devstrap version` reports `0.1.0 (257b137…)`; the tap got exactly ONE cask commit; the no-override `curl|sh` installer resolves latest → v0.1.0 with checksum verification.
+- `docs/audits/README.md`: `P4-PROD-05` moved to *Recently shipped* (full release-execution note incl. the live-caught same-commit bug); the Pass-4 open-table row is now a shipped stub pointer.
+- `spec/14_MVP_ROADMAP_AND_BACKLOG.md`: the Homebrew-tap backlog row flipped `[~]` → `[x]`; the AD-8 direction bullet records v0.1.0 as SHIPPED with the PR #108 hardening.
+
+Validated:
+- Release pipeline runs green for `v0.1.0-rc.2` and `v0.1.0`; the stable smoke checklist in `RELEASING.md` executed end-to-end on this Mac. `go run ./cmd/spec-drift --base origin/main --head HEAD` (post-commit).
+
+Follow-ups:
+- Signing/notarization (`P4-SEC-05`/`P4-QUAL-05`) would let the cask drop the quarantine-strip hook (already tracked).
+
 ## 2026-07-05 — fix(agent): fail closed when the sandbox home anchor cannot resolve (PR #107 post-merge review)
 
 Changed:
