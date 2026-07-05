@@ -90,11 +90,13 @@ this repo's release workflow at the expected tag:
 
 ```bash
 gh release download vX.Y.Z -R Reederey87/DevStrap -p "multiple.intoto.jsonl" -p "*.tar.gz"
-slsa-verifier verify-artifact \
-  --provenance-path multiple.intoto.jsonl \
-  --source-uri github.com/Reederey87/DevStrap \
-  --source-tag vX.Y.Z \
-  devstrap_*.tar.gz
+for f in devstrap_*.tar.gz; do
+  slsa-verifier verify-artifact \
+    --provenance-path multiple.intoto.jsonl \
+    --source-uri github.com/Reederey87/DevStrap \
+    --source-tag vX.Y.Z \
+    "$f"
+done
 ```
 
 A passing check proves the tarball was produced by this repository's release workflow at that tag and signed
