@@ -403,7 +403,7 @@ Status shows both devices.
 [ ] shell cd hydration hook
 [ ] zsh/fish/bash integrations
 [x] Homebrew tap + curl|sh installer + completions (v0.1.0 SHIPPED 2026-07-05 — `brew install Reederey87/devstrap/devstrap` live)
-[~] code signing/notarization (cosign keyless signing + per-archive SBOM SHIPPED 2026-07-05 PR #115, and SLSA v1 build provenance SHIPPED 2026-07-05 — `provenance` job attaches keyless-signed `multiple.intoto.jsonl`, `slsa-verifier`-checkable per `RELEASING.md`, `P4-SEC-05`/`P4-QUAL-05`; Apple Developer ID + notarization still open)
+[~] code signing/notarization (cosign keyless signing + SBOMs + SLSA provenance SHIPPED and LIVE-VERIFIED on v0.1.1, 2026-07-05 — `P4-QUAL-05` closed; remaining: Apple Developer ID + notarization, dormant config ready per `RELEASING.md`, Homebrew Gatekeeper deadline 2026-09-01)
 ```
 
 ## Backlog: V2
