@@ -544,3 +544,40 @@ func TestResolveAgentSandboxReadConfineMatrix(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveAgentSandboxReadConfineExplicitOnRefusesWhenUnavailable(t *testing.T) {
+	// An explicit --read-confine on cannot be honored without a sandbox, so an
+	// unavailable host must fail closed (exitPolicy) even under --sandbox auto,
+	// rather than silently degrading to an unconfined advisory run.
+	withFakeSandbox(t, fakeSandbox{availableErr: errors.New("no adapter on this host")})
+	var stderr bytes.Buffer
+	_, err := resolveAgentSandbox("auto", "guarded", "on", nil, &stderr, "/tmp/devstrap-home")
+	var app appError
+	if !errors.As(err, &app) || app.code != exitPolicy {
+		t.Fatalf("err = %v, want exitPolicy for explicit read-confine on with no sandbox", err)
+	}
+	// A non-explicit (auto) read-confine on the same host should NOT fail — it
+	// degrades to the advisory warning.
+	if _, err := resolveAgentSandbox("auto", "readonly", "auto", nil, &bytes.Buffer{}, "/tmp/devstrap-home"); err != nil {
+		t.Fatalf("auto read-confine should degrade, not fail: %v", err)
+	}
+}
+
+func TestResolveAgentSandboxReadAllowCredentialConflictRefuses(t *testing.T) {
+	// --read-allow that overlaps a credential path is refused before any
+	// worktree is created (read confinement would re-expose it on bwrap/Landlock).
+	withFakeSandbox(t, fakeSandbox{})
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no user home: %v", err)
+	}
+	_, err = resolveAgentSandbox("auto", "readonly", "on", []string{filepath.Join(home, ".ssh")}, &bytes.Buffer{}, "/tmp/devstrap-home")
+	var app appError
+	if !errors.As(err, &app) || app.code != exitInvalidConfig {
+		t.Fatalf("err = %v, want exitInvalidConfig for --read-allow overlapping ~/.ssh", err)
+	}
+	// A harmless --read-allow root is accepted.
+	if _, err := resolveAgentSandbox("auto", "readonly", "on", []string{"/opt/data"}, &bytes.Buffer{}, "/tmp/devstrap-home"); err != nil {
+		t.Fatalf("clean --read-allow rejected: %v", err)
+	}
+}

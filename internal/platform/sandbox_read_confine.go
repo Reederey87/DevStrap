@@ -3,6 +3,7 @@ package platform
 import (
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // readConfineHomeCaches are the $HOME toolchain/build caches kept readable
@@ -73,4 +74,62 @@ func readConfineRoots(spec SandboxSpec) []string {
 		add(extra)
 	}
 	return roots
+}
+
+// credentialAnchors returns the absolute credential paths the sandbox protects
+// (the same set bwrapSensitivePaths masks): the home credential dirs/files and
+// DevstrapHome/keys. Used to reject read-allow roots that would re-expose them.
+func credentialAnchors(userHome, devstrapHome string) []string {
+	var anchors []string
+	if userHome != "" {
+		for _, rel := range sensitiveHomeDirs {
+			anchors = append(anchors, filepath.Join(userHome, rel))
+		}
+		for _, rel := range sensitiveHomeFiles {
+			anchors = append(anchors, filepath.Join(userHome, rel))
+		}
+	}
+	if devstrapHome != "" {
+		anchors = append(anchors, filepath.Join(devstrapHome, "keys"))
+	}
+	return anchors
+}
+
+// pathsOverlap reports whether a and b are the same path or one contains the
+// other (either could expose the other's contents). Both must be clean+abs.
+func pathsOverlap(a, b string) bool {
+	if a == b {
+		return true
+	}
+	sep := string(filepath.Separator)
+	// The filesystem root contains every path, but "/" + sep is "//", which is
+	// never a prefix of a clean absolute path — special-case it so
+	// `--read-allow /` (the ultimate footgun) is caught, not silently allowed.
+	if a == sep || b == sep {
+		return true
+	}
+	return strings.HasPrefix(a, b+sep) || strings.HasPrefix(b, a+sep)
+}
+
+// FirstReadAllowCredentialConflict returns the first --read-allow root that
+// overlaps a protected credential path, or "" if none. Read confinement drops
+// bwrap's credential masks (subsumed by the allow-list) and Landlock cannot
+// subtract from an allowed root, so a read-allow root that contains or sits
+// inside a credential path would silently re-expose it on those backends —
+// this lets the CLI fail closed instead. Seatbelt would still deny it (its
+// credential deny is emitted last), but the guard keeps all backends honest.
+func FirstReadAllowCredentialConflict(userHome, devstrapHome string, readAllow []string) string {
+	anchors := credentialAnchors(userHome, devstrapHome)
+	for _, raw := range readAllow {
+		if !filepath.IsAbs(raw) {
+			continue
+		}
+		root := filepath.Clean(raw)
+		for _, anchor := range anchors {
+			if pathsOverlap(root, filepath.Clean(anchor)) {
+				return raw
+			}
+		}
+	}
+	return ""
 }

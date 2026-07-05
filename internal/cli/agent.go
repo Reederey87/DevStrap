@@ -124,6 +124,24 @@ func resolveAgentSandbox(mode, policy, readConfineMode string, readAllow []strin
 	if rcErr != nil {
 		return launch, rcErr
 	}
+	// Reject a --read-allow root that overlaps a protected credential path: read
+	// confinement drops bwrap's credential masks and Landlock cannot subtract
+	// from an allowed root, so such a root would silently re-expose the
+	// credential on those backends. Fail closed rather than footgun (Codex
+	// review). Resolve the real home here (matching agentSandboxSpec) so the
+	// refusal happens before any worktree/DB row is created.
+	if readConfineWant && len(readAllow) > 0 {
+		home, homeErr := os.UserHomeDir()
+		if homeErr != nil {
+			// Fail closed: without the real home we cannot prove a --read-allow
+			// root does not re-expose a credential, so refuse rather than skip
+			// the check (CodeRabbit review — the guard must not fail open).
+			return launch, fmt.Errorf("resolve user home for the --read-allow credential check (use --read-confine off to run unconfined): %w", homeErr)
+		}
+		if conflict := platform.FirstReadAllowCredentialConflict(home, devstrapHome, readAllow); conflict != "" {
+			return launch, appError{code: exitInvalidConfig, err: fmt.Errorf("--read-allow %q overlaps a protected credential path; read confinement would re-expose it — remove that root", conflict)}
+		}
+	}
 	sb := sandboxBackend()
 	if err := sb.Available(); err != nil {
 		// A mistyped DEVSTRAP_SANDBOX_BACKEND is an explicit-config error, not
@@ -135,6 +153,12 @@ func resolveAgentSandbox(mode, policy, readConfineMode string, readAllow []strin
 		}
 		if mode == "require" {
 			return launch, appError{code: exitPolicy, err: fmt.Errorf("OS sandbox required but unavailable: %w", err)}
+		}
+		// An explicit `--read-confine on` cannot be honored without a sandbox,
+		// so it must fail closed too — an explicit knob must never silently
+		// no-op into an unconfined run (Codex review; mirrors --sandbox require).
+		if readConfineExplicit {
+			return launch, appError{code: exitPolicy, err: fmt.Errorf("--read-confine on requires an OS sandbox but none is available: %w; use --read-confine off to run unconfined", err)}
 		}
 		_, _ = fmt.Fprintf(stderr, "warning: OS sandbox unavailable (%v); agent policy remains advisory (AGEN-01)\n", err)
 		return launch, nil

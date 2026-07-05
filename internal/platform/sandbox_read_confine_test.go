@@ -57,3 +57,29 @@ func TestReadConfineRoots(t *testing.T) {
 		t.Fatalf("linux system roots missing /lib: %v", roots)
 	}
 }
+
+func TestFirstReadAllowCredentialConflict(t *testing.T) {
+	home := "/home/dev"
+	devstrap := "/home/dev/.devstrap"
+	cases := []struct {
+		name      string
+		readAllow []string
+		want      string
+	}{
+		{name: "clean extras", readAllow: []string{"/opt/data", "/srv/cache"}, want: ""},
+		{name: "filesystem root overlaps everything", readAllow: []string{"/"}, want: "/"},
+		{name: "exact credential dir", readAllow: []string{"/home/dev/.ssh"}, want: "/home/dev/.ssh"},
+		{name: "ancestor of credentials (whole home)", readAllow: []string{"/home/dev"}, want: "/home/dev"},
+		{name: "inside a credential dir", readAllow: []string{"/home/dev/.ssh/keys"}, want: "/home/dev/.ssh/keys"},
+		{name: "devstrap keys", readAllow: []string{"/home/dev/.devstrap/keys"}, want: "/home/dev/.devstrap/keys"},
+		{name: "credential file", readAllow: []string{"/home/dev/.netrc"}, want: "/home/dev/.netrc"},
+		{name: "sibling of a credential is fine", readAllow: []string{"/home/dev/.sshkeys"}, want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := FirstReadAllowCredentialConflict(home, devstrap, tc.readAllow); got != tc.want {
+				t.Fatalf("FirstReadAllowCredentialConflict = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
