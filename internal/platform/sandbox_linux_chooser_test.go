@@ -49,8 +49,8 @@ func TestChooseLinuxSandbox(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := chooseLinuxSandbox(tc.backend, chooserStub{name: "bwrap", err: tc.bwrapErr}, chooserStub{name: "landlock", err: tc.landlockErr})
 			if tc.wantErr != nil {
-				if err != tc.wantErr {
-					t.Fatalf("err = %v, want exact stub err %v", err, tc.wantErr)
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("err = %v, want stub err %v", err, tc.wantErr)
 				}
 			} else if tc.wantUnsupported {
 				if !errors.Is(err, ErrUnsupported) {

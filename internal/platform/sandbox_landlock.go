@@ -40,7 +40,7 @@ var probeLandlock = sync.OnceValues(func() (int, error) {
 	// no subprocess launch needed, unlike the bwrap probe.
 	abi, err := llsys.LandlockGetABIVersion()
 	if err != nil {
-		return 0, fmt.Errorf("%w: landlock unavailable: %v", ErrUnsupported, err)
+		return 0, fmt.Errorf("%w: landlock unavailable: %w", ErrUnsupported, err)
 	}
 	if abi < landlockMinABI {
 		return abi, fmt.Errorf("%w: kernel landlock ABI %d < required %d (truncate confinement)", ErrUnsupported, abi, landlockMinABI)
@@ -154,5 +154,5 @@ func ExecSandboxHelper(spec SandboxSpec, argv []string) error {
 	if err != nil {
 		return fmt.Errorf("sandbox-helper: %w", err)
 	}
-	return syscall.Exec(path, argv, os.Environ())
+	return syscall.Exec(path, argv, os.Environ()) //nolint:gosec // argv is the policy-checked agent command; exec-ing it is this shim's whole purpose
 }

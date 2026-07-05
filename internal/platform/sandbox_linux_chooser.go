@@ -43,7 +43,7 @@ func chooseLinuxSandbox(backend string, bwrap, ll Sandbox) (Sandbox, error) {
 			return bwrap, nil
 		}
 		if llErr := ll.Available(); llErr != nil {
-			return nil, fmt.Errorf("%w: no usable Linux sandbox: bwrap: %v; landlock: %v", ErrUnsupported, bwrapErr, llErr)
+			return nil, fmt.Errorf("no usable Linux sandbox: bwrap: %w; landlock: %w", bwrapErr, llErr)
 		}
 		return ll, nil
 	default:
