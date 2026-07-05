@@ -226,6 +226,12 @@ func ExitCodeWithWriter(err error, stderr io.Writer) int {
 	// Scrub token-shaped secrets and URL credentials from the final error text
 	// so a leaked value never reaches the terminal/CI logs (ENV-2/SEC-3).
 	_, _ = fmt.Fprintln(stderr, redact.Scrub(err.Error()))
+	// The remedy hint must print before the appError early return: an
+	// auth-class git failure wrapped in appError keeps its wrapped exit code
+	// but still deserves the hint (errors.As/Is both traverse the chain).
+	if errors.Is(err, dsgit.ErrAuth) {
+		_, _ = fmt.Fprintln(stderr, "hint: git authentication failed — check ssh key / repo access (load your key: ssh-add ~/.ssh/<key>)")
+	}
 	var app appError
 	if errors.As(err, &app) {
 		return app.code

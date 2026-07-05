@@ -67,6 +67,49 @@ func TestExitCodeMapsTypedGitErrors(t *testing.T) {
 	}
 }
 
+func TestAuthErrorsPrintSSHAddRemedyHint(t *testing.T) {
+	const hint = "ssh-add ~/.ssh/<key>"
+
+	// Bare auth-class error: exit 6 plus the remedy hint on stderr.
+	var stderr bytes.Buffer
+	if got := ExitCodeWithWriter(dsgit.ErrAuth, &stderr); got != exitAuth {
+		t.Fatalf("ExitCodeWithWriter(ErrAuth) = %d, want %d", got, exitAuth)
+	}
+	if !strings.Contains(stderr.String(), hint) {
+		t.Fatalf("stderr = %q, want the ssh-add remedy hint", stderr.String())
+	}
+
+	// The production shape: a CommandError with Kind ErrAuth (how classifyGitError
+	// surfaces "Repository not found." from a carrier fetch).
+	stderr.Reset()
+	cmdErr := dsgit.CommandError{Kind: dsgit.ErrAuth, Args: "fetch origin", Message: "ERROR: Repository not found."}
+	if got := ExitCodeWithWriter(cmdErr, &stderr); got != exitAuth {
+		t.Fatalf("ExitCodeWithWriter(CommandError{ErrAuth}) = %d, want %d", got, exitAuth)
+	}
+	if !strings.Contains(stderr.String(), hint) {
+		t.Fatalf("stderr = %q, want the ssh-add remedy hint", stderr.String())
+	}
+
+	// appError wrapping ErrAuth: the wrapped exit code wins, the hint still prints.
+	stderr.Reset()
+	wrapped := appError{code: exitConflict, err: dsgit.CommandError{Kind: dsgit.ErrAuth, Message: "denied"}}
+	if got := ExitCodeWithWriter(wrapped, &stderr); got != exitConflict {
+		t.Fatalf("ExitCodeWithWriter(appError{ErrAuth}) = %d, want %d", got, exitConflict)
+	}
+	if !strings.Contains(stderr.String(), hint) {
+		t.Fatalf("stderr = %q, want the hint through the appError wrap", stderr.String())
+	}
+
+	// Non-auth classes stay hint-free.
+	stderr.Reset()
+	if got := ExitCodeWithWriter(dsgit.ErrNetwork, &stderr); got != exitNetwork {
+		t.Fatalf("ExitCodeWithWriter(ErrNetwork) = %d, want %d", got, exitNetwork)
+	}
+	if strings.Contains(stderr.String(), "hint:") {
+		t.Fatalf("stderr = %q, want NO hint for a network error", stderr.String())
+	}
+}
+
 func TestUsageErrorsExitTen(t *testing.T) {
 	_, _, err := executeForTest("--frobnicate")
 	if err == nil {

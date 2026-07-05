@@ -31,6 +31,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — feat(cli): ssh-add remedy hint on auth-class exits
+
+Changed:
+- `internal/cli/root.go`: `ExitCodeWithWriter` prints a second stderr line for every auth-class failure — `hint: git authentication failed — check ssh key / repo access (load your key: ssh-add ~/.ssh/<key>)` — closing the polish follow-up recorded in the 2026-07-04 entries (the §F.2 live dogfood hit exit 6 quoting "ERROR: Repository not found." with no remedy). Placement is load-bearing: the hint check runs BEFORE the `appError` early return, so an auth error wrapped in an app exit code keeps its code but still gets the hint (`errors.Is` traverses `appError.Unwrap`). Wording mirrors the `hub init` probe warning so the two surfaces stay consistent. Auth class only — network/timeout/branch classes stay hint-free.
+- `internal/cli/root_test.go`: `TestAuthErrorsPrintSSHAddRemedyHint` pins bare `ErrAuth`, the production `CommandError{Kind: ErrAuth}` shape, the `appError`-wrapped case (wrapped code wins, hint still prints), and the no-hint negative for `ErrNetwork`.
+- `spec/13_CLI_DAEMON_API.md`: the backend-selection paragraph now states the shipped stderr contract instead of "recorded polish follow-up".
+- `docs/audits/README.md` unchanged (work-log follow-up; no audit finding).
+
+Validated:
+- `gofmt -l cmd internal` (clean); `GOCACHE=/tmp/devstrap-gocache go test -race ./internal/cli/`; `GOCACHE=/tmp/devstrap-gocache go test -race ./...`; `go run ./cmd/spec-drift --base origin/main --head HEAD` (post-commit).
+
+Follow-ups:
+- None
+
 ## 2026-07-05 — test(git): load-robust margins for the terminal-timeout tests
 
 Changed:
