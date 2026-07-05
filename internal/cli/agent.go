@@ -105,13 +105,21 @@ func resolveAgentSandbox(mode, policy string, stderr io.Writer, devstrapHome str
 	// A degraded backend (the Linux landlock fallback) is still a kernel
 	// write-confinement boundary, so it satisfies `require` — except when the
 	// policy's network deny cannot be enforced at all: running a "no network"
-	// policy with the network open would break the policy's promise.
+	// policy with the network open would break the policy's promise. A
+	// TCP-only deny satisfies `require` but must never read as netns-grade
+	// isolation, so it warns (adversarial review P2).
 	if caps, ok := sb.(platform.SandboxCapabilities); ok {
-		if launch.denyNetwork && !caps.EnforcesNetworkDeny() {
-			if mode == "require" {
-				return launch, appError{code: exitPolicy, err: fmt.Errorf("policy %s requires a network deny but OS sandbox %s cannot enforce it; use --policy guarded, enable bubblewrap, or --sandbox off", policy, sb.Name())}
+		if launch.denyNetwork {
+			switch caps.NetworkDenyEnforcement() {
+			case platform.NetworkDenyNone:
+				if mode == "require" {
+					return launch, appError{code: exitPolicy, err: fmt.Errorf("policy %s requires a network deny but OS sandbox %s cannot enforce it; use --policy guarded, enable bubblewrap, or --sandbox off", policy, sb.Name())}
+				}
+				_, _ = fmt.Fprintf(stderr, "warning: OS sandbox %s cannot enforce the %s network deny; the child network stays open\n", sb.Name(), policy)
+			case platform.NetworkDenyPartialTCP:
+				_, _ = fmt.Fprintf(stderr, "warning: OS sandbox %s enforces the %s network deny for TCP bind/connect only; UDP, QUIC, and unix-domain sockets stay open\n", sb.Name(), policy)
+			case platform.NetworkDenyTotal:
 			}
-			_, _ = fmt.Fprintf(stderr, "warning: OS sandbox %s cannot enforce the %s network deny; the child network stays open\n", sb.Name(), policy)
 		}
 		if lims := caps.Limitations(); len(lims) > 0 {
 			_, _ = fmt.Fprintf(stderr, "notice: OS sandbox %s active with reduced guarantees: %s\n", sb.Name(), strings.Join(lims, "; "))

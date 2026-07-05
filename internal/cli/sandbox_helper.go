@@ -39,9 +39,9 @@ func newSandboxHelperCommand() *cobra.Command {
 				return appError{code: exitSandboxHelper, err: fmt.Errorf("sandbox-helper: parse --spec: %w", err)}
 			}
 			// Only returns on failure; on success the process image has been
-			// replaced by the agent command.
-			err := platform.ExecSandboxHelper(spec, args)
-			return appError{code: exitSandboxHelper, err: fmt.Errorf("sandbox-helper: %w", err)}
+			// replaced by the agent command. No extra prefix: the platform
+			// layer's errors already carry their own context.
+			return appError{code: exitSandboxHelper, err: platform.ExecSandboxHelper(spec, args)}
 		},
 	}
 	cmd.Flags().StringVar(&specJSON, "spec", "", "sandbox spec JSON (internal)")

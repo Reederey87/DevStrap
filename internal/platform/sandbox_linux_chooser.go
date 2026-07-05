@@ -25,8 +25,18 @@ const SandboxBackendEnv = "DEVSTRAP_SANDBOX_BACKEND"
 // expensive bwrap namespace launch still happens at most once.
 type LinuxSandbox struct{}
 
-var selectLinuxSandbox = sync.OnceValues(func() (Sandbox, error) {
-	return chooseLinuxSandbox(os.Getenv(SandboxBackendEnv), BubblewrapSandbox{}, LandlockSandbox{})
+// linuxSelection freezes both the chosen backend and whether it was forced,
+// so Limitations() cannot drift from the cached decision if the env var
+// changes later in the process (adversarial review P3).
+type linuxSelection struct {
+	sb     Sandbox
+	forced bool
+}
+
+var selectLinuxSandbox = sync.OnceValues(func() (linuxSelection, error) {
+	backend := os.Getenv(SandboxBackendEnv)
+	sb, err := chooseLinuxSandbox(backend, BubblewrapSandbox{}, LandlockSandbox{})
+	return linuxSelection{sb: sb, forced: strings.TrimSpace(backend) != ""}, err
 })
 
 // chooseLinuxSandbox is the selection core, kept free of process state so the
@@ -52,8 +62,8 @@ func chooseLinuxSandbox(backend string, bwrap, ll Sandbox) (Sandbox, error) {
 }
 
 func (LinuxSandbox) Name() string {
-	if sb, err := selectLinuxSandbox(); err == nil {
-		return sb.Name()
+	if sel, err := selectLinuxSandbox(); err == nil {
+		return sel.sb.Name()
 	}
 	return "linux-sandbox"
 }
@@ -64,11 +74,11 @@ func (LinuxSandbox) Available() error {
 }
 
 func (LinuxSandbox) Command(ctx context.Context, spec SandboxSpec, argv []string) ([]string, func(), error) {
-	sb, err := selectLinuxSandbox()
+	sel, err := selectLinuxSandbox()
 	if err != nil {
 		return nil, func() {}, err
 	}
-	return sb.Command(ctx, spec, argv)
+	return sel.sb.Command(ctx, spec, argv)
 }
 
 // Limitations implements SandboxCapabilities: empty for bubblewrap (full
@@ -76,12 +86,12 @@ func (LinuxSandbox) Command(ctx context.Context, spec SandboxSpec, argv []string
 // was selected — prefixed with why bwrap was passed over so the one notice
 // line tells the whole story.
 func (LinuxSandbox) Limitations() []string {
-	sb, err := selectLinuxSandbox()
-	if err != nil || sb.Name() != (LandlockSandbox{}).Name() {
+	sel, err := selectLinuxSandbox()
+	if err != nil || sel.sb.Name() != (LandlockSandbox{}).Name() {
 		return nil
 	}
 	reason := "unavailable"
-	if os.Getenv(SandboxBackendEnv) != "" {
+	if sel.forced {
 		reason = "backend forced via " + SandboxBackendEnv
 	} else if _, bwrapErr := probeBwrap(); bwrapErr != nil {
 		reason = bwrapErr.Error()
@@ -90,18 +100,22 @@ func (LinuxSandbox) Limitations() []string {
 	return append([]string{"landlock fallback selected (bubblewrap: " + reason + ")"}, landlockLimitations(abi)...)
 }
 
-// EnforcesNetworkDeny implements SandboxCapabilities: bubblewrap's network
-// namespace is total; the landlock fallback can only deny TCP, and only from
-// kernel ABI v4 on — below that a DenyNetwork policy would run with the
-// network fully open, which resolveAgentSandbox refuses under `require`.
-func (LinuxSandbox) EnforcesNetworkDeny() bool {
-	sb, err := selectLinuxSandbox()
+// NetworkDenyEnforcement implements SandboxCapabilities: bubblewrap's network
+// namespace removes the network entirely; the landlock fallback denies only
+// TCP bind/connect, and only from kernel ABI v4 on — below that a DenyNetwork
+// policy would run with the network fully open, which resolveAgentSandbox
+// refuses under `require`. The TCP-only grade is deliberately not reported as
+// total: UDP, QUIC, and unix-domain sockets stay open under landlock.
+func (LinuxSandbox) NetworkDenyEnforcement() NetworkEnforcement {
+	sel, err := selectLinuxSandbox()
 	if err != nil {
-		return false
+		return NetworkDenyNone
 	}
-	if sb.Name() != (LandlockSandbox{}).Name() {
-		return true
+	if sel.sb.Name() != (LandlockSandbox{}).Name() {
+		return NetworkDenyTotal
 	}
-	abi, _ := probeLandlock()
-	return abi >= 4
+	if abi, _ := probeLandlock(); abi >= 4 {
+		return NetworkDenyPartialTCP
+	}
+	return NetworkDenyNone
 }

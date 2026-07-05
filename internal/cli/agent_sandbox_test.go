@@ -26,11 +26,13 @@ func (f fakeSandbox) Command(_ context.Context, _ platform.SandboxSpec, argv []s
 type fakeCapSandbox struct {
 	fakeSandbox
 	limitations []string
-	netDeny     bool
+	netEnforce  platform.NetworkEnforcement
 }
 
-func (f fakeCapSandbox) Limitations() []string     { return f.limitations }
-func (f fakeCapSandbox) EnforcesNetworkDeny() bool { return f.netDeny }
+func (f fakeCapSandbox) Limitations() []string { return f.limitations }
+func (f fakeCapSandbox) NetworkDenyEnforcement() platform.NetworkEnforcement {
+	return f.netEnforce
+}
 
 func withFakeSandbox(t *testing.T, sb platform.Sandbox) {
 	t.Helper()
@@ -229,7 +231,7 @@ func TestResolveAgentSandboxCapabilities(t *testing.T) {
 			name:        "require refuses missing network deny",
 			mode:        "require",
 			policy:      "readonly",
-			sandbox:     fakeCapSandbox{netDeny: false},
+			sandbox:     fakeCapSandbox{netEnforce: platform.NetworkDenyNone},
 			wantErrCode: exitPolicy,
 			wantErrSub:  "requires a network deny",
 		},
@@ -237,22 +239,31 @@ func TestResolveAgentSandboxCapabilities(t *testing.T) {
 			name:        "auto warns missing network deny",
 			mode:        "auto",
 			policy:      "readonly",
-			sandbox:     fakeCapSandbox{netDeny: false},
+			sandbox:     fakeCapSandbox{netEnforce: platform.NetworkDenyNone},
 			wantWarnSub: "cannot enforce the readonly network deny",
 		},
 		{
 			name:          "guarded limitations without network warning",
 			mode:          "auto",
 			policy:        "guarded",
-			sandbox:       fakeCapSandbox{limitations: []string{"lim-a", "lim-b"}},
+			sandbox:       fakeCapSandbox{netEnforce: platform.NetworkDenyNone, limitations: []string{"lim-a", "lim-b"}},
 			wantNoWarnSub: "cannot enforce",
 			wantNoticeSub: []string{"reduced guarantees", "lim-a", "lim-b"},
 		},
 		{
-			name:          "require accepts degraded network-capable backend",
+			name:          "require accepts total-deny degraded backend",
 			mode:          "require",
 			policy:        "readonly",
-			sandbox:       fakeCapSandbox{netDeny: true, limitations: []string{"lim-a"}},
+			sandbox:       fakeCapSandbox{netEnforce: platform.NetworkDenyTotal, limitations: []string{"lim-a"}},
+			wantNoWarnSub: "network deny",
+			wantNoticeSub: []string{"reduced guarantees"},
+		},
+		{
+			name:          "require accepts TCP-only deny with a warning",
+			mode:          "require",
+			policy:        "readonly",
+			sandbox:       fakeCapSandbox{netEnforce: platform.NetworkDenyPartialTCP, limitations: []string{"lim-a"}},
+			wantWarnSub:   "TCP bind/connect only",
 			wantNoticeSub: []string{"reduced guarantees"},
 		},
 		{
