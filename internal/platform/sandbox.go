@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 )
 
 // SandboxSpec describes the confinement an agent child process should run
@@ -34,6 +35,13 @@ type SandboxSpec struct {
 	// UserHome (.ssh, .aws, .gnupg, .config/gh, .kube, .docker) and
 	// DevstrapHome/keys.
 	DenySensitiveReads bool
+	// DenyDangerousSyscalls installs the seccomp syscall denylist (mount,
+	// ptrace, kernel-module, keyring, io_uring, and other escape-primitive
+	// syscalls return EPERM). Unconditional hardening on both Linux backends
+	// when the sandbox is enabled; a kernel without seccomp-filter support
+	// degrades to a limitation, not an error. macOS ignores it (Seatbelt has
+	// no seccomp analogue).
+	DenyDangerousSyscalls bool
 }
 
 // Sandbox wraps an agent argv in an OS-enforced confinement (AGEN-03 /
@@ -45,9 +53,23 @@ type Sandbox interface {
 	// Available reports whether the sandbox can be used on this host; the
 	// returned error explains why not (wrapped in ErrUnsupported).
 	Available() error
-	// Command returns the argv wrapped in the sandbox launcher plus a cleanup
-	// function (always safe to call) that removes any generated profile file.
-	Command(ctx context.Context, spec SandboxSpec, argv []string) ([]string, func(), error)
+	// Command returns the argv wrapped in the sandbox launcher, any extra file
+	// descriptors the launcher references, and a cleanup function.
+	Command(ctx context.Context, spec SandboxSpec, argv []string) (SandboxCommand, error)
+}
+
+// SandboxCommand is the result of wrapping an agent argv in a Sandbox launcher.
+type SandboxCommand struct {
+	// Argv is the fully wrapped command to exec.
+	Argv []string
+	// ExtraFiles are wired to exec.Cmd.ExtraFiles: entry i is inherited by the
+	// launcher as fd 3+i, and Argv may reference those fd numbers (bubblewrap's
+	// --seccomp <fd> reads the compiled filter this way). Nil when the backend
+	// needs no inherited fds.
+	ExtraFiles []*os.File
+	// Cleanup is always non-nil-safe to call once the command has completed: it
+	// closes ExtraFiles and removes any generated profile file.
+	Cleanup func()
 }
 
 // ErrInvalidSandboxBackend marks a sandbox backend override whose VALUE is
@@ -105,6 +127,6 @@ func (s UnsupportedSandbox) Available() error {
 	return fmt.Errorf("%w: no OS sandbox adapter on %s", ErrUnsupported, s.Platform)
 }
 
-func (s UnsupportedSandbox) Command(context.Context, SandboxSpec, []string) ([]string, func(), error) {
-	return nil, func() {}, fmt.Errorf("%w: no OS sandbox adapter on %s", ErrUnsupported, s.Platform)
+func (s UnsupportedSandbox) Command(context.Context, SandboxSpec, []string) (SandboxCommand, error) {
+	return SandboxCommand{Cleanup: func() {}}, fmt.Errorf("%w: no OS sandbox adapter on %s", ErrUnsupported, s.Platform)
 }

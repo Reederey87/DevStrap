@@ -17,8 +17,8 @@ type chooserStub struct {
 
 func (c chooserStub) Name() string     { return c.name }
 func (c chooserStub) Available() error { return c.err }
-func (c chooserStub) Command(context.Context, SandboxSpec, []string) ([]string, func(), error) {
-	return nil, func() {}, nil
+func (c chooserStub) Command(context.Context, SandboxSpec, []string) (SandboxCommand, error) {
+	return SandboxCommand{Cleanup: func() {}}, nil
 }
 
 func TestChooseLinuxSandbox(t *testing.T) {

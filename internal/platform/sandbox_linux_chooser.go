@@ -73,31 +73,41 @@ func (LinuxSandbox) Available() error {
 	return err
 }
 
-func (LinuxSandbox) Command(ctx context.Context, spec SandboxSpec, argv []string) ([]string, func(), error) {
+func (LinuxSandbox) Command(ctx context.Context, spec SandboxSpec, argv []string) (SandboxCommand, error) {
 	sel, err := selectLinuxSandbox()
 	if err != nil {
-		return nil, func() {}, err
+		return SandboxCommand{Cleanup: func() {}}, err
 	}
 	return sel.sb.Command(ctx, spec, argv)
 }
 
-// Limitations implements SandboxCapabilities: empty for bubblewrap (full
-// fidelity), populated with the degrade contract when the landlock fallback
-// was selected — prefixed with why bwrap was passed over so the one notice
-// line tells the whole story.
+// Limitations implements SandboxCapabilities: empty for a full-fidelity
+// bubblewrap host, populated with the landlock-fallback degrade contract when
+// that backend was selected (prefixed with why bwrap was passed over so the
+// one notice line tells the whole story), and — for either backend — with the
+// seccomp line when the kernel cannot install the syscall denylist.
 func (LinuxSandbox) Limitations() []string {
 	sel, err := selectLinuxSandbox()
-	if err != nil || sel.sb.Name() != (LandlockSandbox{}).Name() {
+	if err != nil {
 		return nil
 	}
-	reason := "unavailable"
-	if sel.forced {
-		reason = "backend forced via " + SandboxBackendEnv
-	} else if _, bwrapErr := probeBwrap(); bwrapErr != nil {
-		reason = bwrapErr.Error()
+	var lims []string
+	if sel.sb.Name() == (LandlockSandbox{}).Name() {
+		reason := "unavailable"
+		if sel.forced {
+			reason = "backend forced via " + SandboxBackendEnv
+		} else if _, bwrapErr := probeBwrap(); bwrapErr != nil {
+			reason = bwrapErr.Error()
+		}
+		abi, _ := probeLandlock()
+		lims = append([]string{"landlock fallback selected (bubblewrap: " + reason + ")"}, landlockLimitations(abi)...)
 	}
-	abi, _ := probeLandlock()
-	return append([]string{"landlock fallback selected (bubblewrap: " + reason + ")"}, landlockLimitations(abi)...)
+	// The seccomp denylist rides on top of both backends; an old kernel that
+	// cannot install a filter degrades to fs/network confinement only.
+	if seccompErr := probeSeccomp(); seccompErr != nil {
+		lims = append(lims, "seccomp syscall denylist not installed: "+seccompErr.Error())
+	}
+	return lims
 }
 
 // NetworkDenyEnforcement implements SandboxCapabilities: bubblewrap's network

@@ -94,28 +94,43 @@ func (s BubblewrapSandbox) Available() error {
 	return err
 }
 
-func (s BubblewrapSandbox) Command(_ context.Context, spec SandboxSpec, argv []string) ([]string, func(), error) {
+func (s BubblewrapSandbox) Command(_ context.Context, spec SandboxSpec, argv []string) (SandboxCommand, error) {
 	if len(argv) == 0 {
-		return nil, func() {}, fmt.Errorf("bubblewrap: empty argv")
+		return SandboxCommand{Cleanup: func() {}}, fmt.Errorf("bubblewrap: empty argv")
 	}
 	// bwrap(1) documents no -- terminator, so a dash argv[0] would parse as
 	// another bwrap option instead of the child command.
 	if strings.HasPrefix(argv[0], "-") {
-		return nil, func() {}, fmt.Errorf("bubblewrap: argv[0] must not begin with '-'")
+		return SandboxCommand{Cleanup: func() {}}, fmt.Errorf("bubblewrap: argv[0] must not begin with '-'")
 	}
 	res, err := probeBwrap()
 	if err != nil {
-		return nil, func() {}, err
+		return SandboxCommand{Cleanup: func() {}}, err
 	}
 	resolved, err := resolveSandboxSpecPaths(spec)
 	if err != nil {
-		return nil, func() {}, err
+		return SandboxCommand{Cleanup: func() {}}, err
 	}
 	dirs, files := bwrapSensitivePaths(resolved)
 	dirs = existingRealPaths(dirs)
 	files = existingRealPaths(files)
-	wrapped := append([]string{res.path}, append(bwrapArgs(resolved, dirs, files, bwrapOptions{DisableUserns: res.disableUserns}), argv...)...)
-	// No profile file exists, so cleanup is a no-op; the Sandbox contract
-	// explicitly permits a safe no-op cleanup.
-	return wrapped, func() {}, nil
+	opts := bwrapOptions{DisableUserns: res.disableUserns}
+	var extraFiles []*os.File
+	cleanup := func() {}
+	// Compile the syscall denylist and hand bwrap the fd, but only when the
+	// policy asks for it AND the kernel supports seccomp filters. A probe
+	// failure is a documented limitation (surfaced via Limitations()), not a
+	// hard error: the mount/network confinement is intact without it, so skip
+	// the filter silently rather than refuse to launch.
+	if spec.DenyDangerousSyscalls && probeSeccomp() == nil {
+		f, ferr := seccompProgramFile()
+		if ferr != nil {
+			return SandboxCommand{Cleanup: func() {}}, fmt.Errorf("bubblewrap: build seccomp filter: %w", ferr)
+		}
+		extraFiles = []*os.File{f}
+		cleanup = func() { _ = f.Close() }
+		opts.SeccompFD = seccompChildFD
+	}
+	wrapped := append([]string{res.path}, append(bwrapArgs(resolved, dirs, files, opts), argv...)...)
+	return SandboxCommand{Argv: wrapped, ExtraFiles: extraFiles, Cleanup: cleanup}, nil
 }

@@ -24,12 +24,19 @@ import (
 // init.go's keychainBackend.
 var sandboxBackend = func() platform.Sandbox { return platform.Detect().Sandbox }
 
+// sandboxSeccompEnv is the escape hatch for the seccomp syscall denylist:
+// empty or "on" installs it (the default), "off" disables it, any other value
+// fails closed with the invalid-config exit class — a typo must never silently
+// weaken the sandbox, mirroring DEVSTRAP_SANDBOX_BACKEND.
+const sandboxSeccompEnv = "DEVSTRAP_SANDBOX_SECCOMP"
+
 // agentSandboxLaunch carries the resolved sandbox decision from flag/policy
 // resolution into runAgentProcess.
 type agentSandboxLaunch struct {
 	sandbox      platform.Sandbox
 	enabled      bool
 	denyNetwork  bool
+	denySyscalls bool
 	devstrapHome string
 }
 
@@ -46,13 +53,14 @@ func agentSandboxSpec(worktreeDir, perRunTmp, logDir string, launch agentSandbox
 		return platform.SandboxSpec{}, fmt.Errorf("resolve user home for sandbox credential denies (use --sandbox off to run unconfined): %w", err)
 	}
 	return platform.SandboxSpec{
-		WorktreeDir:        worktreeDir,
-		TmpDir:             perRunTmp,
-		LogDir:             logDir,
-		UserHome:           userHome,
-		DevstrapHome:       launch.devstrapHome,
-		DenyNetwork:        launch.denyNetwork,
-		DenySensitiveReads: true,
+		WorktreeDir:           worktreeDir,
+		TmpDir:                perRunTmp,
+		LogDir:                logDir,
+		UserHome:              userHome,
+		DevstrapHome:          launch.devstrapHome,
+		DenyNetwork:           launch.denyNetwork,
+		DenySensitiveReads:    true,
+		DenyDangerousSyscalls: launch.denySyscalls,
 	}, nil
 }
 
@@ -84,6 +92,17 @@ func resolveAgentSandbox(mode, policy string, stderr io.Writer, devstrapHome str
 	if mode == "off" {
 		return launch, nil
 	}
+	// Validate the seccomp escape hatch BEFORE host availability: a mistyped
+	// DEVSTRAP_SANDBOX_SECCOMP is an explicit-config error and must fail closed
+	// in every sandboxing mode, exactly like DEVSTRAP_SANDBOX_BACKEND — even
+	// when `auto` would otherwise degrade to advisory because the host sandbox
+	// is unavailable, so a typo can never slip through the degrade path (Codex
+	// review P3). The "off" and "yolo-local" modes already returned above, so
+	// the toggle is only read when a sandbox would actually run.
+	denySyscalls, seccompErr := parseSeccompToggle(os.Getenv(sandboxSeccompEnv))
+	if seccompErr != nil {
+		return launch, seccompErr
+	}
 	sb := sandboxBackend()
 	if err := sb.Available(); err != nil {
 		// A mistyped DEVSTRAP_SANDBOX_BACKEND is an explicit-config error, not
@@ -102,6 +121,13 @@ func resolveAgentSandbox(mode, policy string, stderr io.Writer, devstrapHome str
 	launch.sandbox = sb
 	launch.enabled = true
 	launch.denyNetwork = policy == "readonly" || policy == "cautious"
+	// Seccomp syscall denylist is unconditional hardening for every sandboxed
+	// policy (validated above so a typo fails closed before this point); the
+	// escape hatch only turns it off, never silently weakens the sandbox.
+	launch.denySyscalls = denySyscalls
+	if !denySyscalls {
+		_, _ = fmt.Fprintf(stderr, "notice: OS sandbox syscall denylist disabled via %s=off; the kernel filter is not installed\n", sandboxSeccompEnv)
+	}
 	// A degraded backend (the Linux landlock fallback) is still a kernel
 	// write-confinement boundary, so it satisfies `require` — except when the
 	// policy's network deny cannot be enforced at all: running a "no network"
@@ -251,8 +277,23 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&taskName, "task", "", "task description")
 	cmd.Flags().StringVar(&commandFlag, "command", "", "generic command to run, split on whitespace; args after -- are preferred")
 	cmd.Flags().StringVar(&policy, "policy", "guarded", "agent command policy: readonly, cautious, guarded, or yolo-local (argv/file checks are advisory; combine with the OS sandbox for real confinement)")
-	cmd.Flags().StringVar(&sandboxMode, "sandbox", defaultSandboxMode(), "OS sandbox mode: auto (sandbox when the host supports it; macOS Seatbelt, Linux bubblewrap with a landlock fallback — force one via DEVSTRAP_SANDBOX_BACKEND), require (refuse to run unsandboxed), or off (env: DEVSTRAP_SANDBOX)")
+	cmd.Flags().StringVar(&sandboxMode, "sandbox", defaultSandboxMode(), "OS sandbox mode: auto (sandbox when the host supports it; macOS Seatbelt, Linux bubblewrap with a landlock fallback — force one via DEVSTRAP_SANDBOX_BACKEND), require (refuse to run unsandboxed), or off (env: DEVSTRAP_SANDBOX). On Linux the sandbox also installs a seccomp syscall denylist; DEVSTRAP_SANDBOX_SECCOMP=off disables it")
 	return cmd
+}
+
+// parseSeccompToggle reads DEVSTRAP_SANDBOX_SECCOMP: empty/"on" enables the
+// denylist, "off" disables it, anything else fails closed with the
+// invalid-config exit class (same posture as a mistyped
+// DEVSTRAP_SANDBOX_BACKEND).
+func parseSeccompToggle(v string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "on":
+		return true, nil
+	case "off":
+		return false, nil
+	default:
+		return false, appError{code: exitInvalidConfig, err: fmt.Errorf("invalid %s=%q (want on or off)", sandboxSeccompEnv, v)}
+	}
 }
 
 // defaultSandboxMode lets DEVSTRAP_SANDBOX set the --sandbox default; the
@@ -602,6 +643,7 @@ func runAgentProcess(ctx context.Context, wt state.Worktree, run state.AgentRun,
 		"DEVSTRAP_WORKTREE_ID":  wt.ID,
 		"HOME":                  wt.Path, // SECU-02: repoint HOME to worktree so agent tooling cannot reach user dotfiles.
 	}
+	var extraFiles []*os.File
 	if sandboxLaunch.enabled {
 		// The write allow-list must not include the machine-wide shared
 		// $TMPDIR (review P1): the child gets a PER-RUN scratch dir instead,
@@ -618,12 +660,15 @@ func runAgentProcess(ctx context.Context, wt state.Worktree, run state.AgentRun,
 		if err != nil {
 			return err
 		}
-		wrapped, cleanup, err := sandboxLaunch.sandbox.Command(ctx, spec, args)
+		sc, err := sandboxLaunch.sandbox.Command(ctx, spec, args)
 		if err != nil {
 			return fmt.Errorf("prepare OS sandbox: %w", err)
 		}
-		defer cleanup()
-		args = wrapped
+		// Cleanup closes any inherited seccomp fd and removes generated
+		// profiles; it runs after command.Run returns (defer ordering).
+		defer sc.Cleanup()
+		args = sc.Argv
+		extraFiles = sc.ExtraFiles
 	}
 	env, err := childenv.FromOS(childenv.AgentAllowlist(), envOverrides)
 	if err != nil {
@@ -632,6 +677,9 @@ func runAgentProcess(ctx context.Context, wt state.Worktree, run state.AgentRun,
 	command := exec.CommandContext(ctx, args[0], args[1:]...) //nolint:gosec // agent generic command is explicit user-selected argv, run in an isolated worktree with sanitized env.
 	command.Dir = wt.Path
 	command.Env = env
+	// The sandbox launcher may reference inherited fds (bubblewrap's
+	// --seccomp <fd>); entry i becomes fd 3+i in the child. Nil when unused.
+	command.ExtraFiles = extraFiles
 	// Scrub secrets (token shapes a tool may echo) from both the live output
 	// and the persisted 0600 log so credentials never land on disk in
 	// cleartext. A single scrubbing Writer per sink serializes concurrent

@@ -112,9 +112,9 @@ func TestUnsupportedSandboxReportsUnsupported(t *testing.T) {
 	if err := sb.Available(); err == nil || !strings.Contains(err.Error(), "plan9") {
 		t.Fatalf("Available() = %v, want unsupported error naming the platform", err)
 	}
-	if _, cleanup, err := sb.Command(t.Context(), SandboxSpec{}, []string{"true"}); err == nil {
+	if sc, err := sb.Command(t.Context(), SandboxSpec{}, []string{"true"}); err == nil {
 		t.Fatal("Command() succeeded, want unsupported error")
 	} else {
-		cleanup() // must always be safe to call
+		sc.Cleanup() // must always be safe to call
 	}
 }
