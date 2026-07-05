@@ -31,6 +31,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — chore(community): Discussions + good-first-issues + AGENTS.md reframe (AD-8)
+
+Changed:
+- **Repo settings (recorded here, not in the tree):** GitHub Discussions enabled (`gh repo edit --enable-discussions`, verified via `has_discussions`); three curated starter issues seeded from the open backlog and labeled — #111 `P5-CLI-03` (`MarkFlagsMutuallyExclusive` before the network clone, `good first issue`), #112 `P5-CLI-01` (render-seam rollout to remaining leaf commands, `good first issue`), #113 `P4-QUAL-07` residual (contextcheck + forge-chain context threading, `help wanted`). The default `good first issue`/`help wanted` labels were reused — no bespoke hyphenated label.
+- `.github/ISSUE_TEMPLATE/config.yml`: Discussions contact link ("Questions & ideas") between the security and spec links, so non-bug traffic routes off the issue tracker.
+- `AGENTS.md`: AD-8 scope banner at the top — this file is the *maintainer's* agent workflow, not a contributor obligation; external contributors need only `CONTRIBUTING.md`, and fork-PR spec-drift/work-log bookkeeping is completed by the maintainer at merge (the gate's fork-advisory mode lands in the sibling AD-8 PR).
+- `spec/14_MVP_ROADMAP_AND_BACKLOG.md`: the AD-8 direction bullet marks the Discussions/labels and AGENTS.md-reframe goals SHIPPED 2026-07-05.
+
+Validated:
+- `gh api repos/Reederey87/DevStrap --jq .has_discussions` → `true`; issues #111–#113 visible with labels. `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+- Remaining AD-8 tail after this wave: bus-factor (second write-access maintainer).
+
 ## 2026-07-05 — chore: v0.1.0 released — distribution ledger/backlog bookkeeping
 
 Changed:
