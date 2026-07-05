@@ -444,7 +444,8 @@ CI runs this as a fixed-budget smoke step after the race tests; a longer local r
 
 ## Platform adapter tests
 
-- `internal/platform.Detect` returns watcher, service manager, keychain, and editor adapters for the current OS;
+- `internal/platform.Detect` returns watcher, service manager, keychain, editor, and sandbox adapters for the current OS;
+- agent OS sandbox (`P4-GIT-03` slice 1): SBPL profile shape golden tests run on every platform (`TestSBPLProfileConfinesWritesAndQuotesPaths`, quoting/escaping, optional-deny omission), the CLI mode-x-policy-x-availability matrix runs against a fake adapter (`TestResolveAgentSandboxMatrix` — auto/require/off, yolo-local conflict, readonly/cautious network deny), darwin profile write/cleanup is exercised unconditionally (`TestSeatbeltCommandWrapsArgvAndCleansUpProfile`), and real kernel enforcement (outside-write blocked, `~/.ssh` read blocked, confined work allowed) is env-gated behind `DEVSTRAP_SANDBOX_E2E=1` (`TestSeatbeltSandboxEnforcement`, MinIO-gating precedent);
 - polling watcher emits advisory scan events and stops on context cancellation;
 - unsupported service/keychain placeholders return a sentinel error until native adapters land;
 - source guard fails if `runtime.GOOS` branching appears outside `internal/platform`.

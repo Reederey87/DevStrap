@@ -31,6 +31,24 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — feat(agent): macOS Seatbelt sandbox for agent run (P4-GIT-03 slice 1)
+
+Changed:
+- `internal/platform`: new `Sandbox` adapter seam on `Set` (`sandbox.go` — `SandboxSpec`, `Sandbox` interface, `UnsupportedSandbox`), a build-tag-free SBPL profile generator (`sandbox_profile.go` — pure `sbplProfile(spec)`, unit-testable on every platform), and the darwin `SeatbeltSandbox` (`sandbox_darwin.go`): writes a 0600 profile into the run's log dir and prepends `/usr/bin/sandbox-exec -f <profile>` to the argv. Profile shape is allow-default with targeted denies (the pattern Claude Code/Codex CLI/VT Code converged on — deny-default breaks arbitrary toolchains): global write deny re-allowing worktree/tmp dirs + device nodes (LogDir is profile placement only — the log is parent-written, so the child cannot tamper with its own 0600 log or profile); credential-read denies (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.kube`, `~/.docker`, `~/.devstrap/keys`) anchored on the REAL user home (child `$HOME` is repointed to the worktree, but the dotfiles are still on disk); `(deny network*)` when requested. All spec paths are `EvalSymlinks`-resolved first — Seatbelt matches kernel-real paths and `/tmp`/`TMPDIR` are symlinks on macOS.
+- `internal/cli/agent.go`: `--sandbox auto|off|require` on `agent run` (env `DEVSTRAP_SANDBOX`, default `auto`), resolved via `resolveAgentSandbox` BEFORE the store/worktree exist so `require`-on-unsupported fails with the policy exit class and no orphan cleanup path. Policy map: `readonly`/`cautious` → network denied; `guarded`/`ephemeral-ci` → network open; `yolo-local` → unconfined (conflicts with `require`, config error). `auto` + unavailable prints one warning ("agent policy remains advisory (AGEN-01)") and runs as before — Linux behavior is byte-for-byte unchanged. The advisory argv/file policies still run in addition (better pre-spawn errors; only layer on Linux). Test seam `sandboxBackend` mirrors init.go's `keychainBackend`.
+- Known risk (accepted): Seatbelt can break Apple-signed helpers spawned by user commands; `--sandbox off` and `yolo-local` are the escape hatches, and `sandbox-exec` deprecation is tracked in the adapter comment (if Apple removes it, `Available()` fails and `auto` degrades loudly instead of breaking runs).
+- Out of scope (named follow-up slices in spec/14): Linux bubblewrap/landlock/seccomp, `sandbox.violation` telemetry, tighter read confinement.
+- Specs: spec/10 enforcement-reality + implementation paragraphs, spec/13 agent-run contract (+ future-work line), spec/14 XL-items + backlog checkbox, spec/15 threat-model reality + release-gate lines, spec/16 test rows; ledger `P4-GIT-03` → partial.
+
+Validated:
+- `gofmt`, `golangci-lint run`, `go run ./cmd/spec-drift --base origin/main --head HEAD`, `GOCACHE=/tmp/devstrap-gocache go test -race ./...`.
+- Kernel enforcement proven on this Mac: `DEVSTRAP_SANDBOX_E2E=1 go test ./internal/platform/ -run TestSeatbeltSandboxEnforcement` — outside-worktree write BLOCKED, `~/.ssh` read BLOCKED, confined write + non-sensitive read allowed. Plus a live `devstrap agent run` smoke on a real repo (sandboxed cat of `~/.ssh` fails; `--sandbox off` succeeds).
+
+- Post-review (dual: Codex adversarial + opus): (P1 accepted) the write allow-list granted the machine-wide shared `$TMPDIR` — the child now gets a PER-RUN scratch dir (`$TMPDIR/devstrap-agent-<runID>`, created 0700, removed after the run) with its `TMPDIR` env repointed to match, so the kernel grant is scoped to the run; (P1 rejected as stale) the same finding named the log dir as child-writable and the `git_test.go` "revert" — the log dir was already parent-only in the reviewed HEAD, and the git_test delta was the stale-base diff view resolved by the pre-push rebase; (P2 accepted) `DEVSTRAP_SANDBOX_E2E=1` is now set in ci.yml's test job so the kernel-enforcement test actually runs on macos-latest; (P3 accepted) home-root credential FILES (`.netrc`, `.npmrc`, `.pypirc`, `.gitconfig`) joined the read-deny set, aligning with the wrapper's own sensitive-token scanner (AGEN-05); (P3 accepted) spec/15 now documents the `(deny network*)` residual — XPC/`mach-lookup` and unix-domain sockets are not covered by an allow-default profile, so the network deny is best-effort against deliberate evasion; (P3 accepted) stale "log dir" mention dropped from the profile header comment.
+
+Follow-ups:
+- Linux sandbox slice (bubblewrap/landlock/seccomp) and `sandbox.violation` telemetry (spec/15 reserves the event name); `mach-lookup` tightening under DenyNetwork.
+
 ## 2026-07-05 — feat(hub): local-folder / cloud-drive-folder carrier completes AD-1
 
 Changed:

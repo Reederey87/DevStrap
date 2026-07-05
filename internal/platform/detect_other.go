@@ -10,5 +10,6 @@ func Detect() Set {
 		PollWatcher{},
 		UnsupportedServiceManager{Platform: runtime.GOOS},
 		UnsupportedKeychain{Platform: runtime.GOOS},
+		UnsupportedSandbox{Platform: runtime.GOOS},
 	)
 }

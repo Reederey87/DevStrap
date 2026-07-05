@@ -87,7 +87,7 @@ Mitigation:
 - log redaction;
 - tainted-log handling when secrets are present.
 
-Reality (`AGEN-01`, `AGEN-02`/`SECU-02`): the credential-env leak is fixed — `SSH_AUTH_SOCK` is excluded and `HOME` is repointed to the worktree — but the wrapper command/file policy is still argv-substring matching and **trivially bypassed by any interpreter** (`bash -c`, `python -c`, base64-decode, variable indirection). The default `guarded` agent still has ordinary process-user filesystem read capability and network egress unless an OS sandbox constrains it. Treat the wrapper as accident-prevention rather than a security boundary, and move to an allowlist + OS sandbox (Seatbelt / bubblewrap-landlock-seccomp).
+Reality (`AGEN-01`, `AGEN-02`/`SECU-02`, updated 2026-07-05): the credential-env leak is fixed — `SSH_AUTH_SOCK` is excluded and `HOME` is repointed to the worktree — and the wrapper argv/file policy (still substring-based and interpreter-bypassable on its own) is now backed by a kernel boundary **on macOS**: `agent run` wraps the child in a Seatbelt profile (`P4-GIT-03` slice 1) that confines writes to the worktree/tmp dirs (the 0600 run log is parent-written and child-untouchable), denies reads of `~/.ssh`-class credential paths, and denies all network for `readonly`/`cautious`. What the sandbox does NOT yet cover: XPC/`mach-lookup` and unix-domain sockets under `(deny network*)` — an allow-default profile still lets a `readonly`/`cautious` child talk to system daemons (e.g. out-of-process `nsurlsessiond` transfers) or a local socket proxy, so the network deny is best-effort against a deliberately evasive agent (tightening `mach-lookup` is a follow-up slice); Linux hosts (bubblewrap/landlock/seccomp is a named follow-up — there the `guarded` agent still has ordinary process-user read capability and network egress; `--sandbox auto` warns loudly), reads of non-credential files (allow-default profile; the agent can still read most of the disk on macOS), and `sandbox.violation` telemetry. `--sandbox require` is the fail-closed mode.
 
 ### Threat: destructive sync deletes code
 
@@ -352,7 +352,7 @@ Key-custody status (`SECR-04`/`SECU-01`, refined by `P6-XP-04`): the file fallba
 - Personal encrypted env uses age v1 with per-device X25519 recipients. Current implementation creates the local recipient, keeps the private identity out of SQLite/config, and stores it through the OS keychain/Secret Service when available; encrypted bundle sync remains future work.
 - Trust-affecting hub event payloads must require known, approved device signing keys before hub sync ships. Local event signing is wired; remote signing-key enrollment and approval are not.
 - Agent command execution should be mediated through a PTY proxy before team mode.
-- OS sandboxing is required before public release.
+- OS sandboxing is required before public release — macOS Seatbelt shipped 2026-07-05 (`P4-GIT-03` slice 1, default-on via `--sandbox auto`); Linux is the remaining gap.
 - Remaining question: should DevStrap refuse to manage repos with secret-looking tracked files, or warn and require explicit adoption?
 
 ## Audit implementation notes (2026-06-28)
