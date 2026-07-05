@@ -78,6 +78,34 @@ func TestBwrapArgsOmitsOptionalPieces(t *testing.T) {
 	if indexSequence(args, "--ro-bind", "/dev/null") != -1 {
 		t.Fatalf("/dev/null file mask leaked into optional-minimal args: %v", args)
 	}
+	if slices.Contains(args, "--seccomp") {
+		t.Fatalf("--seccomp leaked in without a seccomp fd: %v", args)
+	}
+}
+
+func TestBwrapArgsSeccompFD(t *testing.T) {
+	spec := SandboxSpec{WorktreeDir: "/wt", TmpDir: "/tmp"}
+
+	// With a seccomp fd: --seccomp <fd> present and positioned before the
+	// --chdir and --new-session terminal args.
+	args := bwrapArgs(spec, nil, nil, bwrapOptions{SeccompFD: seccompChildFD})
+	idx := indexSequence(args, "--seccomp", "3")
+	if idx == -1 {
+		t.Fatalf("missing --seccomp %d in %v", seccompChildFD, args)
+	}
+	chdir := slices.Index(args, "--chdir")
+	newSession := slices.Index(args, "--new-session")
+	if chdir != -1 && idx >= chdir {
+		t.Fatalf("--seccomp must precede --chdir: seccomp@%d chdir@%d in %v", idx, chdir, args)
+	}
+	if newSession != -1 && idx >= newSession {
+		t.Fatalf("--seccomp must precede --new-session: seccomp@%d new-session@%d in %v", idx, newSession, args)
+	}
+
+	// Without a seccomp fd: absent.
+	if slices.Contains(bwrapArgs(spec, nil, nil, bwrapOptions{}), "--seccomp") {
+		t.Fatalf("--seccomp present without a seccomp fd")
+	}
 }
 
 func TestBwrapSensitivePathsMirrorsSeatbeltDenyList(t *testing.T) {

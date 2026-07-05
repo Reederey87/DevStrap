@@ -32,16 +32,16 @@ func (s SeatbeltSandbox) Available() error {
 	return nil
 }
 
-func (s SeatbeltSandbox) Command(_ context.Context, spec SandboxSpec, argv []string) ([]string, func(), error) {
+func (s SeatbeltSandbox) Command(_ context.Context, spec SandboxSpec, argv []string) (SandboxCommand, error) {
 	if len(argv) == 0 {
-		return nil, func() {}, fmt.Errorf("seatbelt: empty argv")
+		return SandboxCommand{Cleanup: func() {}}, fmt.Errorf("seatbelt: empty argv")
 	}
 	if err := s.Available(); err != nil {
-		return nil, func() {}, err
+		return SandboxCommand{Cleanup: func() {}}, err
 	}
 	resolved, err := resolveSandboxSpecPaths(spec)
 	if err != nil {
-		return nil, func() {}, err
+		return SandboxCommand{Cleanup: func() {}}, err
 	}
 	// Derive the credential deny anchors from the same lists as bubblewrap,
 	// then resolve leaf symlinks: Seatbelt matches the kernel-real path, so a
@@ -55,11 +55,13 @@ func (s SeatbeltSandbox) Command(_ context.Context, spec SandboxSpec, argv []str
 	// exits.
 	profilePath := filepath.Join(resolved.LogDir, "sandbox-"+filepath.Base(resolved.WorktreeDir)+".sb")
 	if err := os.WriteFile(profilePath, []byte(sbplProfile(resolved, denyDirs, denyFiles)), 0o600); err != nil {
-		return nil, func() {}, fmt.Errorf("write seatbelt profile: %w", err)
+		return SandboxCommand{Cleanup: func() {}}, fmt.Errorf("write seatbelt profile: %w", err)
 	}
 	cleanup := func() { _ = os.Remove(profilePath) }
+	// Seatbelt has no seccomp analogue, so DenyDangerousSyscalls is a no-op
+	// here and no ExtraFiles are needed.
 	wrapped := append([]string{sandboxExecPath, "-f", profilePath}, argv...)
-	return wrapped, cleanup, nil
+	return SandboxCommand{Argv: wrapped, Cleanup: cleanup}, nil
 }
 
 // seatbeltDenyPaths returns the deduped union of each raw credential path and

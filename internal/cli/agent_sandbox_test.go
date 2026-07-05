@@ -19,8 +19,8 @@ type fakeSandbox struct {
 
 func (f fakeSandbox) Name() string     { return "fake-sandbox" }
 func (f fakeSandbox) Available() error { return f.availableErr }
-func (f fakeSandbox) Command(_ context.Context, _ platform.SandboxSpec, argv []string) ([]string, func(), error) {
-	return append([]string{"fake-sandbox-exec"}, argv...), func() {}, nil
+func (f fakeSandbox) Command(_ context.Context, _ platform.SandboxSpec, argv []string) (platform.SandboxCommand, error) {
+	return platform.SandboxCommand{Argv: append([]string{"fake-sandbox-exec"}, argv...), Cleanup: func() {}}, nil
 }
 
 type fakeCapSandbox struct {
@@ -57,12 +57,12 @@ type passthroughSandbox struct {
 
 func (p passthroughSandbox) Name() string     { return "passthrough-sandbox" }
 func (p passthroughSandbox) Available() error { return nil }
-func (p passthroughSandbox) Command(_ context.Context, spec platform.SandboxSpec, argv []string) ([]string, func(), error) {
+func (p passthroughSandbox) Command(_ context.Context, spec platform.SandboxSpec, argv []string) (platform.SandboxCommand, error) {
 	*p.spec = spec
 	// sh -c positional semantics: the arg after the script is $0 (the marker
 	// path), the rest become "$@" (the original child argv).
 	wrapped := append([]string{"sh", "-c", `touch "$0" && exec "$@"`, p.marker}, argv...)
-	return wrapped, func() { *p.cleanupRuns++ }, nil
+	return platform.SandboxCommand{Argv: wrapped, Cleanup: func() { *p.cleanupRuns++ }}, nil
 }
 
 // TestAgentSandboxSpecFailsClosedWithoutUserHome pins the post-merge review
@@ -361,4 +361,36 @@ func TestResolveAgentSandboxInvalidBackendFailsClosed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestResolveAgentSandboxInvalidSeccompToggleFailsClosed pins the same
+// fail-closed parity for the seccomp escape hatch: a mistyped
+// DEVSTRAP_SANDBOX_SECCOMP is explicit config, so it must fail closed with the
+// invalid-config exit class in every sandboxing mode — including `auto` when
+// the host sandbox is UNAVAILABLE (the degrade path must not swallow the typo,
+// Codex review P3). `off` never reads the toggle, so it stays a clean run.
+func TestResolveAgentSandboxInvalidSeccompToggleFailsClosed(t *testing.T) {
+	unavailable := fakeSandbox{availableErr: errors.New("no adapter on this host")}
+	for _, mode := range []string{"auto", "require"} {
+		t.Run(mode, func(t *testing.T) {
+			withFakeSandbox(t, unavailable)
+			t.Setenv("DEVSTRAP_SANDBOX_SECCOMP", "yes-please")
+			var stderr bytes.Buffer
+			_, err := resolveAgentSandbox(mode, "guarded", &stderr, "/tmp/devstrap-home")
+			var app appError
+			if !errors.As(err, &app) || app.code != exitInvalidConfig {
+				t.Fatalf("mode %s: err = %v, want appError code %d", mode, err, exitInvalidConfig)
+			}
+			if strings.Contains(stderr.String(), "advisory") {
+				t.Fatalf("mode %s: degraded to advisory instead of failing closed on the typo: %q", mode, stderr.String())
+			}
+		})
+	}
+	t.Run("off ignores the toggle", func(t *testing.T) {
+		withFakeSandbox(t, unavailable)
+		t.Setenv("DEVSTRAP_SANDBOX_SECCOMP", "yes-please")
+		if _, err := resolveAgentSandbox("off", "guarded", &bytes.Buffer{}, "/tmp/devstrap-home"); err != nil {
+			t.Fatalf("off mode read the seccomp toggle: %v", err)
+		}
+	})
 }

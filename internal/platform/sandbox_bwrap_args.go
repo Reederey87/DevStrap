@@ -1,8 +1,24 @@
 package platform
 
-import "path/filepath"
+import (
+	"path/filepath"
+	"strconv"
+)
 
-type bwrapOptions struct{ DisableUserns bool }
+// seccompChildFD is the child fd the seccomp filter memfd is inherited as: the
+// first exec.Cmd.ExtraFiles slot maps to fd 3, and bubblewrap reads
+// `--seccomp 3` from it. Defined with the pure builder so the fd number the
+// adapter passes in ExtraFiles and the number the builder renders stay in
+// lockstep (and the builder test can reference it OS-independently).
+const seccompChildFD = 3
+
+type bwrapOptions struct {
+	DisableUserns bool
+	// SeccompFD is the inherited fd bwrap reads the compiled syscall denylist
+	// from (--seccomp <fd>). 0 means no seccomp filter — the pure builder stays
+	// unit-testable on every OS without touching a real fd.
+	SeccompFD int
+}
 
 // bwrapSensitivePaths derives the Linux credential masks from the same lists
 // as the Seatbelt profile. Kept build-tag-free and pure so the Linux mount
@@ -53,6 +69,12 @@ func bwrapArgs(spec SandboxSpec, maskDirs, maskFiles []string, opts bwrapOptions
 	// Directories become empty tmpfs mounts; files become /dev/null.
 	for _, file := range maskFiles {
 		args = append(args, "--ro-bind", "/dev/null", file)
+	}
+	// Seccomp filter fd (the compiled syscall denylist) — placed before the
+	// namespace/terminal/chdir args so it reads clearly as part of the sandbox
+	// setup; bwrap applies it regardless of position.
+	if opts.SeccompFD > 0 {
+		args = append(args, "--seccomp", strconv.Itoa(opts.SeccompFD))
 	}
 	args = append(args, "--unshare-user")
 	if opts.DisableUserns {

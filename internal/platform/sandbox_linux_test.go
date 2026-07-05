@@ -4,6 +4,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -15,19 +16,19 @@ import (
 )
 
 func TestBubblewrapCommandRejectsEmptyArgv(t *testing.T) {
-	_, cleanup, err := BubblewrapSandbox{}.Command(context.Background(), SandboxSpec{}, nil)
+	sc, err := BubblewrapSandbox{}.Command(context.Background(), SandboxSpec{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "empty argv") {
 		t.Fatalf("Command() err = %v, want empty argv guard", err)
 	}
-	cleanup()
+	sc.Cleanup()
 }
 
 func TestBubblewrapCommandRejectsDashArgv0(t *testing.T) {
-	_, cleanup, err := BubblewrapSandbox{}.Command(context.Background(), SandboxSpec{}, []string{"-bad"})
+	sc, err := BubblewrapSandbox{}.Command(context.Background(), SandboxSpec{}, []string{"-bad"})
 	if err == nil || !strings.Contains(err.Error(), "argv[0]") {
 		t.Fatalf("Command() err = %v, want dash argv[0] guard", err)
 	}
-	cleanup()
+	sc.Cleanup()
 }
 
 func TestBubblewrapCommandWrapsArgvAndCleanupIsSafe(t *testing.T) {
@@ -48,7 +49,7 @@ func TestBubblewrapCommandWrapsArgvAndCleanupIsSafe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrapped, cleanup, err := sb.Command(context.Background(), SandboxSpec{
+	sc, err := sb.Command(context.Background(), SandboxSpec{
 		WorktreeDir: worktree,
 		TmpDir:      tmpDir,
 		LogDir:      logs,
@@ -56,6 +57,7 @@ func TestBubblewrapCommandWrapsArgvAndCleanupIsSafe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	wrapped := sc.Argv
 	if wrapped[0] != res.path || !strings.HasSuffix(wrapped[0], "bwrap") {
 		t.Fatalf("wrapped[0] = %q, want probed bwrap path %q", wrapped[0], res.path)
 	}
@@ -74,8 +76,12 @@ func TestBubblewrapCommandWrapsArgvAndCleanupIsSafe(t *testing.T) {
 	if slices.Contains(wrapped, logs) {
 		t.Fatalf("LogDir leaked into wrapped argv: %v", wrapped)
 	}
-	cleanup()
-	cleanup()
+	// No seccomp requested, so no inherited fd.
+	if sc.ExtraFiles != nil {
+		t.Fatalf("unexpected ExtraFiles without DenyDangerousSyscalls: %v", sc.ExtraFiles)
+	}
+	sc.Cleanup()
+	sc.Cleanup()
 }
 
 // TestExistingRealPathsFailsClosed pins the CodeRabbit review fix: a credential
@@ -177,13 +183,14 @@ func TestBubblewrapSandboxEnforcement(t *testing.T) {
 
 	run := func(spec SandboxSpec, argv ...string) error {
 		t.Helper()
-		wrapped, cleanup, err := sb.Command(context.Background(), spec, argv)
+		sc, err := sb.Command(context.Background(), spec, argv)
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer cleanup()
-		cmd := exec.Command(wrapped[0], wrapped[1:]...) //nolint:gosec // test fixture argv
+		defer sc.Cleanup()
+		cmd := exec.Command(sc.Argv[0], sc.Argv[1:]...) //nolint:gosec // test fixture argv
 		cmd.Dir = worktree
+		cmd.ExtraFiles = sc.ExtraFiles
 		return cmd.Run()
 	}
 
@@ -207,6 +214,29 @@ func TestBubblewrapSandboxEnforcement(t *testing.T) {
 	}
 	if err := run(spec, touch, filepath.Join(logs, "tamper.txt")); err == nil {
 		t.Fatal("write into the log dir succeeded, want kernel denial")
+	}
+
+	// Seccomp denylist over bwrap's --seccomp fd: keyctl must return EPERM,
+	// while ordinary tooling (git init+commit) still runs (over-block canary).
+	if probeSeccomp() == nil {
+		self, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		sh, err := exec.LookPath("sh")
+		if err != nil {
+			t.Skipf("sh unavailable: %v", err)
+		}
+		seccompSpec := spec
+		seccompSpec.DenyDangerousSyscalls = true
+		err = run(seccompSpec, self, "seccomp-keyctl-probe")
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || ee.ExitCode() != seccompProbeExitEPERM {
+			t.Fatalf("keyctl not denied under seccomp: err = %v, want exit %d (EPERM)", err, seccompProbeExitEPERM)
+		}
+		assertSeccompCanaryRuns(t, run, seccompSpec, sh)
+	} else {
+		t.Logf("seccomp filters unsupported on this kernel: bwrap denylist sub-assertion skipped")
 	}
 
 	bash, err := exec.LookPath("bash")

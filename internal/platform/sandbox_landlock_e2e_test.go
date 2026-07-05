@@ -13,7 +13,14 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
+
+// seccompProbeExitEPERM is the exit code the keyctl re-exec intercept uses to
+// signal that the seccomp denylist returned EPERM as expected — distinct from
+// 0 (syscall allowed, filter not applied) and 1 (unexpected error).
+const seccompProbeExitEPERM = 42
 
 // TestMain doubles as the sandbox-helper re-exec target: LandlockSandbox
 // wraps argv with os.Executable(), which under `go test` is THIS test binary
@@ -44,7 +51,38 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	// keyctl(2) is on the seccomp denylist; both backends' enforcement e2es
+	// re-exec this probe under DenyDangerousSyscalls and assert it returns
+	// EPERM. keyctl needs no filesystem/network access, so a bare exit code is
+	// an unambiguous signal.
+	if len(os.Args) == 2 && os.Args[1] == "seccomp-keyctl-probe" {
+		_, err := unix.KeyctlInt(unix.KEYCTL_GET_KEYRING_ID, unix.KEY_SPEC_SESSION_KEYRING, 0, 0, 0)
+		if errors.Is(err, unix.EPERM) {
+			os.Exit(seccompProbeExitEPERM)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "keyctl: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	os.Exit(m.Run())
+}
+
+// assertSeccompCanaryRuns is the shared over-blocking canary for both backends'
+// seccomp e2e: clone/fork/execve/openat are deliberately NOT on the denylist,
+// so a git init + empty commit inside the writable worktree must still succeed
+// under the filter. Cheap by design — inline identity, empty commit, no build.
+func assertSeccompCanaryRuns(t *testing.T, run func(SandboxSpec, ...string) error, spec SandboxSpec, sh string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Logf("git unavailable: seccomp over-block canary skipped: %v", err)
+		return
+	}
+	script := `git init -q sc && cd sc && git -c user.email=canary@devstrap.test -c user.name=canary commit -q --allow-empty -m seccomp-canary`
+	if err := run(spec, sh, "-c", script); err != nil {
+		t.Fatalf("git init+commit over-blocked by the seccomp filter: %v", err)
+	}
 }
 
 // TestLandlockSandboxEnforcement proves the kernel actually enforces the
@@ -117,13 +155,14 @@ func TestLandlockSandboxEnforcement(t *testing.T) {
 
 	run := func(spec SandboxSpec, argv ...string) error {
 		t.Helper()
-		wrapped, cleanup, err := sb.Command(context.Background(), spec, argv)
+		sc, err := sb.Command(context.Background(), spec, argv)
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer cleanup()
-		cmd := exec.Command(wrapped[0], wrapped[1:]...) //nolint:gosec // test fixture argv
+		defer sc.Cleanup()
+		cmd := exec.Command(sc.Argv[0], sc.Argv[1:]...) //nolint:gosec // test fixture argv
 		cmd.Dir = worktree
+		cmd.ExtraFiles = sc.ExtraFiles
 		return cmd.Run()
 	}
 
@@ -173,6 +212,21 @@ func TestLandlockSandboxEnforcement(t *testing.T) {
 	var ee *exec.ExitError
 	if !errors.As(err, &ee) || ee.ExitCode() != 7 {
 		t.Fatalf("exit-code fidelity broken through the shim: err = %v, want ExitError 7", err)
+	}
+
+	// Seccomp denylist, applied in-process by the shim after Landlock: keyctl
+	// must return EPERM, while ordinary tooling (execve/clone/fork and a git
+	// commit) still runs — the over-blocking canary.
+	if probeSeccomp() == nil {
+		seccompSpec := spec
+		seccompSpec.DenyDangerousSyscalls = true
+		err := run(seccompSpec, self, "seccomp-keyctl-probe")
+		if !errors.As(err, &ee) || ee.ExitCode() != seccompProbeExitEPERM {
+			t.Fatalf("keyctl not denied under seccomp: err = %v, want exit %d (EPERM)", err, seccompProbeExitEPERM)
+		}
+		assertSeccompCanaryRuns(t, run, seccompSpec, sh)
+	} else {
+		t.Logf("seccomp filters unsupported on this kernel: denylist sub-assertion skipped (the documented degrade)")
 	}
 
 	abi, err := probeLandlock()

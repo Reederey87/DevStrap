@@ -13,11 +13,11 @@ import (
 )
 
 func TestLandlockCommandRejectsEmptyArgv(t *testing.T) {
-	_, cleanup, err := LandlockSandbox{}.Command(context.Background(), SandboxSpec{}, nil)
+	sc, err := LandlockSandbox{}.Command(context.Background(), SandboxSpec{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "empty argv") {
 		t.Fatalf("Command() err = %v, want empty argv guard", err)
 	}
-	cleanup()
+	sc.Cleanup()
 }
 
 func TestLandlockCommandWrapsArgvWithHelper(t *testing.T) {
@@ -47,7 +47,7 @@ func TestLandlockCommandWrapsArgvWithHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	argv := []string{"/bin/true", "--flag"}
-	wrapped, cleanup, err := sb.Command(context.Background(), SandboxSpec{
+	sc, err := sb.Command(context.Background(), SandboxSpec{
 		WorktreeDir: worktreeLink,
 		TmpDir:      tmpDir,
 		LogDir:      logs,
@@ -55,7 +55,8 @@ func TestLandlockCommandWrapsArgvWithHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cleanup()
+	defer sc.Cleanup()
+	wrapped := sc.Argv
 	if wrapped[0] != self {
 		t.Fatalf("wrapped[0] = %q, want %q", wrapped[0], self)
 	}

@@ -53,30 +53,31 @@ func (s LandlockSandbox) Available() error {
 	return err
 }
 
-func (s LandlockSandbox) Command(_ context.Context, spec SandboxSpec, argv []string) ([]string, func(), error) {
+func (s LandlockSandbox) Command(_ context.Context, spec SandboxSpec, argv []string) (SandboxCommand, error) {
 	if len(argv) == 0 {
-		return nil, func() {}, fmt.Errorf("landlock: empty argv")
+		return SandboxCommand{Cleanup: func() {}}, fmt.Errorf("landlock: empty argv")
 	}
 	if _, err := probeLandlock(); err != nil {
-		return nil, func() {}, err
+		return SandboxCommand{Cleanup: func() {}}, err
 	}
 	// Fail closed: never guess argv[0] or trust os.Args for the re-exec
 	// target.
 	self, err := os.Executable()
 	if err != nil {
-		return nil, func() {}, fmt.Errorf("landlock: resolve devstrap executable for re-exec: %w", err)
+		return SandboxCommand{Cleanup: func() {}}, fmt.Errorf("landlock: resolve devstrap executable for re-exec: %w", err)
 	}
 	resolved, err := resolveSandboxSpecPaths(spec)
 	if err != nil {
-		return nil, func() {}, err
+		return SandboxCommand{Cleanup: func() {}}, err
 	}
 	specJSON, err := json.Marshal(resolved)
 	if err != nil {
-		return nil, func() {}, fmt.Errorf("landlock: encode sandbox spec: %w", err)
+		return SandboxCommand{Cleanup: func() {}}, fmt.Errorf("landlock: encode sandbox spec: %w", err)
 	}
-	// No profile file exists, so cleanup is a no-op; the Sandbox contract
-	// explicitly permits a safe no-op cleanup.
-	return sandboxHelperArgs(self, string(specJSON), argv), func() {}, nil
+	// No profile file or inherited fd exists (the seccomp filter is loaded
+	// in-process by the shim, not passed as a fd), so cleanup is a no-op; the
+	// Sandbox contract explicitly permits a safe no-op cleanup.
+	return SandboxCommand{Argv: sandboxHelperArgs(self, string(specJSON), argv), Cleanup: func() {}}, nil
 }
 
 // applyLandlockPolicy maps a SandboxSpec onto stacked Landlock rulesets for
@@ -146,6 +147,17 @@ func ExecSandboxHelper(spec SandboxSpec, argv []string) error {
 	}
 	if err := applyLandlockPolicy(spec); err != nil {
 		return err
+	}
+	// Layer the syscall denylist on top of the filesystem confinement. Loaded
+	// in-process (this shim has no separate launcher to hand a fd to) after
+	// Landlock and before execve, so the filter persists into the agent image.
+	// A probe failure is the documented degrade — skip silently, matching the
+	// bubblewrap path; a load failure is fatal (the shim's error maps to the
+	// exit-125 wrapper-failed path).
+	if spec.DenyDangerousSyscalls && probeSeccomp() == nil {
+		if err := applySeccompSelf(); err != nil {
+			return err
+		}
 	}
 	// Resolved via the sanitized child PATH the shim inherited, matching how
 	// bwrap launches the child. LookPath only needs read+execute, which the

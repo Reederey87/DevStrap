@@ -31,6 +31,33 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — feat(agent): seccomp syscall denylist for the Linux sandbox (P4-GIT-03 slice 4)
+
+Changed:
+- `internal/platform/sandbox.go`: the `Sandbox.Command` seam now returns a `SandboxCommand{Argv, ExtraFiles, Cleanup}` struct instead of `([]string, func(), error)`, so a backend can hand the launcher inherited fds (bubblewrap's `--seccomp <fd>`). `Cleanup` is always non-nil-safe; all implementers (Unsupported/Seatbelt/Bubblewrap/Landlock/LinuxSandbox chooser) and every test fake were migrated. `SandboxSpec` gains `DenyDangerousSyscalls bool`, which rides the existing spec-JSON transport to the Landlock shim.
+- `internal/platform/sandbox_seccomp_names.go` (new, build-tag-free): `seccompDeniedSyscalls`, grouped with rationale (mount / kernel-module-boot / tracing / keyring / escape-primitives / io_uring). `clone`/`clone3`/`unshare`/`setns`, `execve`/`execveat`/`fork`, and `ioctl` are deliberately NOT denied (nested sandboxes, the agent's own launches, and the documented `ioctl`-arg-filter gap).
+- `internal/platform/sandbox_seccomp_linux.go` (new, `//go:build linux`): compiles the denylist with `github.com/elastic/go-seccomp-bpf` — Allow default, one `ActionErrno` (EPERM) group; `seccompFilterProgram` assembles → `bpf.Assemble` → native-endian `sock_filter` bytes; `seccompProgramFile` writes an `unix.MemfdCreate` fd for bwrap; `applySeccompSelf` loads it in-process (NoNewPrivs+TSYNC) for the Landlock shim; `probeSeccomp` (`OnceValues`) detects kernel support.
+- `internal/platform/sandbox_bwrap_args.go`: the pure builder gains `bwrapOptions.SeccompFD` (0 = none) and renders `--seccomp <fd>` before the namespace/terminal/chdir args; `sandbox_linux.go` creates the memfd (fd 3, first ExtraFiles slot), passes it through, and closes it in Cleanup. `sandbox_landlock.go` calls `applySeccompSelf` after the ruleset and before `execve`. Both gate on `spec.DenyDangerousSyscalls && probeSeccomp()==nil`; a probe failure is a `Limitations()` line, not an error (fs/network boundary intact) — `require` still passes.
+- `internal/cli/agent.go`: `resolveAgentSandbox` sets `DenyDangerousSyscalls` true for every enabled sandbox (unconditional hardening) and parses the `DEVSTRAP_SANDBOX_SECCOMP` escape hatch (empty/`on` → true, `off` → false with a stderr notice, anything else → invalid-config exit class, mirroring `DEVSTRAP_SANDBOX_BACKEND`); `runAgentProcess` wires `SandboxCommand.ExtraFiles` into `exec.Cmd.ExtraFiles`. The `--sandbox` `--help` text documents the new env var.
+
+Key decisions:
+- elastic/go-seccomp-bpf's `Assemble` FAILS (not skips) on any syscall name absent from the arch's table, and several denied names (`vm86`, `vm86old`, `modify_ldt`, `_sysctl`, `uselib`, `ustat`) are x86-only. `seccompPolicy` therefore filters the denylist against `arch.GetInfo("").SyscallNames` before assembling, so assembly can never fail at runtime on arm64. The assembled program is audit-arch-gated by the library (a mismatch falls through to the default Allow, never crashes); we assemble for the native `runtime.GOARCH`, so the gate always matches, and the x32 sub-ABI is filtered to ENOSYS by the library.
+- `ActionErrno` auto-ORs EPERM (library `Ret`), so the denied group returns EPERM without an explicit errno.
+- Landlock has no `--new-session` analogue and seccomp does not arg-filter `ioctl`, so `TIOCSTI` terminal injection stays open on the Landlock path — documented in spec/10 and spec/15.
+
+Tests:
+- All-platform: `TestSeccompDeniedSyscallNames` (golden groups; asserts clone/clone3/unshare/setns/execve/openat/ioctl are NOT denied), `TestBwrapArgsSeccompFD` (`--seccomp 3` present and before `--chdir`/`--new-session`; absent without a fd), and the seam migration across every existing sandbox test.
+- Linux: `TestSeccompFilterProgramAssembles` (non-empty, `len%8==0`, instruction-count round-trip), `TestSeccompPolicyFiltersUnknownArchNames` (retained names all exist in the arch table). Env-gated E2E extended: a `keyctl(2)`→EPERM sub-assertion (via a re-exec probe in the landlock e2e `TestMain`) plus an over-blocking `git init`+empty-commit canary under both Linux backends' filters.
+- `go.mod`/`go.sum`: added `github.com/elastic/go-seccomp-bpf v1.6.0` (+ its `golang.org/x/net` dep); both pure Go — `CGO_ENABLED=0 GOOS=linux go build ./...` clean.
+
+Validated:
+- `gofmt -w cmd internal`; `go build ./...`; `GOOS=linux go build ./...`; `GOOS=linux go vet ./...`; `CGO_ENABLED=0 GOOS=linux go build ./...` clean.
+- `golangci-lint run` (full module, darwin) 0 issues; `go test -race ./...` all packages ok. The Docker Linux kernel E2E (`DEVSTRAP_SANDBOX_E2E=1`) is run by the orchestrator.
+
+Follow-ups:
+- `sandbox.violation` telemetry.
+- Tighter read confinement.
+
 ## 2026-07-05 — fix(agent): Seatbelt credential-deny symlink-leaf parity (P4-GIT-03 residual)
 
 Changed:

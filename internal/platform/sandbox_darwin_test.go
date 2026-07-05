@@ -63,12 +63,12 @@ func TestSeatbeltSandboxEnforcement(t *testing.T) {
 
 	run := func(argv ...string) error {
 		t.Helper()
-		wrapped, cleanup, err := sb.Command(context.Background(), spec, argv)
+		sc, err := sb.Command(context.Background(), spec, argv)
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer cleanup()
-		cmd := exec.Command(wrapped[0], wrapped[1:]...) //nolint:gosec // test fixture argv
+		defer sc.Cleanup()
+		cmd := exec.Command(sc.Argv[0], sc.Argv[1:]...) //nolint:gosec // test fixture argv
 		cmd.Dir = worktree
 		return cmd.Run()
 	}
@@ -129,7 +129,7 @@ func TestSeatbeltResolvesCredentialLeafSymlinks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	wrapped, cleanup, err := SeatbeltSandbox{}.Command(context.Background(), SandboxSpec{
+	sc, err := SeatbeltSandbox{}.Command(context.Background(), SandboxSpec{
 		WorktreeDir:        worktree,
 		TmpDir:             root, // any existing, resolvable dir
 		LogDir:             logs,
@@ -139,7 +139,8 @@ func TestSeatbeltResolvesCredentialLeafSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cleanup()
+	defer sc.Cleanup()
+	wrapped := sc.Argv
 
 	// wrapped = [sandbox-exec -f <profile> /usr/bin/true]; the profile path is
 	// wrapped[2].
@@ -186,7 +187,7 @@ func TestSeatbeltCommandWrapsArgvAndCleansUpProfile(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	wrapped, cleanup, err := sb.Command(context.Background(), SandboxSpec{
+	sc, err := sb.Command(context.Background(), SandboxSpec{
 		WorktreeDir: worktree,
 		TmpDir:      os.TempDir(),
 		LogDir:      logs,
@@ -194,6 +195,7 @@ func TestSeatbeltCommandWrapsArgvAndCleansUpProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	wrapped := sc.Argv
 	if wrapped[0] != sandboxExecPath || wrapped[1] != "-f" || wrapped[3] != "/usr/bin/true" || wrapped[4] != "--flag" {
 		t.Fatalf("wrapped argv = %v", wrapped)
 	}
@@ -205,7 +207,7 @@ func TestSeatbeltCommandWrapsArgvAndCleansUpProfile(t *testing.T) {
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("profile mode = %v, want 0600", info.Mode().Perm())
 	}
-	cleanup()
+	sc.Cleanup()
 	if _, err := os.Stat(profilePath); !os.IsNotExist(err) {
 		t.Fatalf("profile still exists after cleanup: %v", err)
 	}
