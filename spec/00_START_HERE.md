@@ -221,6 +221,18 @@ The branch workflow that backs this invariant — trunk-based development on a s
 
 ## Document map
 
+The user-facing tier lives outside `spec/` (`AD-8`, shipped 2026-07-05):
+
+- `../ARCHITECTURE.md` (repo root) — the human "explanation" tier bridging the README and this
+  corpus: the managed-physical-namespace decision, the Workspace Passport promise, the two-plane
+  zero-knowledge hub and its carriers, compaction/snapshot bootstrap, device trust, agent
+  workspaces, and what is deliberately not built. Each section links back here for depth.
+- `../docs/install.md`, `../docs/quickstart.md`, `../docs/self-hosting.md` — task-oriented user
+  guides (all install paths; the first-run loop + pairing + agent loop; choosing and operating a
+  hub). `../docs/audits/` holds the audit archive and open backlog.
+
+The design corpus:
+
 - `01_ARCHITECTURE_DECISION.md` — final architecture choice and rejected alternatives.
 - `02_PRODUCT_REQUIREMENTS.md` — product scope, personas, invariants, success metrics.
 - `03_SYSTEM_ARCHITECTURE.md` — components, data flows, daemon, hub, adapters.

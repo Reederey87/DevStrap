@@ -31,6 +31,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — docs: human ARCHITECTURE.md + user-facing docs/ tier (AD-8)
+
+Changed:
+- **New `ARCHITECTURE.md`** (repo root) — the human "explanation" tier bridging the README and the `spec/` corpus: the managed-physical-namespace decision (real folders, StrapFS deferred), the Workspace Passport eager-materialization promise, the two-plane zero-knowledge hub (signed HLC event log + content-addressed encrypted blobs; envelope encryption; git/folder/R2 carriers), compaction + snapshot bootstrap, device trust + key custody, agent workspaces (fresh worktrees, recorded base SHA, guardrails + macOS Seatbelt sandbox), and what is deliberately not built (daemon, StrapFS, HTTP/SSE relay). One ASCII component sketch; every section ends with a `Depth: spec/XX_….md` pointer.
+- **New `docs/` user tier** — `docs/install.md` (all install paths: Homebrew cask incl. quarantine-strip/unsigned note, `curl|sh`, release binary + checksums, `go install …@main`, source; requirements), `docs/quickstart.md` (the zero-infra first-run loop init → hub init → scan → sync → open, plus pairing a second device and the agent loop), `docs/self-hosting.md` (choosing/operating a hub: git/folder/R2 carriers, `hub compact`/`gc`/`migrate-events`, the zero-knowledge property). `docs/audits/` (audit archive) already existed.
+- **`README.md` slimmed, not gutted** — Install keeps the two happy paths (cask + `curl|sh`) and links `docs/install.md`; Quickstart keeps the 8-line default loop and links `docs/quickstart.md` + `docs/self-hosting.md` (the long Scaling-up and Pair-a-second-device blocks moved into `docs/`); the Architecture section links `ARCHITECTURE.md` first then `spec/`; a new **Documentation** pointer block (+ ToC entry) points at docs/ for users, ARCHITECTURE.md for the big picture, spec/ for depth.
+- `spec/00_START_HERE.md` document map — a user-facing-tier preamble points at `../ARCHITECTURE.md` and the three `../docs/*.md` guides above the design-corpus list.
+- `spec/14_MVP_ROADMAP_AND_BACKLOG.md` — the AD-8 direction bullet marks the docs-tier and `ARCHITECTURE.md` goals **SHIPPED 2026-07-05**.
+
+Validated:
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOCACHE=/tmp/devstrap-gocache go test -race ./...` (command-doc drift test unaffected — no command inventory changed); every relative link in the new files resolves to a real path.
+
+Follow-ups:
+- The remaining AD-8 workstream items (fork-PR advisory gate, GitHub Discussions + good-first-issue labels, `AGENTS.md` reframe, second maintainer) stay open.
+
 ## 2026-07-05 — feat(ci): make the spec-drift/work-log gate advisory on fork PRs (AD-8, B1)
 
 Changed:
