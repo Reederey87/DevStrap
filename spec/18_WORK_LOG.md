@@ -31,6 +31,19 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — chore: v0.1.1 released — supply-chain verification proven live (P4-SEC-05 / P4-QUAL-05)
+
+Changed:
+- **v0.1.1 is live** (release execution, recorded here; the shipped pipeline landed in PRs #115/#117/#119). Flow: `v0.1.1-rc.1` on `eb73e94` ran the new signing/SBOM/provenance pipeline end-to-end (SLSA `provenance` job's first live run); the full verification set passed against the published rc assets — `shasum -c` 4/4 OK, `cosign verify-blob --bundle checksums.txt.sigstore.json` → `Verified OK` at the exact documented workflow identity, `slsa-verifier verify-artifact` → PASSED on all four tarballs, SBOMs valid SPDX-2.3, binary smoke green, tap untouched by the rc (`skip_upload: auto`). `v0.1.1` was then promoted on the SAME commit (second live proof of the `GORELEASER_CURRENT_TAG` pin): tap got exactly ONE cask commit, stable-asset cosign/SLSA verification re-passed at the `v0.1.1` identity/tag, and `brew upgrade` moved 0.1.0 → 0.1.1 cleanly.
+- `docs/audits/README.md`: `P4-QUAL-05` moved to *Recently shipped* (SBOM + provenance shipped AND live-verified); `P4-SEC-05` narrowed to notarization-only with the live-verification evidence and the 2026-09-01 Homebrew deadline.
+- `spec/14_MVP_ROADMAP_AND_BACKLOG.md`: the code-signing backlog row records the live verification; only Apple Developer ID + notarization remains.
+
+Validated:
+- The verification transcript above, executed against the real GitHub releases. `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+- Apple Developer enrollment → set the five `MACOS_*` secrets (all at once) → rc + `spctl` verify → remove the cask quarantine-strip hook → close `P4-SEC-05`.
+
 ## 2026-07-05 — feat(release): dormant Apple notarization config + enrollment runbook (P4-SEC-05 remainder)
 
 Changed:
