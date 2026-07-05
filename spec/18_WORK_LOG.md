@@ -31,6 +31,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — test(git): load-robust margins for the terminal-timeout tests
+
+Changed:
+- `internal/git/git_test.go`: `TestCloneTimeoutIsTerminalAndDoesNotRetryOrWipe` flaked twice under full-suite `go test -race ./...` load (passes in isolation and CI), and a delegated verification run reproduced it on an UNCHANGED tree with a second failure mode — the 500ms transfer deadline killed the fake git before its `echo attempt` marker ever ran (`open …/count: no such file or directory`). Two robustness fixes across the family (`TestCloneTimeoutIsTerminalAndDoesNotRetryOrWipe`, `TestFetchTimeoutIsTerminalAndDoesNotRetry`, `TestLFSPullTimeoutIsTerminalAndDoesNotRetry`, `TestPushBranchTimeoutIsTerminalWithHint`): the fakes now `exec sleep 5` against the 500ms deadline (10x margin instead of 2x; a killed child still returns at the deadline, so tests are not slower), and `attemptCount` treats a missing marker file as zero with the assertions relaxed from `== 1` to `<= 1` — the pinned property is "a terminal timeout never RETRIES (and never wipes the destination)", which a pre-echo kill satisfies. The inverse test (`TestCloneUsesLongTimeoutInsteadOfShortTimeout`) raises `LongTimeout` 2s→30s so machine load cannot stretch the 0.2s success path past the deadline and flip its premise.
+- Assessed and rejected: exposing `exec.Cmd`'s hardcoded 10s `WaitDelay` (`internal/git/git.go`) as a `Runner` knob — irrelevant to this flake, since `exec sleep` leaves no grandchild holding the output pipe.
+- `spec/16_TEST_PLAN.md`: the `P6-GIT-01` row now states the at-most-one-attempt form and the load-robust margins.
+- `docs/audits/README.md` unchanged (test housekeeping; no audit finding).
+
+Validated:
+- `gofmt -l cmd internal` (clean); `GOCACHE=/tmp/devstrap-gocache go test -race -count=20 ./internal/git/`; `GOCACHE=/tmp/devstrap-gocache go test -race ./...`; `go run ./cmd/spec-drift --base origin/main --head HEAD` (post-commit).
+
+Follow-ups:
+- None
+
 ## 2026-07-04 — fix(hub): userinfo-strip the echoed hub value in hub init's conflict error (review P3)
 
 Changed:
