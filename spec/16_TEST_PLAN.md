@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-03
+last_reviewed: 2026-07-05
 tracks_code: [cmd/**, internal/**, internal/specdrift/**, .github/**, go.mod, go.sum]
 ---
 # Test Plan
@@ -23,7 +23,7 @@ go test -race ./...
 The Phase 0 suite must cover:
 
 - CI lint/security gate: `.golangci.yml` enables `errcheck`, `gosec`, `govet`, `ineffassign`, `staticcheck`, and `unconvert`; the workflow runs it as a separate Ubuntu job using the official pinned `golangci-lint-action`;
-- CI spec-drift gate: every `spec/*.md` file has `last_reviewed` and `tracks_code` frontmatter; `cmd/spec-drift` fails when changed code/config paths do not touch mapped specs or when code/spec/doc changes omit `spec/18_WORK_LOG.md`. Mapped-spec satisfaction is two-tiered: `tracks_code: [**]` is a work-log catch-all and never satisfies a file owner; when any specific owner exists (for example `internal/cli/**`), one of those specific specs must change; broad package globs (`cmd/**`, `internal/**`) satisfy only files with no more specific owner. The release/distribution tier (`.goreleaser.yaml`, `scripts/**`) is work-log-gated too (`TestReleaseTierFilesRequireWorkLog`).
+- CI spec-drift gate: every `spec/*.md` file has `last_reviewed` and `tracks_code` frontmatter; `cmd/spec-drift` fails when changed code/config paths do not touch mapped specs or when code/spec/doc changes omit `spec/18_WORK_LOG.md`. Mapped-spec satisfaction is two-tiered: `tracks_code: [**]` is a work-log catch-all and never satisfies a file owner; when any specific owner exists (for example `internal/cli/**`), one of those specific specs must change; broad package globs (`cmd/**`, `internal/**`) satisfy only files with no more specific owner. The release/distribution tier (`.goreleaser.yaml`, `scripts/**`) is work-log-gated too (`TestReleaseTierFilesRequireWorkLog`). The gate is **advisory on fork PRs** (AD-8, 2026-07-05): `cmd/spec-drift --advisory` and the library entry point `specdrift.PrintReport` downgrade findings to GitHub Actions `::warning::` annotations and exit 0 instead of 1; strict mode (the default, used for same-repo PRs and pushes to `main`) is unchanged (`TestStrictModeUnchanged`, `TestAdvisoryModeExitsCleanWithWarnings`). `.github/workflows/ci.yml` flips `--advisory` on only when `github.event.pull_request.head.repo.full_name != github.repository`.
 - SQLite open path: foreign keys enabled and asserted, startup `PRAGMA foreign_key_check`, non-zero busy timeout, single-writer pool, `state.db` mode `0600`;
 - migrations: idempotent `Migrate`, schema version, required tables, generated `ws_` workspace id persistence, singleton workspace enforcement, `PRAGMA quick_check`, `PRAGMA foreign_key_check`, fixed-width UTC nanosecond timestamp formatting, deterministic same-timestamp worktree listing, and an EQP assertion that `ListProjects` uses `idx_namespace_active`;
 - uninitialized state detection uses explicit schema-table checks and returns the friendly `run devstrap init` hint for summary, device, and project reads;

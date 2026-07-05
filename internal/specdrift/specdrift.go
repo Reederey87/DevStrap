@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path"
@@ -38,6 +39,43 @@ type Report struct {
 
 func (r Report) OK() bool {
 	return len(r.Findings) == 0
+}
+
+// PrintReport renders report for CLI output and reports whether the caller
+// should exit non-zero. The analysis behind report is identical regardless of
+// advisory; advisory only changes how findings are presented, since fork PR
+// contributors aren't expected to close out spec/work-log bookkeeping
+// themselves — the maintainer does that at merge (AD-8).
+//
+// Strict mode (advisory false) is byte-identical to the pre-advisory
+// behavior: a passing report prints a one-line summary to stdout, and a
+// failing report prints "spec drift check failed:" plus each finding to
+// stderr and asks the caller to exit 1.
+//
+// Advisory mode never asks for a non-zero exit. A passing report prints the
+// same one-line summary. A report with findings prints one GitHub Actions
+// "::warning::" annotation per finding to stdout, so each finding surfaces in
+// the Actions UI, followed by the same human-readable finding list.
+func PrintReport(stdout, stderr io.Writer, report Report, advisory bool) (exitNonZero bool) {
+	if report.OK() {
+		_, _ = fmt.Fprintf(stdout, "spec drift check passed: %d specs, %d changed files\n", len(report.Specs), len(report.ChangedFiles))
+		return false
+	}
+	if advisory {
+		for _, finding := range report.Findings {
+			_, _ = fmt.Fprintf(stdout, "::warning::spec-drift (advisory on fork PRs): %s\n", finding)
+		}
+		_, _ = fmt.Fprintln(stdout, "spec drift check found issues (advisory on fork PRs, not blocking):")
+		for _, finding := range report.Findings {
+			_, _ = fmt.Fprintf(stdout, "- %s\n", finding)
+		}
+		return false
+	}
+	_, _ = fmt.Fprintln(stderr, "spec drift check failed:")
+	for _, finding := range report.Findings {
+		_, _ = fmt.Fprintf(stderr, "- %s\n", finding)
+	}
+	return true
 }
 
 func Check(ctx context.Context, opts Options) (Report, error) {

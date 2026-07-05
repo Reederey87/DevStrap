@@ -13,9 +13,11 @@ func main() {
 	var base string
 	var head string
 	var repo string
+	var advisory bool
 	flag.StringVar(&base, "base", "origin/main", "base ref for changed-file detection")
 	flag.StringVar(&head, "head", "HEAD", "head ref for changed-file detection")
 	flag.StringVar(&repo, "repo", ".", "repository root")
+	flag.BoolVar(&advisory, "advisory", false, "report findings as GitHub Actions warnings and exit 0 (fork PRs, AD-8)")
 	flag.Parse()
 
 	report, err := specdrift.Check(context.Background(), specdrift.Options{
@@ -28,13 +30,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "spec drift check failed: %v\n", err)
 		os.Exit(1)
 	}
-	if report.OK() {
-		fmt.Printf("spec drift check passed: %d specs, %d changed files\n", len(report.Specs), len(report.ChangedFiles))
-		return
+	if specdrift.PrintReport(os.Stdout, os.Stderr, report, advisory) {
+		os.Exit(1)
 	}
-	fmt.Fprintln(os.Stderr, "spec drift check failed:")
-	for _, finding := range report.Findings {
-		fmt.Fprintf(os.Stderr, "- %s\n", finding)
-	}
-	os.Exit(1)
 }

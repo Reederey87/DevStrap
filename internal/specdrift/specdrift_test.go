@@ -1,6 +1,7 @@
 package specdrift
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -225,6 +226,46 @@ func TestLoadSpecsRequiresClosingFrontmatterDelimiter(t *testing.T) {
 	}
 	if len(findings) != 1 || !strings.Contains(findings[0], "missing closing YAML frontmatter delimiter") {
 		t.Fatalf("findings = %v, want missing closing delimiter", findings)
+	}
+}
+
+func TestAdvisoryModeExitsCleanWithWarnings(t *testing.T) {
+	// AD-8: fork PRs get advisory mode — findings surface as GitHub Actions
+	// warning annotations but never fail the job.
+	report := Report{Findings: []string{"finding one", "finding two"}}
+	var stdout, stderr bytes.Buffer
+
+	if exitNonZero := PrintReport(&stdout, &stderr, report, true); exitNonZero {
+		t.Fatal("advisory mode must not request a non-zero exit")
+	}
+	out := stdout.String()
+	for _, finding := range report.Findings {
+		want := "::warning::spec-drift (advisory on fork PRs): " + finding
+		if !strings.Contains(out, want) {
+			t.Fatalf("stdout = %q, want warning annotation %q", out, want)
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("advisory mode wrote to stderr: %q", stderr.String())
+	}
+}
+
+func TestStrictModeUnchanged(t *testing.T) {
+	// Same finding set as TestAdvisoryModeExitsCleanWithWarnings, but strict
+	// mode must still fail with the pre-advisory message text and exit
+	// request.
+	report := Report{Findings: []string{"finding one"}}
+	var stdout, stderr bytes.Buffer
+
+	if exitNonZero := PrintReport(&stdout, &stderr, report, false); !exitNonZero {
+		t.Fatal("strict mode with findings must request a non-zero exit")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("strict mode wrote to stdout: %q", stdout.String())
+	}
+	want := "spec drift check failed:\n- finding one\n"
+	if stderr.String() != want {
+		t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 	}
 }
 

@@ -13,6 +13,22 @@ By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 - CODEOWNERS is advisory while DevStrap is solo-maintained. It should still request relevant review, but 1 approving review plus required CODEOWNERS review are not branch-gated until a second active maintainer with write access exists.
 - Do not commit directly to `main`. A maintainer reviews external-contributor PRs and squash-merges once CI is green; maintainer-authored PRs may be squash-merged by the maintainer after green CI. The head branch is deleted automatically.
 
+## Spec Drift and the Work Log
+
+Code, spec, and docs changes normally require a newest-first entry at the top
+of `spec/18_WORK_LOG.md`, and a change under `cmd/**` or `internal/**` usually
+needs its owning `spec/*.md` file updated too — `go run ./cmd/spec-drift`
+checks both and CI enforces it.
+
+**External (fork) PRs run this gate in advisory mode**: missing spec/work-log
+updates surface as CI warnings, not failures. You're welcome to add the
+work-log entry and spec updates yourself, but you don't have to — the
+maintainer completes that bookkeeping at merge. Small fixes (typos, comment
+corrections, small bug fixes) need no spec or work-log changes at all on fork
+PRs.
+
+Maintainer-authored PRs and pushes to `main` keep the gate blocking.
+
 ## Local Checks
 
 Run before handoff:

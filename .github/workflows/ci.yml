@@ -33,7 +33,11 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Check spec drift
-        run: go run ./cmd/spec-drift --base origin/main --head HEAD
+        # AD-8: fork PRs get advisory mode — findings surface as warning
+        # annotations instead of failing the job, since the maintainer
+        # completes work-log/ledger bookkeeping at merge. Same-repo PRs and
+        # pushes (including maintainer-authored PRs) stay blocking.
+        run: go run ./cmd/spec-drift --base origin/main --head HEAD ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '--advisory' || '' }}
 
   lint:
     name: Go lint
