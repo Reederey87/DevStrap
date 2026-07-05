@@ -31,6 +31,30 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — feat(agent): tighter read confinement for the OS sandbox (P4-GIT-03 slice 6, COMPLETES P4-GIT-03)
+
+Changed:
+- `internal/platform/sandbox.go`: `SandboxSpec` gains `ReadConfine bool` + `ReadAllowExtra []string`; new `ReadConfineEnforcement` grade + optional `SandboxReadConfinement` interface (kept separate from `SandboxCapabilities` so adding it breaks no implementers).
+- `internal/platform/sandbox_read_confine.go` (new, build-tag-free): `readConfineRoots(spec)` — the worktree/tmp, the running OS's toolchain/system roots (per-OS tables), the `$HOME` build caches (`.cache`, `go`, `.cargo`, …; credential dirs deliberately excluded), and absolute `ReadAllowExtra`, deduped.
+- Backends: the Seatbelt profile denies all reads, allows `file-read-metadata` globally (stat/traversal), re-allows the roots, and keeps the credential denies LAST (SBPL last-match-wins) so a credential inside an allowed root stays denied; bubblewrap swaps `--ro-bind / /` for enumerated `--ro-bind-try <root>` and skips the now-subsumed credential masks; Landlock restricts its `RODirs` grant to the roots — which gives the additive-allow fallback a credential-read boundary it otherwise lacks. All three implement `ReadConfineEnforcement() == ReadConfineEnforced`; the Linux chooser delegates.
+- `internal/cli/agent.go`: `--read-confine auto|on|off` (env `DEVSTRAP_SANDBOX_READ_CONFINE`, default `auto` = on for `readonly` only) + repeatable `--read-allow <abs>`; `resolveAgentSandbox` validates the mode up front (typo fails closed), then honors it only when the backend enforces it — an explicit `on` or `require` refuses to launch otherwise, an auto-derived request warns.
+
+Key decisions:
+- bwrap uses enumerated `--ro-bind-try` roots rather than composing Landlock inside bwrap (the plan's alternative): simpler, debuggable, and it makes `require` satisfiable on any backend without a Landlock-ABI dependency. `--ro-bind-try` never fails on an absent root, sidestepping the enumerate-and-hard-fail trap.
+- Credential masks are omitted under read confinement (every credential path is outside the allow-list, so read confinement subsumes them; their parents may not even exist in the confined namespace).
+- Default-on only for `readonly` — the profile already meant to be strictly read-scoped; extending to cautious/guarded waits until telemetry proves the allow-list survives real toolchains.
+- A global `(allow file-read-metadata)` is a deliberate, documented path-existence leak; the alternative breaks nearly every tool that stats `$HOME`.
+
+Tests:
+- All-platform: `TestReadConfineRoots`, `TestSBPLProfileReadConfineOrdering` (+ `TestSBPLProfileReadConfineOffIsUnchanged` keeps the non-confined profile byte-identical), `TestBwrapArgsReadConfineEnumeratesRootsAndSkipsMasks`, `TestResolveAgentSandboxReadConfineMatrix`.
+- Linux e2e (`DEVSTRAP_SANDBOX_E2E=1`, verified in Docker on kernel 6.12): read confinement kernel-denies a credential read that is allowed without it, while a worktree read still works and the shim re-exec succeeds (test-binary dir added via `ReadAllowExtra`).
+
+Validated:
+- `gofmt`; `go build ./...`; `GOOS=linux go build ./...` + vet; `golangci-lint run` 0 issues; `go test ./...` all ok; `spec-drift --base origin/main` passes; Docker Landlock+read-confine e2e green.
+
+Follow-ups:
+- The `P4-GIT-03` named trio (seccomp, `sandbox.violation` telemetry, tighter read confinement) is COMPLETE. Remaining OS-sandbox direction: containerization (spec/14), Linux runtime denial detection, macOS `mach-lookup` tightening — separate future work, not `P4-GIT-03` remainders.
+
 ## 2026-07-05 — feat(agent): sandbox.violation telemetry (P4-GIT-03 slice 5)
 
 Changed:

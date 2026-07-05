@@ -32,6 +32,9 @@ var sandboxBackend = func() platform.Sandbox { return platform.Detect().Sandbox 
 // weaken the sandbox, mirroring DEVSTRAP_SANDBOX_BACKEND.
 const sandboxSeccompEnv = "DEVSTRAP_SANDBOX_SECCOMP"
 
+// sandboxReadConfineEnv sets the default --read-confine mode (auto|on|off).
+const sandboxReadConfineEnv = "DEVSTRAP_SANDBOX_READ_CONFINE"
+
 // agentSandboxLaunch carries the resolved sandbox decision from flag/policy
 // resolution into runAgentProcess.
 type agentSandboxLaunch struct {
@@ -43,6 +46,8 @@ type agentSandboxLaunch struct {
 	mode         string
 	backendName  string
 	limitations  []string
+	readConfine  bool
+	readAllow    []string
 }
 
 // agentSandboxSpec builds the SandboxSpec for one agent run. The child env
@@ -67,6 +72,8 @@ func agentSandboxSpec(worktreeDir, perRunTmp, logDir string, launch agentSandbox
 		DenySensitiveReads:    true,
 		DenyDangerousSyscalls: launch.denySyscalls,
 		ViolationTag:          sandboxViolationTag(runID),
+		ReadConfine:           launch.readConfine,
+		ReadAllowExtra:        launch.readAllow,
 	}, nil
 }
 
@@ -82,8 +89,8 @@ func agentSandboxSpec(worktreeDir, perRunTmp, logDir string, launch agentSandbox
 // sandbox is off, and combining it with --sandbox require is a config error.
 // readonly/cautious additionally deny the child network access; guarded and
 // ephemeral-ci sandbox the filesystem but keep the network open.
-func resolveAgentSandbox(mode, policy string, stderr io.Writer, devstrapHome string) (agentSandboxLaunch, error) {
-	launch := agentSandboxLaunch{devstrapHome: devstrapHome}
+func resolveAgentSandbox(mode, policy, readConfineMode string, readAllow []string, stderr io.Writer, devstrapHome string) (agentSandboxLaunch, error) {
+	launch := agentSandboxLaunch{devstrapHome: devstrapHome, readAllow: readAllow}
 	launch.mode = mode
 	switch mode {
 	case "auto", "off", "require":
@@ -109,6 +116,13 @@ func resolveAgentSandbox(mode, policy string, stderr io.Writer, devstrapHome str
 	denySyscalls, seccompErr := parseSeccompToggle(os.Getenv(sandboxSeccompEnv))
 	if seccompErr != nil {
 		return launch, seccompErr
+	}
+	// Validate the read-confine mode syntax up front (a typo fails closed like
+	// the seccomp/backend toggles). The boolean want is derived here but only
+	// applied after the backend is known and its capability is checked.
+	readConfineWant, readConfineExplicit, rcErr := parseReadConfineMode(readConfineMode, policy)
+	if rcErr != nil {
+		return launch, rcErr
 	}
 	sb := sandboxBackend()
 	if err := sb.Available(); err != nil {
@@ -160,7 +174,41 @@ func resolveAgentSandbox(mode, policy string, stderr io.Writer, devstrapHome str
 			_, _ = fmt.Fprintf(stderr, "notice: OS sandbox %s active with reduced guarantees: %s\n", sb.Name(), strings.Join(lims, "; "))
 		}
 	}
+	// Read confinement (opt-in): honor it only when the selected backend can
+	// kernel-enforce it. An explicit `--read-confine on` (or `require`) refuses
+	// to launch if the backend cannot — an explicit knob must never silently
+	// no-op; an auto-derived request (readonly policy) degrades to a warning.
+	if readConfineWant {
+		rc, ok := sb.(platform.SandboxReadConfinement)
+		if ok && rc.ReadConfineEnforcement() == platform.ReadConfineEnforced {
+			launch.readConfine = true
+		} else if mode == "require" || readConfineExplicit {
+			return launch, appError{code: exitPolicy, err: fmt.Errorf("read confinement requested but OS sandbox %s cannot enforce it; use --read-confine off or --sandbox off", sb.Name())}
+		} else {
+			_, _ = fmt.Fprintf(stderr, "warning: OS sandbox %s cannot enforce read confinement; the child's reads stay unconfined\n", sb.Name())
+		}
+	}
 	return launch, nil
+}
+
+// parseReadConfineMode validates the --read-confine value and derives whether
+// read confinement is wanted. "auto" (the default) enables it only for the
+// readonly policy — the one profile already meant to be strictly read-scoped;
+// cautious/guarded stay unconfined until telemetry proves the allow-list
+// survives real toolchains. "on"/"off" force it; anything else fails closed.
+// The returned explicit flag is true only for "on", so an explicit request is
+// held to `require`-grade enforcement.
+func parseReadConfineMode(mode, policy string) (want, explicit bool, err error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "auto":
+		return policy == "readonly", false, nil
+	case "on":
+		return true, true, nil
+	case "off":
+		return false, false, nil
+	default:
+		return false, false, appError{code: exitInvalidConfig, err: fmt.Errorf("invalid %s=%q (want auto, on, or off)", sandboxReadConfineEnv, mode)}
+	}
 }
 
 func sandboxViolationTag(runID string) string {
@@ -196,6 +244,8 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var commandFlag string
 	var policy string
 	var sandboxMode string
+	var readConfineMode string
+	var readAllow []string
 	cmd := &cobra.Command{
 		Use:   "run <path> [-- command [args...]]",
 		Short: "Run a generic agent command in a fresh worktree",
@@ -220,7 +270,7 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// `--sandbox require` on an unsupported host fails cheaply with
 			// no orphan worktree/DB row to clean up.
 			sandboxMode = strings.ToLower(strings.TrimSpace(sandboxMode))
-			sandboxLaunch, err := resolveAgentSandbox(sandboxMode, policy, cmd.ErrOrStderr(), opts.paths().Home)
+			sandboxLaunch, err := resolveAgentSandbox(sandboxMode, policy, readConfineMode, readAllow, cmd.ErrOrStderr(), opts.paths().Home)
 			if err != nil {
 				return err
 			}
@@ -307,6 +357,8 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&commandFlag, "command", "", "generic command to run, split on whitespace; args after -- are preferred")
 	cmd.Flags().StringVar(&policy, "policy", "guarded", "agent command policy: readonly, cautious, guarded, or yolo-local (argv/file checks are advisory; combine with the OS sandbox for real confinement)")
 	cmd.Flags().StringVar(&sandboxMode, "sandbox", defaultSandboxMode(), "OS sandbox mode: auto (sandbox when the host supports it; macOS Seatbelt, Linux bubblewrap with a landlock fallback — force one via DEVSTRAP_SANDBOX_BACKEND), require (refuse to run unsandboxed), or off (env: DEVSTRAP_SANDBOX). On Linux the sandbox also installs a seccomp syscall denylist; DEVSTRAP_SANDBOX_SECCOMP=off disables it")
+	cmd.Flags().StringVar(&readConfineMode, "read-confine", defaultReadConfineMode(), "restrict the child's reads to the worktree/tmp, OS toolchain roots, and $HOME build caches instead of the whole disk: auto (on for --policy readonly only), on, or off (env: DEVSTRAP_SANDBOX_READ_CONFINE). Add roots with --read-allow")
+	cmd.Flags().StringArrayVar(&readAllow, "read-allow", nil, "additional absolute path to keep readable under --read-confine (repeatable)")
 	return cmd
 }
 
@@ -329,6 +381,17 @@ func parseSeccompToggle(v string) (bool, error) {
 // explicit flag still wins because cobra parses it over the default.
 func defaultSandboxMode() string {
 	if v := strings.ToLower(strings.TrimSpace(os.Getenv("DEVSTRAP_SANDBOX"))); v != "" {
+		return v
+	}
+	return "auto"
+}
+
+// defaultReadConfineMode lets DEVSTRAP_SANDBOX_READ_CONFINE set the
+// --read-confine default; the explicit flag still wins. Validation happens in
+// parseReadConfineMode, so a bad env value surfaces the same fail-closed error
+// as a bad flag.
+func defaultReadConfineMode() string {
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv(sandboxReadConfineEnv))); v != "" {
 		return v
 	}
 	return "auto"

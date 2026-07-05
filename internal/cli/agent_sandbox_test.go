@@ -25,6 +25,22 @@ func (f fakeSandbox) Command(_ context.Context, _ platform.SandboxSpec, argv []s
 	return platform.SandboxCommand{Argv: append([]string{"fake-sandbox-exec"}, argv...), Cleanup: func() {}}, nil
 }
 
+// The fake enforces read confinement like every real backend, so the readonly
+// policy's auto read-confine resolves cleanly in the matrix tests.
+func (f fakeSandbox) ReadConfineEnforcement() platform.ReadConfineEnforcement {
+	return platform.ReadConfineEnforced
+}
+
+// fakeNoReadConfineSandbox is a backend that CANNOT read-confine, for the
+// refuse/warn path (a hypothetical future degraded adapter).
+type fakeNoReadConfineSandbox struct{ availableErr error }
+
+func (f fakeNoReadConfineSandbox) Name() string     { return "fake-no-readconfine" }
+func (f fakeNoReadConfineSandbox) Available() error { return f.availableErr }
+func (f fakeNoReadConfineSandbox) Command(_ context.Context, _ platform.SandboxSpec, argv []string) (platform.SandboxCommand, error) {
+	return platform.SandboxCommand{Argv: append([]string{"fake-exec"}, argv...), Cleanup: func() {}}, nil
+}
+
 type fakeCapSandbox struct {
 	fakeSandbox
 	limitations []string
@@ -135,7 +151,7 @@ func TestResolveAgentSandboxMatrix(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			withFakeSandbox(t, tc.sandbox)
 			var stderr bytes.Buffer
-			launch, err := resolveAgentSandbox(tc.mode, tc.policy, &stderr, "/tmp/devstrap-home")
+			launch, err := resolveAgentSandbox(tc.mode, tc.policy, "auto", nil, &stderr, "/tmp/devstrap-home")
 			if tc.wantErrCode != 0 {
 				var app appError
 				if !errors.As(err, &app) || app.code != tc.wantErrCode {
@@ -298,7 +314,7 @@ func TestResolveAgentSandboxCapabilities(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			withFakeSandbox(t, tc.sandbox)
 			var stderr bytes.Buffer
-			launch, err := resolveAgentSandbox(tc.mode, tc.policy, &stderr, "/tmp/devstrap-home")
+			launch, err := resolveAgentSandbox(tc.mode, tc.policy, "auto", nil, &stderr, "/tmp/devstrap-home")
 			if tc.wantErrCode != 0 {
 				var app appError
 				if !errors.As(err, &app) || app.code != tc.wantErrCode {
@@ -440,7 +456,7 @@ func TestResolveAgentSandboxInvalidBackendFailsClosed(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			withFakeSandbox(t, fakeSandbox{availableErr: invalid})
 			var stderr bytes.Buffer
-			_, err := resolveAgentSandbox(mode, "guarded", &stderr, "/tmp/devstrap-home")
+			_, err := resolveAgentSandbox(mode, "guarded", "auto", nil, &stderr, "/tmp/devstrap-home")
 			var app appError
 			if !errors.As(err, &app) || app.code != exitInvalidConfig {
 				t.Fatalf("mode %s: err = %v, want appError code %d", mode, err, exitInvalidConfig)
@@ -465,7 +481,7 @@ func TestResolveAgentSandboxInvalidSeccompToggleFailsClosed(t *testing.T) {
 			withFakeSandbox(t, unavailable)
 			t.Setenv("DEVSTRAP_SANDBOX_SECCOMP", "yes-please")
 			var stderr bytes.Buffer
-			_, err := resolveAgentSandbox(mode, "guarded", &stderr, "/tmp/devstrap-home")
+			_, err := resolveAgentSandbox(mode, "guarded", "auto", nil, &stderr, "/tmp/devstrap-home")
 			var app appError
 			if !errors.As(err, &app) || app.code != exitInvalidConfig {
 				t.Fatalf("mode %s: err = %v, want appError code %d", mode, err, exitInvalidConfig)
@@ -478,8 +494,53 @@ func TestResolveAgentSandboxInvalidSeccompToggleFailsClosed(t *testing.T) {
 	t.Run("off ignores the toggle", func(t *testing.T) {
 		withFakeSandbox(t, unavailable)
 		t.Setenv("DEVSTRAP_SANDBOX_SECCOMP", "yes-please")
-		if _, err := resolveAgentSandbox("off", "guarded", &bytes.Buffer{}, "/tmp/devstrap-home"); err != nil {
+		if _, err := resolveAgentSandbox("off", "guarded", "auto", nil, &bytes.Buffer{}, "/tmp/devstrap-home"); err != nil {
 			t.Fatalf("off mode read the seccomp toggle: %v", err)
 		}
 	})
+}
+
+func TestResolveAgentSandboxReadConfineMatrix(t *testing.T) {
+	cases := []struct {
+		name        string
+		mode        string
+		policy      string
+		readConfine string
+		sandbox     platform.Sandbox
+		wantConfine bool
+		wantErr     bool
+		wantWarn    bool
+	}{
+		{name: "auto+readonly enables", mode: "auto", policy: "readonly", readConfine: "auto", sandbox: fakeSandbox{}, wantConfine: true},
+		{name: "auto+guarded stays off", mode: "auto", policy: "guarded", readConfine: "auto", sandbox: fakeSandbox{}, wantConfine: false},
+		{name: "explicit on with guarded", mode: "auto", policy: "guarded", readConfine: "on", sandbox: fakeSandbox{}, wantConfine: true},
+		{name: "explicit off with readonly", mode: "auto", policy: "readonly", readConfine: "off", sandbox: fakeSandbox{}, wantConfine: false},
+		{name: "typo fails closed", mode: "auto", policy: "guarded", readConfine: "sometimes", sandbox: fakeSandbox{}, wantErr: true},
+		{name: "explicit on but backend cannot enforce refuses", mode: "auto", policy: "guarded", readConfine: "on", sandbox: fakeNoReadConfineSandbox{}, wantErr: true},
+		{name: "require+readonly but backend cannot enforce refuses", mode: "require", policy: "readonly", readConfine: "auto", sandbox: fakeNoReadConfineSandbox{}, wantErr: true},
+		{name: "auto+readonly backend cannot enforce warns", mode: "auto", policy: "readonly", readConfine: "auto", sandbox: fakeNoReadConfineSandbox{}, wantConfine: false, wantWarn: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withFakeSandbox(t, tc.sandbox)
+			var stderr bytes.Buffer
+			launch, err := resolveAgentSandbox(tc.mode, tc.policy, tc.readConfine, nil, &stderr, "/tmp/devstrap-home")
+			if tc.wantErr {
+				var app appError
+				if !errors.As(err, &app) {
+					t.Fatalf("err = %v, want appError", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if launch.readConfine != tc.wantConfine {
+				t.Fatalf("readConfine = %v, want %v", launch.readConfine, tc.wantConfine)
+			}
+			if tc.wantWarn && !strings.Contains(stderr.String(), "cannot enforce read confinement") {
+				t.Fatalf("expected a read-confine warning, got %q", stderr.String())
+			}
+		})
+	}
 }

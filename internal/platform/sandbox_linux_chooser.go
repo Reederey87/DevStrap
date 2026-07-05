@@ -129,3 +129,18 @@ func (LinuxSandbox) NetworkDenyEnforcement() NetworkEnforcement {
 	}
 	return NetworkDenyNone
 }
+
+// ReadConfineEnforcement implements SandboxReadConfinement by delegating to the
+// selected backend: both bubblewrap (`--ro-bind-try` roots) and the Landlock
+// fallback (RODirs restricted to the roots) kernel-enforce read confinement,
+// so either selection enforces it.
+func (LinuxSandbox) ReadConfineEnforcement() ReadConfineEnforcement {
+	sel, err := selectLinuxSandbox()
+	if err != nil {
+		return ReadConfineNone
+	}
+	if rc, ok := sel.sb.(SandboxReadConfinement); ok {
+		return rc.ReadConfineEnforcement()
+	}
+	return ReadConfineNone
+}

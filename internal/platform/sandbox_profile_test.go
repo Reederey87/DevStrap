@@ -139,6 +139,47 @@ func TestSBPLQuoteEscapesQuotesAndBackslashes(t *testing.T) {
 	}
 }
 
+func TestSBPLProfileReadConfineOrdering(t *testing.T) {
+	spec := SandboxSpec{
+		WorktreeDir:        "/work/tree",
+		TmpDir:             "/tmp/run",
+		UserHome:           "/home/dev",
+		DenySensitiveReads: true,
+		ReadConfine:        true,
+	}
+	profile := sbplProfile(spec, []string{"/home/dev/.ssh"}, []string{"/home/dev/.netrc"})
+
+	// The read-confine deny-all, the metadata allow, the root allow, and the
+	// credential deny must appear in that order: SBPL is last-match-wins, so the
+	// credential deny MUST come after the root allow or a credential inside an
+	// allowed root would be readable.
+	denyAll := strings.Index(profile, "(deny file-read*)")
+	metaAllow := strings.Index(profile, "(allow file-read-metadata)")
+	rootAllow := strings.Index(profile, "(allow file-read*\n")
+	credDeny := strings.Index(profile, "(deny file-read*\n  (subpath \"/home/dev/.ssh\")")
+	for name, idx := range map[string]int{"deny-all": denyAll, "meta-allow": metaAllow, "root-allow": rootAllow, "cred-deny": credDeny} {
+		if idx < 0 {
+			t.Fatalf("read-confine profile missing %s block:\n%s", name, profile)
+		}
+	}
+	if denyAll >= metaAllow || metaAllow >= rootAllow || rootAllow >= credDeny {
+		t.Fatalf("read-confine block order wrong (denyAll=%d meta=%d rootAllow=%d credDeny=%d):\n%s", denyAll, metaAllow, rootAllow, credDeny, profile)
+	}
+	if !strings.Contains(profile, "(subpath \"/work/tree\")") {
+		t.Fatalf("worktree not in read-allow roots:\n%s", profile)
+	}
+}
+
+func TestSBPLProfileReadConfineOffIsUnchanged(t *testing.T) {
+	// With ReadConfine unset the profile must not contain any read-confine
+	// block — the non-confined profile stays byte-identical to before.
+	spec := SandboxSpec{WorktreeDir: "/work/tree", TmpDir: "/tmp/run"}
+	profile := sbplProfile(spec, nil, nil)
+	if strings.Contains(profile, "(deny file-read*)") || strings.Contains(profile, "file-read-metadata") {
+		t.Fatalf("non-confined profile leaked a read-confine block:\n%s", profile)
+	}
+}
+
 func TestUnsupportedSandboxReportsUnsupported(t *testing.T) {
 	sb := UnsupportedSandbox{Platform: "plan9"}
 	if err := sb.Available(); err == nil || !strings.Contains(err.Error(), "plan9") {

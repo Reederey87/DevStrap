@@ -24,6 +24,13 @@ type BubblewrapSandbox struct{}
 
 func (BubblewrapSandbox) Name() string { return "bubblewrap" }
 
+// ReadConfineEnforcement implements SandboxReadConfinement: bubblewrap exposes
+// only the read-confinement roots (`--ro-bind-try`) instead of the whole
+// filesystem, so it always kernel-enforces read confinement.
+func (BubblewrapSandbox) ReadConfineEnforcement() ReadConfineEnforcement {
+	return ReadConfineEnforced
+}
+
 type bwrapProbeResult struct {
 	path          string
 	disableUserns bool

@@ -65,6 +65,30 @@ func sbplProfile(spec SandboxSpec, denyReadDirs, denyReadFiles []string) string 
 	b.WriteString("  (regex #\"^/dev/ttys[0-9]+$\")\n")
 	b.WriteString(")\n")
 
+	// Read confinement: deny all reads, re-allow the sanctioned roots, and keep
+	// a global metadata allow so stat/traversal/symlink-resolution still works
+	// (a deliberate, documented path-existence leak — the alternative breaks
+	// nearly every tool). The credential deny block below is emitted AFTER this
+	// and, since SBPL is last-match-wins, out-ranks the root allows, so a
+	// credential path inside an allowed root stays denied. Only emitted when
+	// read confinement is requested; the untagged, non-confined profile is
+	// byte-identical to before.
+	if spec.ReadConfine {
+		if spec.ViolationTag == "" {
+			b.WriteString("(deny file-read*)\n")
+		} else {
+			b.WriteString("(deny file-read*\n")
+			b.WriteString(sbplWithMessage(spec.ViolationTag))
+			b.WriteString(")\n")
+		}
+		b.WriteString("(allow file-read-metadata)\n")
+		b.WriteString("(allow file-read*\n")
+		for _, root := range readConfineRoots(spec) {
+			b.WriteString("  (subpath " + sbplQuote(root) + ")\n")
+		}
+		b.WriteString(")\n")
+	}
+
 	// A bare "(deny file-read*)" with no filter denies ALL reads, so only emit
 	// the block when there is at least one anchor to deny.
 	if spec.DenySensitiveReads && (len(denyReadDirs) > 0 || len(denyReadFiles) > 0) {
