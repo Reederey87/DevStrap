@@ -13,11 +13,12 @@ Once installed, head to [quickstart.md](quickstart.md).
 ## Homebrew (macOS and Linux) — recommended
 
 ```bash
-brew install Reederey87/devstrap/devstrap
+brew install Reederey87/devstrap/devstrap   # equivalently: brew install --cask Reederey87/devstrap/devstrap
 devstrap version
 ```
 
-This installs a Homebrew **cask** from the `Reederey87/devstrap` tap; bash/zsh/fish shell
+This installs a Homebrew **cask** from the `Reederey87/devstrap` tap (the tap-qualified name
+resolves to the cask — the flagless form is what the v0.1.0 release smoke verified); bash/zsh/fish shell
 completions install alongside the binary. The release binaries are **not Apple-notarized yet**,
 so the cask strips the macOS quarantine bit in a documented post-install hook (signing and
 notarization are tracked as future work). Upgrade with `brew upgrade devstrap`.
