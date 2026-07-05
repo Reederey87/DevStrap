@@ -101,8 +101,14 @@ func pathsOverlap(a, b string) bool {
 	if a == b {
 		return true
 	}
-	return strings.HasPrefix(a, b+string(filepath.Separator)) ||
-		strings.HasPrefix(b, a+string(filepath.Separator))
+	sep := string(filepath.Separator)
+	// The filesystem root contains every path, but "/" + sep is "//", which is
+	// never a prefix of a clean absolute path — special-case it so
+	// `--read-allow /` (the ultimate footgun) is caught, not silently allowed.
+	if a == sep || b == sep {
+		return true
+	}
+	return strings.HasPrefix(a, b+sep) || strings.HasPrefix(b, a+sep)
 }
 
 // FirstReadAllowCredentialConflict returns the first --read-allow root that

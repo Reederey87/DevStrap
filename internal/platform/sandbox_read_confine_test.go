@@ -67,6 +67,7 @@ func TestFirstReadAllowCredentialConflict(t *testing.T) {
 		want      string
 	}{
 		{name: "clean extras", readAllow: []string{"/opt/data", "/srv/cache"}, want: ""},
+		{name: "filesystem root overlaps everything", readAllow: []string{"/"}, want: "/"},
 		{name: "exact credential dir", readAllow: []string{"/home/dev/.ssh"}, want: "/home/dev/.ssh"},
 		{name: "ancestor of credentials (whole home)", readAllow: []string{"/home/dev"}, want: "/home/dev"},
 		{name: "inside a credential dir", readAllow: []string{"/home/dev/.ssh/keys"}, want: "/home/dev/.ssh/keys"},

@@ -131,10 +131,15 @@ func resolveAgentSandbox(mode, policy, readConfineMode string, readAllow []strin
 	// review). Resolve the real home here (matching agentSandboxSpec) so the
 	// refusal happens before any worktree/DB row is created.
 	if readConfineWant && len(readAllow) > 0 {
-		if home, homeErr := os.UserHomeDir(); homeErr == nil {
-			if conflict := platform.FirstReadAllowCredentialConflict(home, devstrapHome, readAllow); conflict != "" {
-				return launch, appError{code: exitInvalidConfig, err: fmt.Errorf("--read-allow %q overlaps a protected credential path; read confinement would re-expose it — remove that root", conflict)}
-			}
+		home, homeErr := os.UserHomeDir()
+		if homeErr != nil {
+			// Fail closed: without the real home we cannot prove a --read-allow
+			// root does not re-expose a credential, so refuse rather than skip
+			// the check (CodeRabbit review — the guard must not fail open).
+			return launch, fmt.Errorf("resolve user home for the --read-allow credential check (use --read-confine off to run unconfined): %w", homeErr)
+		}
+		if conflict := platform.FirstReadAllowCredentialConflict(home, devstrapHome, readAllow); conflict != "" {
+			return launch, appError{code: exitInvalidConfig, err: fmt.Errorf("--read-allow %q overlaps a protected credential path; read confinement would re-expose it — remove that root", conflict)}
 		}
 	}
 	sb := sandboxBackend()
