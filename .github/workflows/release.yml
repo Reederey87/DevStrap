@@ -69,3 +69,10 @@ jobs:
           # Fine-grained PAT scoped to Reederey87/homebrew-devstrap (Contents:
           # Read+Write) — the default GITHUB_TOKEN cannot push to another repo.
           HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          # Pin the release to the tag that TRIGGERED this run. Without this,
+          # GoReleaser derives the current tag from `git tag --points-at HEAD`,
+          # and when the documented rc -> stable flow puts two tags on one
+          # commit, git's version sort ranks v0.1.0-rc.1 above v0.1.0 — the
+          # stable run then rebuilds rc artifacts and fails uploading them onto
+          # the existing rc release (observed on the first v0.1.0 attempt).
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}

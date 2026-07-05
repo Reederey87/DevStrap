@@ -49,6 +49,9 @@ binary (check with `devstrap version`).
    git push origin v0.1.0
    ```
    The workflow publishes the full (non-pre-release) GitHub Release **and** pushes the updated cask to the tap.
+   The stable tag may point at the **same commit** as the rc — the workflow pins `GORELEASER_CURRENT_TAG` to the
+   triggering tag, so GoReleaser cannot mistake the co-located rc tag for the current one (git's version sort ranks
+   `v0.1.0-rc.1` above `v0.1.0`, which made the first `v0.1.0` run rebuild rc artifacts and fail on upload).
 5. **If it's not**, fix it on `main` via the normal PR flow, then cut `v0.1.0-rc.2` and repeat.
 
 ## Post-release smoke checklist (stable tags)
