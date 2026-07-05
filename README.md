@@ -156,7 +156,7 @@ devstrap status                                   # 3. see what DevStrap manages
 gh repo create you/devstrap-hub --private         # 4. an empty private repo = the hub
 devstrap hub init git@github.com:you/devstrap-hub.git   # 5. point at it (writes config.yaml)
 devstrap sync                                     # 6. push the map + materialize the tree
-devstrap open work/acme/api --cursor              # 7. the folders are really on disk now
+devstrap open <any-managed-path> --cursor         # 7. the folders are really on disk now
 devstrap run-loop                                 # 8. optional: converge on an interval, no daemon
 ```
 

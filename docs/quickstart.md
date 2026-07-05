@@ -52,7 +52,7 @@ your existing SSH key / credential helper, and Git runs non-interactively — lo
 
 ```bash
 devstrap sync
-devstrap open work/acme/api --cursor
+devstrap open work/acme/api --cursor   # the repo cloned in step 2 — any managed path works
 ```
 
 `sync` pushes your local namespace events, pulls anything new, and then **eagerly materializes
@@ -72,7 +72,7 @@ devstrap status
 gh repo create you/devstrap-hub --private
 devstrap hub init git@github.com:you/devstrap-hub.git
 devstrap sync
-devstrap open work/acme/api --cursor
+devstrap open <any-managed-path> --cursor   # a path from `devstrap status`
 devstrap run-loop        # optional: scan + sync + materialize on an interval, no daemon
 ```
 
