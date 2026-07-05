@@ -99,6 +99,38 @@ func TestSBPLProfileOmitsOptionalDenies(t *testing.T) {
 	}
 }
 
+func TestSBPLProfileEmbedsViolationTag(t *testing.T) {
+	spec := SandboxSpec{
+		WorktreeDir:        "/wt",
+		TmpDir:             "/tmp/run",
+		DenyNetwork:        true,
+		DenySensitiveReads: true,
+		ViolationTag:       `devstrap-sb-arun_"quoted"`,
+	}
+	profile := sbplProfile(spec, []string{"/Users/dev/.ssh"}, []string{"/Users/dev/.netrc"})
+	wantMessage := `(with message "devstrap-sb-arun_\"quoted\"")`
+	if count := strings.Count(profile, wantMessage); count != 3 {
+		t.Fatalf("message count = %d, want 3 in each deny form:\n%s", count, profile)
+	}
+	for _, want := range []string{
+		"(deny file-write*\n  " + wantMessage + "\n)",
+		"(deny file-read*",
+		"(deny network*\n  " + wantMessage + "\n)",
+	} {
+		if !strings.Contains(profile, want) {
+			t.Fatalf("profile missing %q:\n%s", want, profile)
+		}
+	}
+
+	untagged := sbplProfile(SandboxSpec{WorktreeDir: "/wt", TmpDir: "/tmp", DenyNetwork: true}, nil, nil)
+	if strings.Contains(untagged, "with message") {
+		t.Fatalf("untagged profile contains message clause:\n%s", untagged)
+	}
+	if !strings.Contains(untagged, "(deny file-write*)\n") || !strings.Contains(untagged, "(deny network*)\n") {
+		t.Fatalf("untagged profile changed away from single-line deny forms:\n%s", untagged)
+	}
+}
+
 func TestSBPLQuoteEscapesQuotesAndBackslashes(t *testing.T) {
 	got := sbplQuote(`/tmp/we"ird\path`)
 	want := `"/tmp/we\"ird\\path"`

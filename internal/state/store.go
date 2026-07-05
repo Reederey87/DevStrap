@@ -129,6 +129,10 @@ func timestampNow() string {
 	return formatTimestamp(time.Now())
 }
 
+func TimestampNow() string {
+	return timestampNow()
+}
+
 func formatTimestamp(t time.Time) string {
 	return t.UTC().Format(timestampLayout)
 }
@@ -196,20 +200,23 @@ type Worktree struct {
 }
 
 type AgentRun struct {
-	ID          string `json:"id"`
-	NamespaceID string `json:"namespace_id"`
-	WorktreeID  string `json:"worktree_id,omitempty"`
-	Engine      string `json:"engine"`
-	Task        string `json:"task"`
-	PolicyID    string `json:"policy_id,omitempty"`
-	Status      string `json:"status"`
-	BaseRef     string `json:"base_ref,omitempty"`
-	BaseSHA     string `json:"base_sha,omitempty"`
-	Branch      string `json:"branch,omitempty"`
-	LogPath     string `json:"log_path,omitempty"`
-	DiffSummary string `json:"diff_summary,omitempty"`
-	TestSummary string `json:"test_summary,omitempty"`
-	RunnerPID   int    `json:"runner_pid,omitempty"`
+	ID                 string `json:"id"`
+	NamespaceID        string `json:"namespace_id"`
+	WorktreeID         string `json:"worktree_id,omitempty"`
+	Engine             string `json:"engine"`
+	Task               string `json:"task"`
+	PolicyID           string `json:"policy_id,omitempty"`
+	Status             string `json:"status"`
+	BaseRef            string `json:"base_ref,omitempty"`
+	BaseSHA            string `json:"base_sha,omitempty"`
+	Branch             string `json:"branch,omitempty"`
+	LogPath            string `json:"log_path,omitempty"`
+	DiffSummary        string `json:"diff_summary,omitempty"`
+	TestSummary        string `json:"test_summary,omitempty"`
+	RunnerPID          int    `json:"runner_pid,omitempty"`
+	SandboxBackend     string `json:"sandbox_backend,omitempty"`
+	SandboxMode        string `json:"sandbox_mode,omitempty"`
+	SandboxLimitations string `json:"sandbox_limitations,omitempty"` // JSON array string, "" when none
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -3813,9 +3820,9 @@ func (s *Store) InsertAgentRun(ctx context.Context, run AgentRun) (AgentRun, err
 	}
 	now := timestampNow()
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO agent_runs (id, namespace_id, worktree_id, engine, task, policy_id, status, base_ref, base_sha, branch, log_path, diff_summary, test_summary, runner_pid, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-`, run.ID, run.NamespaceID, nullEmpty(run.WorktreeID), run.Engine, run.Task, nullEmpty(run.PolicyID), run.Status, nullEmpty(run.BaseRef), nullEmpty(run.BaseSHA), nullEmpty(run.Branch), nullEmpty(run.LogPath), nullEmpty(run.DiffSummary), nullEmpty(run.TestSummary), nullZero(int64(run.RunnerPID)), now, now)
+INSERT INTO agent_runs (id, namespace_id, worktree_id, engine, task, policy_id, status, base_ref, base_sha, branch, log_path, diff_summary, test_summary, runner_pid, sandbox_backend, sandbox_mode, sandbox_limitations, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+`, run.ID, run.NamespaceID, nullEmpty(run.WorktreeID), run.Engine, run.Task, nullEmpty(run.PolicyID), run.Status, nullEmpty(run.BaseRef), nullEmpty(run.BaseSHA), nullEmpty(run.Branch), nullEmpty(run.LogPath), nullEmpty(run.DiffSummary), nullEmpty(run.TestSummary), nullZero(int64(run.RunnerPID)), run.SandboxBackend, run.SandboxMode, run.SandboxLimitations, now, now)
 	if err != nil {
 		return AgentRun{}, fmt.Errorf("insert agent run: %w", err)
 	}
@@ -3853,10 +3860,11 @@ func (s *Store) AgentRunByID(ctx context.Context, id string) (AgentRun, error) {
 	err := s.db.QueryRowContext(ctx, `
 SELECT id, namespace_id, COALESCE(worktree_id, ''), engine, task, COALESCE(policy_id, ''), status,
        COALESCE(base_ref, ''), COALESCE(base_sha, ''), COALESCE(branch, ''), COALESCE(log_path, ''),
-       COALESCE(diff_summary, ''), COALESCE(test_summary, ''), COALESCE(runner_pid, 0)
+       COALESCE(diff_summary, ''), COALESCE(test_summary, ''), COALESCE(runner_pid, 0),
+       COALESCE(sandbox_backend, ''), COALESCE(sandbox_mode, ''), COALESCE(sandbox_limitations, '')
 FROM agent_runs
 WHERE id = ?;
-`, id).Scan(&run.ID, &run.NamespaceID, &run.WorktreeID, &run.Engine, &run.Task, &run.PolicyID, &run.Status, &run.BaseRef, &run.BaseSHA, &run.Branch, &run.LogPath, &run.DiffSummary, &run.TestSummary, &run.RunnerPID)
+`, id).Scan(&run.ID, &run.NamespaceID, &run.WorktreeID, &run.Engine, &run.Task, &run.PolicyID, &run.Status, &run.BaseRef, &run.BaseSHA, &run.Branch, &run.LogPath, &run.DiffSummary, &run.TestSummary, &run.RunnerPID, &run.SandboxBackend, &run.SandboxMode, &run.SandboxLimitations)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return AgentRun{}, fmt.Errorf("unknown agent run %q", id)
@@ -3870,7 +3878,8 @@ func (s *Store) ListAgentRuns(ctx context.Context) ([]AgentRun, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, namespace_id, COALESCE(worktree_id, ''), engine, task, COALESCE(policy_id, ''), status,
        COALESCE(base_ref, ''), COALESCE(base_sha, ''), COALESCE(branch, ''), COALESCE(log_path, ''),
-       COALESCE(diff_summary, ''), COALESCE(test_summary, ''), COALESCE(runner_pid, 0)
+       COALESCE(diff_summary, ''), COALESCE(test_summary, ''), COALESCE(runner_pid, 0),
+       COALESCE(sandbox_backend, ''), COALESCE(sandbox_mode, ''), COALESCE(sandbox_limitations, '')
 FROM agent_runs
 ORDER BY created_at DESC, id DESC;
 `)
@@ -3881,7 +3890,7 @@ ORDER BY created_at DESC, id DESC;
 	var runs []AgentRun
 	for rows.Next() {
 		var run AgentRun
-		if err := rows.Scan(&run.ID, &run.NamespaceID, &run.WorktreeID, &run.Engine, &run.Task, &run.PolicyID, &run.Status, &run.BaseRef, &run.BaseSHA, &run.Branch, &run.LogPath, &run.DiffSummary, &run.TestSummary, &run.RunnerPID); err != nil {
+		if err := rows.Scan(&run.ID, &run.NamespaceID, &run.WorktreeID, &run.Engine, &run.Task, &run.PolicyID, &run.Status, &run.BaseRef, &run.BaseSHA, &run.Branch, &run.LogPath, &run.DiffSummary, &run.TestSummary, &run.RunnerPID, &run.SandboxBackend, &run.SandboxMode, &run.SandboxLimitations); err != nil {
 			return nil, fmt.Errorf("scan agent run: %w", err)
 		}
 		runs = append(runs, run)
@@ -3893,7 +3902,8 @@ func (s *Store) RunningAgentRunsWithPID(ctx context.Context) ([]AgentRun, error)
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, namespace_id, COALESCE(worktree_id, ''), engine, task, COALESCE(policy_id, ''), status,
        COALESCE(base_ref, ''), COALESCE(base_sha, ''), COALESCE(branch, ''), COALESCE(log_path, ''),
-       COALESCE(diff_summary, ''), COALESCE(test_summary, ''), COALESCE(runner_pid, 0)
+       COALESCE(diff_summary, ''), COALESCE(test_summary, ''), COALESCE(runner_pid, 0),
+       COALESCE(sandbox_backend, ''), COALESCE(sandbox_mode, ''), COALESCE(sandbox_limitations, '')
 FROM agent_runs
 WHERE status = 'running' AND runner_pid IS NOT NULL
 ORDER BY created_at DESC, id DESC;
@@ -3905,7 +3915,7 @@ ORDER BY created_at DESC, id DESC;
 	var runs []AgentRun
 	for rows.Next() {
 		var run AgentRun
-		if err := rows.Scan(&run.ID, &run.NamespaceID, &run.WorktreeID, &run.Engine, &run.Task, &run.PolicyID, &run.Status, &run.BaseRef, &run.BaseSHA, &run.Branch, &run.LogPath, &run.DiffSummary, &run.TestSummary, &run.RunnerPID); err != nil {
+		if err := rows.Scan(&run.ID, &run.NamespaceID, &run.WorktreeID, &run.Engine, &run.Task, &run.PolicyID, &run.Status, &run.BaseRef, &run.BaseSHA, &run.Branch, &run.LogPath, &run.DiffSummary, &run.TestSummary, &run.RunnerPID, &run.SandboxBackend, &run.SandboxMode, &run.SandboxLimitations); err != nil {
 			return nil, fmt.Errorf("scan running agent run: %w", err)
 		}
 		runs = append(runs, run)
@@ -3944,6 +3954,69 @@ func nullZero(value int64) any {
 		return nil
 	}
 	return value
+}
+
+// SandboxViolation is one kernel denial the OS agent sandbox reported for a
+// run (P4-GIT-03 slice 5). Coordinates + reason only, no secret material — the
+// detail field is scrubbed before persist. Unsigned local visibility, not the
+// signed audit_log.
+type SandboxViolation struct {
+	RunID      string `json:"run_id"`
+	ObservedAt string `json:"observed_at"`
+	Backend    string `json:"backend"`
+	Operation  string `json:"operation"`
+	Path       string `json:"path,omitempty"`
+	Detail     string `json:"detail,omitempty"`
+	Source     string `json:"source"`
+}
+
+// InsertSandboxViolations appends violation rows for a run (best-effort
+// visibility; callers ignore the error path only after logging). Each row's
+// Detail is assumed already scrubbed by the caller.
+func (s *Store) InsertSandboxViolations(ctx context.Context, vs []SandboxViolation) error {
+	if len(vs) == 0 {
+		return nil
+	}
+	// single-writer pool; a simple loop is fine (mirror other multi-insert loops)
+	for _, v := range vs {
+		if _, err := s.db.ExecContext(ctx, `
+INSERT INTO sandbox_violations (run_id, observed_at, backend, operation, path, detail, source)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+`, v.RunID, v.ObservedAt, v.Backend, v.Operation, v.Path, v.Detail, v.Source); err != nil {
+			return fmt.Errorf("insert sandbox violation: %w", err)
+		}
+	}
+	return nil
+}
+
+// SandboxViolationsByRun returns a run's violation rows, oldest first.
+func (s *Store) SandboxViolationsByRun(ctx context.Context, runID string) ([]SandboxViolation, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT run_id, observed_at, backend, operation, COALESCE(path,''), COALESCE(detail,''), source
+FROM sandbox_violations WHERE run_id = ? ORDER BY observed_at ASC, rowid ASC;
+`, runID)
+	if err != nil {
+		return nil, fmt.Errorf("list sandbox violations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []SandboxViolation
+	for rows.Next() {
+		var v SandboxViolation
+		if err := rows.Scan(&v.RunID, &v.ObservedAt, &v.Backend, &v.Operation, &v.Path, &v.Detail, &v.Source); err != nil {
+			return nil, fmt.Errorf("scan sandbox violation: %w", err)
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// CountRunsWithSandboxViolations returns how many distinct runs have >=1 row.
+func (s *Store) CountRunsWithSandboxViolations(ctx context.Context) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT run_id) FROM sandbox_violations;`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count sandbox violations: %w", err)
+	}
+	return n, nil
 }
 
 // SkippedEvent is one durable record of an event EncryptedHub.Pull dropped

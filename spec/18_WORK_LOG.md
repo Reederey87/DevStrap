@@ -31,6 +31,29 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — feat(agent): sandbox.violation telemetry (P4-GIT-03 slice 5)
+
+Changed:
+- `internal/state`: migration `00022_sandbox_telemetry.sql` adds `agent_runs.sandbox_backend`, `sandbox_mode`, `sandbox_limitations`, plus the unsigned local `sandbox_violations` table (coordinates + scrubbed reason fields only). Store APIs now round-trip the sandbox run columns, append/query/count violation rows, and expose `TimestampNow()` so CLI telemetry uses the DB's timestamp layout.
+- `internal/platform`: `SandboxSpec.ViolationTag` lets Seatbelt deny rules embed a per-run `(with message ...)` tag; Seatbelt implements optional `SandboxViolationReporter` by querying `/usr/bin/log show` after the run, and the build-tag-free parser extracts `operation`, `path`, and raw detail from denial lines.
+- `internal/cli`: `agent run` records backend/mode/limitations, tags macOS Seatbelt profiles, collects violations post-run best-effort, scrubs path/detail with `redact.Scrub`, emits capped `slog.Warn("sandbox.violation", ...)` lines, and persists every row. `agent show` prints sandbox metadata and violation rows; `--json` wraps the run with a `violations` array. `doctor` adds the local DB-only "agent sandbox violations" check.
+- Specs and audit ledger: `spec/10/12/13/14/15/16` and `docs/audits/README.md` now mark unsigned local telemetry shipped while keeping Linux runtime denial detection and signed audit-log recording future.
+
+Key decisions:
+- This is deliberately **not** the signed `audit_log` from `spec/15`: it is local, unsigned, best-effort visibility like `sync_skipped_events`.
+- Linux runtime denial detection is out of scope for this slice. Linux runs still populate backend/mode/limitations so operators can see which confinement backend and reduced guarantees applied.
+- SBPL deny forms remain byte-for-byte single-line when untagged; tagged runs expand only the deny forms to include `(with message "<run tag>")`.
+
+Tests:
+- Added/extended `TestParseSeatbeltDenials`, `TestParseSeatbeltDenialsSkipsEmptyAndGarbage`, `TestSBPLProfileEmbedsViolationTag`, `TestAgentRunSandboxColumnsRoundTrip`, `TestSandboxViolationsRoundTripAndCount`, `TestSandboxTelemetryHelpers`, `TestCollectSandboxViolationsPersistsScrubbedRows`, and `TestCheckSandboxViolations`.
+
+Validated:
+- `gofmt -w cmd internal`; `go build ./...`; `GOOS=linux go build ./...`; `GOOS=linux go vet ./...`.
+- `golangci-lint run` 0 issues; `go test ./...` all packages ok (including the new state/platform/cli telemetry tests); `spec-drift --base origin/main` passes.
+
+Follow-ups:
+- Tighter read confinement.
+
 ## 2026-07-05 — feat(agent): seccomp syscall denylist for the Linux sandbox (P4-GIT-03 slice 4)
 
 Changed:

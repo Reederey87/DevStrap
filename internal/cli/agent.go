@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Reederey87/DevStrap/internal/childenv"
 	dsgit "github.com/Reederey87/DevStrap/internal/git"
@@ -38,6 +40,9 @@ type agentSandboxLaunch struct {
 	denyNetwork  bool
 	denySyscalls bool
 	devstrapHome string
+	mode         string
+	backendName  string
+	limitations  []string
 }
 
 // agentSandboxSpec builds the SandboxSpec for one agent run. The child env
@@ -47,7 +52,7 @@ type agentSandboxLaunch struct {
 // empty anchor would silently drop every home-anchored credential deny while
 // still reporting the run as sandboxed (post-merge review, PR #107).
 // `--sandbox off` is the explicit escape hatch.
-func agentSandboxSpec(worktreeDir, perRunTmp, logDir string, launch agentSandboxLaunch) (platform.SandboxSpec, error) {
+func agentSandboxSpec(worktreeDir, perRunTmp, logDir string, launch agentSandboxLaunch, runID string) (platform.SandboxSpec, error) {
 	userHome, err := os.UserHomeDir()
 	if err != nil {
 		return platform.SandboxSpec{}, fmt.Errorf("resolve user home for sandbox credential denies (use --sandbox off to run unconfined): %w", err)
@@ -61,6 +66,7 @@ func agentSandboxSpec(worktreeDir, perRunTmp, logDir string, launch agentSandbox
 		DenyNetwork:           launch.denyNetwork,
 		DenySensitiveReads:    true,
 		DenyDangerousSyscalls: launch.denySyscalls,
+		ViolationTag:          sandboxViolationTag(runID),
 	}, nil
 }
 
@@ -78,6 +84,7 @@ func agentSandboxSpec(worktreeDir, perRunTmp, logDir string, launch agentSandbox
 // ephemeral-ci sandbox the filesystem but keep the network open.
 func resolveAgentSandbox(mode, policy string, stderr io.Writer, devstrapHome string) (agentSandboxLaunch, error) {
 	launch := agentSandboxLaunch{devstrapHome: devstrapHome}
+	launch.mode = mode
 	switch mode {
 	case "auto", "off", "require":
 	default:
@@ -120,6 +127,7 @@ func resolveAgentSandbox(mode, policy string, stderr io.Writer, devstrapHome str
 	}
 	launch.sandbox = sb
 	launch.enabled = true
+	launch.backendName = sb.Name()
 	launch.denyNetwork = policy == "readonly" || policy == "cautious"
 	// Seccomp syscall denylist is unconditional hardening for every sandboxed
 	// policy (validated above so a typo fails closed before this point); the
@@ -148,10 +156,26 @@ func resolveAgentSandbox(mode, policy string, stderr io.Writer, devstrapHome str
 			}
 		}
 		if lims := caps.Limitations(); len(lims) > 0 {
+			launch.limitations = lims
 			_, _ = fmt.Fprintf(stderr, "notice: OS sandbox %s active with reduced guarantees: %s\n", sb.Name(), strings.Join(lims, "; "))
 		}
 	}
 	return launch, nil
+}
+
+func sandboxViolationTag(runID string) string {
+	return "devstrap-sb-" + runID
+}
+
+func marshalLimitations(limitations []string) string {
+	if len(limitations) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(limitations)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 func newAgentCommand(stdout io.Writer, opts *options) *cobra.Command {
@@ -234,23 +258,28 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 			}
 			logPath := filepath.Join(opts.paths().Home, "logs", "agent-runs", runID+".log")
 			run, err := store.InsertAgentRun(cmd.Context(), state.AgentRun{
-				ID:          runID,
-				NamespaceID: project.ID,
-				WorktreeID:  wt.ID,
-				Engine:      engine,
-				Task:        taskName,
-				PolicyID:    policy,
-				Status:      "running",
-				RunnerPID:   os.Getpid(),
-				BaseRef:     wt.BaseRef,
-				BaseSHA:     wt.BaseSHA,
-				Branch:      wt.Branch,
-				LogPath:     logPath,
+				ID:                 runID,
+				NamespaceID:        project.ID,
+				WorktreeID:         wt.ID,
+				Engine:             engine,
+				Task:               taskName,
+				PolicyID:           policy,
+				Status:             "running",
+				RunnerPID:          os.Getpid(),
+				BaseRef:            wt.BaseRef,
+				BaseSHA:            wt.BaseSHA,
+				Branch:             wt.Branch,
+				LogPath:            logPath,
+				SandboxBackend:     sandboxLaunch.backendName,
+				SandboxMode:        sandboxLaunch.mode,
+				SandboxLimitations: marshalLimitations(sandboxLaunch.limitations),
 			})
 			if err != nil {
 				return err
 			}
+			runStart := time.Now()
 			commandErr := runAgentProcess(cmd.Context(), wt, run, agentCommand, stdout, sandboxLaunch)
+			collectSandboxViolations(cmd.Context(), cmd.ErrOrStderr(), store, run, sandboxLaunch, runStart)
 			diffSummary := agentDiffSummary(cmd.Context(), wt.Path, wt.BaseSHA)
 			status := "complete"
 			testSummary := "command exited 0"
@@ -353,13 +382,34 @@ func newAgentShowCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			violations, err := store.SandboxViolationsByRun(cmd.Context(), run.ID)
+			if err != nil {
+				return err
+			}
 			if opts.v.GetBool("json") {
 				enc := json.NewEncoder(stdout)
 				enc.SetIndent("", "  ")
-				return enc.Encode(run)
+				return enc.Encode(struct {
+					state.AgentRun
+					Violations []state.SandboxViolation `json:"violations"`
+				}{AgentRun: run, Violations: violations})
 			}
-			_, err = fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\nlog: %s\ndiff:\n%s\n", run.ID, run.Status, run.Engine, run.Task, run.LogPath, emptySummary(run.DiffSummary))
-			return err
+			if _, err := fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\nlog: %s\ndiff:\n%s\n", run.ID, run.Status, run.Engine, run.Task, run.LogPath, emptySummary(run.DiffSummary)); err != nil {
+				return err
+			}
+			if run.SandboxBackend != "" || run.SandboxMode != "" {
+				_, _ = fmt.Fprintf(stdout, "sandbox: %s mode=%s\n", emptyDash(run.SandboxBackend), run.SandboxMode)
+			}
+			if run.SandboxLimitations != "" {
+				_, _ = fmt.Fprintf(stdout, "sandbox limitations: %s\n", run.SandboxLimitations)
+			}
+			if len(violations) > 0 {
+				_, _ = fmt.Fprintf(stdout, "sandbox violations: %d\n", len(violations))
+				for _, v := range violations {
+					_, _ = fmt.Fprintf(stdout, "  %s %s\n", v.Operation, emptyDash(v.Path))
+				}
+			}
+			return nil
 		},
 	}
 }
@@ -656,7 +706,7 @@ func runAgentProcess(ctx context.Context, wt state.Worktree, run state.AgentRun,
 		}
 		defer func() { _ = os.RemoveAll(perRunTmp) }()
 		envOverrides["TMPDIR"] = perRunTmp
-		spec, err := agentSandboxSpec(wt.Path, perRunTmp, filepath.Dir(run.LogPath), sandboxLaunch)
+		spec, err := agentSandboxSpec(wt.Path, perRunTmp, filepath.Dir(run.LogPath), sandboxLaunch, run.ID)
 		if err != nil {
 			return err
 		}
@@ -695,6 +745,44 @@ func runAgentProcess(ctx context.Context, wt state.Worktree, run state.AgentRun,
 		return runErr
 	}
 	return flushErr
+}
+
+func collectSandboxViolations(ctx context.Context, stderr io.Writer, store *state.Store, run state.AgentRun, sandboxLaunch agentSandboxLaunch, runStart time.Time) {
+	if !sandboxLaunch.enabled {
+		return
+	}
+	reporter, ok := sandboxLaunch.sandbox.(platform.SandboxViolationReporter)
+	if !ok {
+		return
+	}
+	vs, err := reporter.CollectViolations(ctx, sandboxViolationTag(run.ID), runStart)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "warning: sandbox violation collection failed: %v\n", err)
+		return
+	}
+	if len(vs) == 0 {
+		return
+	}
+	rows := make([]state.SandboxViolation, 0, len(vs))
+	now := state.TimestampNow()
+	for i, v := range vs {
+		path := redact.Scrub(v.Path)
+		rows = append(rows, state.SandboxViolation{
+			RunID:      run.ID,
+			ObservedAt: now,
+			Backend:    sandboxLaunch.backendName,
+			Operation:  v.Operation,
+			Path:       path,
+			Detail:     redact.Scrub(v.Detail),
+			Source:     "seatbelt-log",
+		})
+		if i < 50 {
+			slog.Warn("sandbox.violation", "run", run.ID, "backend", sandboxLaunch.backendName, "operation", v.Operation, "path", path)
+		}
+	}
+	if err := store.InsertSandboxViolations(ctx, rows); err != nil {
+		_, _ = fmt.Fprintf(stderr, "warning: recording sandbox violations failed: %v\n", err)
+	}
 }
 
 func agentDiffSummary(ctx context.Context, worktreePath, baseSHA string) string {
@@ -747,6 +835,13 @@ func agentWorkingTreeDiffSummary(ctx context.Context, r dsgit.Runner, worktreePa
 func emptySummary(value string) string {
 	if strings.TrimSpace(value) == "" {
 		return "(no changes)"
+	}
+	return value
+}
+
+func emptyDash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "-"
 	}
 	return value
 }

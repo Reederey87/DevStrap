@@ -9,8 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Reederey87/DevStrap/internal/platform"
+	"github.com/Reederey87/DevStrap/internal/state"
 )
 
 type fakeSandbox struct {
@@ -32,6 +34,15 @@ type fakeCapSandbox struct {
 func (f fakeCapSandbox) Limitations() []string { return f.limitations }
 func (f fakeCapSandbox) NetworkDenyEnforcement() platform.NetworkEnforcement {
 	return f.netEnforce
+}
+
+type fakeViolationSandbox struct {
+	fakeSandbox
+	violations []platform.SandboxViolation
+}
+
+func (f fakeViolationSandbox) CollectViolations(_ context.Context, _ string, _ time.Time) ([]platform.SandboxViolation, error) {
+	return f.violations, nil
 }
 
 func withFakeSandbox(t *testing.T, sb platform.Sandbox) {
@@ -71,7 +82,7 @@ func (p passthroughSandbox) Command(_ context.Context, spec platform.SandboxSpec
 // silently vanished.
 func TestAgentSandboxSpecFailsClosedWithoutUserHome(t *testing.T) {
 	t.Setenv("HOME", "")
-	if _, err := agentSandboxSpec("/wt", "/tmp/run", "/log", agentSandboxLaunch{devstrapHome: "/dsh"}); err == nil {
+	if _, err := agentSandboxSpec("/wt", "/tmp/run", "/log", agentSandboxLaunch{devstrapHome: "/dsh"}, "arun_test"); err == nil {
 		t.Fatal("agentSandboxSpec succeeded without a resolvable user home; want fail-closed error")
 	}
 }
@@ -79,7 +90,7 @@ func TestAgentSandboxSpecFailsClosedWithoutUserHome(t *testing.T) {
 func TestAgentSandboxSpecAnchorsRealUserHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	spec, err := agentSandboxSpec("/wt", "/tmp/run", "/log", agentSandboxLaunch{devstrapHome: "/dsh", denyNetwork: true})
+	spec, err := agentSandboxSpec("/wt", "/tmp/run", "/log", agentSandboxLaunch{devstrapHome: "/dsh", denyNetwork: true}, "arun_test")
 	if err != nil {
 		t.Fatalf("agentSandboxSpec: %v", err)
 	}
@@ -88,6 +99,9 @@ func TestAgentSandboxSpecAnchorsRealUserHome(t *testing.T) {
 	}
 	if !spec.DenySensitiveReads || !spec.DenyNetwork || spec.WorktreeDir != "/wt" || spec.TmpDir != "/tmp/run" || spec.LogDir != "/log" || spec.DevstrapHome != "/dsh" {
 		t.Fatalf("spec fields not threaded through: %+v", spec)
+	}
+	if spec.ViolationTag != "devstrap-sb-arun_test" {
+		t.Fatalf("ViolationTag = %q, want devstrap-sb-arun_test", spec.ViolationTag)
 	}
 }
 
@@ -137,6 +151,12 @@ func TestResolveAgentSandboxMatrix(t *testing.T) {
 			}
 			if launch.denyNetwork != tc.wantDenyNet {
 				t.Fatalf("denyNetwork = %v, want %v", launch.denyNetwork, tc.wantDenyNet)
+			}
+			if launch.mode != tc.mode {
+				t.Fatalf("mode = %q, want %q", launch.mode, tc.mode)
+			}
+			if tc.wantEnabled && launch.backendName != tc.sandbox.Name() {
+				t.Fatalf("backendName = %q, want %q", launch.backendName, tc.sandbox.Name())
 			}
 			warned := strings.Contains(stderr.String(), "OS sandbox unavailable")
 			if warned != tc.wantWarn {
@@ -295,6 +315,9 @@ func TestResolveAgentSandboxCapabilities(t *testing.T) {
 			if !launch.enabled {
 				t.Fatal("enabled = false, want true")
 			}
+			if len(tc.wantNoticeSub) > 0 && len(launch.limitations) == 0 {
+				t.Fatal("limitations not captured on launch")
+			}
 			if tc.wantWarnSub != "" && !strings.Contains(stderr.String(), tc.wantWarnSub) {
 				t.Fatalf("stderr = %q, want warning substring %q", stderr.String(), tc.wantWarnSub)
 			}
@@ -310,6 +333,72 @@ func TestResolveAgentSandboxCapabilities(t *testing.T) {
 				t.Fatalf("stderr = %q, want empty", stderr.String())
 			}
 		})
+	}
+}
+
+func TestSandboxTelemetryHelpers(t *testing.T) {
+	if got := sandboxViolationTag("arun_123"); got != "devstrap-sb-arun_123" {
+		t.Fatalf("sandboxViolationTag = %q", got)
+	}
+	if got := marshalLimitations(nil); got != "" {
+		t.Fatalf("marshalLimitations(nil) = %q, want empty", got)
+	}
+	if got := marshalLimitations([]string{"lim-a", "lim-b"}); got != `["lim-a","lim-b"]` {
+		t.Fatalf("marshalLimitations = %q", got)
+	}
+}
+
+func TestCollectSandboxViolationsPersistsScrubbedRows(t *testing.T) {
+	ctx := context.Background()
+	st, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureWorkspace(ctx, "personal", "/tmp/Code"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EnsureDevice(ctx, "test-device"); err != nil {
+		t.Fatal(err)
+	}
+	ns, err := st.UpsertProject(ctx, state.UpsertProjectParams{Path: "work/collect", Type: "plain_folder"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := st.InsertAgentRun(ctx, state.AgentRun{
+		ID:          "arun_collect",
+		NamespaceID: ns.ID,
+		Engine:      "generic",
+		Task:        "collect",
+		Status:      "running",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb := fakeViolationSandbox{violations: []platform.SandboxViolation{
+		{Operation: "file-write-create", Path: "/tmp/outside", Detail: "deny(1) file-write-create /tmp/outside"},
+		{Operation: "file-read-data", Path: "/tmp/token-ghp_123456789012345678901234567890123456", Detail: "deny(1) file-read-data /tmp/token-ghp_123456789012345678901234567890123456"},
+	}}
+	var stderr bytes.Buffer
+	collectSandboxViolations(ctx, &stderr, st, run, agentSandboxLaunch{sandbox: sb, enabled: true, backendName: "seatbelt"}, time.Now())
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	got, err := st.SandboxViolationsByRun(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("violations = %+v, want 2", got)
+	}
+	if got[0].Backend != "seatbelt" || got[0].Source != "seatbelt-log" || got[0].Operation != "file-write-create" || got[0].Path != "/tmp/outside" {
+		t.Fatalf("first violation = %+v", got[0])
+	}
+	if strings.Contains(got[1].Path, "ghp_") || strings.Contains(got[1].Detail, "ghp_") {
+		t.Fatalf("secret-looking token was not scrubbed: %+v", got[1])
 	}
 }
 
