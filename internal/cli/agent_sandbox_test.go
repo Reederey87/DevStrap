@@ -22,6 +22,15 @@ func (f fakeSandbox) Command(_ context.Context, _ platform.SandboxSpec, argv []s
 	return append([]string{"fake-sandbox-exec"}, argv...), func() {}, nil
 }
 
+type fakeCapSandbox struct {
+	fakeSandbox
+	limitations []string
+	netDeny     bool
+}
+
+func (f fakeCapSandbox) Limitations() []string     { return f.limitations }
+func (f fakeCapSandbox) EnforcesNetworkDeny() bool { return f.netDeny }
+
 func withFakeSandbox(t *testing.T, sb platform.Sandbox) {
 	t.Helper()
 	prev := sandboxBackend
@@ -199,5 +208,122 @@ func TestAgentRunSandboxEnabledExecPath(t *testing.T) {
 	}
 	if _, err := os.Stat(spec.TmpDir); !os.IsNotExist(err) {
 		t.Fatalf("per-run tmp dir %q not torn down after the run: %v", spec.TmpDir, err)
+	}
+}
+
+func TestResolveAgentSandboxCapabilities(t *testing.T) {
+	cases := []struct {
+		name          string
+		mode          string
+		policy        string
+		sandbox       platform.Sandbox
+		wantErrCode   int
+		wantErrSub    string
+		wantWarnSub   string
+		wantNoticeSub []string
+		wantNoWarnSub string
+		wantNoStderr  bool
+	}{
+		{
+			name:        "require refuses missing network deny",
+			mode:        "require",
+			policy:      "readonly",
+			sandbox:     fakeCapSandbox{netDeny: false},
+			wantErrCode: exitPolicy,
+			wantErrSub:  "requires a network deny",
+		},
+		{
+			name:        "auto warns missing network deny",
+			mode:        "auto",
+			policy:      "readonly",
+			sandbox:     fakeCapSandbox{netDeny: false},
+			wantWarnSub: "cannot enforce the readonly network deny",
+		},
+		{
+			name:          "guarded limitations without network warning",
+			mode:          "auto",
+			policy:        "guarded",
+			sandbox:       fakeCapSandbox{limitations: []string{"lim-a", "lim-b"}},
+			wantNoWarnSub: "cannot enforce",
+			wantNoticeSub: []string{"reduced guarantees", "lim-a", "lim-b"},
+		},
+		{
+			name:          "require accepts degraded network-capable backend",
+			mode:          "require",
+			policy:        "readonly",
+			sandbox:       fakeCapSandbox{netDeny: true, limitations: []string{"lim-a"}},
+			wantNoticeSub: []string{"reduced guarantees"},
+		},
+		{
+			name:         "plain sandbox has no capability notices",
+			mode:         "auto",
+			policy:       "readonly",
+			sandbox:      fakeSandbox{},
+			wantNoStderr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withFakeSandbox(t, tc.sandbox)
+			var stderr bytes.Buffer
+			launch, err := resolveAgentSandbox(tc.mode, tc.policy, &stderr, "/tmp/devstrap-home")
+			if tc.wantErrCode != 0 {
+				var app appError
+				if !errors.As(err, &app) || app.code != tc.wantErrCode {
+					t.Fatalf("err = %v, want appError code %d", err, tc.wantErrCode)
+				}
+				if !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Fatalf("err = %v, want substring %q", err, tc.wantErrSub)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveAgentSandbox: %v", err)
+			}
+			if !launch.enabled {
+				t.Fatal("enabled = false, want true")
+			}
+			if tc.wantWarnSub != "" && !strings.Contains(stderr.String(), tc.wantWarnSub) {
+				t.Fatalf("stderr = %q, want warning substring %q", stderr.String(), tc.wantWarnSub)
+			}
+			if tc.wantNoWarnSub != "" && strings.Contains(stderr.String(), tc.wantNoWarnSub) {
+				t.Fatalf("stderr = %q, want no substring %q", stderr.String(), tc.wantNoWarnSub)
+			}
+			for _, sub := range tc.wantNoticeSub {
+				if !strings.Contains(stderr.String(), sub) {
+					t.Fatalf("stderr = %q, want substring %q", stderr.String(), sub)
+				}
+			}
+			if tc.wantNoStderr && stderr.String() != "" {
+				t.Fatalf("stderr = %q, want empty", stderr.String())
+			}
+		})
+	}
+}
+
+func TestSandboxHelperCommandIsHiddenAndFailsClosed(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	root := NewRootCommand(&stdout, &stderr)
+	var helperFound bool
+	for _, cmd := range root.Commands() {
+		if strings.HasPrefix(cmd.Use, platform.SandboxHelperCommand) {
+			helperFound = true
+			if !cmd.Hidden {
+				t.Fatal("sandbox-helper command is not hidden")
+			}
+		}
+	}
+	if !helperFound {
+		t.Fatal("sandbox-helper command not registered")
+	}
+
+	root.SetArgs([]string{platform.SandboxHelperCommand, "--spec", "{not-json", "--", "true"})
+	err := root.Execute()
+	var app appError
+	if !errors.As(err, &app) || app.code != exitSandboxHelper {
+		t.Fatalf("err = %v, want appError code %d", err, exitSandboxHelper)
+	}
+	if !strings.Contains(err.Error(), "sandbox-helper") {
+		t.Fatalf("err = %v, want sandbox-helper prefix", err)
 	}
 }
