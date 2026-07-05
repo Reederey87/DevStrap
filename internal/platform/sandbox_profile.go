@@ -5,6 +5,14 @@ import (
 	"strings"
 )
 
+var sensitiveHomeDirs = []string{".ssh", ".aws", ".gnupg", ".config/gh", ".kube", ".docker"}
+
+// Credential FILES at the home root — the same names the wrapper's
+// sensitive-token scanner flags (AGEN-05 alignment, review P3): .netrc
+// carries git-https creds, .npmrc/.pypirc registry tokens, .gitconfig
+// credential-helper config.
+var sensitiveHomeFiles = []string{".netrc", ".npmrc", ".pypirc", ".gitconfig"}
+
 // sbplProfile renders the macOS Seatbelt (SBPL) profile for a SandboxSpec.
 // Kept build-tag-free and pure so the profile shape is unit-tested on every
 // platform, not just darwin.
@@ -48,14 +56,10 @@ func sbplProfile(spec SandboxSpec) string {
 	if spec.DenySensitiveReads {
 		b.WriteString("(deny file-read*\n")
 		if spec.UserHome != "" {
-			for _, rel := range []string{".ssh", ".aws", ".gnupg", ".config/gh", ".kube", ".docker"} {
+			for _, rel := range sensitiveHomeDirs {
 				b.WriteString("  (subpath " + sbplQuote(filepath.Join(spec.UserHome, rel)) + ")\n")
 			}
-			// Credential FILES at the home root — the same names the wrapper's
-			// sensitive-token scanner flags (AGEN-05 alignment, review P3):
-			// .netrc carries git-https creds, .npmrc/.pypirc registry tokens,
-			// .gitconfig credential-helper config.
-			for _, rel := range []string{".netrc", ".npmrc", ".pypirc", ".gitconfig"} {
+			for _, rel := range sensitiveHomeFiles {
 				b.WriteString("  (literal " + sbplQuote(filepath.Join(spec.UserHome, rel)) + ")\n")
 			}
 		}

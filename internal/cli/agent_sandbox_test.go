@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -25,6 +27,30 @@ func withFakeSandbox(t *testing.T, sb platform.Sandbox) {
 	prev := sandboxBackend
 	sandboxBackend = func() platform.Sandbox { return sb }
 	t.Cleanup(func() { sandboxBackend = prev })
+}
+
+// passthroughSandbox is a runnable success-path fake: it records the spec it
+// was handed, wraps the child argv in a real `sh -c` shim that drops a marker
+// file before exec'ing the original command, and counts cleanup calls. It
+// exists so the sandbox-ENABLED branch of runAgentProcess (per-run TMPDIR
+// create/repoint/teardown, spec building, argv wrapping, cleanup) stays
+// covered by a deterministic cobra-level test on every platform — the kernel
+// enforcement tests exec the platform adapters directly and never cross this
+// glue (dual-review P3, PR for P4-GIT-03 slice 2).
+type passthroughSandbox struct {
+	spec        *platform.SandboxSpec
+	marker      string
+	cleanupRuns *int
+}
+
+func (p passthroughSandbox) Name() string     { return "passthrough-sandbox" }
+func (p passthroughSandbox) Available() error { return nil }
+func (p passthroughSandbox) Command(_ context.Context, spec platform.SandboxSpec, argv []string) ([]string, func(), error) {
+	*p.spec = spec
+	// sh -c positional semantics: the arg after the script is $0 (the marker
+	// path), the rest become "$@" (the original child argv).
+	wrapped := append([]string{"sh", "-c", `touch "$0" && exec "$@"`, p.marker}, argv...)
+	return wrapped, func() { *p.cleanupRuns++ }, nil
 }
 
 // TestAgentSandboxSpecFailsClosedWithoutUserHome pins the post-merge review
@@ -108,5 +134,70 @@ func TestResolveAgentSandboxMatrix(t *testing.T) {
 				t.Fatal("enabled launch has nil sandbox")
 			}
 		})
+	}
+}
+
+// TestAgentRunSandboxEnabledExecPath drives `agent run` through cobra with a
+// recording passthrough sandbox, pinning the sandbox-enabled branch of
+// runAgentProcess end-to-end: the per-run TMPDIR is created and handed to the
+// adapter (and torn down after the run), the WRAPPED argv is what actually
+// executes, and the adapter cleanup runs. The real-kernel siblings
+// (TestSeatbeltSandboxEnforcement / TestBubblewrapSandboxEnforcement) prove
+// enforcement but exec the platform adapters directly, bypassing this glue.
+func TestAgentRunSandboxEnabledExecPath(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "repo.git")
+	seed := filepath.Join(tmp, "seed")
+	runGit(t, tmp, "init", "--bare", remote)
+	runGit(t, seed, "init")
+	runGit(t, seed, "config", "user.email", "devstrap@example.test")
+	runGit(t, seed, "config", "user.name", "DevStrap Test")
+	runGit(t, seed, "checkout", "-b", "main")
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("initial\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, seed, "add", "README.md")
+	runGit(t, seed, "commit", "-m", "initial")
+	runGit(t, seed, "remote", "add", "origin", remote)
+	runGit(t, seed, "push", "origin", "main")
+	runGit(t, tmp, "--git-dir", remote, "symbolic-ref", "HEAD", "refs/heads/main")
+	if _, stderr, err := executeForTest("--home", home, "add", "file://"+remote, "--path", "work/acme/sandboxed-repo", "--default-branch", "main"); err != nil {
+		t.Fatalf("add stderr = %q err = %v", stderr, err)
+	}
+
+	var spec platform.SandboxSpec
+	cleanups := 0
+	marker := filepath.Join(t.TempDir(), "wrapper-ran")
+	withFakeSandbox(t, passthroughSandbox{spec: &spec, marker: marker, cleanupRuns: &cleanups})
+
+	stdout, stderr, err := executeForTest("--home", home, "agent", "run", "work/acme/sandboxed-repo", "--engine", "generic", "--task", "sandboxed write", "--sandbox", "require", "--", "touch", "sandboxed.txt")
+	if err != nil {
+		t.Fatalf("agent run stdout = %q stderr = %q err = %v", stdout, stderr, err)
+	}
+	if !strings.Contains(stdout, "complete") {
+		t.Fatalf("agent run stdout = %q, want completion", stdout)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("wrapper marker missing — the child ran UNWRAPPED argv: %v", err)
+	}
+	if cleanups != 1 {
+		t.Fatalf("cleanup ran %d times, want exactly 1", cleanups)
+	}
+	if spec.WorktreeDir == "" || !spec.DenySensitiveReads {
+		t.Fatalf("recorded spec missing worktree/deny-reads: %+v", spec)
+	}
+	if spec.DenyNetwork {
+		t.Fatalf("guarded policy must not deny network: %+v", spec)
+	}
+	if !strings.Contains(filepath.Base(spec.TmpDir), "devstrap-agent-") {
+		t.Fatalf("TmpDir = %q, want per-run devstrap-agent-<id> dir", spec.TmpDir)
+	}
+	if _, err := os.Stat(spec.TmpDir); !os.IsNotExist(err) {
+		t.Fatalf("per-run tmp dir %q not torn down after the run: %v", spec.TmpDir, err)
 	}
 }

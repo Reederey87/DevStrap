@@ -50,9 +50,9 @@ type Sandbox interface {
 }
 
 // UnsupportedSandbox is the explicit no-sandbox placeholder for platforms
-// without an implemented adapter (Linux landlock/bubblewrap is a named
-// follow-up slice; see spec/14). Callers treat Available() != nil as "run
-// unconfined and say so".
+// without an implemented adapter (macOS Seatbelt and Linux bubblewrap are
+// implemented; see spec/14 for remaining slices). Callers treat
+// Available() != nil as "run unconfined and say so".
 type UnsupportedSandbox struct {
 	Platform string
 }

@@ -221,7 +221,7 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&taskName, "task", "", "task description")
 	cmd.Flags().StringVar(&commandFlag, "command", "", "generic command to run, split on whitespace; args after -- are preferred")
 	cmd.Flags().StringVar(&policy, "policy", "guarded", "agent command policy: readonly, cautious, guarded, or yolo-local (argv/file checks are advisory; combine with the OS sandbox for real confinement)")
-	cmd.Flags().StringVar(&sandboxMode, "sandbox", defaultSandboxMode(), "OS sandbox mode: auto (sandbox when the host supports it; macOS Seatbelt today), require (refuse to run unsandboxed), or off (env: DEVSTRAP_SANDBOX)")
+	cmd.Flags().StringVar(&sandboxMode, "sandbox", defaultSandboxMode(), "OS sandbox mode: auto (sandbox when the host supports it; macOS Seatbelt, Linux bubblewrap), require (refuse to run unsandboxed), or off (env: DEVSTRAP_SANDBOX)")
 	return cmd
 }
 

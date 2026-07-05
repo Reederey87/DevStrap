@@ -64,9 +64,9 @@ jobs:
       # Headless CI runners have no usable OS keychain / Secret Service; force
       # the file-backed device-key store so key operations do not block or fail.
       DEVSTRAP_NO_KEYCHAIN: "1"
-      # Run the real Seatbelt kernel-enforcement test on macos-latest (the
-      # test self-skips where sandbox-exec is absent, so this is a no-op on
-      # ubuntu). Without it the sandbox's central guarantee has no CI coverage.
+      # Run the real kernel-enforcement tests: Seatbelt on macos-latest and
+      # bubblewrap on ubuntu-latest. Without them the sandbox's central
+      # guarantee has no CI coverage.
       DEVSTRAP_SANDBOX_E2E: "1"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -86,6 +86,20 @@ jobs:
         run: go vet ./...
       - name: Build
         run: go build ./...
+      - name: Install bubblewrap (Linux sandbox E2E)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update && sudo apt-get install -y bubblewrap
+          # ubuntu-24.04 restricts unprivileged user namespaces via AppArmor;
+          # the apt bubblewrap package ships a permitting profile, but pin the
+          # sysctl against runner-image drift so the E2E never silently skips.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          # Fail HERE (loudly) if bwrap can't actually sandbox on this runner —
+          # the enforcement test skips when Available() fails, and a silent
+          # skip would mask regressions. Mirror the adapter's probe fallback:
+          # --disable-userns first, plain userns if the flag is unsupported.
+          bwrap --unshare-user --disable-userns --unshare-pid --ro-bind / / --proc /proc --dev /dev true \
+            || bwrap --unshare-user --unshare-pid --ro-bind / / --proc /proc --dev /dev true
       - name: Test
         run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
       - name: Fuzz smoke (Decide convergence property)
