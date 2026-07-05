@@ -130,9 +130,29 @@ Optional:
 
 ## Install
 
+### Homebrew (macOS and Linux)
+
+```bash
+brew install Reederey87/devstrap/devstrap
+devstrap version
+```
+
+Shell completions (bash/zsh/fish) are installed automatically.
+
+### One-line installer
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Reederey87/DevStrap/main/scripts/install.sh | sh
+```
+
+The script detects your OS/arch, verifies the download against `checksums.txt` before
+extracting, and installs into `/usr/local/bin` (or `~/.local/bin` if that isn't writable).
+It never uses sudo. Overrides: `DEVSTRAP_VERSION=v0.1.0` pins a release,
+`DEVSTRAP_INSTALL_DIR=~/bin` picks the destination.
+
 ### Download a release binary
 
-Prebuilt binaries for macOS and Linux are published on the [Releases](https://github.com/Reederey87/DevStrap/releases) page (built via GoReleaser). Download, extract, and put `devstrap` on your `PATH`.
+Prebuilt binaries for macOS and Linux are published on the [Releases](https://github.com/Reederey87/DevStrap/releases) page (built via GoReleaser). Each tarball ships the binary plus bash/zsh/fish completions. Download, extract, verify against `checksums.txt`, and put `devstrap` on your `PATH`.
 
 ```bash
 # example: install a downloaded release binary into ~/.local/bin
@@ -148,8 +168,6 @@ cd DevStrap
 go build -o bin/devstrap ./cmd/devstrap
 ./bin/devstrap version
 ```
-
-> A Homebrew tap and a `curl | sh` installer are on the roadmap (audit `PROD-05`). Until then, use a release binary or build from source.
 
 ## Quickstart
 

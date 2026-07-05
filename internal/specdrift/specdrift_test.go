@@ -127,6 +127,42 @@ func TestBroadOnlyFileSatisfiedByBroadSpec(t *testing.T) {
 	}
 }
 
+func TestReleaseTierFilesRequireWorkLog(t *testing.T) {
+	// P4-PROD-05 follow-through: the release/distribution tier
+	// (.goreleaser.yaml, scripts/**) must be work-log-gated like the rest of
+	// the shipping surface — a lone packaging change is still a behavior change.
+	root := t.TempDir()
+	writeSpec(t, root, "03_SYSTEM_ARCHITECTURE.md", "[.goreleaser.yaml, scripts/**]")
+	writeSpec(t, root, "18_WORK_LOG.md", "[**]")
+
+	for _, file := range []string{".goreleaser.yaml", "scripts/install.sh"} {
+		report, err := Check(context.Background(), Options{
+			RepoRoot:       root,
+			ChangedFiles:   []string{file},
+			RequireWorkLog: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		joined := strings.Join(report.Findings, "\n")
+		if !strings.Contains(joined, "spec/18_WORK_LOG.md was not updated") {
+			t.Fatalf("changing %s alone: findings = %v, want work-log failure", file, report.Findings)
+		}
+	}
+
+	report, err := Check(context.Background(), Options{
+		RepoRoot:       root,
+		ChangedFiles:   []string{".goreleaser.yaml", "scripts/install.sh", "spec/03_SYSTEM_ARCHITECTURE.md", "spec/18_WORK_LOG.md"},
+		RequireWorkLog: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.OK() {
+		t.Fatalf("findings = %v, want none when the tracking spec and work log change too", report.Findings)
+	}
+}
+
 func TestEveryInternalPackageHasASpecificSpecOwner(t *testing.T) {
 	root := filepath.Join("..", "..")
 	specs, findings, err := LoadSpecs(root)

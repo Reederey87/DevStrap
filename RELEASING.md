@@ -5,8 +5,17 @@ from a feature branch. `main` is always green — every PR passes CI before merg
 release candidate.
 
 Releases are automated by **GoReleaser** via `.github/workflows/release.yml`, triggered on `v*` tags. It
-cross-compiles macOS and Linux binaries (amd64 + arm64), generates `checksums.txt`, and publishes a GitHub Release.
-The `version`, `commit`, and build `date` are injected into the binary (check with `devstrap version`).
+cross-compiles macOS and Linux binaries (amd64 + arm64), packages shell completions into each tarball, generates
+`checksums.txt`, publishes a GitHub Release, and — on **stable** tags only (`skip_upload: auto`) — pushes an updated
+Homebrew **cask** to `Reederey87/homebrew-devstrap`. The `version`, `commit`, and build `date` are injected into the
+binary (check with `devstrap version`).
+
+## One-time prerequisites (already done for this repo; listed for rebuild-from-scratch)
+
+- A public tap repo `Reederey87/homebrew-devstrap` with a `Casks/` directory (GoReleaser writes `Casks/devstrap.rb`).
+- A fine-grained PAT scoped to **that repo only**, Contents: Read+Write, stored as the `HOMEBREW_TAP_GITHUB_TOKEN`
+  Actions secret on this repo (`gh secret set HOMEBREW_TAP_GITHUB_TOKEN --repo Reederey87/DevStrap`). The default
+  `GITHUB_TOKEN` cannot push cross-repo.
 
 ## Versioning
 
@@ -39,8 +48,23 @@ The `version`, `commit`, and build `date` are injected into the binary (check wi
    git tag -a v0.1.0 -m "v0.1.0"
    git push origin v0.1.0
    ```
-   The workflow publishes the full (non-pre-release) GitHub Release.
+   The workflow publishes the full (non-pre-release) GitHub Release **and** pushes the updated cask to the tap.
 5. **If it's not**, fix it on `main` via the normal PR flow, then cut `v0.1.0-rc.2` and repeat.
+
+## Post-release smoke checklist (stable tags)
+
+```bash
+# Tap path — completions should install alongside the binary
+brew install Reederey87/devstrap/devstrap && devstrap version
+
+# Installer path — no overrides resolves the latest release
+curl -fsSL https://raw.githubusercontent.com/Reederey87/DevStrap/main/scripts/install.sh | sh
+
+# Pre-release smoke uses the pinned form instead (the rc never updates the tap):
+DEVSTRAP_VERSION=v0.1.0-rc.1 sh scripts/install.sh
+```
+
+Confirm the tap repo got exactly one new commit (`Casks/devstrap.rb`) and that rc tags produced **no** tap commit.
 
 ## When to use a release branch
 

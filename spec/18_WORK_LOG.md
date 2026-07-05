@@ -31,6 +31,25 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — feat(dist): Homebrew cask + curl|sh installer + completions packaging (AD-8 / P4-PROD-05)
+
+Changed:
+- `.goreleaser.yaml`: `before` hooks pre-generate bash/zsh/fish completions (`go run ./cmd/devstrap completion <shell>` — stateless); archives now ship LICENSE + README + completions; new `homebrew_casks` block publishing to `Reederey87/homebrew-devstrap` (`Casks/devstrap.rb`) on stable tags only (`skip_upload: auto`). Cask, not formula: `brews:` is deprecated since GoReleaser v2.16 and casks now cover Linux. Because the binaries are unsigned (cosign/SLSA tracked under `P4-SEC-05`/`P4-QUAL-05`), the cask strips the quarantine bit via the documented post-install hook.
+- `scripts/install.sh` (new): POSIX `curl|sh` installer — os/arch detect, latest-release resolution via the releases/latest redirect (no API token), `DEVSTRAP_VERSION`/`DEVSTRAP_INSTALL_DIR` overrides, sha256 verification against `checksums.txt` BEFORE extraction (hard-fails if no sha tool exists), `/usr/local/bin` → `~/.local/bin` fallback with a PATH note, never sudo.
+- `.github/workflows/release.yml`: passes `HOMEBREW_TAP_GITHUB_TOKEN` (fine-grained PAT scoped to the tap repo only) into the goreleaser step; the verify-job gate is unchanged.
+- `internal/specdrift`: `.goreleaser.yaml` and `scripts/**` now require a work-log entry (they were neither spec-tracked nor work-log-gated — a silent coverage gap); pinned by `TestReleaseTierFilesRequireWorkLog`; `spec/03` `tracks_code` picks both up.
+- `README.md` §Install reordered: brew → curl|sh → release binary → source; roadmap note removed. `RELEASING.md`: tap/PAT prerequisites + post-release smoke checklist. `spec/03` gains a Distribution section; `spec/14` release-gates bullet, AD-8 direction, and Homebrew-tap backlog row updated; ledger `P4-PROD-05` marked partial (closes when `v0.1.0` actually publishes).
+
+Validated:
+- `gofmt`, `golangci-lint run`, `go run ./cmd/spec-drift --base origin/main --head HEAD`, `GOCACHE=/tmp/devstrap-gocache go test -race ./...`.
+- `goreleaser check` + `goreleaser release --snapshot --clean` (via `go run github.com/goreleaser/goreleaser/v2@latest`): archives contain the binary + 3 completions; `Casks/devstrap.rb` renders with the quarantine postflight and completion stanzas; no deprecation warnings.
+- `sh -n scripts/install.sh`; installer smoke against the snapshot artifacts: positive install, corrupted-artifact rejection, and missing-checksums-entry rejection.
+- Post-review (Codex, dual-review): (2x P1 accepted) the checksum pipeline `grep … | sha256sum -c -` could read as verified on a MISSING checksums entry (empty stdin); the matching line is now extracted first and its absence is a hard `fail` before any hash tool runs — pinned by the missing-entry smoke case; (P3 accepted) stray `.,` in the spec/14 release-gates bullet; (opus reviewer, no P1/P2, P3 accepted) an unprefixed `DEVSTRAP_VERSION=0.1.0` now normalizes to `v0.1.0` instead of 404ing — and the opus pass empirically confirmed the checksum P1 mattered on macOS too: this machine's `/sbin/sha256sum` exits 0 on empty stdin (fails open), so the grep-first hard-fail is load-bearing on every platform.
+
+Follow-ups:
+- Cut `v0.1.0-rc.1` → smoke → `v0.1.0` (maintainer-gated; the tap repo + `HOMEBREW_TAP_GITHUB_TOKEN` secret must exist first — see `RELEASING.md`). Flip the ledger row and the `[~]` backlog row when the stable tag lands.
+- Signing/notarization (`P4-SEC-05`/`P4-QUAL-05`) would let the cask drop the quarantine-strip hook.
+
 ## 2026-07-05 — feat(cli): ssh-add remedy hint on auth-class exits
 
 Changed:

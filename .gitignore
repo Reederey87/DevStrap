@@ -2,6 +2,8 @@
 bin/
 dist/
 coverage/
+# GoReleaser before-hook output (pre-generated shell completions)
+/completions/
 
 # Go
 *.test
