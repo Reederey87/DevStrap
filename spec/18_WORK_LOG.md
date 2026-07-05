@@ -31,6 +31,23 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — fix(agent): Seatbelt credential-deny symlink-leaf parity (P4-GIT-03 residual)
+
+Changed:
+- `internal/platform/sandbox_profile.go`: `sbplProfile` now takes pre-resolved credential deny lists (`sbplProfile(spec, denyReadDirs, denyReadFiles)`) instead of deriving them from `spec.UserHome`. Seatbelt matches the kernel-real path, so a deny on the literal `~/.ssh` never fired when `~/.ssh` was itself a symlink to an out-of-tree target — the credential stayed readable. The pure builder stays build-tag-free and now also guards against emitting a bare `(deny file-read*)` (which would deny ALL reads) when the lists are empty.
+- `internal/platform/sandbox_paths_resolve.go` (new, build-tag-free): the shared fail-closed `existingRealPaths` resolver, moved out of the `//go:build linux` adapter so bubblewrap and Seatbelt share ONE copy of the drop-only-on-ErrNotExist rule and it cannot drift.
+- `internal/platform/sandbox_darwin.go`: `seatbeltDenyPaths` derives the credential anchors via the shared `bwrapSensitivePaths`, then denies the deduped UNION of each literal alias and its symlink-resolved target — stronger than bwrap (which mounts, so uses only the resolved dest and drops absent ones): a Seatbelt deny rule is harmless on an absent or literal path, so it never drops, keeping every literal alias denied and every present-but-unresolvable path denied at its literal.
+- Tests: updated the all-platform `sbplProfile` goldens for the new signature (asserting the builder renders exactly the caller lists and does not re-derive omitted anchors); added `TestSeatbeltResolvesCredentialLeafSymlinks` (unit: literal + resolved both denied, absent anchor keeps its literal); extended the env-gated darwin e2e `TestSeatbeltSandboxEnforcement` to read the key through both a `~/.ssh` symlink and its resolved target and assert both kernel-denied.
+
+Validated:
+- `gofmt -l cmd internal` clean; `go build ./...`; `GOOS=linux go build ./...`; `go vet ./...`; `GOOS=linux go vet ./internal/platform/`; `golangci-lint run ./internal/platform/...` (darwin + `GOOS=linux`) 0 issues.
+- `go test ./...` all packages ok; darwin kernel e2e `DEVSTRAP_SANDBOX_E2E=1 go test -run TestSeatbeltSandboxEnforcement ./internal/platform/` PASS with the new resolved-target read sub-assertion (kernel-denied).
+
+Follow-ups:
+- Seccomp.
+- `sandbox.violation` telemetry.
+- Tighter read confinement.
+
 ## 2026-07-05 — feat(agent): Linux Landlock fallback sandbox for agent run (P4-GIT-03 slice 3)
 
 Changed:

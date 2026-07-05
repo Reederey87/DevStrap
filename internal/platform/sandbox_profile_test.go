@@ -15,7 +15,26 @@ func TestSBPLProfileConfinesWritesAndQuotesPaths(t *testing.T) {
 		DenyNetwork:        true,
 		DenySensitiveReads: true,
 	}
-	profile := sbplProfile(spec)
+	// The adapter now supplies pre-resolved deny lists; the pure builder renders
+	// exactly those inputs. Includes a resolved leaf-symlink target
+	// (/mnt/real-ssh) to prove the builder renders arbitrary caller-supplied
+	// anchors, not a set derived from spec.UserHome. .kube/.docker are
+	// deliberately omitted to assert the builder does NOT re-derive them.
+	denyDirs := []string{
+		"/Users/dev/.ssh",
+		"/mnt/real-ssh",
+		"/Users/dev/.aws",
+		"/Users/dev/.gnupg",
+		"/Users/dev/.config/gh",
+		"/Users/dev/.devstrap/keys",
+	}
+	denyFiles := []string{
+		"/Users/dev/.netrc",
+		"/Users/dev/.npmrc",
+		"/Users/dev/.pypirc",
+		"/Users/dev/.gitconfig",
+	}
+	profile := sbplProfile(spec, denyDirs, denyFiles)
 
 	for _, want := range []string{
 		"(version 1)",
@@ -27,6 +46,8 @@ func TestSBPLProfileConfinesWritesAndQuotesPaths(t *testing.T) {
 		`(literal "/dev/null")`,
 		"(deny file-read*",
 		`(subpath "/Users/dev/.ssh")`,
+		// A resolved leaf-symlink target renders exactly as passed.
+		`(subpath "/mnt/real-ssh")`,
 		`(subpath "/Users/dev/.aws")`,
 		`(subpath "/Users/dev/.gnupg")`,
 		`(subpath "/Users/dev/.config/gh")`,
@@ -40,6 +61,11 @@ func TestSBPLProfileConfinesWritesAndQuotesPaths(t *testing.T) {
 		if !strings.Contains(profile, want) {
 			t.Fatalf("profile missing %q:\n%s", want, profile)
 		}
+	}
+	// The builder renders ONLY the caller-supplied anchors — an anchor not in
+	// the deny lists must not appear even though it is a sensitiveHomeDir.
+	if strings.Contains(profile, `/Users/dev/.kube`) {
+		t.Fatalf("profile re-derived a home anchor not in the deny list:\n%s", profile)
 	}
 	// LogDir is profile placement only — the child must not be able to
 	// rewrite its own log or profile.
@@ -55,16 +81,21 @@ func TestSBPLProfileConfinesWritesAndQuotesPaths(t *testing.T) {
 }
 
 func TestSBPLProfileOmitsOptionalDenies(t *testing.T) {
+	// Deny lists are supplied but DenySensitiveReads is false: they must be
+	// ignored entirely (no deny-read block).
 	profile := sbplProfile(SandboxSpec{
 		WorktreeDir: "/wt",
 		TmpDir:      "/tmp",
 		LogDir:      "/logs",
-	})
+	}, []string{"/Users/dev/.ssh"}, []string{"/Users/dev/.netrc"})
 	if strings.Contains(profile, "network") {
 		t.Fatalf("network deny leaked into a network-allowed profile:\n%s", profile)
 	}
 	if strings.Contains(profile, "file-read") {
 		t.Fatalf("read denies leaked without DenySensitiveReads:\n%s", profile)
+	}
+	if strings.Contains(profile, ".ssh") || strings.Contains(profile, ".netrc") {
+		t.Fatalf("deny lists leaked without DenySensitiveReads:\n%s", profile)
 	}
 }
 

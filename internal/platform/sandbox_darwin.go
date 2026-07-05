@@ -43,14 +43,56 @@ func (s SeatbeltSandbox) Command(_ context.Context, spec SandboxSpec, argv []str
 	if err != nil {
 		return nil, func() {}, err
 	}
+	// Derive the credential deny anchors from the same lists as bubblewrap,
+	// then resolve leaf symlinks: Seatbelt matches the kernel-real path, so a
+	// deny on the literal ~/.ssh never fires when ~/.ssh is itself a symlink.
+	// (bwrapSensitivePaths returns nil,nil unless DenySensitiveReads.)
+	denyDirs, denyFiles := bwrapSensitivePaths(resolved)
+	denyDirs = seatbeltDenyPaths(denyDirs)
+	denyFiles = seatbeltDenyPaths(denyFiles)
 	// The profile lives in the run's log dir (0700) with the same 0600 mode
 	// as the agent log; the caller removes it via cleanup after the child
 	// exits.
 	profilePath := filepath.Join(resolved.LogDir, "sandbox-"+filepath.Base(resolved.WorktreeDir)+".sb")
-	if err := os.WriteFile(profilePath, []byte(sbplProfile(resolved)), 0o600); err != nil {
+	if err := os.WriteFile(profilePath, []byte(sbplProfile(resolved, denyDirs, denyFiles)), 0o600); err != nil {
 		return nil, func() {}, fmt.Errorf("write seatbelt profile: %w", err)
 	}
 	cleanup := func() { _ = os.Remove(profilePath) }
 	wrapped := append([]string{sandboxExecPath, "-f", profilePath}, argv...)
 	return wrapped, cleanup, nil
+}
+
+// seatbeltDenyPaths returns the deduped union of each raw credential path and
+// its symlink-resolved target. Seatbelt is allow-default, so denying BOTH the
+// literal alias and its resolved target is safe and closes the hole where e.g.
+// ~/.ssh is itself a symlink to /elsewhere — a reader referencing either name
+// is denied.
+//
+// This is deliberately STRONGER than reusing existingRealPaths verbatim: bwrap
+// mounts over the dest, so it uses only the resolved target and must DROP absent
+// paths (mounting over a missing dest errors). A Seatbelt deny RULE is harmless
+// on an absent or literal path, so we never drop — an absent credential dir
+// keeps its literal deny, and an unresolvable-but-present path keeps at least
+// its literal deny. The resolved half comes from the shared fail-closed
+// existingRealPaths (which drops absent and keeps unresolvable literals); the
+// raw half guarantees every literal alias is denied regardless.
+func seatbeltDenyPaths(raw []string) []string {
+	seen := make(map[string]struct{}, len(raw)*2)
+	var out []string
+	add := func(p string) {
+		if _, ok := seen[p]; ok {
+			return
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	// Literal aliases first (deterministic, and always denied), then the
+	// resolved targets contributed by the shared resolver.
+	for _, p := range raw {
+		add(p)
+	}
+	for _, p := range existingRealPaths(raw) {
+		add(p)
+	}
+	return out
 }
