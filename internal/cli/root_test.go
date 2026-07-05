@@ -1172,7 +1172,7 @@ func TestAgentRunRecordsLogsDiffAndPRStaleGate(t *testing.T) {
 	if !strings.Contains(stderr, "agent file policy guarded denied sensitive path") {
 		t.Fatalf("agent sensitive-path stderr = %q, want sensitive-path denial", stderr)
 	}
-	stdout, stderr, err := executeForTest("--home", home, "agent", "run", "work/acme/agent-repo", "--engine", "generic", "--task", "write agent file", "--", "touch", "agent.txt")
+	stdout, stderr, err := executeForTest("--home", home, "agent", "run", "work/acme/agent-repo", "--engine", "generic", "--task", "write agent file", "--sandbox", "off", "--", "touch", "agent.txt")
 	if err != nil {
 		t.Fatalf("agent run stdout = %q stderr = %q err = %v", stdout, stderr, err)
 	}
@@ -1202,7 +1202,7 @@ func TestAgentRunRecordsLogsDiffAndPRStaleGate(t *testing.T) {
 		t.Fatalf("agent log leaked provider env: %s", logRaw)
 	}
 
-	_, _, err = executeForTest("--home", home, "agent", "run", "work/acme/agent-repo", "--engine", "generic", "--task", "failing command", "--", "false")
+	_, _, err = executeForTest("--home", home, "agent", "run", "work/acme/agent-repo", "--engine", "generic", "--task", "failing command", "--sandbox", "off", "--", "false")
 	if err == nil {
 		t.Fatal("expected failing agent command")
 	}

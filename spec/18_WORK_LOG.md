@@ -31,6 +31,23 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — feat(agent): Linux bubblewrap sandbox for agent run (P4-GIT-03 slice 2)
+
+Changed:
+- `internal/platform`: added the Linux `BubblewrapSandbox` adapter and wired Linux detection to it. Availability now probes a real bwrap namespace launch with a `--disable-userns` retry fallback, so userns-restricted hosts degrade honestly; command wrapping resolves symlinked sandbox paths, masks existing real credential targets, guards empty/dash child argv before probing, and returns a safe no-op cleanup.
+- Added the pure all-OS bwrap argv builder and tests, sharing the Seatbelt sensitive-path lists so Linux credential masks stay in deny-list parity with the SBPL profile. Moved `resolveSandboxSpecPaths` out of the Darwin file and added a symlink-resolution test for worktree/tmp/log dirs plus missing deny-anchor tolerance.
+- CLI help, CI, spec docs, and the audit ledger now record the Linux bubblewrap slice: CI installs bwrap on ubuntu-latest, pins the AppArmor userns sysctl best-effort, and hard-fails a runner probe before the env-gated enforcement test can skip.
+- The broad agent lifecycle CLI test now passes `--sandbox off` for its generic command-success/failure assertions so ordinary `go test ./internal/cli/` remains deterministic on hosts that expose `sandbox-exec` but reject nested Seatbelt profiles; the dedicated sandbox matrix and platform E2E tests cover sandbox behavior.
+- Post-review (dual review — Fable-5 line-by-line + Opus-4.8 adversarial + Codex; Codex clean, Opus 4×P3, all folded in): the `--sandbox off` change above dropped the only end-to-end coverage of `runAgentProcess`'s sandbox-ENABLED branch, so a recording `passthroughSandbox` fake plus `TestAgentRunSandboxEnabledExecPath` now drive that glue hermetically on every platform (per-run TMPDIR create/repoint/teardown, argv wrapping, adapter cleanup); the probe now surfaces the compatible-mode (no-`--disable-userns`) stderr so bwrap < 0.8 no longer masks the real denial; the argv-shape test pins `--unshare-pid`; and the CI hard-probe mirrors the adapter's `--disable-userns`→plain-userns fallback.
+
+Validated:
+- `gofmt -w cmd internal`; `test -z "$(gofmt -l cmd internal)"`; `go vet ./...`; `GOOS=linux go vet ./...`; `go build ./...`; `GOOS=linux go build ./...`; `golangci-lint run` (darwin + `GOOS=linux` for the platform/cli packages); `GOCACHE=/tmp/devstrap-gocache go test -race ./...`; `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+- Landlock layered fallback slice (re-exec helper; additive-allow so read-denial stays bwrap-only).
+- `sandbox.violation` telemetry.
+- Open question: should `/var/run/docker.sock` join the mask list? Deferred to keep Seatbelt deny-list parity.
+
 ## 2026-07-05 — chore: v0.1.1 released — supply-chain verification proven live (P4-SEC-05 / P4-QUAL-05)
 
 Changed:
@@ -2636,4 +2653,3 @@ Validated:
 
 Follow-ups:
 - Continue remaining audit items: env run, OS keychain/approval, agent policy enforcement, and future PR command integration.
-
