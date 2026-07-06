@@ -896,7 +896,7 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 		// (reviewer finding; the env/draft malformed-payload convention is
 		// tracked in #133).
 		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
-			return fmt.Errorf("%w: decode trust event %s: %v", state.ErrEventVerification, event.ID, err)
+			return fmt.Errorf("%w: decode trust event %s: %w", state.ErrEventVerification, event.ID, err)
 		}
 		if payload.DeviceID == "" {
 			return fmt.Errorf("%w: trust event %s: empty target device id", state.ErrEventVerification, event.ID)
