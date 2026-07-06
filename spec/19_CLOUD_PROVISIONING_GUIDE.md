@@ -865,6 +865,39 @@ test the failure path with an inaccessible repo URL instead. A non-TTY `init --j
 `--fingerprint` leaves the founder unpinned and prints the exact `devices approve … --fingerprint`
 remedy — behaved as designed; pass `--fingerprint` to keep the ceremony scriptable.
 
+### F.3 Multi-device completeness wave — env exchange + trust propagation (2026-07-05) — **PASS**
+
+First live exercise of the ENV-SYNC-01 + TRUST-01 wave (PRs #130–#132) on the R2 hub, run BEFORE the
+TRUST-01 merge from the feature binary — and it **caught a real bug** (see 5). Two fresh workspaces on
+the shared `devstrap-hub` bucket (prefix isolation), three simulated devices (`--home`/`--root` +
+`DEVSTRAP_NO_KEYCHAIN=1`), creds via `~/.devstrap/dogfood-r2.env`, one real private project repo.
+
+1. **Pairing before capture (ordering matters):** A founds, adds the repo, first `sync` mints WCK
+   epoch 1; B and C join via the one-paste `--fingerprint` ceremony and are approved BEFORE any env
+   capture — env blobs are age-encrypted to the recipient set **at capture time**, so a device
+   enrolled later cannot decrypt an existing blob without a re-capture/rotate.
+2. **ENV-SYNC-01:** A `env capture` = *"2 env variables … for 3 recipient device(s)"* → `sync`
+   pushed the `env.profile.updated` event + blob; B `sync` then `env hydrate --write .env.local`
+   reproduced A's values **byte-identical**. No extra commands beyond the killer loop.
+3. **TRUST-01:** A `devices revoke <B>` (epoch 1→2, superseding env rewrap, trust event in the same
+   tx) → A `sync` → C `sync`: C's `devices list` showed B **revoked with no local operator action**
+   — the headline. B's next pull deferred *"awaiting workspace key grant"* on epoch 2 (the designed
+   wedge-out); B could still push a rogue project, which C pulled and **quarantined** (project absent
+   from C's status, one loud `event_verification_failure` conflict).
+4. **Rotation propagation (fixed-binary re-run, second workspace):** after the fix in 5, A's doctor
+   showed *"warning secrets needing rotation 1"*, C's doctor showed the SAME warning purely via sync,
+   and C's hydrate still worked through the superseded (rewrapped) blob ref.
+5. **Bug caught:** the rewrap's superseding `env.profile.updated` re-inserted `secret_bindings` rows
+   with `needs_rotation` cleared — wiping the revoke's rotation flags on the revoker AND every peer
+   (P5-PROD-03 doctor surfacing silently broken). The txtar's `stdout 'rotation'` assertion was too
+   weak to catch it (it matched the label in *"rotation 0"*). Fixed in PR #132: the upsert carries
+   each var's flag forward; the txtar now asserts `secrets needing rotation [1-9]`.
+
+Traps: the git carrier is **workspace-bound** by its `devstrap-hub.json` marker — a second workspace
+pointed at `devstrap-hub-dogfood` is refused (create a fresh empty repo per workspace, or use R2,
+whose per-workspace prefixes isolate); `hub init` bootstraps only git carriers — for r2/s3 set `hub:`
+in config.yaml or export `DEVSTRAP_HUB` per shell. Assert doctor COUNTS (`[1-9]`), never bare labels.
+
 ## Pass 6 audit recommendations (2026-07-01)
 
 From the sixth-pass audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`); IDs link to full evidence there.
