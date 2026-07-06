@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/Reederey87/DevStrap/internal/id"
@@ -209,8 +210,13 @@ const (
 	// EventConflictKindEnvPendingProject quarantines a verified
 	// env.profile.updated whose project has not applied yet (ENV-SYNC-01
 	// review): recoverable ordering, e.g. the project's origin device is not
-	// pinned here yet. Replayed by ReplayPendingEnvProfileConflicts.
+	// pinned here yet. Replayed by ReplayPendingProjectConflicts.
 	EventConflictKindEnvPendingProject = "env_pending_project"
+	// EventConflictKindDraftPendingProject quarantines a verified
+	// draft.snapshot.created whose project has not applied yet. This mirrors
+	// env_pending_project so one stale/early draft pointer cannot wedge the
+	// pull cursor.
+	EventConflictKindDraftPendingProject = "draft_pending_project"
 )
 
 type eventVerificationConflictDetails struct {
@@ -593,15 +599,19 @@ func ApplyEventsWithStats(ctx context.Context, st *state.Store, events []state.E
 				record(event, true)
 				continue
 			}
-			if errors.Is(err, errEnvProjectPending) {
-				if conflictErr := insertEnvPendingProjectConflict(ctx, st, event, err); conflictErr != nil {
+			if errors.Is(err, errEnvProjectPending) || errors.Is(err, errDraftProjectPending) {
+				kind := EventConflictKindEnvPendingProject
+				if errors.Is(err, errDraftProjectPending) {
+					kind = EventConflictKindDraftPendingProject
+				}
+				if conflictErr := insertPendingProjectConflict(ctx, st, event, kind, err); conflictErr != nil {
 					return nil, stats, errors.Join(err, conflictErr)
 				}
 				stats.Quarantined++
 				// Consumed for the cursor like verification quarantines:
 				// re-delivery would hit the same missing project, and the full
 				// event is preserved in the conflict for the per-cycle replay
-				// (ReplayPendingEnvProfileConflicts) once the project applies.
+				// (ReplayPendingProjectConflicts) once the project applies.
 				record(event, true)
 				continue
 			}
@@ -686,18 +696,21 @@ func insertEventHashChainConflict(ctx context.Context, st *state.Store, event st
 	return st.InsertConflict(ctx, "", ConflictEventHashChain, string(raw))
 }
 
-// errEnvProjectPending marks a verified env.profile.updated event whose
-// project row is absent WITHOUT a tombstone (ENV-SYNC-01 review, Codex P2):
-// the ordering is recoverable — most commonly the project.added author is not
-// pinned on this device yet, so its event sits in a verification quarantine —
-// and consuming the env event silently would lose the profile even after the
-// project later replays. The apply loop quarantines it for replay instead.
-var errEnvProjectPending = errors.New("env profile project not yet applied")
+// Pending-project sentinels mark verified pointer events whose project row is
+// absent WITHOUT a tombstone: the ordering is recoverable — most commonly the
+// project.added author is not pinned on this device yet, so its event sits in a
+// verification quarantine — and consuming the pointer silently would lose data
+// even after the project later replays. The apply loop quarantines these for
+// replay instead.
+var (
+	errEnvProjectPending   = errors.New("env profile project not yet applied")
+	errDraftProjectPending = errors.New("draft snapshot project not yet applied")
+)
 
-// insertEnvPendingProjectConflict preserves the full env event for replay once
-// its project applies (ReplayPendingEnvProfileConflicts).
-func insertEnvPendingProjectConflict(ctx context.Context, st *state.Store, event state.Event, cause error) error {
-	return insertEventConflictOnce(ctx, st, event, EventConflictKindEnvPendingProject, cause.Error())
+// insertPendingProjectConflict preserves the full pointer event for replay once
+// its project applies (ReplayPendingProjectConflicts).
+func insertPendingProjectConflict(ctx context.Context, st *state.Store, event state.Event, kind string, cause error) error {
+	return insertEventConflictOnce(ctx, st, event, kind, cause.Error())
 }
 
 func insertEventVerificationConflict(ctx context.Context, st *state.Store, event state.Event, cause error) error {
@@ -820,28 +833,51 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 	case EventDraftSnapshotCreated:
 		var payload DraftSnapshotPayload
 		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
-			return fmt.Errorf("decode event %s: %w", event.ID, err)
+			return fmt.Errorf("%w: decode draft snapshot event %s: %w", state.ErrEventVerification, event.ID, err)
+		}
+		// A blob ref that can never pass RecordDraftSnapshotTx's validation is
+		// the same malformed-payload class (review finding): validate HERE so
+		// it quarantines-as-consumed instead of surfacing as a raw store error
+		// that aborts the batch — or, worse, error-loops the pending replay
+		// once the project lands.
+		if !strings.HasPrefix(payload.BlobRef, "age_blob:") {
+			return fmt.Errorf("%w: draft snapshot blob ref %q must use age_blob: prefix", state.ErrEventVerification, payload.BlobRef)
 		}
 		// DRAFT-02: record the content-addressed blob reference against the
 		// project. The blob content is fetched from the hub during sync and
 		// extracted during materialization.
 		pk, err := pathkey.Clean(payload.Path)
 		if err != nil {
-			return fmt.Errorf("draft snapshot path %q: %w", payload.Path, err)
+			// A verified event whose payload can never apply (unsafe path) is
+			// the same malformed-payload class as a decode failure: quarantine
+			// as consumed instead of aborting the batch (#133).
+			return fmt.Errorf("%w: draft snapshot path %q: %w", state.ErrEventVerification, payload.Path, err)
 		}
 		project, err := tx.ProjectByPath(ctx, pk.Display)
 		if err != nil {
-			return fmt.Errorf("draft snapshot for unknown project %q: %w", payload.Path, err)
+			// Mirror env.profile.updated: a winning delete drops the pointer,
+			// while a missing, non-tombstoned project is recoverable ordering
+			// and must be quarantined as consumed so the pull cursor advances.
+			if _, ok, terr := tx.TombstoneHLC(ctx, pk.Display); terr != nil {
+				return terr
+			} else if ok {
+				return nil
+			}
+			return fmt.Errorf("%w: %s", errDraftProjectPending, payload.Path)
 		}
 		return tx.RecordDraftSnapshotTx(ctx, project.ID, payload.BlobRef, payload.ByteSize, payload.FileCount, event)
 	case EventEnvProfileUpdated:
 		var payload EnvProfilePayload
 		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
-			return fmt.Errorf("decode event %s: %w", event.ID, err)
+			// Same malformed-payload convention as the draft case above (#133):
+			// only an APPROVED signer can reach here (mustVerify), and a
+			// payload that can never decode must quarantine as consumed, not
+			// abort the pull batch.
+			return fmt.Errorf("%w: decode env profile event %s: %w", state.ErrEventVerification, event.ID, err)
 		}
 		pk, err := pathkey.Clean(payload.Path)
 		if err != nil {
-			return fmt.Errorf("env profile path %q: %w", payload.Path, err)
+			return fmt.Errorf("%w: env profile path %q: %w", state.ErrEventVerification, payload.Path, err)
 		}
 		project, err := tx.ProjectByPath(ctx, pk.Display)
 		if err != nil {
@@ -946,16 +982,16 @@ func envCoordLess(hlc int64, deviceID, eventID string, event state.Event) bool {
 	)
 }
 
-// ReplayPendingEnvProfileConflicts re-attempts every open env_pending_project
-// quarantine (ENV-SYNC-01 review, Codex P2): a verified env.profile.updated
-// whose project had not applied yet was preserved here instead of being
-// consumed. Once the project lands — a later pull window, or a quarantined
-// project.added replayed by `devices approve` — the stored event applies
-// through the normal verified path and the conflict resolves. A still-missing
-// project re-quarantines as a dedup no-op and the row stays open (visible,
-// bounded). The conflict resolves only AFTER a successful apply, mirroring
-// ReplayUndecryptableConflicts' resolve-after-apply rule.
-func ReplayPendingEnvProfileConflicts(ctx context.Context, st *state.Store) (int, error) {
+// ReplayPendingProjectConflicts re-attempts every open env_pending_project and
+// draft_pending_project quarantine: a verified env.profile.updated or
+// draft.snapshot.created whose project had not applied yet was preserved here
+// instead of being consumed. Once the project lands — a later pull window, or a
+// quarantined project.added replayed by `devices approve` — the stored event
+// applies through the normal verified path and the conflict resolves. A
+// still-missing project re-quarantines as a dedup no-op and the row stays open
+// (visible, bounded). The conflict resolves only AFTER a successful apply,
+// mirroring ReplayUndecryptableConflicts' resolve-after-apply rule.
+func ReplayPendingProjectConflicts(ctx context.Context, st *state.Store) (int, error) {
 	conflicts, err := st.OpenConflictsByType(ctx, ConflictEventVerification)
 	if err != nil {
 		return 0, err
@@ -963,13 +999,13 @@ func ReplayPendingEnvProfileConflicts(ctx context.Context, st *state.Store) (int
 	replayed := 0
 	for _, c := range conflicts {
 		var details eventVerificationConflictDetails
-		if json.Unmarshal([]byte(c.DetailsJSON), &details) != nil || details.Kind != EventConflictKindEnvPendingProject {
+		if json.Unmarshal([]byte(c.DetailsJSON), &details) != nil || !isPendingProjectConflictKind(details.Kind) {
 			continue
 		}
 		var restored state.Event
 		if err := json.Unmarshal([]byte(details.EventJSON), &restored); err != nil {
-			logging.Logger(ctx).Warn("env-pending replay: conflict carries unparseable event JSON",
-				"conflict_id", c.ID, "event_id", details.EventID, "err", err.Error())
+			logging.Logger(ctx).Warn("pending-project replay: conflict carries unparseable event JSON",
+				"conflict_id", c.ID, "kind", details.Kind, "event_id", details.EventID, "err", err.Error())
 			continue
 		}
 		_, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{restored}, nil)
@@ -979,14 +1015,18 @@ func ReplayPendingEnvProfileConflicts(ctx context.Context, st *state.Store) (int
 		if stats.Quarantined > 0 {
 			continue // project still missing (or a fresh verification failure); row stays open
 		}
-		if err := st.ResolveConflict(ctx, c.ID, `{"action":"auto","reason":"project applied after env-pending hold (ENV-SYNC-01 replay)"}`); err != nil {
+		if err := st.ResolveConflict(ctx, c.ID, `{"action":"auto","reason":"project applied after pending-project hold replay"}`); err != nil {
 			return replayed, err
 		}
-		logging.Logger(ctx).Info("env-pending replay: quarantined env profile recovered",
-			"event_id", details.EventID, "device_id", details.DeviceID)
+		logging.Logger(ctx).Info("pending-project replay: quarantined pointer recovered",
+			"kind", details.Kind, "event_id", details.EventID, "device_id", details.DeviceID)
 		replayed++
 	}
 	return replayed, nil
+}
+
+func isPendingProjectConflictKind(kind string) bool {
+	return kind == EventConflictKindEnvPendingProject || kind == EventConflictKindDraftPendingProject
 }
 
 // loadNamespaceProjection loads the projection slice Decide needs for a

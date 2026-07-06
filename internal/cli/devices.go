@@ -578,13 +578,13 @@ func replayQuarantinedEvents(ctx context.Context, stderr io.Writer, opts *option
 	if replayed > 0 {
 		_, _ = fmt.Fprintf(stderr, "Replayed %d quarantined event(s) from device %s\n", replayed, deviceID)
 	}
-	// ENV-SYNC-01 review: the replayed events may include the project.added an
-	// env_pending_project quarantine was waiting on — re-attempt those now so
-	// approving the project's origin device recovers the profile in one step.
-	if n, err := dssync.ReplayPendingEnvProfileConflicts(ctx, store); err != nil {
-		_, _ = fmt.Fprintf(stderr, "warning: could not replay pending env profile conflicts: %v\n", err)
+	// The replayed events may include the project.added a pending-project
+	// pointer quarantine was waiting on — re-attempt those now so approving the
+	// project's origin device recovers env and draft pointers in one step.
+	if n, err := dssync.ReplayPendingProjectConflicts(ctx, store); err != nil {
+		_, _ = fmt.Fprintf(stderr, "warning: could not replay pending project conflicts: %v\n", err)
 	} else if n > 0 {
-		_, _ = fmt.Fprintf(stderr, "Recovered %d pending env profile(s)\n", n)
+		_, _ = fmt.Fprintf(stderr, "Recovered %d pending project pointer(s)\n", n)
 	}
 }
 
