@@ -31,6 +31,17 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — docs(spec/19): §F.3 multi-device completeness dogfood runbook
+
+Changed:
+- `spec/19_CLOUD_PROVISIONING_GUIDE.md` §F.3: live-R2 validation log for the ENV-SYNC-01 + TRUST-01 wave (PRs #130–#132) — three devices, pairing-before-capture ordering, byte-identical cross-device hydrate, revocation propagation to a bystander via sync alone, post-revocation quarantine + epoch wedge-out, rotation-warning propagation on the fixed binary, and the dogfood-caught needs_rotation wipe (fixed in PR #132). Traps recorded: workspace-bound git carrier marker, `hub init` git-only bootstrap, count-not-label doctor assertions.
+
+Validated:
+- Docs-only; the run itself is the validation (all legs PASS on live R2; details in §F.3).
+
+Follow-ups:
+- None (wave complete; #133/#134 track the code follow-ups).
+
 ## 2026-07-05 — feat(devices): synced device-trust propagation (TRUST-01)
 
 Changed:
