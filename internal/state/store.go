@@ -1766,25 +1766,9 @@ WHERE id = ?;
 		// (breaking the P5-PROD-03 doctor surfacing). Carry the flag forward
 		// per var name; clearing stays the explicit, device-local operator
 		// action (`env rotate` -> ClearRotationForProject), per spec/09.
-		rotFlags := map[string]int{}
-		rotRows, rerr := tx.tx.QueryContext(ctx, `SELECT var_name, needs_rotation FROM secret_bindings WHERE env_profile_id = ?;`, existingID)
+		rotFlags, rerr := tx.envBindingRotationFlags(ctx, existingID)
 		if rerr != nil {
-			return EnvProfile{}, fmt.Errorf("read env binding rotation flags: %w", rerr)
-		}
-		for rotRows.Next() {
-			var varName string
-			var flag int
-			if err := rotRows.Scan(&varName, &flag); err != nil {
-				_ = rotRows.Close()
-				return EnvProfile{}, fmt.Errorf("scan env binding rotation flag: %w", err)
-			}
-			rotFlags[varName] = flag
-		}
-		if err := rotRows.Err(); err != nil {
-			return EnvProfile{}, err
-		}
-		if err := rotRows.Close(); err != nil {
-			return EnvProfile{}, fmt.Errorf("close env binding rotation flags: %w", err)
+			return EnvProfile{}, rerr
 		}
 		if _, err := tx.tx.ExecContext(ctx, `DELETE FROM secret_bindings WHERE env_profile_id = ?;`, existingID); err != nil {
 			return EnvProfile{}, fmt.Errorf("replace env bindings: %w", err)
@@ -1819,6 +1803,26 @@ VALUES (?, ?, ?, ?, 1, ?, ?, ?);
 		Provider:    p.Provider,
 		Mode:        p.Mode,
 	}, nil
+}
+
+// envBindingRotationFlags reads each binding's needs_rotation by var name so
+// the replace-all upsert can carry the flags forward (TRUST-01 dogfood fix).
+func (tx *Tx) envBindingRotationFlags(ctx context.Context, envProfileID string) (map[string]int, error) {
+	rows, err := tx.tx.QueryContext(ctx, `SELECT var_name, needs_rotation FROM secret_bindings WHERE env_profile_id = ?;`, envProfileID)
+	if err != nil {
+		return nil, fmt.Errorf("read env binding rotation flags: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	flags := map[string]int{}
+	for rows.Next() {
+		var varName string
+		var flag int
+		if err := rows.Scan(&varName, &flag); err != nil {
+			return nil, fmt.Errorf("scan env binding rotation flag: %w", err)
+		}
+		flags[varName] = flag
+	}
+	return flags, rows.Err()
 }
 
 func (s *Store) EnvProfileForProject(ctx context.Context, namespaceID string) (EnvProfile, []SecretBinding, error) {
