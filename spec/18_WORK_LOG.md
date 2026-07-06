@@ -31,6 +31,28 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — feat(devices): synced device-trust propagation (TRUST-01)
+
+Changed:
+- `internal/sync/events.go`: new `device.revoked`/`device.lost` events + `DeviceTrustPayload` (state derives from the event TYPE — one source of truth) + `NewDeviceTrustEvent`; apply case ensures a placeholder for an unknown target, applies the sticky flip, and flags `needs_rotation` ONLY when a row actually changed (replays never re-flag cleared rotations). `device.approved` is deliberately NOT an event — propagating approvals would let one compromised device enroll attackers fleet-wide; approval stays the local P4-SEC-04 fingerprint ceremony.
+- `internal/state/store.go`: `SetDeviceTrustStateTx` (factored transactional core, refuse-local guard kept), `ApplyRemoteDeviceTrustTx` (sticky UPDATE `WHERE trust_state IN ('pending','approved')`; the local device NEVER flips from a remote event — a hub cannot talk a device into distrusting itself; returns `changed`), `MarkEncryptedBindingsNeedingRotationTx`; `mustVerifyEvent` gains both trust types.
+- `internal/cli/devices.go`: `devices revoke`/`lost` write the trust flip + insert the synced event in ONE transaction (P6-DATA-03), BEFORE the WCK rotation — a rotation failure can never orphan the trust write, and the trust event's seq precedes the new epoch's grants; stderr notes the propagation.
+- Semantics (design record): sticky/monotonic — revoked/lost are terminal for remote transitions, only a local approve ceremony resurrects; pending→revoked is the fail-closed direction (hasEnrolledDevices already counts revoked rows). Mutual revocation converges deterministically within one batch (HLC-earlier revoke wins; the counter-revoke fails verification once its signer flips and quarantines); across pull windows bystanders can diverge — ACCEPTED residual, fail-closed either way, loud (quarantine rows preserved), operator re-approves the survivor. No trust CRDTs by design (Keybase downgrade-lease analysis: full race-proofing needs an ordering service; wrong trade-off for a single-user fleet).
+- Specs: spec/00/07/09/13/15/16 reconciled (the spec/07 "revoke is local-only" gap, the spec/15 P6-SYNC-01 residual, and spec/13's future-work line are retired); spec/14 `TRUST-01` flipped shipped.
+
+Validated:
+- `internal/sync/trust_apply_test.go`: flip+rotation flagging, sticky replay no-reflag, unknown-target placeholder, untrusted-signer quarantine, local-target no-op, mutual-revocation both-order determinism, post-revoke same-batch quarantine isolation. `TestApplyRemoteDeviceTrustTxMatrix` (state) pins the transition matrix incl. remote-approve rejection. `TestDeviceRevokeEmitsTrustEvent` (cli) pins same-tx emission.
+- e2e `sync_trust_propagation.txtar`: three devices, full mutual pinning; A revokes B → C learns via sync, doctor flags rotation, B's subsequent push quarantines on C.
+- gofmt; darwin+linux builds; golangci-lint 0 issues; `go test -race ./...`; spec-drift.
+
+- Post-dogfood fix (live R2 run F.3 caught it): `UpsertEnvProfileTx`'s replace-all-bindings upsert was silently WIPING `needs_rotation` — a revoke flags the bindings, then the rewrap's superseding `env.profile.updated` re-inserted fresh rows with the flag cleared, on the revoker AND on every receiving device (breaking P5-PROD-03 doctor surfacing; the txtar's `stdout 'rotation'` assertion was too weak to catch it — it matched the label in "rotation 0"). The upsert now carries each var's flag forward (clearing stays the explicit device-local `env rotate` action); pinned by `TestUpsertEnvProfileTxPreservesNeedsRotation` and the hardened txtar assertion (`secrets needing rotation [1-9]`).
+- Post-review (Codex adversarial, dual-review): (HIGH, partially accepted) a failed WCK rotation during revoke leaves the old epoch active so pre-rotation pushes (incl. the revoke event) stay readable by the revoked device — the fail-closed-revoke suggestion was REJECTED (refusing the revoke keeps a compromised device approved, strictly worse; rotation failure is a pre-existing P4-SEC-07 warn path); accepted the loudness half: the CLI now names the exposure and the `keys rotate` remedy, spec/15 documents the residual, fail-closed/auto-retry rotation filed as follow-up. (HIGH, residual confirmed + hardened) cross-window mutual-revocation divergence stays the documented accepted trade (no trust CRDTs/ordering service for a single-user fleet), but the review exposed an undocumented recovery trap — re-approving one side replays its quarantined counter-revoke, flipping the other — now pinned by `TestApplyMutualRevocationCrossWindowDivergesLoudly` (both bystanders diverge LOUDLY with the loser preserved in an open conflict) and documented as the two-step recovery in spec/07.
+
+Follow-ups:
+- Fail-closed or auto-retrying WCK rotation on revoke (adversarial-review follow-up).
+- Bounded conflict-row aggregation for a still-pushing revoked device (pre-existing).
+- Cross-window mutual-revocation divergence: documented accepted residual (spec/07).
+
 ## 2026-07-05 — feat(env): cross-device env-profile exchange (ENV-SYNC-01)
 
 Changed:

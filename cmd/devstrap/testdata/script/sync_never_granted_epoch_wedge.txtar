@@ -69,8 +69,12 @@ exec sh -c 'test -d $WORK/CodeB/work/a2-proj/.git'
 # cursor advances (the P6-SEC-03 un-wedge).
 env DEVSTRAP_SYNC_KEY_GRANT_GRACE=0s
 exec devstrap --home=$WORK/homeC --root=$WORK/CodeC sync --hub-file=$WORK/hub.json
+# TRUST-01: A's revoke of D now ALSO emits a synced device.revoked event,
+# sealed (like all post-rotation traffic) under epoch 2 — so never-granted C
+# quarantines TWO epoch-2 carriers (the trust event + the project event), each
+# with its undecryptable row and the successor's hash-chain hold.
 exec devstrap --home=$WORK/homeC --root=$WORK/CodeC conflicts list
-stdout '1 open conflict'
+stdout '4 open conflict'
 exec devstrap --home=$WORK/homeC --root=$WORK/CodeC doctor
 stdout 'awaiting key grants'
 stdout 'epoch 2'

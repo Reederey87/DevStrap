@@ -301,8 +301,34 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 					return err
 				}
 			}
-			if err := store.SetDeviceTrustState(cmd.Context(), args[0], trustState); err != nil {
-				return err
+			if trustState == "revoked" || trustState == "lost" {
+				// TRUST-01: the trust flip and the synced device.revoked/lost
+				// event land in ONE transaction (P6-DATA-03), BEFORE the WCK
+				// rotation below — a rotation failure can never orphan the
+				// trust write, and the trust event's seq precedes the new
+				// epoch's grant events in this device's stream.
+				eventType := dssync.EventDeviceRevoked
+				if trustState == "lost" {
+					eventType = dssync.EventDeviceLost
+				}
+				payloadJSON, err := json.Marshal(dssync.DeviceTrustPayload{DeviceID: args[0]})
+				if err != nil {
+					return err
+				}
+				if err := store.WithTx(cmd.Context(), func(tx *state.Tx) error {
+					if err := tx.SetDeviceTrustStateTx(cmd.Context(), args[0], trustState); err != nil {
+						return err
+					}
+					_, err := store.InsertLocalEventTx(cmd.Context(), tx, dssync.NewDeviceTrustEvent(eventType, string(payloadJSON)))
+					return err
+				}); err != nil {
+					return err
+				}
+				_, _ = fmt.Fprintf(stderr, "note: the %s state propagates to other devices on their next sync (they will quarantine %s's events and flag secrets for rotation)\n", trustState, args[0])
+			} else {
+				if err := store.SetDeviceTrustState(cmd.Context(), args[0], trustState); err != nil {
+					return err
+				}
 			}
 			if _, err := fmt.Fprintf(stdout, "Device %s marked %s\n", args[0], trustState); err != nil {
 				return err
@@ -784,7 +810,15 @@ func rotateWorkspaceKeyOnRevoke(ctx context.Context, stderr io.Writer, opts *opt
 	}
 	newEpoch, grants, rerr := kr.Rotate(ctx)
 	if rerr != nil {
-		_, _ = fmt.Fprintf(stderr, "warning: workspace key rotation failed: %v\n", rerr)
+		// Adversarial-review (TRUST-01): a failed rotation leaves the OLD
+		// epoch active, so every event pushed until a rotation succeeds —
+		// including the device.revoked event itself — stays decryptable by
+		// the revoked device (it still holds the old WCK). The trust flip is
+		// deliberately NOT rolled back: refusing the revoke because rotation
+		// failed would keep a compromised device APPROVED, which is worse.
+		// Be loud about the confidentiality gap and the remedy instead.
+		_, _ = fmt.Fprintf(stderr, "warning: workspace key rotation FAILED: %v\n", rerr)
+		_, _ = fmt.Fprintf(stderr, "warning: events pushed before a successful rotation remain readable by the revoked device (it holds the current epoch key). Run 'devstrap keys rotate' until it succeeds, then 'devstrap sync'.\n")
 		return
 	}
 	if len(grants) > 0 {

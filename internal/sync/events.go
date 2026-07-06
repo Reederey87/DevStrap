@@ -26,6 +26,13 @@ const (
 	// ENV-SYNC-01: captured/bound env profile metadata; supersedes the planned "env.profile.bound".
 	EventEnvProfileUpdated = "env.profile.updated"
 	EventDeviceKeyGranted  = "device.key.granted" // P4-SEC-07: age-wrapped WCK epoch grant
+	// TRUST-01: fleet-wide device-trust propagation. Only the fail-safe
+	// direction syncs — device.approved is DELIBERATELY not an event, because
+	// propagating approvals would let one compromised approved device enroll
+	// attacker devices fleet-wide; approval stays the local P4-SEC-04
+	// fingerprint ceremony.
+	EventDeviceRevoked = "device.revoked"
+	EventDeviceLost    = "device.lost"
 )
 
 // Conflict type identifiers, exported so the CLI resolver can branch on them
@@ -112,6 +119,14 @@ type EnvProfilePayload struct {
 	BlobRef  string            `json:"blob_ref,omitempty"`  // devstrap_encrypted only
 	VarNames []string          `json:"var_names,omitempty"` // devstrap_encrypted only
 	Refs     map[string]string `json:"refs,omitempty"`      // provider profiles only (var -> op:// ref)
+}
+
+// DeviceTrustPayload names the target of a device.revoked/device.lost event
+// (TRUST-01). The resulting trust state derives from the event TYPE, not the
+// payload, so there is exactly one source of truth. Reason is audit-only.
+type DeviceTrustPayload struct {
+	DeviceID string `json:"device_id"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 // DeviceKeyGrant carries a device.key.granted event (P4-SEC-07): a Workspace
@@ -271,6 +286,17 @@ func NewDraftSnapshotEvent(typ, payloadJSON string) state.Event {
 func NewEnvProfileEvent(payloadJSON string) state.Event {
 	return state.Event{
 		Type:        EventEnvProfileUpdated,
+		PayloadJSON: payloadJSON,
+		ContentHash: state.ContentHash(payloadJSON),
+	}
+}
+
+// NewDeviceTrustEvent builds an unsigned device.revoked/device.lost event
+// from a pre-marshaled DeviceTrustPayload (TRUST-01). The store stamps HLC,
+// seq, device id, and the device signature on InsertLocalEvent.
+func NewDeviceTrustEvent(typ, payloadJSON string) state.Event {
+	return state.Event{
+		Type:        typ,
 		PayloadJSON: payloadJSON,
 		ContentHash: state.ContentHash(payloadJSON),
 	}
@@ -849,6 +875,40 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 		}
 		if _, err := tx.UpsertEnvProfileTx(ctx, project.ID, params, event); err != nil {
 			return fmt.Errorf("apply env profile for %q: %w", payload.Path, err)
+		}
+		return nil
+	case EventDeviceRevoked, EventDeviceLost:
+		// TRUST-01: a synced trust flip. Signature verification already ran
+		// (mustVerifyEvent), so the SIGNER is a locally-approved device; the
+		// TARGET may be unknown here (device records do not sync), so ensure a
+		// placeholder row exists for the sticky update to act on —
+		// pending -> revoked is the fail-closed direction. The update itself
+		// is monotonic (only pending/approved flip; the local device never
+		// flips from a remote event) and replay-idempotent; needs_rotation is
+		// flagged only when a row ACTUALLY changed, so replays can never
+		// re-flag values an operator already rotated and cleared.
+		var payload DeviceTrustPayload
+		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+			return fmt.Errorf("decode event %s: %w", event.ID, err)
+		}
+		if payload.DeviceID == "" {
+			return fmt.Errorf("decode event %s: empty target device id", event.ID)
+		}
+		if err := tx.EnsureRemoteDeviceTx(ctx, payload.DeviceID); err != nil {
+			return err
+		}
+		trustState := "revoked"
+		if event.Type == EventDeviceLost {
+			trustState = "lost"
+		}
+		changed, err := tx.ApplyRemoteDeviceTrustTx(ctx, payload.DeviceID, trustState)
+		if err != nil {
+			return err
+		}
+		if changed {
+			if _, err := tx.MarkEncryptedBindingsNeedingRotationTx(ctx); err != nil {
+				return err
+			}
 		}
 		return nil
 	case EventDeviceKeyGranted:
