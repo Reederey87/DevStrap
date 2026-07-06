@@ -41,21 +41,40 @@ type Watcher interface {
 }
 
 type ServiceSpec struct {
-	Label    string
-	ExecPath string
-	Args     []string
-	Env      map[string]string
+	Label       string
+	Description string
+	ExecPath    string
+	Args        []string
+	Env         map[string]string
+	// WorkingDir, when set, is the service's working directory.
+	WorkingDir string
+	// StdoutPath/StderrPath are launchd-only log destinations; systemd routes to
+	// journald and ignores them.
+	StdoutPath string
+	StderrPath string
+	// RestartOnFailure asks the supervisor to relaunch the service when it exits
+	// with a failure; RestartDelaySeconds throttles the relaunch (0 → adapter
+	// default of 30s).
+	RestartOnFailure    bool
+	RestartDelaySeconds int
 }
 
 type ServiceStatus struct {
 	Installed bool
 	Running   bool
 	Detail    string
+	// UnitPath is the on-disk plist/unit file backing the service.
+	UnitPath string
 }
 
 type ServiceManager interface {
 	Name() string
-	Install(ctx context.Context, spec ServiceSpec) error
+	// DefaultLabel is the OS-idiomatic label used when the caller does not pass
+	// one (a reverse-DNS launchd label, a bare systemd unit name).
+	DefaultLabel() string
+	// Install returns OS-idiomatic advisory notes (e.g. the Linux linger note)
+	// alongside any error, so the CLI never has to branch on the OS.
+	Install(ctx context.Context, spec ServiceSpec) (notes []string, err error)
 	Uninstall(ctx context.Context, label string) error
 	Status(ctx context.Context, label string) (ServiceStatus, error)
 }
@@ -135,8 +154,10 @@ func (m UnsupportedServiceManager) Name() string {
 	return "unsupported-service"
 }
 
-func (m UnsupportedServiceManager) Install(context.Context, ServiceSpec) error {
-	return fmt.Errorf("%w: %s service manager is not implemented", ErrUnsupported, m.Name())
+func (m UnsupportedServiceManager) DefaultLabel() string { return "devstrap-run-loop" }
+
+func (m UnsupportedServiceManager) Install(context.Context, ServiceSpec) ([]string, error) {
+	return nil, fmt.Errorf("%w: %s service manager is not implemented", ErrUnsupported, m.Name())
 }
 
 func (m UnsupportedServiceManager) Uninstall(context.Context, string) error {

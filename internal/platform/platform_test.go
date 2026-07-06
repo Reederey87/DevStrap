@@ -52,7 +52,7 @@ func TestPollWatcherEmitsScanAndStopsOnContext(t *testing.T) {
 
 func TestUnsupportedAdaptersReturnSentinel(t *testing.T) {
 	service := UnsupportedServiceManager{Target: "launchd"}
-	if err := service.Install(t.Context(), ServiceSpec{}); !errors.Is(err, ErrUnsupported) {
+	if _, err := service.Install(t.Context(), ServiceSpec{}); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("service Install err = %v, want ErrUnsupported", err)
 	}
 	keychain := UnsupportedKeychain{Target: "keychain"}

@@ -6,7 +6,7 @@ func Detect() Set {
 	return newSet(
 		"darwin",
 		NativeWatcher{},
-		UnsupportedServiceManager{Platform: "darwin", Target: "launchd"},
+		LaunchdManager{},
 		SystemKeychain{Platform: "darwin", Target: "keychain"},
 		SeatbeltSandbox{},
 	)

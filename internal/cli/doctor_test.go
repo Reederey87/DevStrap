@@ -3,8 +3,10 @@ package cli
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/state"
 	"github.com/spf13/viper"
 )
@@ -157,5 +159,29 @@ func TestCheckHubHealthWorkspaceIDRowFileHub(t *testing.T) {
 	}
 	if !foundWorkspaceID {
 		t.Fatalf("checkHubHealth results = %+v, want workspace id row", results)
+	}
+}
+
+func TestDoctorWarnsWhenServiceInstalledButStopped(t *testing.T) {
+	f := &fakeServiceManager{
+		labelVal:  "fake.run-loop",
+		statusVal: platform.ServiceStatus{Installed: true, Running: false, Detail: "not loaded", UnitPath: "/x/fake.plist"},
+	}
+	withFakeService(t, f)
+
+	v := viper.New()
+	v.Set("home", t.TempDir())
+	opts := &options{v: v}
+
+	results := checkService(context.Background(), opts)
+	if len(results) != 1 {
+		t.Fatalf("checkService results = %+v, want exactly one", results)
+	}
+	got := results[0]
+	if got.Name != "run-loop service" || got.Status != checkWarn {
+		t.Fatalf("service check = %+v, want a warning row", got)
+	}
+	if !strings.Contains(got.Remedy, "journalctl --user -u fake.run-loop") {
+		t.Errorf("remedy = %q, want the inspection hint", got.Remedy)
 	}
 }

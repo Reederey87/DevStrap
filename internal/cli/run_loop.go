@@ -16,6 +16,13 @@ import (
 // or log consumer must be able to notice a persistently failing loop; swallowing
 // every error forever hides outages. A single transient failure resets on the
 // next success.
+//
+// When run under `devstrap service` (P4-PROD-04), a non-zero exit here trips
+// the supervisor's restart, throttled by the 30s ThrottleInterval (launchd) /
+// RestartSec (systemd) baked into the service spec — so a persistently failing
+// loop backs off rather than hot-looping. Keep that delay comfortably shorter
+// than a typical --interval so a genuinely transient failure still recovers
+// promptly.
 const runLoopMaxConsecutiveFailures = 5
 
 // newRunLoopCommand implements `devstrap run-loop` (XP-02): a portable
