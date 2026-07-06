@@ -228,6 +228,7 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 
 			results = append(results, checkSkippedEvents(ctx, store)...)
 			results = append(results, checkWorkspaceKeyAge(ctx, opts, store)...)
+			results = append(results, checkWCKRotationPending(ctx, store)...)
 			results = append(results, checkForgeCLIs(ctx, opts, store)...)
 			results = append(results, checkAgentRunSweep(ctx, opts, store)...)
 			results = append(results, checkSandboxViolations(ctx, store)...)
@@ -470,6 +471,28 @@ func gradeWorkspaceKeyAge(epoch int64, created time.Time, maxAge time.Duration, 
 		}
 	}
 	return checkResult{Name: "workspace key age", Status: checkOK, Detail: detail}
+}
+
+// checkWCKRotationPending surfaces an owed WCK rotation (issue #134): a device
+// revoke could not rotate the epoch, so events keep sealing under a key the
+// revoked device still holds until a rotation lands. Silent when nothing is
+// owed — the marker exists only after a failed revoke-path rotation and is
+// cleared only by this device's own successful Rotate (see wck_rotation.go).
+func checkWCKRotationPending(ctx context.Context, store *state.Store) []checkResult {
+	since, pending, err := wckRotationPendingSince(ctx, store)
+	if err != nil || !pending {
+		return nil
+	}
+	detail := "a device revoke could not rotate the workspace key; events remain readable by the revoked device"
+	if !since.IsZero() {
+		detail = fmt.Sprintf("owed since %s: %s", since.Format(time.RFC3339), detail)
+	}
+	return []checkResult{{
+		Name:   "workspace key rotation",
+		Status: checkWarn,
+		Detail: detail,
+		Remedy: "run 'devstrap sync' (retries the rotation automatically) or 'devstrap keys rotate'",
+	}}
 }
 
 // checkSkippedEvents surfaces the durable P6-SYNC-02 skip records: hub

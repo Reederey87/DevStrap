@@ -2920,6 +2920,16 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.upd
 	return nil
 }
 
+// DeleteLocalMeta removes a local, never-synced key/value metadata row.
+// Deleting an absent key is a no-op. Used to clear self-resolved flags such as
+// the owed-WCK-rotation marker (issue #134).
+func (s *Store) DeleteLocalMeta(ctx context.Context, key string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM local_meta WHERE key = ?;`, key); err != nil {
+		return fmt.Errorf("delete local meta %q: %w", key, err)
+	}
+	return nil
+}
+
 // ApprovedDeviceSigningKey returns the signing public key of a locally known,
 // APPROVED device, or ok=false when the device is unknown, not approved, or has
 // no signing key recorded. It is the trust gate for snapshot recovery
