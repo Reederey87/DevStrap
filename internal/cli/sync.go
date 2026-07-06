@@ -249,11 +249,10 @@ func pullAndApplyEvents(ctx context.Context, store *state.Store, hub dssync.Hub,
 			}
 		}
 	}
-	// ENV-SYNC-01 review: an env.profile.updated quarantined earlier because
-	// its project had not applied yet may be recoverable now that this batch
-	// applied (the project could have arrived in it). Replay AFTER apply so
-	// recovery is one-cycle.
-	if _, err := dssync.ReplayPendingEnvProfileConflicts(ctx, store); err != nil {
+	// Pointer events quarantined earlier because their project had not applied
+	// yet may be recoverable now that this batch applied (the project could
+	// have arrived in it). Replay AFTER apply so recovery is one-cycle.
+	if _, err := dssync.ReplayPendingProjectConflicts(ctx, store); err != nil {
 		return pullApplyOutcome{}, err
 	}
 	return pullApplyOutcome{events: remoteEvents, stats: stats}, nil

@@ -31,6 +31,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-06 — fix(sync): draft-snapshot apply quarantines instead of aborting the pull batch (#133)
+
+Changed:
+- `internal/sync/events.go`: the `draft.snapshot.created` apply case mirrors the env pointer shape (issue #133) — a winning tombstone drops the pointer; an absent, non-tombstoned project returns the new `errDraftProjectPending` sentinel, quarantined by the batch loop as a cursor-consuming, replayable `draft_pending_project` conflict (new kind beside `env_pending_project`, shared `insertPendingProjectConflict`). The env replay generalizes to `ReplayPendingProjectConflicts` covering both kinds (call sites: post-pull apply in `internal/cli/sync.go`, approve-time replay in `internal/cli/devices.go`); draft re-apply re-runs `RecordDraftSnapshotTx` through the normal verified path and resolves the conflict only after a successful apply.
+- Malformed-payload convention (the issue's same-class residual, both planes): a signed-but-malformed **draft or env** payload — JSON decode failure, an unsafe `pathkey.Clean` path, or (opus review) a blob ref that can never pass `RecordDraftSnapshotTx`'s `age_blob:` validation — now wraps `state.ErrEventVerification` at the APPLY layer, so it quarantines-as-consumed instead of aborting the batch or error-looping the pending replay once the project lands (only an APPROVED signer can reach these branches; mirrors the PR #132 trust-payload convention). The env decode/path wraps and the blob-ref validation were coordinator review additions on top of the delegated draft-side fix.
+- Post-review (Codex, dual-review): confirmed-and-pinned rather than fixed — a pending-quarantined pointer is consumed for the cursor but never inserted into `events`, so the origin device's next CHAINED event breaks on `validatePrevEventHash` and holds that device's cursor. Verified this is a bounded temporary hold with existing recovery, not a wedge (the same shape the shipped env/undecryptable designs carry): the real CLI can never emit a draft before its own project.added (draft creation requires a local project), so the pending case is cross-device — and once the project lands, the replay inserts the pointer, the re-delivered successor applies, and its `event_hash_chain_break` conflict auto-resolves through the P6-SEC-03 resolve-by-event-id path. Pinned end-to-end by `TestApplyDraftSnapshotPendingChainSuccessorRecovers`; documented in spec/07.
+- Specs: spec/07 (P6-SYNC-01 status: conflict-kind list, `ReplayPendingProjectConflicts`, the chain-hold note), spec/09 (renamed replay), spec/13 (sync pending-project replay), spec/16 (test inventory).
+
+Validated:
+- New: `TestApplyDraftSnapshotUnknownProjectQuarantinesWithoutAbort` (batch continues, cursor advances, `draft_pending_project` row), `TestApplyDraftSnapshotTombstonedProjectDrops`, `TestApplyDraftSnapshotMalformedPayloadQuarantinesWithoutAbort`, `TestApplyDraftSnapshotBadBlobRefQuarantinesWithoutAbort`, `TestApplyEnvProfileMalformedPayloadQuarantinesWithoutAbort`, `TestReplayPendingDraftSnapshotConflictRecovers`, `TestApplyDraftSnapshotPendingChainSuccessorRecovers`.
+- gofmt clean; `go test -race ./...` all ok; golangci-lint; spec-drift vs origin/main.
+
+Follow-ups:
+- None (closes #133).
+
 ## 2026-07-05 — docs(spec/19): §F.3 multi-device completeness dogfood runbook
 
 Changed:

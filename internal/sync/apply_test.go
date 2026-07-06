@@ -467,6 +467,34 @@ func signedEnvProfileEvent(t *testing.T, signing devicekeys.SigningIdentity, id,
 	return ev
 }
 
+func draftSnapshotEvent(t *testing.T, id, dev string, seq, hlc int64, payload DraftSnapshotPayload) state.Event {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state.Event{
+		ID:          id,
+		DeviceID:    dev,
+		Seq:         seq,
+		HLC:         hlc << hlcLogicalBits,
+		Type:        EventDraftSnapshotCreated,
+		PayloadJSON: string(raw),
+		ContentHash: state.ContentHash(string(raw)),
+	}
+}
+
+func signedDraftSnapshotEvent(t *testing.T, signing devicekeys.SigningIdentity, id, dev string, seq, hlc int64, payload DraftSnapshotPayload) state.Event {
+	t.Helper()
+	ev := draftSnapshotEvent(t, id, dev, seq, hlc, payload)
+	sig, err := devicekeys.Sign(signing.Private, "devstrap:event:v2", state.EventSignaturePayloadV2(ev))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev.DeviceSig = sig
+	return ev
+}
+
 func TestApplyEnvProfileEventCreatesProfileAndBindings(t *testing.T) {
 	ctx := context.Background()
 	st, device := newSyncStore(t)
@@ -533,7 +561,7 @@ func TestApplyEnvProfileEventDuplicateIdempotent(t *testing.T) {
 // TestApplyEnvProfileEventUnknownProjectQuarantinesWithoutAbort: an env event
 // for an absent (NOT tombstoned) project must not abort the batch, must not be
 // silently consumed, and must leave a replayable env_pending_project
-// quarantine; ReplayPendingEnvProfileConflicts recovers it once the project
+// quarantine; ReplayPendingProjectConflicts recovers it once the project
 // applies (Codex review P2 on the original soft-skip).
 func TestApplyEnvProfileEventUnknownProjectQuarantinesWithoutAbort(t *testing.T) {
 	ctx := context.Background()
@@ -579,7 +607,7 @@ func TestApplyEnvProfileEventUnknownProjectQuarantinesWithoutAbort(t *testing.T)
 	}
 
 	// Replay before the project exists: row stays open, nothing recovered.
-	if n, err := ReplayPendingEnvProfileConflicts(ctx, st); err != nil || n != 0 {
+	if n, err := ReplayPendingProjectConflicts(ctx, st); err != nil || n != 0 {
 		t.Fatalf("premature replay: n=%d err=%v", n, err)
 	}
 
@@ -590,7 +618,7 @@ func TestApplyEnvProfileEventUnknownProjectQuarantinesWithoutAbort(t *testing.T)
 	if _, err := ApplyEvents(ctx, st, []state.Event{addMissing}); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := ReplayPendingEnvProfileConflicts(ctx, st); err != nil || n != 1 {
+	if n, err := ReplayPendingProjectConflicts(ctx, st); err != nil || n != 1 {
 		t.Fatalf("replay after project applied: n=%d err=%v", n, err)
 	}
 	project, err := st.ProjectByPath(ctx, "work/acme/missing")
@@ -652,6 +680,318 @@ func TestApplyEnvProfileEventTombstonedProjectDrops(t *testing.T) {
 		var d eventVerificationConflictDetails
 		if json.Unmarshal([]byte(c.DetailsJSON), &d) == nil && d.Kind == EventConflictKindEnvPendingProject {
 			t.Fatalf("tombstoned drop must not quarantine: %#v", c)
+		}
+	}
+}
+
+func TestApplyDraftSnapshotUnknownProjectQuarantinesWithoutAbort(t *testing.T) {
+	ctx := context.Background()
+	st, device := newSyncStore(t)
+	signing := addRemoteDeviceForApplyTest(t, st, "device-draft", "approved")
+	now := time.Now().UnixMilli()
+	draft := signedDraftSnapshotEvent(t, signing, "evt_draft_missing", "device-draft", 1, now, DraftSnapshotPayload{
+		Path:      "work/acme/missing-draft",
+		BlobRef:   "age_blob:deadbeef",
+		ByteSize:  42,
+		FileCount: 3,
+	})
+	add := projEvent(t, device.ID, EventProjectAdded, now+1, "work/acme/valid-draft", "github.com/acme/valid-draft")
+	add.Seq = 1
+	safe, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{draft, add}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Quarantined != 1 || stats.CursorHeld {
+		t.Fatalf("stats=%+v, want exactly the draft event quarantined and no held cursor", stats)
+	}
+	if safe.After("device-draft") != 1 || safe.After(device.ID) != 1 {
+		t.Fatalf("safe cursor=%v, want both devices advanced (quarantine consumes the slot)", safe)
+	}
+	if _, err := st.ProjectByPath(ctx, "work/acme/valid-draft"); err != nil {
+		t.Fatal(err)
+	}
+	conflicts, err := st.OpenConflictsByType(ctx, ConflictEventVerification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range conflicts {
+		var d eventVerificationConflictDetails
+		if json.Unmarshal([]byte(c.DetailsJSON), &d) == nil && d.Kind == EventConflictKindDraftPendingProject && d.EventID == "evt_draft_missing" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("want a draft_pending_project quarantine for evt_draft_missing, got %#v", conflicts)
+	}
+}
+
+func TestApplyDraftSnapshotTombstonedProjectDrops(t *testing.T) {
+	ctx := context.Background()
+	st, device := newSyncStore(t)
+	signing := addRemoteDeviceForApplyTest(t, st, "device-draft", "approved")
+	now := time.Now().UnixMilli()
+	add := projEvent(t, device.ID, EventProjectAdded, now, "work/acme/gone-draft", "github.com/acme/gone-draft")
+	del := projEvent(t, device.ID, EventProjectDeleted, now+1, "work/acme/gone-draft", "github.com/acme/gone-draft")
+	if _, err := ApplyEvents(ctx, st, []state.Event{add, del}); err != nil {
+		t.Fatal(err)
+	}
+	draft := signedDraftSnapshotEvent(t, signing, "evt_draft_gone", "device-draft", 1, now+2, DraftSnapshotPayload{
+		Path:      "work/acme/gone-draft",
+		BlobRef:   "age_blob:deadbeef",
+		ByteSize:  42,
+		FileCount: 3,
+	})
+	_, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{draft}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Quarantined != 0 {
+		t.Fatalf("stats=%+v, want the tombstoned draft pointer dropped without quarantine", stats)
+	}
+	conflicts, err := st.OpenConflictsByType(ctx, ConflictEventVerification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range conflicts {
+		var d eventVerificationConflictDetails
+		if json.Unmarshal([]byte(c.DetailsJSON), &d) == nil && d.Kind == EventConflictKindDraftPendingProject {
+			t.Fatalf("tombstoned draft drop must not quarantine: %#v", c)
+		}
+	}
+}
+
+// TestApplyDraftSnapshotBadBlobRefQuarantinesWithoutAbort (review finding): a
+// signed draft event whose project EXISTS but whose blob ref can never pass
+// RecordDraftSnapshotTx's validation must quarantine-as-consumed at the apply
+// layer — a raw store error would abort the batch, or error-loop the pending
+// replay once the project lands.
+func TestApplyDraftSnapshotBadBlobRefQuarantinesWithoutAbort(t *testing.T) {
+	ctx := context.Background()
+	st, device := newSyncStore(t)
+	signing := addRemoteDeviceForApplyTest(t, st, "device-draft", "approved")
+	now := time.Now().UnixMilli()
+	add := projEvent(t, device.ID, EventProjectAdded, now, "work/acme/badref", "github.com/acme/badref")
+	add.Seq = 1
+	bad := signedDraftSnapshotEvent(t, signing, "evt_badref_draft", "device-draft", 1, now+1, DraftSnapshotPayload{
+		Path:      "work/acme/badref",
+		BlobRef:   "s3://not-an-age-blob",
+		ByteSize:  1,
+		FileCount: 1,
+	})
+	good := projEvent(t, device.ID, EventProjectAdded, now+2, "work/acme/after-badref", "github.com/acme/after-badref")
+	good.Seq = 2
+	_, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{add, bad, good}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Quarantined != 1 || stats.CursorHeld {
+		t.Fatalf("stats=%+v, want bad blob ref quarantined as consumed", stats)
+	}
+	if _, err := st.ProjectByPath(ctx, "work/acme/after-badref"); err != nil {
+		t.Fatalf("batch must continue past the bad blob ref: %v", err)
+	}
+}
+
+// TestApplyDraftSnapshotPendingChainSuccessorRecovers (Codex review): a
+// pending-quarantined pointer is consumed for the cursor but never inserted
+// into events, so an approved device's NEXT chained event breaks on
+// validatePrevEventHash and HOLDS that device's cursor. This pins that the
+// hold is temporary, not a wedge: once the project lands, the pending replay
+// inserts the pointer, the re-delivered successor applies, and its hash-chain
+// conflict auto-resolves (the P6-SEC-03 resolve-by-event-id path).
+func TestApplyDraftSnapshotPendingChainSuccessorRecovers(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newSyncStore(t)
+	signingB := addRemoteDeviceForApplyTest(t, st, "device-b", "approved")
+	signingC := addRemoteDeviceForApplyTest(t, st, "device-c", "approved")
+	now := time.Now().UnixMilli()
+
+	draft := signedDraftSnapshotEvent(t, signingB, "evt_chain_draft", "device-b", 1, now, DraftSnapshotPayload{
+		Path:      "work/acme/chain",
+		BlobRef:   "age_blob:feedface",
+		ByteSize:  5,
+		FileCount: 1,
+	})
+	successor := projEvent(t, "device-b", EventProjectAdded, now+1, "work/acme/other-b", "github.com/acme/other-b")
+	successor.ID = "evt_chain_successor"
+	successor.Seq = 2
+	successor.PrevEventHash = draft.ContentHash
+	sig, err := devicekeys.Sign(signingB.Private, "devstrap:event:v2", state.EventSignaturePayloadV2(successor))
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor.DeviceSig = sig
+
+	safe, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{draft, successor}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The pending draft is consumed; the chained successor breaks and HOLDS
+	// device-b's cursor below seq 2 for re-delivery.
+	if stats.Quarantined != 2 {
+		t.Fatalf("stats=%+v, want pending draft + chain break both quarantined", stats)
+	}
+	if got := safe.After("device-b"); got != 1 {
+		t.Fatalf("safe cursor for device-b = %d, want 1 (held below the chained successor)", got)
+	}
+
+	// The project lands from another device; the pending replay inserts the
+	// draft pointer, restoring the chain anchor.
+	add := signedProjEvent(t, signingC, "evt_chain_add", "device-c", 1, now+2, EventProjectAdded, "work/acme/chain", "github.com/acme/chain")
+	if _, err := ApplyEvents(ctx, st, []state.Event{add}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := ReplayPendingProjectConflicts(ctx, st); err != nil || n != 1 {
+		t.Fatalf("pending replay: n=%d err=%v", n, err)
+	}
+
+	// The re-delivered successor now applies and auto-resolves its
+	// hash-chain conflict.
+	if _, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{successor}, nil); err != nil || stats.Quarantined != 0 {
+		t.Fatalf("re-delivered successor: stats=%+v err=%v, want clean apply", stats, err)
+	}
+	if _, err := st.ProjectByPath(ctx, "work/acme/other-b"); err != nil {
+		t.Fatalf("successor project missing after recovery: %v", err)
+	}
+	open, err := st.OpenConflictsByType(ctx, ConflictEventHashChain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 0 {
+		t.Fatalf("hash-chain conflict not auto-resolved after recovery: %#v", open)
+	}
+}
+
+// TestApplyEnvProfileMalformedPayloadQuarantinesWithoutAbort pins the same
+// malformed-payload convention on the ENV pointer (#133 residual): a verified
+// event whose payload can never decode quarantines as consumed instead of
+// aborting the pull batch.
+func TestApplyEnvProfileMalformedPayloadQuarantinesWithoutAbort(t *testing.T) {
+	ctx := context.Background()
+	st, device := newSyncStore(t)
+	signing := addRemoteDeviceForApplyTest(t, st, "device-env", "approved")
+	now := time.Now().UnixMilli()
+	bad := state.Event{
+		ID:          "evt_bad_env",
+		DeviceID:    "device-env",
+		Seq:         1,
+		HLC:         now << hlcLogicalBits,
+		Type:        EventEnvProfileUpdated,
+		PayloadJSON: `{"path":`,
+	}
+	bad.ContentHash = state.ContentHash(bad.PayloadJSON)
+	sig, err := devicekeys.Sign(signing.Private, "devstrap:event:v2", state.EventSignaturePayloadV2(bad))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad.DeviceSig = sig
+	good := projEvent(t, device.ID, EventProjectAdded, now+1, "work/acme/after-env", "github.com/acme/after-env")
+	good.Seq = 1
+	_, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{bad, good}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Quarantined != 1 || stats.CursorHeld {
+		t.Fatalf("stats=%+v, want malformed env quarantined as consumed", stats)
+	}
+	if _, err := st.ProjectByPath(ctx, "work/acme/after-env"); err != nil {
+		t.Fatalf("batch must continue past malformed env event: %v", err)
+	}
+}
+
+func TestApplyDraftSnapshotMalformedPayloadQuarantinesWithoutAbort(t *testing.T) {
+	ctx := context.Background()
+	st, device := newSyncStore(t)
+	signing := addRemoteDeviceForApplyTest(t, st, "device-draft", "approved")
+	now := time.Now().UnixMilli()
+	bad := state.Event{
+		ID:          "evt_bad_draft",
+		DeviceID:    "device-draft",
+		Seq:         1,
+		HLC:         now << hlcLogicalBits,
+		Type:        EventDraftSnapshotCreated,
+		PayloadJSON: `{"path":`,
+	}
+	bad.ContentHash = state.ContentHash(bad.PayloadJSON)
+	sig, err := devicekeys.Sign(signing.Private, "devstrap:event:v2", state.EventSignaturePayloadV2(bad))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad.DeviceSig = sig
+	good := projEvent(t, device.ID, EventProjectAdded, now+1, "work/acme/after-draft", "github.com/acme/after-draft")
+	good.Seq = 1
+	_, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{bad, good}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Quarantined != 1 || stats.CursorHeld {
+		t.Fatalf("stats=%+v, want malformed draft quarantined as consumed", stats)
+	}
+	if _, err := st.ProjectByPath(ctx, "work/acme/after-draft"); err != nil {
+		t.Fatalf("batch must continue past malformed draft event: %v", err)
+	}
+	conflicts, err := st.OpenConflictsByType(ctx, ConflictEventVerification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, c := range conflicts {
+		var d eventVerificationConflictDetails
+		if json.Unmarshal([]byte(c.DetailsJSON), &d) == nil && d.Kind == EventConflictKindVerification && d.EventID == "evt_bad_draft" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("want a verification quarantine for malformed draft payload, got %#v", conflicts)
+	}
+}
+
+func TestReplayPendingDraftSnapshotConflictRecovers(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newSyncStore(t)
+	signing := addRemoteDeviceForApplyTest(t, st, "device-draft", "approved")
+	now := time.Now().UnixMilli()
+	draft := signedDraftSnapshotEvent(t, signing, "evt_draft_replay", "device-draft", 1, now, DraftSnapshotPayload{
+		Path:      "work/acme/replay-draft",
+		BlobRef:   "age_blob:cafebabe",
+		ByteSize:  99,
+		FileCount: 7,
+	})
+	if _, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{draft}, nil); err != nil {
+		t.Fatal(err)
+	} else if stats.Quarantined != 1 {
+		t.Fatalf("stats=%+v, want initial draft quarantine", stats)
+	}
+	if n, err := ReplayPendingProjectConflicts(ctx, st); err != nil || n != 0 {
+		t.Fatalf("premature replay: n=%d err=%v", n, err)
+	}
+	add := signedProjEvent(t, signing, "evt_add_replay_draft", "device-draft", 2, now+1, EventProjectAdded, "work/acme/replay-draft", "github.com/acme/replay-draft")
+	if _, err := ApplyEvents(ctx, st, []state.Event{add}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := ReplayPendingProjectConflicts(ctx, st); err != nil || n != 1 {
+		t.Fatalf("replay after project applied: n=%d err=%v", n, err)
+	}
+	project, err := st.ProjectByPath(ctx, "work/acme/replay-draft")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := st.LatestDraftSnapshot(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap == nil || snap.BlobRef != "age_blob:cafebabe" || snap.ByteSize != 99 || snap.FileCount != 7 {
+		t.Fatalf("recovered draft snapshot=%#v", snap)
+	}
+	open, err := st.OpenConflictsByType(ctx, ConflictEventVerification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range open {
+		var d eventVerificationConflictDetails
+		if json.Unmarshal([]byte(c.DetailsJSON), &d) == nil && d.Kind == EventConflictKindDraftPendingProject {
+			t.Fatalf("draft_pending_project conflict should be resolved after replay: %#v", c)
 		}
 	}
 }
