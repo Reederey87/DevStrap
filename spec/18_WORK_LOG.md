@@ -31,6 +31,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-06 — feat(worktree): cleanup reaps squash/rebase-merged worktrees (P4-GIT-04)
+
+Changed:
+- `internal/git/git.go`: new `Runner.IsSquashMerged(ctx, dir, branch, baseRef)` — offline content-equivalence via a **current-tree merge probe**: `git merge-tree --write-tree <base> <branch>` (git ≥ 2.38) reports merged only when the simulated merge's tree is IDENTICAL to the current base tree (the branch would contribute nothing — exactly a squash/rebase/cherry-pick-merge's effect). The first draft's `git cherry`/synthetic-commit/`patch-id --stable` chain was REPLACED in dual review: both reviewers independently proved (with repros) that patch-id equivalence matches HISTORICAL base commits, so a change merged-then-REVERTED on base — or a per-commit coincidence overruling cherry — would reap genuinely-unmerged work; the merge-tree probe compares against the current tree and is immune to the revert class. Conservative: a conflicting simulated merge, an older git, or any error → not merged.
+- Documented accepted limitation (inherent to ANY content test): a branch whose net change also landed via an unrelated identical commit reads as merged — pinned by `TestIsSquashMergedMatchesCoincidentallyIdenticalDiff` (a tripwire naming spec/08), mitigated by the reap breadcrumb below.
+- `internal/cli/worktree.go`: `worktree cleanup --merged` semantics extend to ancestry OR content-equivalent — the ancestry `git branch --merged` check stays first; only its misses consult `IsSquashMerged`. Reaps are labeled `merged` vs `merged (squash)` and print the deleted branch's tip SHA (`branch <name> was at <sha>`) as the recovery breadcrumb (`git branch <name> <sha>` restores until gc). New `refreshWorktreeBase` best-effort fetches the recorded `remote/branch` base under the repo lock, deduped per (project, base ref) per run (review finding: N worktrees must not trigger N fetches); warn + continue on stale/offline. Reaped worktrees also get `git branch -D` (warn-only), matching the P6-GIT-05 failure-cleanup precedent.
+- Specs: spec/08 (merge-tree semantics, conservative rule, pinned limitation + breadcrumb, forge-API non-goal), spec/16 (test inventory).
+
+Validated:
+- New real-git tests: `TestIsSquashMergedDetectsSquashMerge`, `...DetectsRebaseMerge`, `...FalseForUnmerged`, `...ConservativeOnContentDivergence`, `...FalseAfterRevertOnBase` (the dual-review repro), `...MatchesCoincidentallyIdenticalDiff` (documented-limitation tripwire); CLI e2e `TestWorktreeCleanupReapsSquashMergedWorktree` (squash-merged reaped with `merged (squash)` + branch deleted + state row `removed`; unmerged untouched in the same run).
+- gofmt clean; `go test -race ./...` all ok; golangci-lint; spec-drift vs origin/main.
+
+Follow-ups:
+- None (P4-GIT-04 moves to Recently shipped in the ledger).
 ## 2026-07-06 — feat(devices): self-healing WCK rotation after revoke (#134)
 
 Changed:

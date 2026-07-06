@@ -176,6 +176,115 @@ exit 128
 	}
 }
 
+func TestIsSquashMergedDetectsSquashMerge(t *testing.T) {
+	repo, runner := initSquashMergeRepo(t)
+	runRealGit(t, runner.Bin, repo, "checkout", "-b", "feature")
+	writeAndCommit(t, runner.Bin, repo, "one.txt", "one\n", "feature one")
+	writeAndCommit(t, runner.Bin, repo, "two.txt", "two\n", "feature two")
+	runRealGit(t, runner.Bin, repo, "checkout", "main")
+	runRealGit(t, runner.Bin, repo, "merge", "--squash", "feature")
+	runRealGit(t, runner.Bin, repo, "commit", "-m", "squash feature")
+
+	got, err := runner.IsSquashMerged(context.Background(), repo, "feature", "main")
+	if err != nil {
+		t.Fatalf("IsSquashMerged: %v", err)
+	}
+	if !got {
+		t.Fatal("IsSquashMerged = false, want true")
+	}
+}
+
+func TestIsSquashMergedDetectsRebaseMerge(t *testing.T) {
+	repo, runner := initSquashMergeRepo(t)
+	runRealGit(t, runner.Bin, repo, "checkout", "-b", "feature")
+	writeAndCommit(t, runner.Bin, repo, "one.txt", "one\n", "feature one")
+	writeAndCommit(t, runner.Bin, repo, "two.txt", "two\n", "feature two")
+	runRealGit(t, runner.Bin, repo, "checkout", "main")
+	writeAndCommit(t, runner.Bin, repo, "main.txt", "main\n", "advance main")
+	runRealGit(t, runner.Bin, repo, "cherry-pick", "feature~1", "feature")
+
+	got, err := runner.IsSquashMerged(context.Background(), repo, "feature", "main")
+	if err != nil {
+		t.Fatalf("IsSquashMerged: %v", err)
+	}
+	if !got {
+		t.Fatal("IsSquashMerged = false, want true")
+	}
+}
+
+func TestIsSquashMergedFalseForUnmerged(t *testing.T) {
+	repo, runner := initSquashMergeRepo(t)
+	runRealGit(t, runner.Bin, repo, "checkout", "-b", "feature")
+	writeAndCommit(t, runner.Bin, repo, "one.txt", "one\n", "feature one")
+
+	got, err := runner.IsSquashMerged(context.Background(), repo, "feature", "main")
+	if err != nil {
+		t.Fatalf("IsSquashMerged: %v", err)
+	}
+	if got {
+		t.Fatal("IsSquashMerged = true, want false")
+	}
+}
+
+func TestIsSquashMergedConservativeOnContentDivergence(t *testing.T) {
+	repo, runner := initSquashMergeRepo(t)
+	runRealGit(t, runner.Bin, repo, "checkout", "-b", "feature")
+	writeAndCommit(t, runner.Bin, repo, "README.md", "feature\n", "feature readme")
+	runRealGit(t, runner.Bin, repo, "checkout", "main")
+	writeAndCommit(t, runner.Bin, repo, "README.md", "main\n", "main readme")
+
+	got, err := runner.IsSquashMerged(context.Background(), repo, "feature", "main")
+	if err != nil {
+		t.Fatalf("IsSquashMerged: %v", err)
+	}
+	if got {
+		t.Fatal("IsSquashMerged = true, want false")
+	}
+}
+
+// TestIsSquashMergedFalseAfterRevertOnBase (dual-review fix): a change that
+// was merged into base and then REVERTED must read as NOT merged — the branch
+// still carries work absent from the CURRENT base tree. The earlier patch-id
+// approach matched the historical (reverted) commit and would have reaped it.
+func TestIsSquashMergedFalseAfterRevertOnBase(t *testing.T) {
+	repo, runner := initSquashMergeRepo(t)
+	runRealGit(t, runner.Bin, repo, "checkout", "-b", "feature")
+	writeAndCommit(t, runner.Bin, repo, "one.txt", "one\n", "feature one")
+	runRealGit(t, runner.Bin, repo, "checkout", "main")
+	runRealGit(t, runner.Bin, repo, "merge", "--squash", "feature")
+	runRealGit(t, runner.Bin, repo, "commit", "-m", "squash feature")
+	runRealGit(t, runner.Bin, repo, "revert", "--no-edit", "HEAD")
+
+	got, err := runner.IsSquashMerged(context.Background(), repo, "feature", "main")
+	if err != nil {
+		t.Fatalf("IsSquashMerged: %v", err)
+	}
+	if got {
+		t.Fatal("IsSquashMerged = true, want false (squash was reverted on base)")
+	}
+}
+
+// TestIsSquashMergedMatchesCoincidentallyIdenticalDiff pins the DOCUMENTED
+// accepted limitation: a branch whose net change also landed via an unrelated
+// identical commit is indistinguishable from a squash-merge by any content-
+// equivalence test and reads as merged. If this test ever fails, the
+// limitation was fixed — update spec/08 and the reap-breadcrumb rationale.
+func TestIsSquashMergedMatchesCoincidentallyIdenticalDiff(t *testing.T) {
+	repo, runner := initSquashMergeRepo(t)
+	runRealGit(t, runner.Bin, repo, "checkout", "-b", "feature")
+	writeAndCommit(t, runner.Bin, repo, "one.txt", "identical\n", "feature adds one.txt")
+	runRealGit(t, runner.Bin, repo, "checkout", "main")
+	writeAndCommit(t, runner.Bin, repo, "one.txt", "identical\n", "unrelated identical change")
+
+	got, err := runner.IsSquashMerged(context.Background(), repo, "feature", "main")
+	if err != nil {
+		t.Fatalf("IsSquashMerged: %v", err)
+	}
+	if !got {
+		t.Fatal("IsSquashMerged = false; the documented coincidental-identical-diff limitation appears fixed — update spec/08")
+	}
+}
+
 func TestCloneRetriesTransientNetworkErrors(t *testing.T) {
 	countPath := filepath.Join(t.TempDir(), "count")
 	script := writeFakeGit(t, fmt.Sprintf(`#!/bin/sh
@@ -753,6 +862,33 @@ func initLocalDefaultBranchRepo(t *testing.T) (string, Runner) {
 	// (symbolic-ref / rev-parse) returns in milliseconds.
 	runRealGit(t, gitBin, repo, "remote", "add", "origin", "https://192.0.2.1/none.git")
 	return repo, Runner{Bin: gitBin, Timeout: 5 * time.Second}
+}
+
+func initSquashMergeRepo(t *testing.T) (string, Runner) {
+	t.Helper()
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runRealGit(t, gitBin, repo, "init")
+	runRealGit(t, gitBin, repo, "config", "user.name", "t")
+	runRealGit(t, gitBin, repo, "config", "user.email", "t@example.com")
+	runRealGit(t, gitBin, repo, "checkout", "-b", "main")
+	writeAndCommit(t, gitBin, repo, "README.md", "base\n", "init")
+	return repo, Runner{Bin: gitBin, Timeout: 5 * time.Second}
+}
+
+func writeAndCommit(t *testing.T, gitBin, repo, name, contents, message string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(repo, name), []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runRealGit(t, gitBin, repo, "add", name)
+	runRealGit(t, gitBin, repo, "commit", "-m", message)
 }
 
 func runRealGit(t *testing.T, gitBin, dir string, args ...string) {

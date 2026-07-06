@@ -503,6 +503,48 @@ func (r Runner) RevParse(ctx context.Context, dir, ref string) (string, error) {
 	return r.Run(ctx, dir, "rev-parse", ref)
 }
 
+// IsSquashMerged reports whether branch's content is already contained in the
+// CURRENT baseRef tree — the content-equivalence test behind `worktree cleanup
+// --merged`'s squash/rebase detection (P4-GIT-04). It simulates the merge
+// (`git merge-tree --write-tree <baseRef> <branch>`, git >= 2.38): when the
+// resulting tree is identical to baseRef's own tree, merging the branch would
+// contribute nothing — every change the branch carries is already present in
+// base, which is exactly the effect of a squash- or rebase-merge. Comparing
+// against the CURRENT tree (rather than patch-id history) means a change that
+// was merged and then REVERTED on base correctly reads as NOT merged
+// (dual-review finding: historical patch-id equivalence would have deleted
+// genuinely-unmerged work).
+//
+// Conservative by construction: a conflicting simulated merge (content
+// diverged), an invalid ref, or an older git without --write-tree all report
+// false — doubt is never grounds to reap.
+//
+// Documented accepted limitation (inherent to ANY content-equivalence test):
+// a branch whose net change ALSO landed via an unrelated identical commit is
+// indistinguishable from a squash-merge and reads as merged; the reap
+// breadcrumb (the printed branch tip SHA) is the recovery path. Pinned by
+// TestIsSquashMergedMatchesCoincidentallyIdenticalDiff.
+func (r Runner) IsSquashMerged(ctx context.Context, dir, branch, baseRef string) (bool, error) {
+	if !safeBranchName(branch) {
+		return false, fmt.Errorf("invalid git branch name %q", branch)
+	}
+	if !safeBranchName(baseRef) {
+		return false, fmt.Errorf("invalid git base ref %q", baseRef)
+	}
+	merged, err := r.Run(ctx, dir, "merge-tree", "--write-tree", baseRef, branch)
+	if err != nil {
+		// Exit 1 is a conflicting simulated merge — the canonical not-merged
+		// answer. Any other failure (old git, bad ref) is equally
+		// conservative: never reap on doubt.
+		return false, nil
+	}
+	baseTree, err := r.Run(ctx, dir, "rev-parse", baseRef+"^{tree}")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(merged) == strings.TrimSpace(baseTree), nil
+}
+
 func (r Runner) WorktreeAdd(ctx context.Context, dir, path, branch, base string) error {
 	if !safeBranchName(branch) {
 		return fmt.Errorf("invalid git branch name %q", branch)
