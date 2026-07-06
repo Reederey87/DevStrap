@@ -186,19 +186,22 @@ func recoverFromSnapshot(ctx context.Context, stdout io.Writer, store *state.Sto
 		return false, fmt.Errorf("import snapshot: %w", err)
 	}
 
-	// 8. Pull the blobs referenced by imported draft pointers — they have no
-	// carrier event on the tail, so the normal per-event blob pull will not see
-	// them.
-	var draftRefs []string
+	// 8. Pull the blobs referenced by imported draft and env pointers — they
+	// have no carrier event on the tail, so the normal per-event blob pull will
+	// not see them (ENV-SYNC-01 env pointers share the draft pointer's shape).
+	var pointerRefs []string
 	for _, entry := range snap.Entries {
 		if entry.Draft != nil && entry.Draft.BlobRef != "" {
-			draftRefs = append(draftRefs, entry.Draft.BlobRef)
+			pointerRefs = append(pointerRefs, entry.Draft.BlobRef)
+		}
+		if entry.Env != nil && entry.Env.BlobRef != "" {
+			pointerRefs = append(pointerRefs, entry.Env.BlobRef)
 		}
 	}
-	if missing, berr := pullBlobsByRef(ctx, hub, draftRefs, paths); berr != nil {
-		return false, appError{code: exitNetwork, err: fmt.Errorf("pull imported draft blobs: %w", berr)}
+	if missing, berr := pullBlobsByRef(ctx, hub, pointerRefs, paths); berr != nil {
+		return false, appError{code: exitNetwork, err: fmt.Errorf("pull imported draft/env blobs: %w", berr)}
 	} else if missing > 0 {
-		_, _ = fmt.Fprintf(stdout, "warning: %d imported draft blob(s) missing from hub; materialization may be incomplete\n", missing)
+		_, _ = fmt.Fprintf(stdout, "warning: %d imported draft/env blob(s) missing from hub; materialization may be incomplete\n", missing)
 	}
 	return true, nil
 }

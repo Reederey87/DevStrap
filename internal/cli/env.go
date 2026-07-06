@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"github.com/Reederey87/DevStrap/internal/envbundle"
 	"github.com/Reederey87/DevStrap/internal/envfile"
 	"github.com/Reederey87/DevStrap/internal/state"
+	dssync "github.com/Reederey87/DevStrap/internal/sync"
 	"github.com/spf13/cobra"
 )
 
@@ -74,7 +76,35 @@ func captureEnvProfile(ctx context.Context, store *state.Store, opts *options, p
 	for _, binding := range bindings {
 		varNames = append(varNames, binding.Name)
 	}
-	if _, err := store.SaveCapturedEnvProfile(ctx, project.ID, profileName, varNames, ref); err != nil {
+	if profileName == "" {
+		profileName = "default"
+	}
+	payloadJSON, err := json.Marshal(dssync.EnvProfilePayload{
+		Path:     project.Path,
+		Profile:  profileName,
+		Provider: "devstrap_encrypted",
+		Mode:     "hydrate_or_runtime",
+		BlobRef:  ref,
+		VarNames: varNames,
+	})
+	if err != nil {
+		return 0, "", 0, err
+	}
+	params := state.EnvProfileParams{
+		Name:     profileName,
+		Provider: "devstrap_encrypted",
+		Mode:     "hydrate_or_runtime",
+		BlobRef:  ref,
+		VarNames: varNames,
+	}
+	if err := store.WithTx(ctx, func(tx *state.Tx) error {
+		ev, err := store.InsertLocalEventTx(ctx, tx, dssync.NewEnvProfileEvent(string(payloadJSON)))
+		if err != nil {
+			return err
+		}
+		_, err = tx.UpsertEnvProfileTx(ctx, project.ID, params, ev)
+		return err
+	}); err != nil {
 		return 0, "", 0, err
 	}
 	if err := ensureIgnored(localPath, envPath); err != nil {
@@ -259,6 +289,9 @@ func hydratedEnvContent(ctx context.Context, opts *options, store *state.Store, 
 		}
 		ciphertext, err := readEnvBlob(opts.paths(), ref)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, 0, fmt.Errorf("%w (blob not cached locally -- run 'devstrap sync' to pull it)", err)
+			}
 			return nil, 0, err
 		}
 		device, err := store.CurrentDevice(ctx)
@@ -344,7 +377,33 @@ func newEnvBindCommand(stdout io.Writer, opts *options) *cobra.Command {
 				}
 				refs[binding.Name] = binding.Value
 			}
-			if _, err := store.SaveProviderEnvProfile(cmd.Context(), project.ID, profileName, provider, refs); err != nil {
+			if profileName == "" {
+				profileName = "default"
+			}
+			payloadJSON, err := json.Marshal(dssync.EnvProfilePayload{
+				Path:     project.Path,
+				Profile:  profileName,
+				Provider: provider,
+				Mode:     "runtime_only",
+				Refs:     refs,
+			})
+			if err != nil {
+				return err
+			}
+			params := state.EnvProfileParams{
+				Name:     profileName,
+				Provider: provider,
+				Mode:     "runtime_only",
+				Refs:     refs,
+			}
+			if err := store.WithTx(cmd.Context(), func(tx *state.Tx) error {
+				ev, err := store.InsertLocalEventTx(cmd.Context(), tx, dssync.NewEnvProfileEvent(string(payloadJSON)))
+				if err != nil {
+					return err
+				}
+				_, err = tx.UpsertEnvProfileTx(cmd.Context(), project.ID, params, ev)
+				return err
+			}); err != nil {
 				return err
 			}
 			if err := ensureIgnored(localPath, refsPath); err != nil {

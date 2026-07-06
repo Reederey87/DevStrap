@@ -252,6 +252,7 @@ This is the most important test.
 6. hydrate to .env.local
 7. assert file contains abc123 and mode 0600
 8. assert logs contain *** not abc123
+9. assert `env capture` emits one `env.profile.updated` event and profile rows in the same transaction
 ```
 
 ### Provider env bind/run/hydrate
@@ -272,6 +273,17 @@ This is the most important test.
 3. capture an env profile
 4. assert the ciphertext decrypts with the approved remote identity
 5. assert local device revocation remains refused
+6. assert revoke rewrap emits a superseding `env.profile.updated` event, repoints bindings, and queues/pushes old hub blob cleanup
+```
+
+### Env profile sync
+
+```text
+1. state: UpsertEnvProfileTx stamps source-event coordinates, switches encrypted/provider shapes, legacy wrappers leave NULL coords, and EnvProfilesForBlobRef returns affected profiles/vars
+2. sync: apply env.profile.updated creates bindings, duplicates are idempotent, a tombstoned project drops the pointer without quarantine, an absent project quarantines as env_pending_project without aborting the batch and replays to recovery once the project applies, LWW converges in both delivery orders, and rewrapHubCleanup uploads the new blob before pushing the superseding event
+3. cli: blobRefFromEvent extracts env blob refs for encrypted profiles but not provider profiles
+4. txtar: env_exchange.txtar enrolls two homes, syncs through --hub-file, and hydrates captured values on the second device with no conflicts
+5. `TestSnapshotRoundTripsEnvProfile` proves BuildSnapshot -> ImportSnapshot carries the env pointer into a fresh store idempotently; `TestImportSnapshotEnvLWW` proves the pointer merges by its own coordinate (an older pointer never regresses, a newer pointer wins even on a losing entry row)
 ```
 
 ### Draft sync
@@ -339,7 +351,7 @@ Device B: hydrate repo
 Device A: status shows Device B ready after heartbeat
 ```
 
-### Eager-clone two-machine end-to-end (shipped — see `cmd/devstrap/testdata/script/sync_materialize.txtar` and `sync_encrypted.txtar`)
+### Eager-clone two-machine end-to-end (shipped — see `cmd/devstrap/testdata/script/sync_materialize.txtar`, `sync_encrypted.txtar`, and `env_exchange.txtar`)
 
 Proves the "Dropbox experience for code" round trip: one `devstrap sync` on Device B reconstructs the whole `~/Code` tree — repos blobless-cloned from their existing remotes, drafts restored from encrypted blobs, env hydrated — with no skeletons left behind. Eager-clone materialization shipped and this suite guards it; the two-device testscripts (`sync_materialize.txtar`, `sync_encrypted.txtar`) cover the core round trip. Any assertion below not yet covered by those testscripts (e.g. the byte-identical draft restore and node_modules-absent checks) is a remaining gap.
 

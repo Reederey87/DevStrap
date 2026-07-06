@@ -363,10 +363,10 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 					}
 				}
 				if hub == nil {
-					// P5-PROD-02: the old draft ciphertext is queued (pending_hub_deletes)
+					// P5-PROD-02: the old synced ciphertext is queued (pending_hub_deletes)
 					// and deleted on the next hub-enabled sync — state that plainly
 					// instead of promising a cleanup that never ran.
-					_, _ = fmt.Fprintf(stderr, "note: no hub configured; old draft ciphertext is queued and removed on the next 'devstrap sync --hub-file'. Rotate the affected secrets at their source regardless.\n")
+					_, _ = fmt.Fprintf(stderr, "note: no hub configured; old synced ciphertext is queued and removed on the next 'devstrap sync --hub-file'. Rotate the affected secrets at their source regardless.\n")
 				}
 			}
 			return nil
@@ -551,6 +551,14 @@ func replayQuarantinedEvents(ctx context.Context, stderr io.Writer, opts *option
 	}
 	if replayed > 0 {
 		_, _ = fmt.Fprintf(stderr, "Replayed %d quarantined event(s) from device %s\n", replayed, deviceID)
+	}
+	// ENV-SYNC-01 review: the replayed events may include the project.added an
+	// env_pending_project quarantine was waiting on — re-attempt those now so
+	// approving the project's origin device recovers the profile in one step.
+	if n, err := dssync.ReplayPendingEnvProfileConflicts(ctx, store); err != nil {
+		_, _ = fmt.Fprintf(stderr, "warning: could not replay pending env profile conflicts: %v\n", err)
+	} else if n > 0 {
+		_, _ = fmt.Fprintf(stderr, "Recovered %d pending env profile(s)\n", n)
 	}
 }
 

@@ -23,7 +23,9 @@ const (
 	EventConflictCreated      = "conflict.created"
 	EventConflictResolved     = "conflict.resolved"      // PROD-06
 	EventDraftSnapshotCreated = "draft.snapshot.created" // DRAFT-02
-	EventDeviceKeyGranted     = "device.key.granted"     // P4-SEC-07: age-wrapped WCK epoch grant
+	// ENV-SYNC-01: captured/bound env profile metadata; supersedes the planned "env.profile.bound".
+	EventEnvProfileUpdated = "env.profile.updated"
+	EventDeviceKeyGranted  = "device.key.granted" // P4-SEC-07: age-wrapped WCK epoch grant
 )
 
 // Conflict type identifiers, exported so the CLI resolver can branch on them
@@ -96,6 +98,20 @@ type DraftSnapshotPayload struct {
 	BlobRef   string `json:"blob_ref"`
 	ByteSize  int64  `json:"byte_size"`
 	FileCount int64  `json:"file_count"`
+}
+
+// EnvProfilePayload describes a captured or provider-bound env profile.
+// Payloads ride the enc.v2 envelope, so var names are not visible to the hub;
+// they are required so the apply path can populate secret_bindings without
+// decrypting the value blob (ENV-SYNC-01).
+type EnvProfilePayload struct {
+	Path     string            `json:"path"`
+	Profile  string            `json:"profile"`
+	Provider string            `json:"provider"`            // devstrap_encrypted or a provider name (e.g. 1password)
+	Mode     string            `json:"mode"`                // hydrate_or_runtime | runtime_only
+	BlobRef  string            `json:"blob_ref,omitempty"`  // devstrap_encrypted only
+	VarNames []string          `json:"var_names,omitempty"` // devstrap_encrypted only
+	Refs     map[string]string `json:"refs,omitempty"`      // provider profiles only (var -> op:// ref)
 }
 
 // DeviceKeyGrant carries a device.key.granted event (P4-SEC-07): a Workspace
@@ -175,6 +191,11 @@ const (
 	EventConflictKindVerification  = "verification"
 	EventConflictKindDivergent     = "divergent"
 	EventConflictKindUndecryptable = "undecryptable"
+	// EventConflictKindEnvPendingProject quarantines a verified
+	// env.profile.updated whose project has not applied yet (ENV-SYNC-01
+	// review): recoverable ordering, e.g. the project's origin device is not
+	// pinned here yet. Replayed by ReplayPendingEnvProfileConflicts.
+	EventConflictKindEnvPendingProject = "env_pending_project"
 )
 
 type eventVerificationConflictDetails struct {
@@ -239,6 +260,17 @@ func createProjectEvent(ctx context.Context, st *state.Store, tx *state.Tx, typ 
 func NewDraftSnapshotEvent(typ, payloadJSON string) state.Event {
 	return state.Event{
 		Type:        typ,
+		PayloadJSON: payloadJSON,
+		ContentHash: state.ContentHash(payloadJSON),
+	}
+}
+
+// NewEnvProfileEvent builds an unsigned env.profile.updated event from a
+// pre-marshaled payload (ENV-SYNC-01). The store stamps HLC, seq, device id,
+// and the device signature on InsertLocalEvent.
+func NewEnvProfileEvent(payloadJSON string) state.Event {
+	return state.Event{
+		Type:        EventEnvProfileUpdated,
 		PayloadJSON: payloadJSON,
 		ContentHash: state.ContentHash(payloadJSON),
 	}
@@ -535,6 +567,18 @@ func ApplyEventsWithStats(ctx context.Context, st *state.Store, events []state.E
 				record(event, true)
 				continue
 			}
+			if errors.Is(err, errEnvProjectPending) {
+				if conflictErr := insertEnvPendingProjectConflict(ctx, st, event, err); conflictErr != nil {
+					return nil, stats, errors.Join(err, conflictErr)
+				}
+				stats.Quarantined++
+				// Consumed for the cursor like verification quarantines:
+				// re-delivery would hit the same missing project, and the full
+				// event is preserved in the conflict for the per-cycle replay
+				// (ReplayPendingEnvProfileConflicts) once the project applies.
+				record(event, true)
+				continue
+			}
 			return nil, stats, err
 		}
 		// Applied, or deduped (already inserted): both consume the slot.
@@ -614,6 +658,20 @@ func insertEventHashChainConflict(ctx context.Context, st *state.Store, event st
 		return err
 	}
 	return st.InsertConflict(ctx, "", ConflictEventHashChain, string(raw))
+}
+
+// errEnvProjectPending marks a verified env.profile.updated event whose
+// project row is absent WITHOUT a tombstone (ENV-SYNC-01 review, Codex P2):
+// the ordering is recoverable — most commonly the project.added author is not
+// pinned on this device yet, so its event sits in a verification quarantine —
+// and consuming the env event silently would lose the profile even after the
+// project later replays. The apply loop quarantines it for replay instead.
+var errEnvProjectPending = errors.New("env profile project not yet applied")
+
+// insertEnvPendingProjectConflict preserves the full env event for replay once
+// its project applies (ReplayPendingEnvProfileConflicts).
+func insertEnvPendingProjectConflict(ctx context.Context, st *state.Store, event state.Event, cause error) error {
+	return insertEventConflictOnce(ctx, st, event, EventConflictKindEnvPendingProject, cause.Error())
 }
 
 func insertEventVerificationConflict(ctx context.Context, st *state.Store, event state.Event, cause error) error {
@@ -750,6 +808,49 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 			return fmt.Errorf("draft snapshot for unknown project %q: %w", payload.Path, err)
 		}
 		return tx.RecordDraftSnapshotTx(ctx, project.ID, payload.BlobRef, payload.ByteSize, payload.FileCount, event)
+	case EventEnvProfileUpdated:
+		var payload EnvProfilePayload
+		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+			return fmt.Errorf("decode event %s: %w", event.ID, err)
+		}
+		pk, err := pathkey.Clean(payload.Path)
+		if err != nil {
+			return fmt.Errorf("env profile path %q: %w", payload.Path, err)
+		}
+		project, err := tx.ProjectByPath(ctx, pk.Display)
+		if err != nil {
+			// ENV-SYNC-01: distinguish a WINNING DELETE from a project that has
+			// not applied yet (Codex review P2). A tombstoned path drops the
+			// pointer (the delete won; a re-add + re-capture re-emits). An
+			// absent path without a tombstone is recoverable ordering — the
+			// batch loop quarantines the event for replay instead of consuming
+			// it, and a hard error here would abort the whole pull batch.
+			if _, ok, terr := tx.TombstoneHLC(ctx, pk.Display); terr != nil {
+				return terr
+			} else if ok {
+				return nil
+			}
+			return fmt.Errorf("%w: %s", errEnvProjectPending, payload.Path)
+		}
+		hlc, deviceID, eventID, ok, err := tx.EnvProfileSourceCoords(ctx, project.ID)
+		if err != nil {
+			return err
+		}
+		if ok && !envCoordLess(hlc, deviceID, eventID, event) {
+			return nil
+		}
+		params := state.EnvProfileParams{
+			Name:     payload.Profile,
+			Provider: payload.Provider,
+			Mode:     payload.Mode,
+			BlobRef:  payload.BlobRef,
+			VarNames: payload.VarNames,
+			Refs:     payload.Refs,
+		}
+		if _, err := tx.UpsertEnvProfileTx(ctx, project.ID, params, event); err != nil {
+			return fmt.Errorf("apply env profile for %q: %w", payload.Path, err)
+		}
+		return nil
 	case EventDeviceKeyGranted:
 		// P4-SEC-07: record the grant audit row transactionally with the event
 		// insert. The secret WCK is ingested into the keychain by the
@@ -767,6 +868,58 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 	default:
 		return nil
 	}
+}
+
+// envCoordLess uses the same highest-(HLC, deviceID, eventID)-wins ordering as
+// samePathLess so env profile LWW converges with namespace reconciliation.
+func envCoordLess(hlc int64, deviceID, eventID string, event state.Event) bool {
+	return samePathLess(
+		samePathCandidate{hlc: hlc, deviceID: deviceID, eventID: eventID},
+		samePathCandidate{hlc: event.HLC, deviceID: event.DeviceID, eventID: event.ID},
+	)
+}
+
+// ReplayPendingEnvProfileConflicts re-attempts every open env_pending_project
+// quarantine (ENV-SYNC-01 review, Codex P2): a verified env.profile.updated
+// whose project had not applied yet was preserved here instead of being
+// consumed. Once the project lands — a later pull window, or a quarantined
+// project.added replayed by `devices approve` — the stored event applies
+// through the normal verified path and the conflict resolves. A still-missing
+// project re-quarantines as a dedup no-op and the row stays open (visible,
+// bounded). The conflict resolves only AFTER a successful apply, mirroring
+// ReplayUndecryptableConflicts' resolve-after-apply rule.
+func ReplayPendingEnvProfileConflicts(ctx context.Context, st *state.Store) (int, error) {
+	conflicts, err := st.OpenConflictsByType(ctx, ConflictEventVerification)
+	if err != nil {
+		return 0, err
+	}
+	replayed := 0
+	for _, c := range conflicts {
+		var details eventVerificationConflictDetails
+		if json.Unmarshal([]byte(c.DetailsJSON), &details) != nil || details.Kind != EventConflictKindEnvPendingProject {
+			continue
+		}
+		var restored state.Event
+		if err := json.Unmarshal([]byte(details.EventJSON), &restored); err != nil {
+			logging.Logger(ctx).Warn("env-pending replay: conflict carries unparseable event JSON",
+				"conflict_id", c.ID, "event_id", details.EventID, "err", err.Error())
+			continue
+		}
+		_, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{restored}, nil)
+		if err != nil {
+			return replayed, err // conflict stays open; retried next cycle
+		}
+		if stats.Quarantined > 0 {
+			continue // project still missing (or a fresh verification failure); row stays open
+		}
+		if err := st.ResolveConflict(ctx, c.ID, `{"action":"auto","reason":"project applied after env-pending hold (ENV-SYNC-01 replay)"}`); err != nil {
+			return replayed, err
+		}
+		logging.Logger(ctx).Info("env-pending replay: quarantined env profile recovered",
+			"event_id", details.EventID, "device_id", details.DeviceID)
+		replayed++
+	}
+	return replayed, nil
 }
 
 // loadNamespaceProjection loads the projection slice Decide needs for a

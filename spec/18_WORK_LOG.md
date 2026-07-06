@@ -31,6 +31,24 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-05 — feat(env): cross-device env-profile exchange (ENV-SYNC-01)
+
+Changed:
+- `internal/sync`: added `env.profile.updated` payload/event helpers and apply handling. Env profile replay is LWW by source-event coordinate, duplicates/stale events are idempotent, and the event is signature-gated as trust-affecting.
+- Post-review (Codex, dual-review): (P2) the apply path no longer consumes a verified env event whose project has not applied yet — a tombstoned path drops the pointer, an absent-without-tombstone path quarantines as a replayable `env_pending_project` conflict (cursor advances, batch never aborts) and `ReplayPendingEnvProfileConflicts` recovers it after every pull apply and after `devices approve` replay, pinned by `TestApplyEnvProfileEventUnknownProjectQuarantinesWithoutAbort`/`...TombstonedProjectDrops`; (P2) `rewrapHubCleanup` now uploads the rewrapped blob BEFORE pushing the superseding event (a peer that applies the event can always fetch the ciphertext it names; a failed event push self-heals on the next sync because superseding events are ordinary local events), pinned by `TestRewrapHubCleanupUploadsBlobBeforeEvent` — this also fixes the pre-existing draft-rewrap ordering.
+- `internal/state`: migration `00023_env_profile_source_events.sql` adds `env_profiles.source_event_hlc/source_event_device_id/source_event_id`; env profile saves now share `Tx.UpsertEnvProfileTx`, stamp event coords, keep legacy wrappers for tests/callers, and expose `EnvProfileSourceCoords` plus `EnvProfilesForBlobRef`.
+- `internal/cli`: `env capture` and `env bind` emit `env.profile.updated` in the same transaction as the profile upsert; sync blob discovery includes env profile blob refs; hydrate missing local blobs now carries a `devstrap sync` remedy; revoke rewrap emits superseding env profile events before hub cleanup.
+- Snapshot plane (coordinator follow-up in the same PR): `SnapshotEnv` pointer on `SnapshotEntry` (state read `snapshotEnvForProject` skips never-synced NULL-coord profiles), `BuildSnapshot` mapping, `importEnvTx` merging by the pointer's OWN coordinate even when the entry row loses the project LWW, and `recoverFromSnapshot` step 8 pulls imported env blobs alongside draft blobs.
+- Review fixes (coordinator line-by-line): `rewrapEnvBlob` regained the catch-all `UpdateBlobRef` so bindings on tombstoned entries repoint too (EnvProfilesForBlobRef only sees active projects); `UpsertEnvProfileTx` dropped an unreachable provider branch.
+- Specs: `spec/00`, `spec/07`, `spec/09`, `spec/12`, and `spec/16` now describe shipped env-profile exchange, the snapshot env pointer, and migration 00023.
+
+Validated:
+- Added state, sync, and CLI unit coverage for env profile source coords, blob-ref lookup, apply idempotency/LWW/pending-quarantine/tombstone-drop, local capture event emission, env blob discovery, and revoke rewrap superseding events + blob-before-event ordering.
+- Focused package run: `GOCACHE=/tmp/devstrap-gocache go test ./internal/state/... ./internal/sync/... ./internal/cli/...`.
+
+Follow-ups:
+- file the draft-apply batch-abort finding (a draft.snapshot.created or malformed-but-verified env payload for an unknown project can still abort a whole pull batch; the env apply path now tombstone-drops or quarantines-for-replay instead — the draft handler should adopt the same shape).
+
 ## 2026-07-05 — docs(audits): Pass-6 closure banner + ledger truth-up + multi-device wave direction
 
 Changed:

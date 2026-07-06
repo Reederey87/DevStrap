@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Reederey87/DevStrap/internal/state"
 )
@@ -312,4 +313,133 @@ func TestImportThenApplyEqualsApplyThenImport(t *testing.T) {
 	if a, b := sourceHLC(t, stA), sourceHLC(t, stB); a != b || a != h(600) {
 		t.Fatalf("convergence failed: import-then-apply source_hlc=%d apply-then-import source_hlc=%d, want %d", a, b, h(600))
 	}
+}
+
+func envPointer(hlc int64, dev, evt string) *SnapshotEnv {
+	return &SnapshotEnv{
+		Name:                "default",
+		Provider:            "devstrap_encrypted",
+		Mode:                "hydrate_or_runtime",
+		BlobRef:             "age_blob:" + evt,
+		VarNames:            []string{"API_TOKEN"},
+		SourceEventHLC:      hlc,
+		SourceEventDeviceID: dev,
+		SourceEventID:       evt,
+	}
+}
+
+// TestSnapshotRoundTripsEnvProfile: an env profile captured via the event plane
+// survives BuildSnapshot → ImportSnapshot into a fresh store (ENV-SYNC-01 /
+// P4-HUB-11: profiles must outlive event-log compaction), and re-import is
+// idempotent.
+func TestSnapshotRoundTripsEnvProfile(t *testing.T) {
+	ctx := context.Background()
+	stA, deviceA := newSyncStore(t)
+	signing := addRemoteDeviceForApplyTest(t, stA, "device-env", "approved")
+	now := time.Now().UnixMilli()
+	add := projEvent(t, deviceA.ID, EventProjectAdded, now, "work/acme/api", "github.com/acme/api")
+	env := signedEnvProfileEvent(t, signing, "evt_env", "device-env", 1, now+1, EnvProfilePayload{
+		Path:     "work/acme/api",
+		Profile:  "default",
+		Provider: "devstrap_encrypted",
+		Mode:     "hydrate_or_runtime",
+		BlobRef:  "age_blob:roundtrip",
+		VarNames: []string{"API_TOKEN", "DB_URL"},
+	})
+	if _, err := ApplyEvents(ctx, stA, []state.Event{add, env}); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := BuildSnapshot(ctx, stA, deviceA.ID, h(1000), Cursor{deviceA.ID: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Entries) != 1 || snap.Entries[0].Env == nil {
+		t.Fatalf("snapshot must carry the env pointer: %#v", snap.Entries)
+	}
+	if got := snap.Entries[0].Env.BlobRef; got != "age_blob:roundtrip" {
+		t.Fatalf("env blob ref = %q", got)
+	}
+
+	stB, _ := newSyncStore(t)
+	if err := ImportSnapshot(ctx, stB, snap, "sha-env", "hub-env"); err != nil {
+		t.Fatal(err)
+	}
+	project, err := stB.ProjectByPath(ctx, "work/acme/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, bindings, err := stB.EnvProfileForProject(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.Provider != "devstrap_encrypted" || len(bindings) != 2 || bindings[0].EncryptedValueRef != "age_blob:roundtrip" {
+		t.Fatalf("profile=%#v bindings=%#v", profile, bindings)
+	}
+	// Re-import: idempotent (equal coordinates do not win the LWW compare).
+	if err := ImportSnapshot(ctx, stB, snap, "sha-env", "hub-env"); err != nil {
+		t.Fatal(err)
+	}
+	if _, bindings, err = stB.EnvProfileForProject(ctx, project.ID); err != nil || len(bindings) != 2 {
+		t.Fatalf("re-import changed bindings: %v %#v", err, bindings)
+	}
+}
+
+// TestImportSnapshotEnvLWW: the env pointer merges by its OWN coordinate — an
+// older pointer never regresses a newer local profile, a newer pointer wins
+// even when the entry row itself LOSES the project LWW compare.
+func TestImportSnapshotEnvLWW(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newSyncStore(t)
+
+	// Local state: project at h(800) with an env profile at h(900).
+	if err := ImportSnapshot(ctx, st, importOnly([]SnapshotEntry{
+		gitEntry("work/api", "api", h(800), "dev_local", "evt_800"),
+	}, nil), "sha-env", "hub-env"); err != nil {
+		t.Fatal(err)
+	}
+	project, err := st.ProjectByPath(ctx, "work/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WithTx(ctx, func(tx *state.Tx) error {
+		_, err := tx.UpsertEnvProfileTx(ctx, project.ID, state.EnvProfileParams{
+			Name:     "default",
+			Provider: "devstrap_encrypted",
+			Mode:     "hydrate_or_runtime",
+			BlobRef:  "age_blob:local900",
+			VarNames: []string{"API_TOKEN"},
+		}, state.Event{ID: "evt_900", DeviceID: "dev_local", HLC: h(900)})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	assertEnvRef := func(want string) {
+		t.Helper()
+		_, bindings, err := st.EnvProfileForProject(ctx, project.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(bindings) == 0 || bindings[0].EncryptedValueRef != want {
+			t.Fatalf("env ref = %#v, want %s", bindings, want)
+		}
+	}
+
+	// Older env pointer on a WINNING entry (project h(850) loses to nothing —
+	// entry at h(850) beats h(800)) must not regress the newer local profile.
+	older := gitEntry("work/api", "api", h(850), "dev_a", "evt_850")
+	older.Env = envPointer(h(700), "dev_a", "evt_700")
+	if err := ImportSnapshot(ctx, st, importOnly([]SnapshotEntry{older}, nil), "sha-env2", "hub-env"); err != nil {
+		t.Fatal(err)
+	}
+	assertEnvRef("age_blob:local900")
+
+	// Newer env pointer on a LOSING entry (project h(820) < local h(850) now)
+	// must still win the independent env compare.
+	newer := gitEntry("work/api", "api", h(820), "dev_b", "evt_820")
+	newer.Env = envPointer(h(950), "dev_b", "evt_950")
+	if err := ImportSnapshot(ctx, st, importOnly([]SnapshotEntry{newer}, nil), "sha-env3", "hub-env"); err != nil {
+		t.Fatal(err)
+	}
+	assertEnvRef("age_blob:evt_950")
 }

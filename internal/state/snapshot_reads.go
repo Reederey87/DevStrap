@@ -29,6 +29,7 @@ type SnapshotEntry struct {
 	SourceEventID         string
 	Git                   *SnapshotEntryGit
 	Draft                 *SnapshotEntryDraft
+	Env                   *SnapshotEntryEnv
 }
 
 // SnapshotEntryGit mirrors the git_repos row attached to a namespace entry.
@@ -48,6 +49,22 @@ type SnapshotEntryDraft struct {
 	BlobRef             string
 	ByteSize            int64
 	FileCount           int64
+	SourceEventHLC      int64
+	SourceEventDeviceID string
+	SourceEventID       string
+}
+
+// SnapshotEntryEnv is the env-profile pointer attached to a namespace entry
+// (ENV-SYNC-01). A snapshot ships it so env profiles survive event-log
+// compaction: without it, a snapshot-bootstrapped device would never learn a
+// profile whose env.profile.updated carrier was compacted away.
+type SnapshotEntryEnv struct {
+	Name                string
+	Provider            string
+	Mode                string
+	BlobRef             string
+	VarNames            []string
+	Refs                map[string]string
 	SourceEventHLC      int64
 	SourceEventDeviceID string
 	SourceEventID       string
@@ -117,9 +134,74 @@ func (s *Store) SnapshotEntries(ctx context.Context) ([]SnapshotEntry, error) {
 				SourceEventID:       draft.SourceEventID,
 			}
 		}
+		env, err := s.snapshotEnvForProject(ctx, p.ID)
+		if err != nil {
+			return nil, err
+		}
+		entry.Env = env
 		out = append(out, entry)
 	}
 	return out, nil
+}
+
+// snapshotEnvForProject reads the active env-profile pointer for one namespace
+// entry (ENV-SYNC-01). Profiles without source-event coordinates are skipped:
+// they predate the exchange (or came through the legacy no-event wrappers), so
+// they never synced anyway and a re-capture is what stamps them — shipping them
+// with zero coordinates would let any later event permanently dominate them on
+// importers while pretending they had a place in the LWW order.
+func (s *Store) snapshotEnvForProject(ctx context.Context, namespaceID string) (*SnapshotEntryEnv, error) {
+	var env SnapshotEntryEnv
+	var profileID string
+	var nHLC sql.NullInt64
+	var nDev, nEvt sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+SELECT e.id, e.name, e.provider, e.mode, e.source_event_hlc, e.source_event_device_id, e.source_event_id
+FROM namespace_entries n
+JOIN env_profiles e ON e.id = n.env_profile_id
+WHERE n.id = ? AND n.status = 'active';
+`, namespaceID).Scan(&profileID, &env.Name, &env.Provider, &env.Mode, &nHLC, &nDev, &nEvt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read snapshot env profile: %w", err)
+	}
+	if !nHLC.Valid || !nDev.Valid || nDev.String == "" || !nEvt.Valid || nEvt.String == "" {
+		return nil, nil // never synced; see doc comment
+	}
+	env.SourceEventHLC = nHLC.Int64
+	env.SourceEventDeviceID = nDev.String
+	env.SourceEventID = nEvt.String
+	rows, err := s.db.QueryContext(ctx, `
+SELECT var_name, COALESCE(encrypted_value_ref, ''), COALESCE(provider_ref, '')
+FROM secret_bindings
+WHERE env_profile_id = ?
+ORDER BY var_name;
+`, profileID)
+	if err != nil {
+		return nil, fmt.Errorf("read snapshot env bindings: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var varName, encRef, provRef string
+		if err := rows.Scan(&varName, &encRef, &provRef); err != nil {
+			return nil, fmt.Errorf("scan snapshot env binding: %w", err)
+		}
+		if encRef != "" {
+			env.BlobRef = encRef
+			env.VarNames = append(env.VarNames, varName)
+		} else {
+			if env.Refs == nil {
+				env.Refs = make(map[string]string)
+			}
+			env.Refs[varName] = provRef
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return &env, nil
 }
 
 // SnapshotTombstones returns every deleted namespace entry that carries a

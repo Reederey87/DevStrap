@@ -124,6 +124,7 @@ type SnapshotEntry struct {
 	SourceEventID         string         `json:"source_event_id"`
 	Git                   *SnapshotGit   `json:"git,omitempty"`
 	Draft                 *SnapshotDraft `json:"draft,omitempty"`
+	Env                   *SnapshotEnv   `json:"env,omitempty"`
 }
 
 // SnapshotGit mirrors the git_repos row attached to a namespace entry.
@@ -147,6 +148,22 @@ type SnapshotDraft struct {
 	SourceEventHLC      int64  `json:"source_event_hlc"`
 	SourceEventDeviceID string `json:"source_event_device_id"`
 	SourceEventID       string `json:"source_event_id"`
+}
+
+// SnapshotEnv is the env-profile pointer for a namespace entry (ENV-SYNC-01),
+// shipped so env profiles survive event-log compaction. Its source-event
+// coordinate is independent of the entry's: a capture can postdate the project
+// row that carries it, so import merges it by its own LWW compare.
+type SnapshotEnv struct {
+	Name                string            `json:"name"`
+	Provider            string            `json:"provider"`
+	Mode                string            `json:"mode"`
+	BlobRef             string            `json:"blob_ref,omitempty"`
+	VarNames            []string          `json:"var_names,omitempty"`
+	Refs                map[string]string `json:"refs,omitempty"`
+	SourceEventHLC      int64             `json:"source_event_hlc"`
+	SourceEventDeviceID string            `json:"source_event_device_id"`
+	SourceEventID       string            `json:"source_event_id"`
 }
 
 // SnapshotTombstone is one surviving deleted entry, kept so a stale add

@@ -41,6 +41,38 @@ func TestVerifyBlobContentHash(t *testing.T) {
 	}
 }
 
+func TestBlobRefFromEventEnvProfile(t *testing.T) {
+	raw, err := json.Marshal(dssync.EnvProfilePayload{
+		Path:     "work/acme/api",
+		Profile:  "default",
+		Provider: "devstrap_encrypted",
+		Mode:     "hydrate_or_runtime",
+		BlobRef:  "age_blob:" + hex64a,
+		VarNames: []string{"API_TOKEN"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, ok := blobRefFromEvent(state.Event{Type: dssync.EventEnvProfileUpdated, PayloadJSON: string(raw)})
+	if !ok || ref != "age_blob:"+hex64a {
+		t.Fatalf("blobRefFromEvent encrypted = (%q, %t), want env ref", ref, ok)
+	}
+	providerRaw, err := json.Marshal(dssync.EnvProfilePayload{
+		Path:     "work/acme/api",
+		Profile:  "default",
+		Provider: "1password",
+		Mode:     "runtime_only",
+		Refs:     map[string]string{"API_TOKEN": "op://vault/item/token"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, ok = blobRefFromEvent(state.Event{Type: dssync.EventEnvProfileUpdated, PayloadJSON: string(providerRaw)})
+	if ok || ref != "" {
+		t.Fatalf("blobRefFromEvent provider = (%q, %t), want no ref", ref, ok)
+	}
+}
+
 func TestPushReferencedBlobsPushesMultipleBlobs(t *testing.T) {
 	ctx := context.Background()
 	paths := config.Paths{Home: t.TempDir(), Root: t.TempDir()}

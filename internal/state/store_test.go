@@ -206,8 +206,8 @@ func TestMigrateEnsureSummaryAndVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 22 {
-		t.Fatalf("schema version = %d, want 22", version)
+	if version != 23 {
+		t.Fatalf("schema version = %d, want 23", version)
 	}
 
 	var tableCount int
@@ -347,8 +347,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 21 {
-		t.Fatalf("schema version after down = %d, want 21", version)
+	if version != 22 {
+		t.Fatalf("schema version after down = %d, want 22", version)
 	}
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
@@ -357,8 +357,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 22 {
-		t.Fatalf("schema version after re-migrate = %d, want 22", version)
+	if version != 23 {
+		t.Fatalf("schema version after re-migrate = %d, want 23", version)
 	}
 }
 
@@ -1343,6 +1343,192 @@ func TestInsertLocalEventSeedsClockFromExistingEvents(t *testing.T) {
 
 func packHLCForTest(physical, logical int64) int64 {
 	return (physical << hlcLogicalBits) | logical
+}
+
+func TestUpsertEnvProfileTxLWWCoordsStamped(t *testing.T) {
+	ctx := context.Background()
+	st, project := newEnvProfileTestStore(t, ctx, "work/acme/api")
+	defer st.Close()
+
+	low := Event{ID: "evt_low", DeviceID: "dev_a", HLC: 10}
+	if err := st.WithTx(ctx, func(tx *Tx) error {
+		_, err := tx.UpsertEnvProfileTx(ctx, project.ID, EnvProfileParams{
+			Name:     "default",
+			Provider: "devstrap_encrypted",
+			Mode:     "hydrate_or_runtime",
+			BlobRef:  "age_blob:aaaa",
+			VarNames: []string{"API_TOKEN"},
+		}, low)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WithTx(ctx, func(tx *Tx) error {
+		hlc, deviceID, eventID, ok, err := tx.EnvProfileSourceCoords(ctx, project.ID)
+		if err != nil {
+			return err
+		}
+		if !ok || hlc != low.HLC || deviceID != low.DeviceID || eventID != low.ID {
+			t.Fatalf("coords = (%d, %q, %q, %t), want low event", hlc, deviceID, eventID, ok)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	high := Event{ID: "evt_high", DeviceID: "dev_b", HLC: 11}
+	if err := st.WithTx(ctx, func(tx *Tx) error {
+		_, err := tx.UpsertEnvProfileTx(ctx, project.ID, EnvProfileParams{
+			Name:     "default",
+			Provider: "1password",
+			Mode:     "runtime_only",
+			Refs:     map[string]string{"API_TOKEN": "op://vault/item/token", "DB_URL": "op://vault/item/db"},
+		}, high)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	profile, bindings, err := st.EnvProfileForProject(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.Provider != "1password" || profile.Mode != "runtime_only" {
+		t.Fatalf("profile = %#v, want provider runtime profile", profile)
+	}
+	if len(bindings) != 2 || bindings[0].EncryptedValueRef != "" || bindings[0].ProviderRef == "" {
+		t.Fatalf("provider bindings = %#v", bindings)
+	}
+	if err := st.WithTx(ctx, func(tx *Tx) error {
+		hlc, deviceID, eventID, ok, err := tx.EnvProfileSourceCoords(ctx, project.ID)
+		if err != nil {
+			return err
+		}
+		if !ok || hlc != high.HLC || deviceID != high.DeviceID || eventID != high.ID {
+			t.Fatalf("coords = (%d, %q, %q, %t), want high event", hlc, deviceID, eventID, ok)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnvProfileLegacyWrappersUseNullSourceCoords(t *testing.T) {
+	ctx := context.Background()
+	st, project := newEnvProfileTestStore(t, ctx, "work/acme/api")
+	defer st.Close()
+
+	if _, err := st.SaveCapturedEnvProfile(ctx, project.ID, "", []string{"API_TOKEN"}, "age_blob:deadbeef"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WithTx(ctx, func(tx *Tx) error {
+		_, _, _, ok, err := tx.EnvProfileSourceCoords(ctx, project.ID)
+		if err != nil {
+			return err
+		}
+		if ok {
+			t.Fatal("EnvProfileSourceCoords ok = true, want false for legacy wrapper")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveProviderEnvProfile(ctx, project.ID, "", "1password", map[string]string{"API_TOKEN": "op://vault/item/token"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WithTx(ctx, func(tx *Tx) error {
+		_, _, _, ok, err := tx.EnvProfileSourceCoords(ctx, project.ID)
+		if err != nil {
+			return err
+		}
+		if ok {
+			t.Fatal("EnvProfileSourceCoords ok = true after provider wrapper, want false")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnvProfilesForBlobRef(t *testing.T) {
+	ctx := context.Background()
+	st, projectA := newEnvProfileTestStore(t, ctx, "work/acme/api")
+	defer st.Close()
+	projectB, err := st.UpsertProject(ctx, UpsertProjectParams{
+		Path:          "work/acme/web",
+		Type:          "git_repo",
+		RemoteURL:     "git@github.com:acme/web.git",
+		RemoteKey:     "github.com/acme/web",
+		DefaultBranch: "main",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveCapturedEnvProfile(ctx, projectA.ID, "default", []string{"API_TOKEN", "DB_URL"}, "age_blob:shared"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveCapturedEnvProfile(ctx, projectB.ID, "default", []string{"WEB_TOKEN"}, "age_blob:shared"); err != nil {
+		t.Fatal(err)
+	}
+
+	refs, err := st.EnvProfilesForBlobRef(ctx, "age_blob:shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("refs len = %d, want 2: %#v", len(refs), refs)
+	}
+	if refs[0].Path != "work/acme/api" || strings.Join(refs[0].VarNames, ",") != "API_TOKEN,DB_URL" {
+		t.Fatalf("first ref = %#v", refs[0])
+	}
+	if refs[1].Path != "work/acme/web" || strings.Join(refs[1].VarNames, ",") != "WEB_TOKEN" {
+		t.Fatalf("second ref = %#v", refs[1])
+	}
+	absent, err := st.EnvProfilesForBlobRef(ctx, "age_blob:absent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(absent) != 0 {
+		t.Fatalf("absent refs = %#v, want none", absent)
+	}
+}
+
+func TestMustVerifyEventIncludesTrustAffectingTypes(t *testing.T) {
+	for _, eventType := range []string{"project.deleted", "project.renamed", "env.profile.updated"} {
+		if !mustVerifyEvent(eventType) {
+			t.Fatalf("mustVerifyEvent(%q) = false, want true", eventType)
+		}
+	}
+	if mustVerifyEvent("draft.snapshot.created") {
+		t.Fatal("mustVerifyEvent(draft.snapshot.created) = true, want false")
+	}
+}
+
+func newEnvProfileTestStore(t *testing.T, ctx context.Context, path string) (*Store, NamespaceEntry) {
+	t.Helper()
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureWorkspace(ctx, "personal", "/tmp/Code"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EnsureDevice(ctx, "test-device"); err != nil {
+		t.Fatal(err)
+	}
+	project, err := st.UpsertProject(ctx, UpsertProjectParams{
+		Path:          path,
+		Type:          "git_repo",
+		RemoteURL:     "git@github.com:acme/api.git",
+		RemoteKey:     "github.com/acme/api",
+		DefaultBranch: "main",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st, project
 }
 
 func TestMarkEncryptedBindingsNeedingRotation(t *testing.T) {
