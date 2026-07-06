@@ -888,11 +888,18 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 		// flagged only when a row ACTUALLY changed, so replays can never
 		// re-flag values an operator already rotated and cleared.
 		var payload DeviceTrustPayload
+		// A malformed payload here is permanently malformed and only an
+		// APPROVED signer can produce it (mustVerify) — exactly the
+		// compromised-device class trust events exist to cut off. Wrap in
+		// ErrEventVerification so it quarantines-as-consumed (preserved in a
+		// conflict) instead of aborting the batch and wedging the pull
+		// (reviewer finding; the env/draft malformed-payload convention is
+		// tracked in #133).
 		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
-			return fmt.Errorf("decode event %s: %w", event.ID, err)
+			return fmt.Errorf("%w: decode trust event %s: %v", state.ErrEventVerification, event.ID, err)
 		}
 		if payload.DeviceID == "" {
-			return fmt.Errorf("decode event %s: empty target device id", event.ID)
+			return fmt.Errorf("%w: trust event %s: empty target device id", state.ErrEventVerification, event.ID)
 		}
 		if err := tx.EnsureRemoteDeviceTx(ctx, payload.DeviceID); err != nil {
 			return err

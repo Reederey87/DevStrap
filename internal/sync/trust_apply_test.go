@@ -320,3 +320,41 @@ func TestApplyMutualRevocationCrossWindowDivergesLoudly(t *testing.T) {
 		}
 	}
 }
+
+// TestApplyDeviceTrustMalformedPayloadQuarantinesWithoutAbort (reviewer
+// finding): a signed-but-malformed trust payload must quarantine-as-consumed,
+// never abort the batch — the signer is by definition an approved device, and
+// a permanent decode failure re-pulled forever would be the P6-SYNC-01 wedge.
+func TestApplyDeviceTrustMalformedPayloadQuarantinesWithoutAbort(t *testing.T) {
+	ctx := context.Background()
+	st, device := newSyncStore(t)
+	signingA := addRemoteDeviceForApplyTest(t, st, "device-a", "approved")
+	now := time.Now().UnixMilli()
+	bad := state.Event{
+		ID:          "evt_bad_trust",
+		DeviceID:    "device-a",
+		Seq:         1,
+		HLC:         now << hlcLogicalBits,
+		Type:        EventDeviceRevoked,
+		PayloadJSON: `{"device_id":`, // truncated JSON
+	}
+	bad.ContentHash = state.ContentHash(bad.PayloadJSON)
+	sig, err := devicekeys.Sign(signingA.Private, "devstrap:event:v2", state.EventSignaturePayloadV2(bad))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad.DeviceSig = sig
+	empty := signedDeviceTrustEvent(t, signingA, "evt_empty_target", "device-a", 2, now+1, EventDeviceRevoked, "")
+	good := projEvent(t, device.ID, EventProjectAdded, now+2, "work/acme/after", "github.com/acme/after")
+	good.Seq = 1
+	_, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{bad, empty, good}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Quarantined != 2 {
+		t.Fatalf("stats=%+v, want both malformed trust events quarantined", stats)
+	}
+	if _, err := st.ProjectByPath(ctx, "work/acme/after"); err != nil {
+		t.Fatalf("batch must continue past malformed trust events: %v", err)
+	}
+}

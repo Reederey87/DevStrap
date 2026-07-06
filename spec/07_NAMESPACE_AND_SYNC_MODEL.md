@@ -224,6 +224,8 @@ project.deleted
 draft.snapshot.created        # encrypted working-tree bundle (non-git / draft fallback — Layer C)
 env.profile.updated           # encrypted/provider env profile metadata; blob plane carries ciphertext
 device.key.granted            # age-wrapped Workspace Content Key for a recipient+(epoch, kid) (P4-SEC-07/P6-SEC-02)
+device.revoked                # synced trust flip: sticky/monotonic apply, local device exempt (TRUST-01)
+device.lost                   # same plane as device.revoked; revoked <-> lost churn is a no-op
 conflict.created
 conflict.resolved
 ```
