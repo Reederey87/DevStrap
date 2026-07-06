@@ -113,6 +113,7 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newEnvCommand(stdout, opts))
 	cmd.AddCommand(newRunCommand(stdout, opts))
 	cmd.AddCommand(newRunLoopCommand(stdout, opts))
+	cmd.AddCommand(newServiceCommand(stdout, opts))
 	cmd.AddCommand(newAgentCommand(stdout, opts))
 	cmd.AddCommand(newDevicesCommand(stdout, opts))
 	cmd.AddCommand(newConflictsCommand(stdout, opts))

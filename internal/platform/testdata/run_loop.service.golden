@@ -1,0 +1,16 @@
+[Unit]
+Description=DevStrap run-loop (scan + sync + materialize)
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/devstrap run-loop --interval 5m0s --hub-file /home/dev/hub.json
+Restart=on-failure
+RestartSec=30
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+WorkingDirectory=/home/dev/Code
+
+[Install]
+WantedBy=default.target

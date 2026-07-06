@@ -40,7 +40,9 @@ Why LaunchAgent:
 
 LaunchDaemon is only needed later if you need system-wide service behavior before login.
 
-## Example LaunchAgent plist
+## LaunchAgent plist — shipped via `devstrap service install` (`P4-PROD-04`)
+
+The **native daemon (`devstrapd serve`) stays deferred**, but the LaunchAgent installer is shipped: `devstrap service install` renders and installs a per-user LaunchAgent that wraps the portable `run-loop`, so the workspace converges unattended without the Phase 1 daemon. The rendered plist:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -48,12 +50,14 @@ LaunchDaemon is only needed later if you need system-wide service behavior befor
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.devstrap.devstrapd</string>
+  <string>com.devstrap.run-loop</string>
 
   <key>ProgramArguments</key>
   <array>
-    <string>{{ .ExecutablePath }}</string>
-    <string>serve</string>
+    <string>{{ .ExecPath }}</string>
+    <string>run-loop</string>
+    <string>--interval</string>
+    <string>5m0s</string>
   </array>
 
   <key>RunAtLoad</key>
@@ -61,39 +65,38 @@ LaunchDaemon is only needed later if you need system-wide service behavior befor
 
   <key>KeepAlive</key>
   <dict>
-    <key>Crashed</key>
-    <true/>
     <key>SuccessfulExit</key>
     <false/>
   </dict>
 
   <key>ThrottleInterval</key>
-  <integer>10</integer>
+  <integer>30</integer>
 
   <key>StandardOutPath</key>
-  <string>{{ .Home }}/.devstrap/logs/devstrapd.out.log</string>
+  <string>{{ .Home }}/.devstrap/logs/run-loop.out.log</string>
 
   <key>StandardErrorPath</key>
-  <string>{{ .Home }}/.devstrap/logs/devstrapd.err.log</string>
+  <string>{{ .Home }}/.devstrap/logs/run-loop.err.log</string>
 </dict>
 </plist>
 ```
 
-Install command (deferred — daemon layer, not shipped):
+Shipped commands:
 
 ```bash
-devstrap daemon install
+devstrap service install     # renders the plist, then bootstraps it
+devstrap service status      # installed / running / detail / unit (also --json)
+devstrap service uninstall   # bootout + remove the plist (idempotent)
 ```
 
-Uninstall command (deferred — daemon layer, not shipped):
+The adapter renders the plist with Go `text/template` (every value XML-escaped through `encoding/xml.EscapeText`) using `os.UserHomeDir()` and `os.Executable()` (symlinks resolved), and writes it atomically at mode `0600`. It manages the service with the **modern per-domain verbs** — `launchctl bootstrap gui/<uid> <plist>` and `launchctl bootout gui/<uid>/<label>` (a best-effort `bootout` precedes `bootstrap` so a reinstall is idempotent; because `bootout` tears the old job down asynchronously the adapter then polls `launchctl print` until the label leaves the domain, so reinstalling over a *running* service does not race into an EIO `Bootstrap failed: 5` — caught in live dogfood) and `launchctl print` for status — never the deprecated `load`/`unload`. `ExecPath` is refused when it resolves to an ephemeral `$TMPDIR`/`go-build` path (install `devstrap` to a stable location or pass `--exec-path <abs>`); `PATH` is seeded to `<execdir>:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`. Do not hardcode `/Users/USER`, `~`, or Homebrew paths; launchd does not expand them in plist fields.
 
-```bash
-devstrap daemon uninstall
-```
+Troubleshooting (`launchctl print` surfaces `last exit code = N`):
 
-There is no `devstrap daemon` command in the current binary; these are target commands for the deferred Phase 1 daemon.
+- **exit 78** (`EX_CONFIG`) — the plist is malformed or references a missing path. Re-run `devstrap service install`; it rewrites and re-bootstraps the plist atomically.
+- **exit 127** — the service could not find the `devstrap` binary or a sibling tool (`git`) on the seeded `PATH`. Install `devstrap` to a stable directory and re-run `devstrap service install` so `ExecPath`/`PATH` point at it.
 
-The installer renders the plist with Go `text/template` using `os.UserHomeDir()` and `os.Executable()`. Do not hardcode `/Users/USER`, `~`, or Homebrew paths; launchd does not expand them in plist fields. `devstrapd serve` runs in the foreground under launchd and never self-daemonizes.
+The deferred native daemon (`devstrapd serve`) would install its own `com.devstrap.devstrapd` LaunchAgent later and run in the foreground under launchd; `devstrap service` targets the shipped `run-loop` today.
 
 ## Filesystem watcher
 
@@ -331,7 +334,7 @@ Platform findings (`PLAT-*`, from `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.
 - **No ENOSPC/EMFILE handling (`PLAT-02`):** the watcher treats every Add/Errors failure as fatal with no fallback; add degraded polling + periodic reconciliation.
 - **Watcher/PollWatcher unwired; no periodic reconciliation backstop (`PLAT-03`).**
 - **No Chmod-only / OS-junk event filtering (`PLAT-04`).**
-- **`ServiceSpec` seam too thin to render the launchd plist (`PLAT-05`);** flesh out the adapter so installers can be generated. A native FSEvents watcher remains a follow-up.
+- **`ServiceSpec` seam too thin to render the launchd plist (`PLAT-05`) — RESOLVED (`P4-PROD-04`).** `ServiceSpec` now carries Description/WorkingDir/Stdout+StderrPath/RestartOnFailure/RestartDelaySeconds and `ServiceManager` renders + installs the LaunchAgent (`internal/platform/service_launchd.go` + `service_darwin.go`, golden-tested) and the systemd user unit on Linux, driven by `devstrap service install|uninstall|status`. A native FSEvents watcher remains a follow-up.
 
 ## Audit follow-ups (2026-06-28)
 

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -240,7 +241,37 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 		results = append(results, checkResult{Name: "state database", Status: checkError, Detail: err.Error()})
 	}
 	results = append(results, checkRepoLocks(paths.Home)...)
+	results = append(results, checkService(ctx, opts)...)
 	return results
+}
+
+// checkService reports the background run-loop service's health (P4-PROD-04).
+// It is entirely optional: an unsupported platform/session omits the check, a
+// not-installed service reports ok (with the install hint), a running service
+// reports ok, and an installed-but-stopped service warns with an inspection
+// remedy.
+func checkService(ctx context.Context, opts *options) []checkResult {
+	mgr := serviceBackend()
+	label := mgr.DefaultLabel()
+	status, err := mgr.Status(ctx, label)
+	if err != nil {
+		if errors.Is(err, platform.ErrUnsupported) {
+			return nil
+		}
+		return []checkResult{{Name: "run-loop service", Status: checkWarn, Detail: err.Error()}}
+	}
+	if !status.Installed {
+		return []checkResult{{Name: "run-loop service", Status: checkOK, Detail: "not installed (optional; `devstrap service install` for unattended sync)"}}
+	}
+	if status.Running {
+		return []checkResult{{Name: "run-loop service", Status: checkOK, Detail: fmt.Sprintf("installed and running (%s)", status.Detail)}}
+	}
+	return []checkResult{{
+		Name:   "run-loop service",
+		Status: checkWarn,
+		Detail: fmt.Sprintf("installed but not running (%s)", status.Detail),
+		Remedy: fmt.Sprintf("inspect launchctl print / journalctl --user -u %s; reinstall with devstrap service install", label),
+	}}
 }
 
 func checkAgentRunSweep(ctx context.Context, opts *options, store *state.Store) []checkResult {

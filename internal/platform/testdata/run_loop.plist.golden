@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.devstrap.run-loop</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/devstrap</string>
+		<string>run-loop</string>
+		<string>--interval</string>
+		<string>5m0s</string>
+		<string>--hub-file</string>
+		<string>/home/dev/hub.json</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+	<key>StandardOutPath</key>
+	<string>/home/dev/.devstrap/logs/run-loop.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>/home/dev/.devstrap/logs/run-loop.err.log</string>
+	<key>WorkingDirectory</key>
+	<string>/home/dev/Code</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/local/bin:/usr/bin:/bin</string>
+	</dict>
+</dict>
+</plist>

@@ -37,6 +37,7 @@ devstrap doctor
 devstrap hub
 devstrap materialize
 devstrap run-loop
+devstrap service
 devstrap draft
 devstrap completion
 
@@ -54,7 +55,7 @@ devstrap wip
 Current repository status as of `2026-07-01`:
 
 ```text
-Implemented: devstrap init, version, scan, add, clone, hydrate, open, sync --hub-file, sync (hub: git+ssh://…/git@host:path.git zero-infrastructure git carrier — the documented default — and hub: r2://<bucket> production R2/S3 SDK wiring), hub init, hub compact, hub gc, hub login, hub logout, hub migrate-events, keys rotate, materialize, draft snapshot create, run-loop, status, doctor, conflicts list, conflicts show, conflicts resolve, db migrate, db status, db backup, db backup --full, db restore, db down, env capture, env hydrate, env bind, env rotate, run, worktree new, worktree status, worktree finalize, worktree list, worktree remove, worktree cleanup, worktree unlock, agent run, agent list, agent show, agent pr, devices enroll, devices list, devices approve, devices revoke, devices lost, devices rename, devices recipient, devices pairing-code
+Implemented: devstrap init, version, scan, add, clone, hydrate, open, sync --hub-file, sync (hub: git+ssh://…/git@host:path.git zero-infrastructure git carrier — the documented default — and hub: r2://<bucket> production R2/S3 SDK wiring), hub init, hub compact, hub gc, hub login, hub logout, hub migrate-events, keys rotate, materialize, draft snapshot create, run-loop, service install, service uninstall, service status, status, doctor, conflicts list, conflicts show, conflicts resolve, db migrate, db status, db backup, db backup --full, db restore, db down, env capture, env hydrate, env bind, env rotate, run, worktree new, worktree status, worktree finalize, worktree list, worktree remove, worktree cleanup, worktree unlock, agent run, agent list, agent show, agent pr, devices enroll, devices list, devices approve, devices revoke, devices lost, devices rename, devices recipient, devices pairing-code
 Planned: env check, automatic remote device enrollment/fingerprint confirmation, daemon/socket API, export, promote, gitstate, wip
 ```
 
@@ -280,6 +281,14 @@ Current implementation uses partial clone by default, supports `--full` and `--l
 ### run-loop
 
 `devstrap run-loop` is the portable, daemonless convergence loop: it runs **scan + sync + materialize** on an interval (`--interval`, default 5m; `--once` for cron/schedulers), identically on macOS and Linux. Progress/diagnostics go to stderr and the sync result stream to stdout (`P5-CLI-05`); a jittered backoff avoids hub stampedes and the loop aborts after 5 consecutive tick failures (`P5-CLI-05`/`P5-QUAL-03`). Per `P6-XP-03` the tick's **scan stage is real and idempotent** — it runs `scan.Walk` (offline since `P6-XP-05`) and adopts only genuinely-new findings (no active `ProjectByPath` row matching the finding's type and, for `git_repo`, `remote_key`), so a new local project reaches the hub without appending duplicate `project.added` events every tick. Warning-class findings (secret-looking files, symlink escapes) and duplicate-remote findings are surfaced on stderr and never auto-adopted; one-shot `scan --adopt` semantics are unchanged.
+
+### service
+
+`devstrap service install|uninstall|status` (`P4-PROD-04`) installs the `run-loop` as a background OS service so the workspace converges unattended without a bespoke daemon: a per-user **launchd LaunchAgent** on macOS (label `com.devstrap.run-loop`, managed with the modern `launchctl bootstrap`/`bootout`/`print` verbs) and a **systemd `--user` service** on Linux (unit `devstrap-run-loop.service`). The OS branch lives entirely behind `internal/platform` — the CLI never reads `runtime.GOOS` — and the platform `ServiceManager.Install` returns OS-idiomatic advisory notes (e.g. the Linux linger caveat) that the CLI prints verbatim.
+
+- `service install [--interval 5m] [--namespace-only] [--hub-file <path>] [--label <label>] [--exec-path <path>]` refuses up front when no hub is configured (same remedy as `run-loop`), resolves the binary path from `os.Executable()` (symlinks resolved) and **refuses an ephemeral path** (under `$TMPDIR` or a `go-build` cache) with a hint to install to a stable location or pass `--exec-path <abs>`. It bakes `run-loop --interval <d>` (plus `--namespace-only`/`--hub-file` and any explicitly-set `--home`/`--root`/`--config`), writes the plist/unit atomically at mode `0600`, and starts the service with `RestartOnFailure` throttled to 30s (coupled to `run-loop`'s consecutive-failure ceiling). No secret ever enters the service file — the adapters add only a `PATH`.
+- `service uninstall [--label]` is idempotent (a not-installed service is a success no-op).
+- `service status [--label]` reports `installed`/`running`/`detail`/`unit` (honoring `--json` with `{manager,label,installed,running,detail,unit_path}`) and exits 0 regardless of run-state. On an unsupported platform/session all three exit non-zero with a clear message. `doctor` folds the same status in as an optional check (omitted when unsupported, ok when running or not-installed, a warning with an inspection remedy when installed-but-stopped).
 
 ### add
 

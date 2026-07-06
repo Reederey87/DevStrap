@@ -305,7 +305,7 @@ Tasks:
 [x] Implement fsnotify watcher adapter for Darwin/Linux
 [ ] Implement FSEvents-specific Mac watcher if fsnotify/kqueue proves insufficient
 [ ] Implement reconcile job
-[ ] Implement LaunchAgent install/uninstall
+[x] Implement LaunchAgent install/uninstall — shipped as `devstrap service`, wrapping run-loop (`P4-PROD-04`)
 [ ] Implement logs and daemon status
 ```
 
@@ -332,7 +332,7 @@ Tasks:
 ```text
 [x] Implement initial Linux platform detection with polling/unsupported fallbacks
 [ ] Implement native Linux platform adapter
-[ ] Implement systemd service install
+[x] Implement systemd service install — shipped as `devstrap service`, wrapping run-loop (`P4-PROD-04`)
 [ ] Test watcher on Ubuntu
 [ ] Test Git hydration
 [ ] Test env hydration

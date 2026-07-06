@@ -81,42 +81,47 @@ Secrets: Secret Service/keyring-backed age and Ed25519 identities with file fall
 Paths: ~/.devstrap, ~/Code, XDG optional
 ```
 
-## systemd user service
+## systemd user service — shipped via `devstrap service install` (`P4-PROD-04`)
 
-Deferred this cycle (`XP-*` defers the native daemon on both platforms); documented here as the target so the cross-platform `ServiceManager` seam stays accurate. On Ubuntu today the foreground CLI is the supported entry point. Example unit:
+The **native daemon (`devstrapd serve`) stays deferred**, but the systemd user-unit installer is shipped: `devstrap service install` renders and installs a `--user` service wrapping the portable `run-loop`, so a Linux box converges unattended without the daemon. The rendered unit (`~/.config/systemd/user/devstrap-run-loop.service`, written atomically at mode `0600`):
 
 ```ini
 [Unit]
-Description=DevStrap user daemon
+Description=DevStrap run-loop (scan + sync + materialize)
 After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/devstrapd serve
+ExecStart=/usr/local/bin/devstrap run-loop --interval 5m0s
 Restart=on-failure
-RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=5
-Environment=DEVSTRAP_HOME=%h/.devstrap
+RestartSec=30
+Environment="PATH=/usr/local/bin/…:/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
 [Install]
 WantedBy=default.target
 ```
 
-Install:
+Shipped commands (the adapter runs `systemctl --user daemon-reload`/`enable`/`restart`, gated behind a `systemctl --user show-environment` availability probe — a missing systemd or D-Bus-less session fails closed as `ErrUnsupported`, never a confusing raw error):
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp devstrapd.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now devstrapd.service
+devstrap service install     # render unit → daemon-reload → enable → restart
+devstrap service status      # is-active + `journalctl --user -u …` hint (also --json)
+devstrap service uninstall   # disable --now → remove unit → daemon-reload (idempotent)
 ```
 
-Headless machines that need the user service active without an interactive login may require:
+`ExecStart` words are systemd-quoted (whitespace/quotes double-quoted, `%` doubled to escape specifier expansion); `ExecPath` comes from `os.Executable()` (symlinks resolved) and is refused at an ephemeral `$TMPDIR`/`go-build` path.
+
+**Lingering advisory.** A systemd `--user` manager stops when the user's last session ends, so on install the adapter probes `loginctl show-user "$USER" --property=Linger --value` and, when linger is off (or the probe fails), returns an advisory note the CLI prints verbatim:
 
 ```bash
-loginctl enable-linger "$USER"
+loginctl enable-linger "$USER"   # may require sudo; needed for headless/boot persistence
 ```
+
+The probe never fails the install — it only advises.
+
+**Keychain custody (fail-closed, `P6-XP-04`).** The service runs in exactly the D-Bus-less context where the Secret Service is unreachable. The installer deliberately does **not** auto-bake `DEVSTRAP_NO_KEYCHAIN=1` into the unit: a silent custody downgrade is forbidden. A box that recorded `file` custody at init keeps using the `0600` file store and runs cleanly under the unit; a box that recorded `keychain` custody and then runs headless fails closed (rather than minting a divergent identity) until the operator explicitly opts into file custody — set `DEVSTRAP_NO_KEYCHAIN=1` in the unit's `Environment=` yourself, having migrated the key files, if that is what you want. See the headless custody model at `P6-XP-04` below.
 
 ## Linux watcher
 
