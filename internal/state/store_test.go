@@ -1493,7 +1493,7 @@ func TestEnvProfilesForBlobRef(t *testing.T) {
 }
 
 func TestMustVerifyEventIncludesTrustAffectingTypes(t *testing.T) {
-	for _, eventType := range []string{"project.deleted", "project.renamed", "env.profile.updated"} {
+	for _, eventType := range []string{"project.deleted", "project.renamed", "env.profile.updated", "device.revoked", "device.lost"} {
 		if !mustVerifyEvent(eventType) {
 			t.Fatalf("mustVerifyEvent(%q) = false, want true", eventType)
 		}
@@ -1665,5 +1665,135 @@ func TestClearRotationForProject(t *testing.T) {
 		if !binding.NeedsRotation {
 			t.Fatalf("project B binding %s unexpectedly cleared needs_rotation", binding.VarName)
 		}
+	}
+}
+
+// TestApplyRemoteDeviceTrustTxMatrix pins the sticky/monotonic transition
+// rules for synced device.revoked/device.lost (TRUST-01).
+func TestApplyRemoteDeviceTrustTxMatrix(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureWorkspace(ctx, "test", "/tmp/Code"); err != nil {
+		t.Fatal(err)
+	}
+	local, err := st.EnsureDevice(ctx, "local-device")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := func(id, trust string) {
+		t.Helper()
+		if err := st.UpsertDevice(ctx, Device{ID: id, Name: id, OS: "linux", Arch: "arm64", TrustState: trust}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seed("dev-pending", "pending")
+	seed("dev-approved", "approved")
+	seed("dev-revoked", "revoked")
+	seed("dev-lost", "lost")
+
+	cases := []struct {
+		target, to  string
+		wantChanged bool
+		wantState   string
+	}{
+		{"dev-pending", "revoked", true, "revoked"},    // pending -> revoked is fail-closed
+		{"dev-approved", "lost", true, "lost"},         // approved -> lost flips
+		{"dev-revoked", "lost", false, "revoked"},      // revoked <-> lost churn no-ops
+		{"dev-lost", "revoked", false, "lost"},         // sticky both directions
+		{local.ID, "revoked", false, local.TrustState}, // local device never flips remotely
+	}
+	for _, tc := range cases {
+		var changed bool
+		if err := st.WithTx(ctx, func(tx *Tx) error {
+			var err error
+			changed, err = tx.ApplyRemoteDeviceTrustTx(ctx, tc.target, tc.to)
+			return err
+		}); err != nil {
+			t.Fatalf("%s -> %s: %v", tc.target, tc.to, err)
+		}
+		if changed != tc.wantChanged {
+			t.Fatalf("%s -> %s: changed=%v, want %v", tc.target, tc.to, changed, tc.wantChanged)
+		}
+		devices, err := st.ListDevices(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range devices {
+			if d.ID == tc.target && d.TrustState != tc.wantState {
+				t.Fatalf("%s -> %s: state=%q, want %q", tc.target, tc.to, d.TrustState, tc.wantState)
+			}
+		}
+	}
+	// approved is not a valid remote transition target.
+	if err := st.WithTx(ctx, func(tx *Tx) error {
+		_, err := tx.ApplyRemoteDeviceTrustTx(ctx, "dev-pending", "approved")
+		return err
+	}); err == nil {
+		t.Fatal("remote approve must be rejected — approval is the local ceremony only")
+	}
+}
+
+// TestUpsertEnvProfileTxPreservesNeedsRotation (TRUST-01 dogfood finding): a
+// superseding upsert (revoke rewrap repointing the blob ref) must carry each
+// binding's needs_rotation flag forward — wiping it broke the P5-PROD-03
+// doctor surfacing on the revoker and on every receiving device.
+func TestUpsertEnvProfileTxPreservesNeedsRotation(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureWorkspace(ctx, "test", "/tmp/Code"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EnsureDevice(ctx, "local-device"); err != nil {
+		t.Fatal(err)
+	}
+	ns, err := st.UpsertProject(ctx, UpsertProjectParams{Path: "work/x", Type: "git_repo", RemoteURL: "https://example.com/x", RemoteKey: "example.com/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := EnvProfileParams{Name: "default", Provider: "devstrap_encrypted", Mode: "hydrate_or_runtime", BlobRef: "age_blob:old", VarNames: []string{"API_TOKEN", "DB_URL"}}
+	if err := st.WithTx(ctx, func(tx *Tx) error {
+		_, err := tx.UpsertEnvProfileTx(ctx, ns.ID, params, Event{ID: "e1", DeviceID: "d1", HLC: 10})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.MarkEncryptedBindingsNeedingRotation(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Superseding upsert (rewrap: same vars, new ref) must keep the flags.
+	params.BlobRef = "age_blob:new"
+	if err := st.WithTx(ctx, func(tx *Tx) error {
+		_, err := tx.UpsertEnvProfileTx(ctx, ns.ID, params, Event{ID: "e2", DeviceID: "d1", HLC: 20})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	n, err := st.CountSecretBindingsNeedingRotation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("needs_rotation after superseding upsert = %d, want 2 (flags preserved)", n)
+	}
+	// And the operator clear still works on the fresh rows.
+	if _, err := st.ClearRotationForProject(ctx, ns.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n, err = st.CountSecretBindingsNeedingRotation(ctx); err != nil || n != 0 {
+		t.Fatalf("after clear: n=%d err=%v", n, err)
 	}
 }

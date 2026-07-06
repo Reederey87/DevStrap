@@ -284,6 +284,8 @@ This is the most important test.
 3. cli: blobRefFromEvent extracts env blob refs for encrypted profiles but not provider profiles
 4. txtar: env_exchange.txtar enrolls two homes, syncs through --hub-file, and hydrates captured values on the second device with no conflicts
 5. `TestSnapshotRoundTripsEnvProfile` proves BuildSnapshot -> ImportSnapshot carries the env pointer into a fresh store idempotently; `TestImportSnapshotEnvLWW` proves the pointer merges by its own coordinate (an older pointer never regresses, a newer pointer wins even on a losing entry row)
+6. sync trust propagation (TRUST-01): `TestApplyDeviceRevokedFlipsTrustAndFlagsRotation`, sticky replay (`...ReplayDoesNotReflagRotation`), unknown-target placeholder revoke, untrusted-signer quarantine, local-target no-op, single-batch mutual-revocation determinism (both orders), post-revoke same-batch quarantine isolation (`internal/sync/trust_apply_test.go`); `TestApplyRemoteDeviceTrustTxMatrix` (state); `TestDeviceRevokeEmitsTrustEvent` (cli, same-tx emission)
+7. txtar: sync_trust_propagation.txtar — three devices, full mutual pinning; A revokes B; C learns via sync (devices list shows revoked, doctor flags rotation), B's subsequent push quarantines on C
 ```
 
 ### Draft sync

@@ -371,3 +371,54 @@ func TestJoinerApprovingAnotherDeviceDoesNotSelfMint(t *testing.T) {
 		t.Fatalf("CurrentKeyEpoch = %d, want 0 (joiner must not self-mint on approve)", epoch)
 	}
 }
+
+// TestDeviceRevokeEmitsTrustEvent (TRUST-01): `devices revoke` writes the
+// trust flip and the synced device.revoked event in one transaction, so the
+// local event log carries the revocation for the next push.
+func TestDeviceRevokeEmitsTrustEvent(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	root := t.TempDir()
+	t.Setenv("DEVSTRAP_NO_KEYCHAIN", "1")
+	if _, _, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	if err := store.UpsertDevice(ctx, state.Device{
+		ID: "dev_remote", Name: "remote", OS: "linux", Arch: "arm64", TrustState: "approved",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "devices", "revoke", "dev_remote")
+	if err != nil {
+		t.Fatalf("revoke: stdout=%q stderr=%q err=%v", stdout, stderr, err)
+	}
+	if !strings.Contains(stderr, "propagates to other devices on their next sync") {
+		t.Fatalf("stderr = %q, want propagation note", stderr)
+	}
+
+	events, err := store.LocalPendingEventsBySeq(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, ev := range events {
+		if ev.Type == dssync.EventDeviceRevoked {
+			var p dssync.DeviceTrustPayload
+			if err := json.Unmarshal([]byte(ev.PayloadJSON), &p); err != nil {
+				t.Fatal(err)
+			}
+			if p.DeviceID == "dev_remote" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no device.revoked event for dev_remote in the local log (%d events)", len(events))
+	}
+}

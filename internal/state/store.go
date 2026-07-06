@@ -742,6 +742,16 @@ UPDATE devices SET name = ?, updated_at = ? WHERE id = ?;
 }
 
 func (s *Store) SetDeviceTrustState(ctx context.Context, deviceID, trustState string) error {
+	return s.WithTx(ctx, func(tx *Tx) error {
+		return tx.SetDeviceTrustStateTx(ctx, deviceID, trustState)
+	})
+}
+
+// SetDeviceTrustStateTx is the transactional core of SetDeviceTrustState
+// (TRUST-01): `devices revoke`/`lost` write the trust flip and insert the
+// synced device.revoked/device.lost event in ONE transaction (P6-DATA-03), so
+// a failure between the two can never orphan either side.
+func (tx *Tx) SetDeviceTrustStateTx(ctx context.Context, deviceID, trustState string) error {
 	if deviceID == "" {
 		return fmt.Errorf("device id is required")
 	}
@@ -750,7 +760,7 @@ func (s *Store) SetDeviceTrustState(ctx context.Context, deviceID, trustState st
 	default:
 		return fmt.Errorf("unsupported trust state %q", trustState)
 	}
-	current, err := currentDevice(ctx, s.db)
+	current, err := currentDevice(ctx, tx.tx)
 	if err != nil {
 		return err
 	}
@@ -758,7 +768,7 @@ func (s *Store) SetDeviceTrustState(ctx context.Context, deviceID, trustState st
 		return fmt.Errorf("refusing to change local device trust state")
 	}
 	now := timestampNow()
-	result, err := s.db.ExecContext(ctx, `
+	result, err := tx.tx.ExecContext(ctx, `
 UPDATE devices SET trust_state = ?, updated_at = ? WHERE id = ?;
 `, trustState, now, deviceID)
 	if err != nil {
@@ -772,6 +782,46 @@ UPDATE devices SET trust_state = ?, updated_at = ? WHERE id = ?;
 		return fmt.Errorf("unknown device %q", deviceID)
 	}
 	return nil
+}
+
+// ApplyRemoteDeviceTrustTx applies a synced device.revoked/device.lost event
+// to the local trust table (TRUST-01). The transition is STICKY/monotonic:
+// only pending or approved rows flip (pending -> revoked is the more
+// fail-closed direction, consistent with hasEnrolledDevices counting revoked
+// rows); revoked <-> lost churn and replays are no-ops; only the local
+// fingerprint ceremony (`devices approve`) resurrects a device. The local
+// device never flips from a remote event — a hub cannot talk this device into
+// distrusting itself; the operator sees the fleet's decision via peers
+// quarantining its events instead. Returns whether a row actually changed so
+// the caller can gate side effects (needs_rotation flagging) off replays.
+func (tx *Tx) ApplyRemoteDeviceTrustTx(ctx context.Context, deviceID, trustState string) (bool, error) {
+	if deviceID == "" {
+		return false, fmt.Errorf("device id is required")
+	}
+	switch trustState {
+	case "revoked", "lost":
+	default:
+		return false, fmt.Errorf("unsupported remote trust state %q", trustState)
+	}
+	current, err := currentDevice(ctx, tx.tx)
+	if err != nil {
+		return false, err
+	}
+	if deviceID == current.ID {
+		return false, nil
+	}
+	result, err := tx.tx.ExecContext(ctx, `
+UPDATE devices SET trust_state = ?, updated_at = ?
+WHERE id = ? AND trust_state IN ('pending', 'approved');
+`, trustState, timestampNow(), deviceID)
+	if err != nil {
+		return false, fmt.Errorf("apply remote device trust: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("read remote trust update count: %w", err)
+	}
+	return affected > 0, nil
 }
 
 func (s *Store) SetDevicePublicKey(ctx context.Context, deviceID, publicKey string) error {
@@ -1670,6 +1720,7 @@ func (tx *Tx) UpsertEnvProfileTx(ctx context.Context, namespaceID string, p EnvP
 		eventDeviceID = event.DeviceID
 		eventID = event.ID
 	}
+	preservedRotation := map[string]int{}
 	var existingID string
 	err := tx.tx.QueryRowContext(ctx, `
 SELECT COALESCE(env_profile_id, '')
@@ -1708,9 +1759,21 @@ WHERE id = ?;
 `, p.Name, p.Provider, p.Mode, eventHLC, eventDeviceID, eventID, now, existingID); err != nil {
 			return EnvProfile{}, fmt.Errorf("update env profile: %w", err)
 		}
+		// TRUST-01 dogfood fix: the replace-all-bindings upsert was silently
+		// WIPING needs_rotation — a revoke flags the bindings, then the
+		// rewrap's superseding env.profile.updated re-inserted fresh rows with
+		// the flag cleared, on the revoker AND on every receiving device
+		// (breaking the P5-PROD-03 doctor surfacing). Carry the flag forward
+		// per var name; clearing stays the explicit, device-local operator
+		// action (`env rotate` -> ClearRotationForProject), per spec/09.
+		rotFlags, rerr := tx.envBindingRotationFlags(ctx, existingID)
+		if rerr != nil {
+			return EnvProfile{}, rerr
+		}
 		if _, err := tx.tx.ExecContext(ctx, `DELETE FROM secret_bindings WHERE env_profile_id = ?;`, existingID); err != nil {
 			return EnvProfile{}, fmt.Errorf("replace env bindings: %w", err)
 		}
+		preservedRotation = rotFlags
 	}
 	for _, varName := range varNames {
 		bindingID, err := id.New("sec")
@@ -1719,16 +1782,16 @@ WHERE id = ?;
 		}
 		if encrypted {
 			if _, err := tx.tx.ExecContext(ctx, `
-INSERT INTO secret_bindings (id, env_profile_id, var_name, encrypted_value_ref, required, created_at, updated_at)
-VALUES (?, ?, ?, ?, 1, ?, ?);
-`, bindingID, existingID, varName, p.BlobRef, now, now); err != nil {
+INSERT INTO secret_bindings (id, env_profile_id, var_name, encrypted_value_ref, required, needs_rotation, created_at, updated_at)
+VALUES (?, ?, ?, ?, 1, ?, ?, ?);
+`, bindingID, existingID, varName, p.BlobRef, preservedRotation[varName], now, now); err != nil {
 				return EnvProfile{}, fmt.Errorf("insert secret binding %s: %w", varName, err)
 			}
 		} else {
 			if _, err := tx.tx.ExecContext(ctx, `
-INSERT INTO secret_bindings (id, env_profile_id, var_name, provider_ref, required, created_at, updated_at)
-VALUES (?, ?, ?, ?, 1, ?, ?);
-`, bindingID, existingID, varName, p.Refs[varName], now, now); err != nil {
+INSERT INTO secret_bindings (id, env_profile_id, var_name, provider_ref, required, needs_rotation, created_at, updated_at)
+VALUES (?, ?, ?, ?, 1, ?, ?, ?);
+`, bindingID, existingID, varName, p.Refs[varName], preservedRotation[varName], now, now); err != nil {
 				return EnvProfile{}, fmt.Errorf("insert provider secret binding %s: %w", varName, err)
 			}
 		}
@@ -1740,6 +1803,26 @@ VALUES (?, ?, ?, ?, 1, ?, ?);
 		Provider:    p.Provider,
 		Mode:        p.Mode,
 	}, nil
+}
+
+// envBindingRotationFlags reads each binding's needs_rotation by var name so
+// the replace-all upsert can carry the flags forward (TRUST-01 dogfood fix).
+func (tx *Tx) envBindingRotationFlags(ctx context.Context, envProfileID string) (map[string]int, error) {
+	rows, err := tx.tx.QueryContext(ctx, `SELECT var_name, needs_rotation FROM secret_bindings WHERE env_profile_id = ?;`, envProfileID)
+	if err != nil {
+		return nil, fmt.Errorf("read env binding rotation flags: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	flags := map[string]int{}
+	for rows.Next() {
+		var varName string
+		var flag int
+		if err := rows.Scan(&varName, &flag); err != nil {
+			return nil, fmt.Errorf("scan env binding rotation flag: %w", err)
+		}
+		flags[varName] = flag
+	}
+	return flags, rows.Err()
 }
 
 func (s *Store) EnvProfileForProject(ctx context.Context, namespaceID string) (EnvProfile, []SecretBinding, error) {
@@ -1820,8 +1903,19 @@ WHERE n.id = ? AND n.workspace_id = ? AND n.status = 'active';
 // must be rotated at their source — rewrapping recipients alone does not revoke
 // historical access. Returns the number of bindings flagged.
 func (s *Store) MarkEncryptedBindingsNeedingRotation(ctx context.Context) (int, error) {
+	return markEncryptedBindingsNeedingRotation(ctx, s.db)
+}
+
+// MarkEncryptedBindingsNeedingRotationTx is the Tx variant, used by the
+// device.revoked/device.lost apply path so the flip and the rotation flags
+// land atomically (TRUST-01).
+func (tx *Tx) MarkEncryptedBindingsNeedingRotationTx(ctx context.Context) (int, error) {
+	return markEncryptedBindingsNeedingRotation(ctx, tx.tx)
+}
+
+func markEncryptedBindingsNeedingRotation(ctx context.Context, q sqlExecutor) (int, error) {
 	now := timestampNow()
-	res, err := s.db.ExecContext(ctx, `
+	res, err := q.ExecContext(ctx, `
 UPDATE secret_bindings
 SET needs_rotation = 1, updated_at = ?
 WHERE encrypted_value_ref IS NOT NULL AND needs_rotation = 0;
@@ -3259,7 +3353,8 @@ SELECT COUNT(*) FROM devices WHERE trust_state IN ('approved', 'revoked', 'lost'
 // lifecycle-script environments, so they are trust-affecting.
 func mustVerifyEvent(eventType string) bool {
 	switch eventType {
-	case "project.deleted", "project.renamed", "env.profile.updated":
+	case "project.deleted", "project.renamed", "env.profile.updated",
+		"device.revoked", "device.lost":
 		return true
 	default:
 		return false
