@@ -520,6 +520,16 @@ func (k *Keyring) cached(epoch int64, kid string) ([]byte, bool) {
 	return entry.wck, true
 }
 
+// ValidateRecipient reports whether recipient parses as an age X25519
+// recipient — the same parse wrapWCK performs. `devices revoke` preflights the
+// remaining approved recipients with it BEFORE the trust write so the
+// by-far-likeliest rotation failure (a malformed recipient row) is named up
+// front (issue #134); Rotate's wrap-first ordering remains the enforcement.
+func ValidateRecipient(recipient string) error {
+	_, err := age.ParseX25519Recipient(recipient)
+	return err
+}
+
 // wrapWCK age-encrypts a WCK to a single X25519 recipient and returns base64.
 func wrapWCK(wck []byte, recipient string) (string, error) {
 	r, err := age.ParseX25519Recipient(recipient)

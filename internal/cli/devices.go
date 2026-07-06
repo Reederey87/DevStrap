@@ -15,6 +15,7 @@ import (
 	"github.com/Reederey87/DevStrap/internal/pairing"
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
+	"github.com/Reederey87/DevStrap/internal/workspacekeys"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -302,6 +303,11 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 				}
 			}
 			if trustState == "revoked" || trustState == "lost" {
+				// Issue #134: preflight the post-revoke rotation's recipients
+				// BEFORE the trust write so the by-far-likeliest rotation
+				// failure (a malformed recipient on a REMAINING device) is
+				// named while the operator is still looking at the revoke.
+				warnMalformedRemainingRecipients(cmd.Context(), stderr, store, args[0])
 				// TRUST-01: the trust flip and the synced device.revoked/lost
 				// event land in ONE transaction (P6-DATA-03), BEFORE the WCK
 				// rotation below — a rotation failure can never orphan the
@@ -816,12 +822,46 @@ func rotateWorkspaceKeyOnRevoke(ctx context.Context, stderr io.Writer, opts *opt
 		// the revoked device (it still holds the old WCK). The trust flip is
 		// deliberately NOT rolled back: refusing the revoke because rotation
 		// failed would keep a compromised device APPROVED, which is worse.
-		// Be loud about the confidentiality gap and the remedy instead.
+		// Be loud about the confidentiality gap and record the owed rotation
+		// so sync's rotation gate retries it every cycle (issue #134).
 		_, _ = fmt.Fprintf(stderr, "warning: workspace key rotation FAILED: %v\n", rerr)
-		_, _ = fmt.Fprintf(stderr, "warning: events pushed before a successful rotation remain readable by the revoked device (it holds the current epoch key). Run 'devstrap keys rotate' until it succeeds, then 'devstrap sync'.\n")
+		if merr := markWCKRotationPending(ctx, store, epoch); merr != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: could not record the owed rotation (%v); sync will NOT auto-retry — run 'devstrap keys rotate' until it succeeds, then 'devstrap sync'\n", merr)
+			return
+		}
+		_, _ = fmt.Fprintf(stderr, "warning: events pushed before a successful rotation remain readable by the revoked device (it holds the current epoch key). The next 'devstrap sync' retries the rotation automatically; run 'devstrap keys rotate' to close the gap now.\n")
 		return
+	}
+	// A successful Rotate excludes every locally-revoked device, so it also
+	// satisfies any rotation still owed from an earlier failed revoke.
+	if cerr := clearWCKRotationPending(ctx, store); cerr != nil {
+		_, _ = fmt.Fprintf(stderr, "warning: could not clear the owed-rotation marker (%v); sync may rotate once more\n", cerr)
 	}
 	if len(grants) > 0 {
 		_, _ = fmt.Fprintf(stderr, "Rotated workspace key to epoch %d; granted to %d remaining device(s); run 'devstrap sync' to publish\n", newEpoch, len(grants))
+	}
+}
+
+// warnMalformedRemainingRecipients preflights the post-revoke rotation (issue
+// #134): the by-far-likeliest Rotate failure is a malformed age recipient on a
+// REMAINING approved device, and by the time Rotate reports it the trust flip
+// is already committed. Parsing each remaining recipient up front names the
+// offending device while the operator is still looking at the revoke.
+// Advisory only — the revoke proceeds regardless (refusing to revoke because a
+// bystander's row is malformed would keep the compromised device approved),
+// and Rotate's wrap-first ordering remains the enforcement. Empty recipients
+// are skipped to mirror ApprovedRecipients.
+func warnMalformedRemainingRecipients(ctx context.Context, stderr io.Writer, store *state.Store, target string) {
+	devices, err := store.ListDevices(ctx)
+	if err != nil {
+		return
+	}
+	for _, dev := range devices {
+		if dev.ID == target || dev.TrustState != "approved" || strings.TrimSpace(dev.PublicKey) == "" {
+			continue
+		}
+		if err := workspacekeys.ValidateRecipient(dev.PublicKey); err != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: remaining device %s has a malformed age recipient (%v); the post-revoke key rotation will fail until it is re-enrolled with a valid recipient\n", dev.ID, err)
+		}
 	}
 }

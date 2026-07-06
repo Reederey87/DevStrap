@@ -323,30 +323,68 @@ func keyRotateMaxAge(opts *options) time.Duration {
 // registry is per-device), so a fleet device unknown to the rotator lands on
 // the P6-SEC-03 grace→quarantine→replay path until any device that knows it
 // re-approves it.
+//
+// Issue #134: it also retries a rotation OWED from a failed revoke-path
+// rotation (the wck_rotation_pending marker). The owed retry runs even when
+// keys.rotate_max_age=0 — disabling PERIODIC rotation must not disable the
+// revoke containment a device already committed to.
 func maybeRotateWorkspaceKey(ctx context.Context, stdout io.Writer, opts *options, store *state.Store) (bool, error) {
-	maxAge := keyRotateMaxAge(opts)
-	if maxAge <= 0 {
-		return false, nil
+	pendingSince, pending, err := wckRotationPendingSince(ctx, store)
+	if err != nil {
+		return false, err
 	}
 	epoch, created, err := store.ActiveKeyEpochAge(ctx)
 	if err != nil {
 		return false, err
 	}
-	if epoch == 0 || time.Since(created) < maxAge {
+	if epoch == 0 {
+		return false, nil
+	}
+	maxAge := keyRotateMaxAge(opts)
+	aged := maxAge > 0 && time.Since(created) >= maxAge
+	if !pending && !aged {
 		return false, nil
 	}
 	kr := buildKeyring(ctx, opts, store)
 	newEpoch, grants, rerr := kr.Rotate(ctx)
 	if rerr != nil {
-		// FATAL for the cycle (post-#56 Codex review, P1): Rotate wraps every
-		// grant before writing any state, so a failure here is either
-		// harmless-and-early (nothing recorded; a malformed recipient row
-		// needs fixing, not retrying) or a rare DB/custody fault mid-commit —
-		// and in the latter case pushing would seal this cycle's events under
-		// a half-minted epoch whose grants never published, while the fresh
-		// created_at suppresses the retry. Aborting keeps the cycle's events
-		// queued and the failure loud.
+		// FATAL for the cycle when the failure could be a mid-commit
+		// half-mint (post-#56 Codex review, P1): if the active epoch advanced
+		// under this failed Rotate, pushing would seal this cycle's events
+		// under an epoch whose grants never fully published. Detect it by
+		// re-reading the epoch rather than assuming.
+		if after, aerr := store.CurrentKeyEpoch(ctx); aerr != nil || after != epoch {
+			return false, fmt.Errorf("workspace key rotation failed mid-commit (epoch advanced %d→%d; grants may not have published): %w", epoch, after, rerr)
+		}
+		if pending {
+			// Early failure (nothing recorded — the malformed-recipient
+			// class). Do NOT fail the cycle: aborting here would also block
+			// pushing the device.revoked event itself, so the fleet never
+			// learns about the revoke — strictly worse than pushing under the
+			// old epoch, which is the already-documented exposure
+			// (adversarial-review finding, issue #134). Warn loudly, keep the
+			// marker, retry next cycle; deliberately NOT progressf-gated.
+			_, _ = fmt.Fprintf(stdout, "warning: workspace key rotation owed since %s still failing (events remain readable by the revoked device until it succeeds): %v\n",
+				pendingSince.Format(time.RFC3339), rerr)
+			_, _ = fmt.Fprintf(stdout, "warning: check 'devstrap devices list' for a malformed age recipient, or run 'devstrap keys rotate' after fixing it\n")
+			return false, nil
+		}
+		// Age-triggered early failure keeps the shipped fatal semantics: a
+		// malformed recipient row needs fixing, not retrying, and there is no
+		// queued revoke event whose propagation the abort would block.
 		return false, fmt.Errorf("periodic workspace key rotation failed (fix the cause or disable via keys.rotate_max_age=0 / --key-max-age 0): %w", rerr)
+	}
+	if pending {
+		// The ONLY resolution path for the owed marker (see wck_rotation.go:
+		// a newer epoch alone is not proof the revoked device was excluded; a
+		// local Rotate is). A delete failure surfaces as a cycle error so the
+		// marker cannot silently outlive its rotation.
+		if cerr := clearWCKRotationPending(ctx, store); cerr != nil {
+			return true, cerr
+		}
+		opts.progressf(stdout, "Rotated workspace key to epoch %d (rotation owed since %s after a device revoke); %d grant event(s) ride this push\n",
+			newEpoch, pendingSince.Format(time.RFC3339), len(grants))
+		return true, nil
 	}
 	opts.progressf(stdout, "Rotated workspace key to epoch %d (epoch %d exceeded keys.rotate_max_age %s); %d grant event(s) ride this push\n",
 		newEpoch, epoch, maxAge, len(grants))

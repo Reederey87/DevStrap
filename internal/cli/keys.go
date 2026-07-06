@@ -57,6 +57,11 @@ re-encrypts blobs and flags secrets for source rotation.`,
 			if err != nil {
 				return err
 			}
+			// A successful Rotate excludes every locally-revoked device, so
+			// it also satisfies a rotation owed from a failed revoke (#134).
+			if cerr := clearWCKRotationPending(cmd.Context(), store); cerr != nil {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not clear the owed-rotation marker (%v); sync may rotate once more\n", cerr)
+			}
 			_, err = fmt.Fprintf(stdout, "Rotated workspace key to epoch %d; queued %d grant event(s); run 'devstrap sync' to publish\n", newEpoch, len(grants))
 			return err
 		},
