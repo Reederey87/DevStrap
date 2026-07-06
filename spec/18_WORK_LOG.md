@@ -31,6 +31,19 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-06 — docs: unattended-operation wave close-out (PRs #136–#139)
+
+Changed:
+- `spec/14_MVP_ROADMAP_AND_BACKLOG.md`: new `DIRECTION — unattended-operation wave (2026-07-06): COMPLETE` bullet recording the four shipped items (issue #133 draft-pending quarantine, issue #134 self-healing WCK rotation, `P4-GIT-04` squash-merge worktree GC, `P4-PROD-04` `devstrap service`), the remaining backlog after the wave, and the Pass-7 audit as the natural next checkpoint.
+- `docs/audits/README.md`: the intro blockquote's wave trail extended with the 2026-07-06 completion note (both ledger row moves happened in their own PRs; header counts unchanged).
+
+Validated:
+- Docs-only; ledger open-count invariant unaffected (no rows moved in this PR).
+
+Follow-ups:
+- None (wave complete).
+
+
 ## 2026-07-06 — feat(service): devstrap service install|uninstall|status (P4-PROD-04)
 
 Changed:
