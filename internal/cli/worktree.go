@@ -474,6 +474,10 @@ func newWorktreeCleanupCommand(stdout io.Writer, opts *options) *cobra.Command {
 			}
 			removed := 0
 			skipped := 0
+			// One base fetch per (project, base ref) per run — N worktrees on
+			// the same project must not trigger N redundant network fetches
+			// (review finding).
+			refreshed := map[string]bool{}
 			for _, wt := range worktrees {
 				r := gitRunner(opts)
 				project, err := store.ProjectByID(cmd.Context(), wt.NamespaceID)
@@ -511,19 +515,46 @@ func newWorktreeCleanupCommand(stdout io.Writer, opts *options) *cobra.Command {
 					skipped++
 					continue
 				}
+				if refreshKey := project.ID + "\x00" + wt.BaseRef; !refreshed[refreshKey] {
+					refreshed[refreshKey] = true
+					if err := refreshWorktreeBase(cmd.Context(), opts, r, project, repoPath, wt.BaseRef); err != nil {
+						_, _ = fmt.Fprintf(stdout, "warning: could not refresh %s for worktree %s: %v; using local ref\n", wt.BaseRef, wt.ID, err)
+					}
+				}
+				mergeLabel := "merged"
 				mergedOut, err := r.Run(cmd.Context(), wt.Path, "branch", "--merged", wt.BaseRef, "--list", wt.Branch)
 				if err != nil || !strings.Contains(mergedOut, wt.Branch) {
-					skipped++
-					continue
+					squashMerged, squashErr := r.IsSquashMerged(cmd.Context(), wt.Path, wt.Branch, wt.BaseRef)
+					if squashErr != nil || !squashMerged {
+						skipped++
+						continue
+					}
+					mergeLabel = "merged (squash)"
+				}
+				// Recovery breadcrumb: content-equivalence can match a
+				// coincidentally-identical unrelated commit (documented
+				// limitation), so name the deleted branch's tip — recreating
+				// it is one `git branch <name> <sha>` away until git gc.
+				tip := ""
+				if out, terr := r.RevParse(cmd.Context(), repoPath, wt.Branch); terr == nil {
+					tip = strings.TrimSpace(out)
 				}
 				if err := r.WorktreeRemove(cmd.Context(), repoPath, wt.Path, force); err != nil {
 					skipped++
 					continue
 				}
+				if _, err := r.Run(cmd.Context(), repoPath, "branch", "-D", wt.Branch); err != nil {
+					_, _ = fmt.Fprintf(stdout, "warning: failed to delete branch %s for removed worktree %s: %v\n", wt.Branch, wt.ID, err)
+				}
 				if err := store.MarkWorktreeRemoved(cmd.Context(), wt.ID); err != nil {
 					return err
 				}
 				removed++
+				if tip != "" {
+					_, _ = fmt.Fprintf(stdout, "Removed worktree %s (%s; branch %s was at %s)\n", wt.ID, mergeLabel, wt.Branch, tip)
+				} else {
+					_, _ = fmt.Fprintf(stdout, "Removed worktree %s (%s)\n", wt.ID, mergeLabel)
+				}
 			}
 			_, err = fmt.Fprintf(stdout, "Cleaned up %d worktrees (%d skipped)\n", removed, skipped)
 			return err
@@ -532,6 +563,19 @@ func newWorktreeCleanupCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().BoolVar(&merged, "merged", false, "only remove merged, clean worktrees")
 	cmd.Flags().BoolVar(&force, "force", false, "also remove merged worktrees with a dirty tree")
 	return cmd
+}
+
+func refreshWorktreeBase(ctx context.Context, opts *options, r dsgit.Runner, project state.ProjectStatus, repoPath, baseRef string) error {
+	remote, branch, ok := strings.Cut(baseRef, "/")
+	if !ok || remote == "" || branch == "" {
+		return fmt.Errorf("base ref must be remote/branch, got %q", baseRef)
+	}
+	unlock, err := acquireRepoLock(opts.paths().Home, project.ID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return r.Fetch(ctx, repoPath, remote, branch)
 }
 
 var slugPattern = regexp.MustCompile(`[^a-z0-9]+`)

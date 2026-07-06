@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -108,6 +109,89 @@ func TestCreateFreshWorktreeCleansUpAfterInsertWorktreeFailure(t *testing.T) {
 	assertNoAgentBranches(t, localPath)
 }
 
+func TestWorktreeCleanupReapsSquashMergedWorktree(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	localPath := setupFreshWorktreeRepo(t, home, root, "auto", false)
+	// Repo-local identity is shared by the clone's worktrees; CI runners have
+	// no global git config, so the worktree commits below need it.
+	runGit(t, localPath, "config", "user.email", "devstrap@example.test")
+	runGit(t, localPath, "config", "user.name", "DevStrap Test")
+
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "worktree", "new", "work/acme/repo", "--fresh-upstream", "--name", "squash merged")
+	if err != nil {
+		t.Fatalf("worktree new squash stdout = %q stderr = %q err = %v", stdout, stderr, err)
+	}
+	stdout, stderr, err = executeForTest("--home", home, "--root", root, "worktree", "new", "work/acme/repo", "--fresh-upstream", "--name", "unmerged")
+	if err != nil {
+		t.Fatalf("worktree new unmerged stdout = %q stderr = %q err = %v", stdout, stderr, err)
+	}
+	worktrees := listWorktreesForTest(t, home, root)
+	if len(worktrees) != 2 {
+		t.Fatalf("worktree count = %d, want 2: %+v", len(worktrees), worktrees)
+	}
+	var squashWT, unmergedWT testWorktree
+	for _, wt := range worktrees {
+		switch {
+		case strings.Contains(wt.Branch, "squash-merged"):
+			squashWT = wt
+		case strings.Contains(wt.Branch, "unmerged"):
+			unmergedWT = wt
+		}
+	}
+	if squashWT.ID == "" || unmergedWT.ID == "" {
+		t.Fatalf("did not find expected worktrees: %+v", worktrees)
+	}
+
+	if err := os.WriteFile(filepath.Join(squashWT.Path, "squashed.txt"), []byte("squashed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, squashWT.Path, "add", "squashed.txt")
+	runGit(t, squashWT.Path, "commit", "-m", "squashed change")
+	runGit(t, localPath, "push", "origin", squashWT.Branch)
+
+	if err := os.WriteFile(filepath.Join(unmergedWT.Path, "unmerged.txt"), []byte("unmerged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, unmergedWT.Path, "add", "unmerged.txt")
+	runGit(t, unmergedWT.Path, "commit", "-m", "unmerged change")
+
+	tmp := t.TempDir()
+	remote := strings.TrimSpace(runGitOutput(t, localPath, "remote", "get-url", "origin"))
+	integrator := filepath.Join(tmp, "integrator")
+	runGit(t, tmp, "clone", remote, integrator)
+	runGit(t, integrator, "config", "user.email", "devstrap@example.test")
+	runGit(t, integrator, "config", "user.name", "DevStrap Test")
+	runGit(t, integrator, "checkout", "main")
+	runGit(t, integrator, "fetch", "origin", squashWT.Branch)
+	runGit(t, integrator, "merge", "--squash", "origin/"+squashWT.Branch)
+	runGit(t, integrator, "commit", "-m", "squash merge worktree")
+	runGit(t, integrator, "push", "origin", "main")
+
+	stdout, stderr, err = executeForTest("--home", home, "--root", root, "worktree", "cleanup", "--merged")
+	if err != nil {
+		t.Fatalf("cleanup stdout = %q stderr = %q err = %v", stdout, stderr, err)
+	}
+	if !strings.Contains(stdout, "merged (squash)") {
+		t.Fatalf("cleanup stdout = %q, want squash merge label", stdout)
+	}
+	if !strings.Contains(stdout, "Cleaned up 1 worktrees (1 skipped)") {
+		t.Fatalf("cleanup stdout = %q, want one removed and one skipped", stdout)
+	}
+	if got := worktreeStatusForTest(t, filepath.Join(home, "state.db"), squashWT.ID); got != "removed" {
+		t.Fatalf("squash worktree status = %q, want removed", got)
+	}
+	if got := worktreeStatusForTest(t, filepath.Join(home, "state.db"), unmergedWT.ID); got != "active" {
+		t.Fatalf("unmerged worktree status = %q, want active", got)
+	}
+	if branches := runGitOutput(t, localPath, "branch", "--list", squashWT.Branch); strings.TrimSpace(branches) != "" {
+		t.Fatalf("squash branch still exists: %q", branches)
+	}
+	if branches := runGitOutput(t, localPath, "branch", "--list", unmergedWT.Branch); !strings.Contains(branches, unmergedWT.Branch) {
+		t.Fatalf("unmerged branch missing: %q", branches)
+	}
+}
+
 func TestWorktreeUnlockClearsStaleAndRefusesLiveLock(t *testing.T) {
 	ctx := context.Background()
 	home := filepath.Join(t.TempDir(), ".devstrap")
@@ -165,6 +249,43 @@ func TestWorktreeUnlockClearsStaleAndRefusesLiveLock(t *testing.T) {
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Fatalf("stale lock was not cleared: %v", err)
 	}
+}
+
+type testWorktree struct {
+	ID     string `json:"id"`
+	Path   string `json:"path"`
+	Branch string `json:"branch"`
+}
+
+func listWorktreesForTest(t *testing.T, home, root string) []testWorktree {
+	t.Helper()
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "worktree", "list", "--json")
+	if err != nil {
+		t.Fatalf("worktree list stdout = %q stderr = %q err = %v", stdout, stderr, err)
+	}
+	var worktrees []testWorktree
+	if err := json.Unmarshal([]byte(stdout), &worktrees); err != nil {
+		t.Fatalf("decode worktree list: %v\n%s", err, stdout)
+	}
+	return worktrees
+}
+
+func worktreeStatusForTest(t *testing.T, dbPath, wtID string) string {
+	t.Helper()
+	q := url.Values{}
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "foreign_keys(1)")
+	dsn := (&url.URL{Scheme: "file", Path: dbPath, RawQuery: q.Encode()}).String()
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var status string
+	if err := db.QueryRow("SELECT status FROM worktrees WHERE id = ?", wtID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	return status
 }
 
 func itoa(n int) string {
