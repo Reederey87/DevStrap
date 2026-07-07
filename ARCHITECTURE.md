@@ -137,8 +137,9 @@ built on a moved base. Runs are logged to a `0600` file and tracked in a queryab
 The wrapper's command/file policy is **guardrails, not a sandbox**. On macOS an OS-enforced
 Seatbelt sandbox now wraps the child (`--sandbox auto|off|require`): writes are confined to the
 worktree, credential paths (`~/.ssh`, `~/.aws`, …) are denied, and network is blocked for
-read-only policies. Linux OS-level confinement (bubblewrap/landlock/seccomp) is the next slice;
-until it lands the Linux wrapper is advisory and says so at run start.
+read-only policies. Linux OS-level confinement is shipped too — bubblewrap with a Landlock
+fallback plus a seccomp syscall denylist, chosen at run start — so `agent run` is kernel-confined
+on both macOS and Linux (containerization remains the one deferred slice).
 
 **Depth:** [`spec/10_AGENT_WORKSPACES_AND_POLICIES.md`](spec/10_AGENT_WORKSPACES_AND_POLICIES.md).
 
@@ -146,9 +147,10 @@ until it lands the Linux wrapper is advisory and says so at run start.
 
 DevStrap is honest about its edges. Not yet built, by design:
 
-- **The local daemon** (`devstrapd`), its socket API, an FSEvents-specific Mac watcher, and
-  LaunchAgent/systemd installers — every CLI command works correctly without a daemon; local
-  reconciliation is the explicit `devstrap scan` plus the portable `run-loop`.
+- **The local daemon** (`devstrapd`), its socket API, and an FSEvents-specific Mac watcher —
+  every CLI command works correctly without a daemon; local reconciliation is the explicit
+  `devstrap scan` plus the portable `run-loop`. (LaunchAgent/systemd *installers* are shipped as
+  `devstrap service install|uninstall|status`, which wrap `run-loop` — they are not the daemon.)
 - **StrapFS** — the optional lazy virtual filesystem, deferred until the product loop is proven.
 - **A bespoke HTTP/SSE relay** and a hosted control plane for production device enrollment —
   the git/folder/R2 carriers cover the transport today.

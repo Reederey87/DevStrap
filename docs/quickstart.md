@@ -124,9 +124,15 @@ devstrap agent run work/acme/api --engine generic --task "run tests" -- npm test
 devstrap agent pr <run-id> --dry-run
 ```
 
-On macOS, `agent run` wraps the child in an OS-enforced Seatbelt sandbox by default
-(`--sandbox auto|off|require`). The wrapper's command/file policy is guardrails, not a full
-sandbox — see [`../spec/10_AGENT_WORKSPACES_AND_POLICIES.md`](../spec/10_AGENT_WORKSPACES_AND_POLICIES.md).
+`agent run` wraps the child in an OS-enforced sandbox by default (`--sandbox auto|off|require`):
+macOS uses Seatbelt, and Linux uses bubblewrap with a Landlock fallback plus a seccomp syscall
+denylist. Writes are confined to the worktree and credential paths are denied; network is blocked
+for read-only policies. The wrapper's command/file policy is guardrails on top of that kernel
+confinement — see [`../spec/10_AGENT_WORKSPACES_AND_POLICIES.md`](../spec/10_AGENT_WORKSPACES_AND_POLICIES.md).
+
+For unattended operation, `devstrap service install` registers a LaunchAgent (macOS) or systemd
+user unit (Linux) that runs `run-loop` in the background; `devstrap service status|uninstall`
+manage it.
 
 ## Where to next
 

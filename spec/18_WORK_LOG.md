@@ -31,6 +31,23 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-07 — docs(audits): Pass-7 adversarial audit of the #77–#140 wave + spec truth-up
+
+Changed:
+- `docs/audits/AUDIT_RECOMMENDATIONS_2026-07-07_PASS7.md`: new seventh-pass audit of the OS agent sandbox (`P4-GIT-03`, #107–#129), the AD-1 carrier hub (#96–#106), the supply-chain/distribution pipeline (#105–#120), and the multi-device env/trust/service wave (#131–#139). Verification-driven nine-dimension workflow (9 dimension reviewers → per-finding adversarial verification), with the three P1 candidates additionally cross-verified by a second model family (gpt-5.5 via Codex, the project's dual-review norm applied to the audit). **22 candidates → 21 confirmed** (P1=3, P2=11, P3=7), 1 refuted (`P7-DOC-04` — spec/00's "remaining core-engine candidate" phrasing is consistent with spec/14's `[~]` partial marker). Two severity corrections at verification: `P7-SANDBOX-01` P2→P1 (default-on sandbox breaks the core agent commit loop), `P7-SUPPLY-01` P1→P3 (defense-in-depth on an optional installer path, not a broken promise). Five exa best-practice anchors cited (agent-sandbox escapes, SLSA/cosign verification, git-carrier concurrency, E2E-encrypted git).
+- `docs/audits/README.md`: Pass-7 index row; open-backlog blockquote 2026-07-07 note; new "Pass 7 (2026-07-07) — 17 open of 21" section with the open table (17 rows = 21 − 4 doc truth-ups fixed here; header count == row count). The ledger was already reconciled through #140 by the shipping PRs; Pass 7 adds only the Pass-7 rows.
+- Doc truth-up (the four confirmed `P7-DOC-*` findings, fixed in this PR): `ARCHITECTURE.md` (Linux OS sandbox is shipped not "next slice"; `service` installers are shipped, only the resident daemon is unbuilt), `spec/00_START_HERE.md` (OS-enforced agent sandbox moved out of "Not implemented yet"; only containerization remains), `docs/quickstart.md` (document the Linux bwrap/Landlock/seccomp sandbox and `devstrap service install`).
+
+Findings (17 open, for the next implementation wave): P1 — `P7-SANDBOX-01` (grant the linked worktree's git-common-dir in all three sandbox backends), `P7-DATA-01` (add the CAS guard to the revoke env-blob rewrap), `P7-SEC-01` (carry device-trust state in the snapshot so revocation survives compaction). P2 — `P7-SYNC-02` (rewrap-on-approve), `P7-SYNC-01` (retry stranded blobs), `P7-HUB-01`/`P7-HUB-02` (folder-carrier atomic write + atomic stale-lock break), `P7-CLI-01`/`P7-SVC-01`/`P7-SVC-02` (service exec-path validation, Cellar-symlink path, per-workspace label), `P7-SANDBOX-02` (`.snowflake` deny-set drift), `P7-SYNC-03` (property-gen coverage). P3 — `P7-SUPPLY-01`, `P7-SEC-02`, `P7-SANDBOX-03`, `P7-CLI-02`, `P7-CLI-03`.
+
+Validated:
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` (docs+spec change set mapped, work-log present).
+- `go test ./internal/cli/... -run 'TestEveryCommandIsDocumented|TestMigrationsDocumented'` (no code/command surface changed).
+- Docs-only PR: single reviewer per the PR-cycle convention (no Codex code review needed).
+
+Follow-ups:
+- Implement the 17 open Pass-7 findings per severity in per-finding PRs (Phase B). P1s first: `P7-SANDBOX-01` unblocks the sandboxed agent-commit loop; `P7-DATA-01`/`P7-SEC-01`/`P7-SYNC-02` close the multi-device env/trust data-integrity edges.
+
 ## 2026-07-06 — docs: unattended-operation wave close-out (PRs #136–#139)
 
 Changed:
