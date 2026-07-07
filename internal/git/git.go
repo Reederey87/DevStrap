@@ -545,6 +545,75 @@ func (r Runner) IsSquashMerged(ctx context.Context, dir, branch, baseRef string)
 	return strings.TrimSpace(merged) == strings.TrimSpace(baseTree), nil
 }
 
+// WorktreeSandboxWriteDirs returns the absolute git storage paths a linked
+// worktree must be able to WRITE for `git add`/`git commit` to succeed under an
+// OS sandbox: the shared object store, refs, and reflogs in the git-common-dir,
+// plus the per-worktree admin dir (index/HEAD/COMMIT_EDITMSG/logs). It
+// deliberately EXCLUDES the common dir itself (and thus hooks/ and config) —
+// granting those would let a sandboxed agent plant a hook or config that
+// executes UNSANDBOXED on a later git operation (P7-SANDBOX-01). Paths are
+// symlink-resolved. A nil slice with no error is returned when dir is not inside
+// a git worktree, so callers can grant nothing without special-casing.
+func (r Runner) WorktreeSandboxWriteDirs(ctx context.Context, dir string) ([]string, error) {
+	common, err := r.Run(ctx, dir, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return nil, nil // not a git worktree — nothing to grant
+	}
+	gitDir, err := r.Run(ctx, dir, "rev-parse", "--git-dir")
+	if err != nil {
+		return nil, nil
+	}
+	abs := func(p string) string {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return ""
+		}
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(dir, p)
+		}
+		if resolved, rerr := filepath.EvalSymlinks(p); rerr == nil {
+			return resolved
+		}
+		return filepath.Clean(p)
+	}
+	commonAbs := abs(common)
+	gitDirAbs := abs(gitDir)
+	if commonAbs == "" || gitDirAbs == "" {
+		return nil, nil
+	}
+	// Resolve each storage subpath too: <common>/objects can itself be a
+	// symlink (git alternates / a relocated object store), and Seatbelt matches
+	// the kernel-real path — so grant the resolved target, not the alias.
+	// EvalSymlinks fails on a not-yet-created path (e.g. no reflog); fall back
+	// to the clean join, which git creates under the already-resolved commonAbs.
+	evalJoin := func(elem string) string {
+		p := filepath.Join(commonAbs, elem)
+		if resolved, rerr := filepath.EvalSymlinks(p); rerr == nil {
+			return resolved
+		}
+		return p
+	}
+	dirs := []string{
+		evalJoin("objects"),
+		evalJoin("refs"),
+		evalJoin("logs"),
+	}
+	// Add the per-worktree admin dir only for a genuine LINKED worktree, and
+	// only when it is actually under <common>/worktrees/. gitDir == common is
+	// the main checkout (objects/refs/logs already cover its writes; never add
+	// the whole common dir — hooks/ and config live there). A --git-dir that
+	// resolves ELSEWHERE under the common dir (a malformed gitfile/commondir
+	// could point at <common>/hooks or a sibling) is refused rather than
+	// granted, keeping the hooks/config exclusion robust against hostile setups.
+	if gitDirAbs != commonAbs {
+		worktreesRoot := filepath.Join(commonAbs, "worktrees")
+		if rel, rerr := filepath.Rel(worktreesRoot, gitDirAbs); rerr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			dirs = append(dirs, gitDirAbs)
+		}
+	}
+	return dirs, nil
+}
+
 func (r Runner) WorktreeAdd(ctx context.Context, dir, path, branch, base string) error {
 	if !safeBranchName(branch) {
 		return fmt.Errorf("invalid git branch name %q", branch)

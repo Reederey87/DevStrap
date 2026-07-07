@@ -73,6 +73,12 @@ func readConfineRoots(spec SandboxSpec) []string {
 	for _, extra := range spec.ReadAllowExtra {
 		add(extra)
 	}
+	// The linked worktree's git storage dirs must be readable under
+	// --read-confine so `git status`/`git commit` can read objects/refs
+	// (P7-SANDBOX-01); they are already writable via the backends' RW grants.
+	for _, dir := range spec.GitDirs {
+		add(dir)
+	}
 	return roots
 }
 

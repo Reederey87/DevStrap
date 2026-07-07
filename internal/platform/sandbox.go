@@ -57,6 +57,17 @@ type SandboxSpec struct {
 	// ReadAllowExtra are additional absolute read roots (repeatable
 	// --read-allow) folded into the read-confinement allow-list.
 	ReadAllowExtra []string
+	// GitDirs are absolute git storage paths a linked agent worktree must be
+	// able to WRITE for `git add`/`git commit` to succeed: the shared object
+	// store, refs, and reflogs in the clone's git-common-dir, plus the
+	// per-worktree admin dir (index/HEAD/COMMIT_EDITMSG). A DevStrap agent
+	// worktree is a git *linked* worktree whose .git lives in the parent clone,
+	// so without these the child's commit is EPERM'd and `agent pr` has nothing
+	// to push (P7-SANDBOX-01). The common dir's hooks/ and config are
+	// deliberately EXCLUDED — granting them would let the child plant a hook or
+	// config that executes UNSANDBOXED on a later git operation. Also folded
+	// into the read-confinement allow-list so git reads work under --read-confine.
+	GitDirs []string
 }
 
 // Sandbox wraps an agent argv in an OS-enforced confinement (AGEN-03 /
