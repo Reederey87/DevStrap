@@ -1,10 +1,10 @@
 ---
-last_reviewed: 2026-07-03
-tracks_code: [cmd/**, internal/**, .github/**, AGENTS.md, README.md, go.mod, go.sum, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md]
+last_reviewed: 2026-07-10
+tracks_code: [cmd/**, internal/**, .github/**, AGENTS.md, README.md, go.mod, go.sum, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # DevStrap — Start Here
 
-> Audit history and the open backlog live in `docs/audits/README.md`; the latest pass is `docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`. The sixth pass (2026-07-01, trunk `8c739b8`) produced 43 findings tracked in that ledger.
+> Audit history and the open backlog live in `docs/audits/README.md`; the latest pass is `docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md`. The seventh pass (2026-07-10, trunk `d667530`) produced 47 findings (P1=1, P2=25, P3=21) tracked in that ledger; the sixth pass (2026-07-01) is fully closed (43/43).
 
 "Workspace Passport" is the core-concept tagline — the portable, managed code namespace that appears identically on every device — not a separate product name (see `spec/adr/0001-product-naming.md`).
 
