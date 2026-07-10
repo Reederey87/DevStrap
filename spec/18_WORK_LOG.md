@@ -46,6 +46,25 @@ Validated:
 Follow-ups:
 - Unblocks the Pass-7 audit PR (#144) and the product-docs PR (#145), which were green on every check except this `vuln` gate.
 
+## 2026-07-10 — docs(audit): seventh design & implementation pass (P7)
+
+Changed:
+- `docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md` (new): seventh pass against trunk `d667530`, 47 findings (P1=1, P2=25, P3=21) across ten dimensions (SEC/SYNC/HUB/GIT/CLI/DATA/QUAL/XP/DOC/PROD). Verification-driven multi-agent workflow — opus-4.8 / GPT-5.6 / Grok-4.5 reviewers, every candidate adversarially verified, every candidate P1 double-verified; three candidate P1s downgraded to P2 by cross-checking verifiers, leaving one confirmed P1 (`P7-SYNC-01`: device revocation erased by compaction + absent from snapshots). Appendix A maps extensions to the open Pass-4/5 backlog; Appendix B collects six exa-backed external anchors.
+- `docs/audits/README.md`: added the Pass-7 index row + a `### Pass 7 — 47 open of 47` open-findings table (header count == rows) + a dated blockquote note. Reconciled the ledger per convention #3: corrected the **Pass-5 count to 35 shipped / 1 open (`P5-CLI-01`)** — both prior counts (index "33/3", header "34/2") were stale, and `contextcheck` is a `P4-QUAL-07` sub-item, not a Pass-5 row (replaced the ~36-row Pass-5 table with an open-only table + a correction note); corrected the **Pass-6 index status to closed**; updated the **Pass-4 index status** to ~32 shipped / ~12 open; reworded the *Recently shipped* invariant note from a hand-listed "seven" to the ID-prefix filter rule (16 non-`P6-` rows now exist; the `= 0` arithmetic was unaffected).
+- `spec/00`, `spec/12`, `spec/14`, `spec/17`: appended the new pass file to `tracks_code`, bumped `last_reviewed` to 2026-07-10; spec/00's "latest pass" pointer now names Pass 7.
+
+Validated:
+- `gofmt -l cmd internal` (clean — doc-only cycle, no Go changes)
+- `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run`
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...` (exercises `TestEveryCommandIsDocumented`, `TestMigrationsDocumented`, and the spec-drift real-repo regression gate)
+- Ledger invariants re-counted: Pass-7 header "47 open" == 47 table rows; findings-at-a-glance totals (1/25/21) == per-dimension column sums == index-row count; corrected Pass-5 header "1 open" == 1 open-table row.
+
+Follow-ups:
+- The 47 findings are recommendations, not yet implemented; per-finding fix PRs follow (highest priority: `P7-SYNC-01`, then `P7-QUAL-02`/`P7-SEC-02`/`P7-HUB-02` and the `P7-DATA-03/04/05` backup-hardening cluster). `P7-DOC-01` (six files describing shipped `devstrap service` + OS sandbox as unbuilt) is a cheap early win.
+- The Pass-4 open count (~12) is ledger-text-derived; a row-by-row Pass-4 re-verification against current code is itself a `P7-DOC` follow-up.
+- Commercialization (`spec/20`) and website (`spec/21`) plans ship in a separate PR that consumes the `P7-PROD`/`P7-HUB` cost-and-readiness findings.
+
 ## 2026-07-06 — docs: unattended-operation wave close-out (PRs #136–#139)
 
 Changed:
