@@ -31,6 +31,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-10 — chore(ci): bump Go to 1.26.5 (clear GO-2026-5856); refresh CLAUDE.md
+
+Changed:
+- `go.mod`: `go 1.26.4` → `go 1.26.5`. All CI/release jobs resolve the toolchain via `go-version-file: go.mod`, so this one line moves every job to 1.26.5, which fixes `GO-2026-5856` (a `crypto/tls` standard-library vulnerability) that was failing the required `vuln` govulncheck gate on every branch, `main` included — a pre-existing blocker unrelated to any feature change.
+- `spec/16_TEST_PLAN.md`: noted the Go-pin mechanism + this bump in the govulncheck-gate history; `last_reviewed` bumped.
+- `CLAUDE.md`: refreshed the maintainer's model-picker/preferences (grok-4.5 added, gpt-5.5 → gpt-5.6, new Tech Stack / Code Style / General Preferences sections, restructured codex/grok command docs) — maintainer instructions, no behavior change to the codebase.
+
+Validated:
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `go build ./...`; `gofmt -l cmd internal` (clean)
+- `go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...` locally on go1.26.5 (GO-2026-5856 no longer reported)
+
+Follow-ups:
+- Unblocks the Pass-7 audit PR (#144) and the product-docs PR (#145), which were green on every check except this `vuln` gate.
+
 ## 2026-07-06 — docs: unattended-operation wave close-out (PRs #136–#139)
 
 Changed:
