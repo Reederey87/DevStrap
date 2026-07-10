@@ -35,7 +35,7 @@ How to apply:
 - Use Grok-4.5 for implementation of predefined plans, but only if the plan is clear and complete. Otherwise, use gpt-5.6. Use Grok-4.5 for exploration work on codebase and searching information using `exa` ncp search tools.
 - Never use Haiku model.
 
-### gpt-5.6 (via Codex plugin)
+## gpt-5.6 (via Codex plugin)
 - Mechanics: gpt-5.6 is only reachable through the `codex:codex-rescue` subagent (Codex plugin for Claude Code), my `~/.codex/config.toml` defaults to gpt-5.6.
 - `/codex:review` - review uncommitted changes or branch vs base (`--base <ref>`). Supports `--wait` and `--background`. Not steerable, no custom focus text.
 - `/codex:adversarial-review` - challenge a specific decision or risk area.
@@ -46,7 +46,7 @@ How to apply:
 - `/codex:cancel` - cancel an active background Codex job.
 - Stall-detecting loop: use `/codex:status` every 10 mins.
 
-### grok-4.5 (via Grok plugin)
+## grok-4.5 (via Grok plugin)
 - Use `/grok:rescue --write` for low-cost implementation of predefined plans. All headless writes require explicit `--always-approve` or `--yolo`.
 - `/grok:setup` - check local Grok Build CLI availability and auth.
 - `/grok:ask [question]` - read-only repository question.
