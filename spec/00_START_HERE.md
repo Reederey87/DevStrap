@@ -251,3 +251,5 @@ The design corpus:
 - `17_REFERENCES.md` — useful platform and tool references.
 - `18_WORK_LOG.md` — concise end-of-cycle implementation tracking and handoff notes.
 - `19_CLOUD_PROVISIONING_GUIDE.md` — register/configure the chosen cloud stack (Fly.io + Cloudflare R2 + Neon). Live-R2 dogfood credentials are kept in a stable `0600` env file (`~/.devstrap/dogfood-r2.env`) that agents `source` for any live-R2 run — see `AGENTS.md` § *Live-R2 dogfood credentials*.
+- `20_COMMERCIALIZATION_AND_PRICING.md` — the plan (not a shipped feature) for a managed-hub commercial tier alongside the free OSS BYO-hub product: open-core boundary, comparable-product pricing research, R2 cost model, packaging, and the engineering prerequisites (control plane, credential broker, quotas).
+- `21_WEBSITE_PLAN.md` — the marketing + docs site: goals, information architecture, tech-stack recommendation (Astro + Starlight on Cloudflare Pages), design direction, hosting, domain, and phased launch.

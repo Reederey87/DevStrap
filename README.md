@@ -100,22 +100,23 @@ Materialization is **eager**: after `devstrap sync`, the whole `~/Code` tree is 
 
 ## Project status
 
-> **Alpha.** The local engine and the agent loop are shipped and tested; the cloud‑sync layer has landed with two shipped hub backends — the zero‑infrastructure **git carrier** (point `hub:` at any private git repo, e.g. `git@github.com:you/devstrap-hub.git`; no bucket, no credentials plane) and **R2/S3** (`hub: r2://<bucket>` + `DEVSTRAP_HUB_S3_*` credentials) — and `devstrap sync` talks to either.
+> **Alpha, but shipping.** Tagged releases (`v0.1.1` latest) are published with a **verifiable supply chain** — Homebrew cask, `curl | sh` installer, cosign keyless signatures, SLSA build provenance, and per‑archive SBOMs. The local engine, the agent loop, and multi‑device sync are all shipped and tested; `devstrap sync` talks to any of three hub backends.
 
 **Shipped**
 
-- Phase 0 local CLI: `init`, `scan`/`add`/`hydrate`/`open`, `worktree`, `env`, `run`, `status`, `doctor`, `db`, `devices`, `conflicts`.
-- Phase 3 agent loop: fresh‑worktree `agent run`, recorded logs, base‑gated `agent pr` with forge‑aware routing.
-- Cloud‑sync workstreams (PR #16): **eager materialization** (`sync`/`materialize`), **encrypted draft bundles** + `.devstrapignore` compiler (`draft`), the **pluggable `Hub` interface + R2/S3 backend**, and a **portable `run-loop`** (scan + sync + materialize on an interval, no daemon).
-- Hardened internals: sanitized child env, value‑level secret redaction, partial clone with retry classification, WAL SQLite with single‑writer pool, HLC event ordering with conflict reconciliation, age X25519 device identities in the OS keychain (file‑store fallback for headless/CI).
+- Phase 0 local CLI: `init`, `scan`/`add`/`hydrate`/`open`, `worktree`, `env`, `run`, `status`, `doctor`, `db` (incl. `backup --full`/`restore`), `devices`, `conflicts`, `keys`.
+- Phase 3 agent loop: fresh‑worktree `agent run` inside an **OS‑enforced sandbox** (macOS Seatbelt; Linux bubblewrap/Landlock + a seccomp denylist), recorded logs, base‑gated `agent pr` with forge‑aware routing.
+- Multi‑device sync: **eager materialization** (`sync`/`materialize`), **encrypted draft bundles** + `.devstrapignore` compiler (`draft`), **cross‑device env‑profile exchange** and **synced device‑trust propagation**, event‑log **compaction + snapshot bootstrap**, and a portable **`run-loop`** with a `devstrap service install` (launchd/systemd) wrapper for unattended convergence.
+- Three hub backends behind one `Hub` interface: the zero‑infrastructure **git carrier** (`hub init <git-url>` — any private git repo, no bucket, no credentials plane), a **local‑folder/cloud‑drive carrier**, and **R2/S3** (`hub: r2://<bucket>` + `DEVSTRAP_HUB_S3_*`).
+- Hardened internals: sanitized child env, value‑level secret redaction, partial clone with retry classification, WAL SQLite with single‑writer pool, HLC event ordering with property‑tested convergence, age X25519 + Ed25519 device identities in the OS keychain (file‑store fallback for headless/CI), per‑epoch workspace content keys with pairing‑code device enrollment.
 
 **Not yet implemented**
 
-- The local daemon, FSEvents‑specific Mac watcher, and native LaunchAgent/systemd installers.
-- The **hosted** control plane: production remote device enrollment and out‑of‑band fingerprint confirmation (the R2/S3 hub backend itself is shipped).
-- OS‑enforced agent sandboxing (today's command/file policy is wrapper‑level).
+- The local daemon, FSEvents‑specific Mac watcher, and an HTTP/SSE relay (the daemonless `run-loop` + `service` cover unattended sync today).
+- A **hosted managed‑hub tier** — a DevStrap‑operated hub with zero setup, on a free‑with‑limits + subscription model. This is a plan, not a feature; see [`spec/20_COMMERCIALIZATION_AND_PRICING.md`](spec/20_COMMERCIALIZATION_AND_PRICING.md). The CLI and self‑hosting your own hub are free and open‑source **forever**.
+- Optional StrapFS (a lazy virtual filesystem) — deliberately deferred.
 
-A standing design/implementation audit drives the backlog. All passes are archived under [`docs/audits/`](docs/audits/) — see the [index & open backlog](docs/audits/README.md). The latest is the sixth pass, [`AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`](docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md) (43 findings, building on the 36-finding fifth pass).
+A standing design/implementation audit drives the backlog. All passes are archived under [`docs/audits/`](docs/audits/) — see the [index & open backlog](docs/audits/README.md). The latest is the seventh pass, [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md`](docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md) (47 findings); Pass 6 is fully closed (43/43).
 
 ## Requirements
 
@@ -183,14 +184,16 @@ Prefer not to install? Every command also works via `go run ./cmd/devstrap <cmd>
 | `devstrap sync` | Push/pull namespace events and materialize the tree (hub from config: `hub: git@github.com:you/hub.git` — any private git repo, the zero-infra default — or `hub: r2://<bucket>`; `--hub-file <path>` overrides for local tests) |
 | `devstrap run-loop` | Run scan + sync + materialize on an interval (portable, no daemon) |
 | `devstrap worktree` | Manage isolated worktrees (`new`/`status`/`finalize`/`list`/`remove`/`cleanup`/`unlock`) |
-| `devstrap agent` | Run agents in isolated fresh worktrees (`run`/`list`/`show`/`pr`) |
+| `devstrap agent` | Run agents in isolated fresh worktrees inside an OS sandbox (`run`/`list`/`show`/`pr`; `--sandbox`, `--read-confine`) |
 | `devstrap env` | Manage project environment profiles (`capture`/`hydrate`/`bind`/`rotate`) |
 | `devstrap run` | Run a command with the project env profile injected |
 | `devstrap draft` | Manage non‑git draft project content sync (`snapshot`) |
-| `devstrap hub` | Operate on the sync hub (`init` configures git carriers; `gc` reclaims unreferenced blobs) |
-| `devstrap devices` | Manage device trust state (`list`/`approve`/`revoke`/`lost`/`rename`) |
-| `devstrap conflicts` | List open namespace conflicts |
-| `devstrap db` | Manage the local state database (`migrate`/`status`/`backup`/`down`) |
+| `devstrap hub` | Operate on the sync hub (`init` configures a git carrier; `compact`/`gc`/`migrate-events`/`login` operate it) |
+| `devstrap keys` | Manage the workspace content key (WCK) epochs (`rotate`) |
+| `devstrap devices` | Manage device trust state (`list`/`approve`/`revoke`/`lost`/`rename`/`enroll`/`pairing-code`) |
+| `devstrap conflicts` | Inspect and resolve namespace conflicts (`list`/`show`/`resolve`) |
+| `devstrap service` | Install the `run-loop` as a background OS service (`install`/`uninstall`/`status`) |
+| `devstrap db` | Manage the local state database (`migrate`/`status`/`backup [--full]`/`restore`/`down`) |
 | `devstrap version` | Print build version |
 
 Run `devstrap <command> --help` for flags and subcommands.
@@ -210,9 +213,9 @@ DevStrap is a Mac‑first, Linux‑compatible **managed physical namespace** —
 
 Components:
 
-- **`devstrap`** — the CLI for workspace setup, status, hydration, worktrees, env, sync, and agents (shipped).
-- **`devstrapd`** — a local daemon for reconciliation, watchers, and a local API (planned).
-- **DevStrap Hub** — a two‑plane zero‑knowledge sync service: a signed HLC namespace‑map event log plus a content‑addressed encrypted blob store, through any private git repo (the zero‑infra carrier) or Cloudflare R2/S3, behind one pluggable `Hub` interface (shipped; a hosted control plane for device enrollment is still planned).
+- **`devstrap`** — the CLI for workspace setup, status, hydration, worktrees, env, sync, and sandboxed agents (shipped).
+- **`devstrap service`** — installs the `run-loop` as a launchd/systemd background service for unattended convergence (shipped); a native `devstrapd` daemon with an FSEvents watcher and local API is still planned.
+- **DevStrap Hub** — a two‑plane zero‑knowledge sync service: a signed HLC namespace‑map event log plus a content‑addressed encrypted blob store, through any private git repo (the zero‑infra carrier), a local‑folder/cloud‑drive carrier, or Cloudflare R2/S3, behind one pluggable `Hub` interface (shipped; a hosted control plane for a managed tier is planned — [`spec/20`](spec/20_COMMERCIALIZATION_AND_PRICING.md)).
 
 Start with **[ARCHITECTURE.md](ARCHITECTURE.md)** for the big picture — why a managed physical
 namespace, how the two‑plane hub works, and what is deliberately not built. The full design
@@ -231,18 +234,19 @@ corpus lives under [`spec/`](spec/), beginning with [`spec/00_START_HERE.md`](sp
 Capability layers (see [`spec/14_MVP_ROADMAP_AND_BACKLOG.md`](spec/14_MVP_ROADMAP_AND_BACKLOG.md) for the canonical, re‑ordered sequencing):
 
 1. **Local CLI proof** — scan, register, hydrate, fresh worktrees, env profiles. ✅
-2. **Agent workspaces** — one worktree per task, fresh remote base, logs, forge‑agnostic PR/MR. ✅
-3. **Multi‑device sync** — eager materialization, encrypted draft/env blobs, the zero‑knowledge hub (git carrier + R2/S3). 🚧
-4. **Mac daemon** — LaunchAgent, FSEvents watcher, shell/editor integration. ⏳
-5. **Optional StrapFS** — File Provider / FUSE evaluation. ⏳ (deliberately deferred)
+2. **Agent workspaces** — one worktree per task, fresh remote base, logs, forge‑agnostic PR/MR, OS‑enforced sandbox. ✅
+3. **Multi‑device sync** — eager materialization, encrypted draft/env blobs, device‑trust propagation, compaction + snapshot bootstrap, the zero‑knowledge hub (git/folder carriers + R2/S3). ✅
+4. **Unattended operation** — `run-loop` + `devstrap service install` (launchd/systemd). ✅ · a native daemon + FSEvents watcher remain ⏳
+5. **Hosted managed tier** — a DevStrap‑operated hub + control plane; a plan, see [`spec/20`](spec/20_COMMERCIALIZATION_AND_PRICING.md). ⏳
+6. **Optional StrapFS** — File Provider / FUSE evaluation. ⏳ (deliberately deferred)
 
-The near‑term priorities — now that the R2/S3 hub backend is shipped behind the `hubFromOptions` seam — are to bound sync‑log growth (event‑log compaction + full‑state snapshot exchange and a retention marker), harden the hub's zero‑knowledge guarantees, and then grow the transport and product surface (an HTTP/SSE relay, production device enrollment, and a `service install` daemon). They are detailed across the [audit archive](docs/audits/) (latest: the sixth pass).
+The near‑term priorities — captured across the [audit archive](docs/audits/) (latest: the [seventh pass](docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md)) — are to close the revocation‑survives‑compaction gap (`P7-SYNC-01`), harden backup/restore atomicity and the new hub carriers' durability, and build the minimal control plane that a managed tier requires.
 
 ## Security
 
-DevStrap is built so the sync hub is **zero‑knowledge**: repo content rides Git's own transport and never reaches the hub, and env/draft content is **age‑encrypted client‑side** into content‑addressed blobs. Device identities are age X25519 + Ed25519 keypairs kept in the OS keychain (with a `0600` file fallback for headless/CI), and secret values are redacted from logs, errors, and event payloads.
+DevStrap is built so the sync hub is **zero‑knowledge**: repo content rides Git's own transport and never reaches the hub, the namespace‑map event log is envelope‑encrypted under a per‑epoch workspace content key, and env/draft content is **age‑encrypted client‑side** into content‑addressed blobs. Device identities are age X25519 + Ed25519 keypairs kept in the OS keychain (with a `0600` file fallback for headless/CI); new devices enroll through an out‑of‑band fingerprint / pairing‑code ceremony, and secret values are redacted from logs, errors, and event payloads. Agent runs execute inside an OS‑enforced sandbox, and releases are cosign‑signed with SLSA provenance you can verify yourself (see [docs/install.md](docs/install.md)).
 
-Please report vulnerabilities privately per [SECURITY.md](SECURITY.md). The threat model is documented in [`spec/15_SECURITY_THREAT_MODEL.md`](spec/15_SECURITY_THREAT_MODEL.md); known hardening gaps are tracked as `SEC-*` findings in the latest audit.
+Please report vulnerabilities privately per [SECURITY.md](SECURITY.md). The threat model is documented in [`spec/15_SECURITY_THREAT_MODEL.md`](spec/15_SECURITY_THREAT_MODEL.md); known hardening gaps are tracked as `SEC-*` findings in the [latest audit](docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md).
 
 ## Contributing
 

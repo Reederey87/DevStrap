@@ -31,6 +31,26 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-10 — docs(product): commercialization spec, website plan, README rewrite, AGENTS tightening
+
+Changed:
+- `spec/20_COMMERCIALIZATION_AND_PRICING.md` (new): the plan for a managed-hub commercial tier alongside the free OSS BYO-hub product — open-core boundary (CLI + self-hosting free forever), a 10-product comparable-pricing table (Tailscale/Ngrok/Docker/Doppler/Infisical/1Password/Raycast/Codespaces/Ona/Coder, researched 2026-07-10), an R2 cost model (hub operations are ~$0.001/device/month; storage dominates → meter storage + device count, not operations), recommended packaging (generous free tier, ~$8 Individual, flat-then-scale Team, custom Enterprise), and the engineering prerequisites drawn from the Pass-7 `P7-PROD-*` findings (control plane, credential broker, server-side quotas, version-skew policy).
+- `spec/21_WEBSITE_PLAN.md` (new): the marketing + docs site — two conversion paths (OSS install + hosted-tier waitlist), IA, a tech-stack recommendation (Astro + Starlight + Tailwind on Cloudflare Pages, with Next.js/Vercel weighed and deferred to a future dashboard), terminal-first design with a VHS hero demo, single-sourced docs from the repo's `docs/` tier, `devstrap.dev` as the recommended domain (skip the $4,150 parked `.com` for now), and a phased launch checklist.
+- `README.md`: reconciled to shipped reality (the OS sandbox and `devstrap service` were described as unbuilt — `P7-DOC-01`); status now names the `v0.1.1` supply-chain-verified release, the command reference adds `service`/`keys` and `db restore`, the roadmap and near-term-priorities reflect the closed multi-device wave, the latest-audit pointer is Pass 7, and a truthful managed-tier forward-pointer to `spec/20` was added (the CLI + self-hosting stay free/OSS forever).
+- `AGENTS.md`: tightened (55→~44 lines) — compressed the Live-R2 dogfood section without losing the "source the `0600` file each shell, never paste secrets" contract; PR-cycle invariants unchanged.
+- `spec/00_START_HERE.md`: document-map entries for `20`/`21`; `last_reviewed` bumped.
+
+Validated:
+- `gofmt -l cmd internal` (clean — doc-only cycle)
+- `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run`
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...` (`TestEveryCommandIsDocumented` confirms every command in the README/spec/00 inventories exists)
+- README command claims cross-checked against `devstrap --help`.
+
+Follow-ups:
+- `spec/20` price points are a hypothesis to validate against real waitlist demand; the managed tier is unshippable until the `P7-PROD-04` control plane exists.
+- The website ships from a separate `devstrap-web` repo (per `spec/21`) to keep the spec-drift gate off site PRs.
+
 ## 2026-07-10 — chore(ci): bump Go to 1.26.5 (clear GO-2026-5856); refresh CLAUDE.md
 
 Changed:
