@@ -95,7 +95,9 @@ type gitCarrierMarker struct {
 // gitHeadState is the persisted last-known-good carrier head (P7-HUB-02).
 // The retention fields fingerprint the retention manifest as checked out at
 // SHA; they let a non-compacting device distinguish a legitimate compaction
-// squash (manifest strictly advanced) from a rewound carrier.
+// squash (manifest strictly advanced, or byte-identical to this fingerprint —
+// the parentless squash reuses the pre-squash manifest bytes) from a rewound
+// carrier.
 type gitHeadState struct {
 	Version             int              `json:"version"` // 1
 	SHA                 string           `json:"sha"`
