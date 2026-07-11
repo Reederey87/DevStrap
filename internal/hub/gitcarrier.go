@@ -500,7 +500,7 @@ func (g *GitCarrierHub) validateMarkerLocked() error {
 	if err != nil {
 		return fmt.Errorf("open git hub root: %w", err)
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	if info, lerr := root.Lstat(gitMarkerFile); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("git hub %s: %s is a symlink; refusing", redactedRemote(g.remote), gitMarkerFile)
 	}
@@ -1167,7 +1167,7 @@ func (s *fsObjectStore) PutObject(_ context.Context, key string, body []byte, if
 	if err != nil {
 		return err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	if ifNoneMatch {
 		if _, err := root.Stat(path); err == nil {
 			return ErrPreconditionFailed
@@ -1192,7 +1192,7 @@ func (s *fsObjectStore) GetObject(_ context.Context, key string) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	data, err := root.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("%w: %s", dssync.ErrBlobNotFound, key)
@@ -1212,7 +1212,7 @@ func (s *fsObjectStore) ObjectExists(_ context.Context, key string) (bool, error
 	if err != nil {
 		return false, err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	if _, err := root.Stat(path); err == nil {
 		return true, nil
 	} else if errors.Is(err, os.ErrNotExist) {
@@ -1233,7 +1233,7 @@ func (s *fsObjectStore) DeleteObject(_ context.Context, key string) error {
 	if err != nil {
 		return err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	if err := root.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("delete git hub object: %w", err)
 	}
@@ -1302,7 +1302,7 @@ func (s *fsObjectStore) ListObjectsV2(_ context.Context, prefix, startAfter stri
 	if err != nil {
 		return nil, "", err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	all, err := s.listKeys(root)
 	if err != nil {
 		return nil, "", err
@@ -1334,7 +1334,7 @@ func (s *fsObjectStore) ListCommonPrefixes(_ context.Context, prefix, delimiter 
 	if err != nil {
 		return nil, err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	all, err := s.listKeys(root)
 	if err != nil {
 		return nil, err
@@ -1368,7 +1368,7 @@ func (s *fsObjectStore) StatObject(_ context.Context, key string) (dssync.BlobIn
 	if err != nil {
 		return dssync.BlobInfo{}, err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	if _, err := root.Stat(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return dssync.BlobInfo{}, fmt.Errorf("%w: %s", dssync.ErrBlobNotFound, key)
@@ -1397,7 +1397,7 @@ func (s *fsObjectStore) PutObjectIfMatch(_ context.Context, key string, body []b
 	if err != nil {
 		return err
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	current, rerr := root.ReadFile(path)
 	if rerr != nil || fsETag(current) != etag {
 		return ErrPreconditionFailed
