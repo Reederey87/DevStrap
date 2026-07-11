@@ -308,47 +308,67 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			wt, err := createFreshWorktree(cmd.Context(), stdout, opts, store, project, taskName, "agent")
-			if err != nil {
-				return err
-			}
-			if err := enforceAgentFilePolicy(policy, agentCommand, wt.Path); err != nil {
-				// M2: clean up the just-created worktree so a policy denial
-				// does not leak an orphan git worktree + DB row. Shares the
-				// P6-GIT-05 helper: detached bounded context + surfaced
-				// warnings instead of swallowed errors.
-				repoPath := project.LocalPath
-				if repoPath == "" {
-					repoPath = filepath.Join(opts.paths().Root, filepath.FromSlash(project.Path))
+			// P7-GIT-01: hold the project repo lock from worktree creation
+			// through InsertAgentRun, so `worktree cleanup` (which checks
+			// running runs under the same lock) can never observe the fresh
+			// worktree without its running row.
+			run, wt, err := func() (state.AgentRun, state.Worktree, error) {
+				unlock, err := acquireRepoLock(opts.paths().Home, project.ID)
+				if err != nil {
+					return state.AgentRun{}, state.Worktree{}, err
 				}
-				removeOrphanWorktree(cmd.Context(), cmd.ErrOrStderr(), gitRunner(opts), repoPath, wt.Path, wt.Branch)
-				if markErr := store.MarkWorktreeRemoved(cmd.Context(), wt.ID); markErr != nil {
-					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to mark worktree %s removed: %v\n", wt.ID, markErr)
+				defer unlock()
+				wt, err := createFreshWorktreeLocked(cmd.Context(), stdout, opts, store, project, taskName, "agent")
+				if err != nil {
+					return state.AgentRun{}, state.Worktree{}, err
 				}
-				return err
-			}
-			runID, err := id.New("arun")
-			if err != nil {
-				return err
-			}
-			logPath := filepath.Join(opts.paths().Home, "logs", "agent-runs", runID+".log")
-			run, err := store.InsertAgentRun(cmd.Context(), state.AgentRun{
-				ID:                 runID,
-				NamespaceID:        project.ID,
-				WorktreeID:         wt.ID,
-				Engine:             engine,
-				Task:               taskName,
-				PolicyID:           policy,
-				Status:             "running",
-				RunnerPID:          os.Getpid(),
-				BaseRef:            wt.BaseRef,
-				BaseSHA:            wt.BaseSHA,
-				Branch:             wt.Branch,
-				LogPath:            logPath,
-				SandboxBackend:     sandboxLaunch.backendName,
-				SandboxMode:        sandboxLaunch.mode,
-				SandboxLimitations: marshalLimitations(sandboxLaunch.limitations),
-			})
+				cleanupOrphan := func() {
+					// M2: clean up the just-created worktree so a failure here
+					// does not leak an orphan git worktree + DB row. Shares the
+					// P6-GIT-05 helper: detached bounded context + surfaced
+					// warnings instead of swallowed errors.
+					repoPath := project.LocalPath
+					if repoPath == "" {
+						repoPath = filepath.Join(opts.paths().Root, filepath.FromSlash(project.Path))
+					}
+					removeOrphanWorktree(cmd.Context(), cmd.ErrOrStderr(), gitRunner(opts), repoPath, wt.Path, wt.Branch)
+					if markErr := store.MarkWorktreeRemoved(cmd.Context(), wt.ID); markErr != nil {
+						_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: failed to mark worktree %s removed: %v\n", wt.ID, markErr)
+					}
+				}
+				if err := enforceAgentFilePolicy(policy, agentCommand, wt.Path); err != nil {
+					cleanupOrphan()
+					return state.AgentRun{}, state.Worktree{}, err
+				}
+				runID, err := id.New("arun")
+				if err != nil {
+					cleanupOrphan()
+					return state.AgentRun{}, state.Worktree{}, err
+				}
+				logPath := filepath.Join(opts.paths().Home, "logs", "agent-runs", runID+".log")
+				run, err := store.InsertAgentRun(cmd.Context(), state.AgentRun{
+					ID:                 runID,
+					NamespaceID:        project.ID,
+					WorktreeID:         wt.ID,
+					Engine:             engine,
+					Task:               taskName,
+					PolicyID:           policy,
+					Status:             "running",
+					RunnerPID:          os.Getpid(),
+					BaseRef:            wt.BaseRef,
+					BaseSHA:            wt.BaseSHA,
+					Branch:             wt.Branch,
+					LogPath:            logPath,
+					SandboxBackend:     sandboxLaunch.backendName,
+					SandboxMode:        sandboxLaunch.mode,
+					SandboxLimitations: marshalLimitations(sandboxLaunch.limitations),
+				})
+				if err != nil {
+					cleanupOrphan()
+					return state.AgentRun{}, state.Worktree{}, err
+				}
+				return run, wt, nil
+			}()
 			if err != nil {
 				return err
 			}
@@ -381,7 +401,7 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := store.UpdateAgentRunResult(cmd.Context(), run.ID, status, diffSummary, testSummary); err != nil {
 				return err
 			}
-			_, _ = fmt.Fprintf(stdout, "\nAgent run %s %s\nworktree: %s\nlog: %s\ndiff:\n%s\n", run.ID, status, wt.Path, logPath, emptySummary(diffSummary))
+			_, _ = fmt.Fprintf(stdout, "\nAgent run %s %s\nworktree: %s\nlog: %s\ndiff:\n%s\n", run.ID, status, wt.Path, run.LogPath, emptySummary(diffSummary))
 			if commandErr != nil {
 				// CLI-03: propagate the child's real exit code.
 				var ee *exec.ExitError

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -137,16 +138,24 @@ func newWorktreeNewCommand(stdout io.Writer, opts *options) *cobra.Command {
 }
 
 func createFreshWorktree(ctx context.Context, stdout io.Writer, opts *options, store *state.Store, project state.ProjectStatus, taskName, createdBy string) (state.Worktree, error) {
-	// NOVCS-04: preflight — a remote-less repo cannot produce a fresh-upstream
-	// worktree; fail fast with an actionable message before touching git.
-	if strings.TrimSpace(project.RemoteKey) == "" {
-		return state.Worktree{}, appError{code: exitInvalidConfig, err: fmt.Errorf("%s has no git remote; fresh-upstream worktrees require one (add one with 'git remote add origin <url>')", project.Path)}
-	}
 	unlock, err := acquireRepoLock(opts.paths().Home, project.ID)
 	if err != nil {
 		return state.Worktree{}, err
 	}
 	defer unlock()
+	return createFreshWorktreeLocked(ctx, stdout, opts, store, project, taskName, createdBy)
+}
+
+// createFreshWorktreeLocked is createFreshWorktree for callers that already
+// hold the project repo lock — `agent run` keeps it held until the running
+// agent_runs row exists, so `worktree cleanup` can never observe the fresh
+// worktree without its run row (P7-GIT-01 startup window).
+func createFreshWorktreeLocked(ctx context.Context, stdout io.Writer, opts *options, store *state.Store, project state.ProjectStatus, taskName, createdBy string) (state.Worktree, error) {
+	// NOVCS-04: preflight — a remote-less repo cannot produce a fresh-upstream
+	// worktree; fail fast with an actionable message before touching git.
+	if strings.TrimSpace(project.RemoteKey) == "" {
+		return state.Worktree{}, appError{code: exitInvalidConfig, err: fmt.Errorf("%s has no git remote; fresh-upstream worktrees require one (add one with 'git remote add origin <url>')", project.Path)}
+	}
 	localPath, err := hydrateProjectUnlocked(ctx, store, opts, project, true)
 	if err != nil {
 		return state.Worktree{}, err
@@ -459,6 +468,7 @@ func newWorktreeCleanupCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cleanup",
 		Short: "Clean up eligible worktrees",
+		Args:  usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !merged {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("--merged is required")}
@@ -468,6 +478,11 @@ func newWorktreeCleanupCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			defer closeStore(store)
+			// Reconcile crashed runs first so a dead recorder cannot spuriously
+			// block cleanup of a worktree that is no longer live (P7-GIT-01).
+			if _, _, err := sweepStaleAgentRuns(cmd.Context(), store); err != nil {
+				return err
+			}
 			worktrees, err := store.ListWorktrees(cmd.Context())
 			if err != nil {
 				return err
@@ -488,72 +503,14 @@ func newWorktreeCleanupCommand(stdout io.Writer, opts *options) *cobra.Command {
 				if repoPath == "" {
 					repoPath = filepath.Join(opts.paths().Root, filepath.FromSlash(project.Path))
 				}
-				if _, err := os.Stat(wt.Path); err != nil {
-					if os.IsNotExist(err) {
-						if dsgit.IsRepo(repoPath) {
-							_ = r.WorktreePrune(cmd.Context(), repoPath)
-						}
-						if err := store.MarkWorktreeRemoved(cmd.Context(), wt.ID); err != nil {
-							return err
-						}
-						removed++
-						continue
-					}
-					// Unreadable path is an error, not "missing": surface it
-					// instead of silently leaving the worktree behind forever.
-					skipped++
-					logging.Logger(cmd.Context()).Warn("worktree cleanup skipped: stat failed", "worktree", wt.ID, "path", wt.Path, "error", err.Error())
-					continue
-				}
-				dirty, err := r.DirtyState(cmd.Context(), wt.Path)
+				didRemove, err := cleanupOneWorktree(cmd.Context(), opts, stdout, store, r, project, repoPath, wt, force, refreshed)
 				if err != nil {
-					skipped++
-					logging.Logger(cmd.Context()).Warn("worktree cleanup skipped: dirty-state check failed", "worktree", wt.ID, "path", wt.Path, "error", err.Error())
-					continue
-				}
-				if dirty != dsgit.DirtyClean && !force {
-					skipped++
-					continue
-				}
-				if refreshKey := project.ID + "\x00" + wt.BaseRef; !refreshed[refreshKey] {
-					refreshed[refreshKey] = true
-					if err := refreshWorktreeBase(cmd.Context(), opts, r, project, repoPath, wt.BaseRef); err != nil {
-						_, _ = fmt.Fprintf(stdout, "warning: could not refresh %s for worktree %s: %v; using local ref\n", wt.BaseRef, wt.ID, err)
-					}
-				}
-				mergeLabel := "merged"
-				mergedOut, err := r.Run(cmd.Context(), wt.Path, "branch", "--merged", wt.BaseRef, "--list", wt.Branch)
-				if err != nil || !strings.Contains(mergedOut, wt.Branch) {
-					squashMerged, squashErr := r.IsSquashMerged(cmd.Context(), wt.Path, wt.Branch, wt.BaseRef)
-					if squashErr != nil || !squashMerged {
-						skipped++
-						continue
-					}
-					mergeLabel = "merged (squash)"
-				}
-				// Recovery breadcrumb: content-equivalence can match a
-				// coincidentally-identical unrelated commit (documented
-				// limitation), so name the deleted branch's tip — recreating
-				// it is one `git branch <name> <sha>` away until git gc.
-				tip := ""
-				if out, terr := r.RevParse(cmd.Context(), repoPath, wt.Branch); terr == nil {
-					tip = strings.TrimSpace(out)
-				}
-				if err := r.WorktreeRemove(cmd.Context(), repoPath, wt.Path, force); err != nil {
-					skipped++
-					continue
-				}
-				if _, err := r.Run(cmd.Context(), repoPath, "branch", "-D", wt.Branch); err != nil {
-					_, _ = fmt.Fprintf(stdout, "warning: failed to delete branch %s for removed worktree %s: %v\n", wt.Branch, wt.ID, err)
-				}
-				if err := store.MarkWorktreeRemoved(cmd.Context(), wt.ID); err != nil {
 					return err
 				}
-				removed++
-				if tip != "" {
-					_, _ = fmt.Fprintf(stdout, "Removed worktree %s (%s; branch %s was at %s)\n", wt.ID, mergeLabel, wt.Branch, tip)
+				if didRemove {
+					removed++
 				} else {
-					_, _ = fmt.Fprintf(stdout, "Removed worktree %s (%s)\n", wt.ID, mergeLabel)
+					skipped++
 				}
 			}
 			_, err = fmt.Fprintf(stdout, "Cleaned up %d worktrees (%d skipped)\n", removed, skipped)
@@ -565,16 +522,120 @@ func newWorktreeCleanupCommand(stdout io.Writer, opts *options) *cobra.Command {
 	return cmd
 }
 
-func refreshWorktreeBase(ctx context.Context, opts *options, r dsgit.Runner, project state.ProjectStatus, repoPath, baseRef string) error {
+// cleanupOneWorktree reaps one worktree — missing-path metadata prune or full
+// remove — entirely under the project repo lock (P7-GIT-01/02). removed==false
+// with err==nil means skip.
+func cleanupOneWorktree(ctx context.Context, opts *options, stdout io.Writer, store *state.Store, r dsgit.Runner, project state.ProjectStatus, repoPath string, wt state.Worktree, force bool, refreshed map[string]bool) (removed bool, err error) {
+	unlock, err := acquireRepoLock(opts.paths().Home, project.ID)
+	if err != nil {
+		var app appError
+		if errors.As(err, &app) && app.code == exitConflict {
+			logging.Logger(ctx).Warn("worktree cleanup skipped: repo lock held", "worktree", wt.ID, "project", project.ID, "error", err.Error())
+			return false, nil
+		}
+		return false, err
+	}
+	defer unlock()
+
+	// The running-run check happens UNDER the lock: `agent run` holds the same
+	// lock from worktree creation through InsertAgentRun, so a fresh agent
+	// worktree can never be observed here without its running row.
+	runs, err := store.RunningAgentRunsByWorktree(ctx, wt.ID)
+	if err != nil {
+		return false, err
+	}
+	if len(runs) > 0 {
+		logging.Logger(ctx).Warn("worktree cleanup skipped: running agent run", "run", runs[0].ID, "worktree", wt.ID)
+		return false, nil
+	}
+
+	if _, err := os.Stat(wt.Path); err != nil {
+		if os.IsNotExist(err) {
+			// Path-missing: metadata-only prune, under the same repo lock so
+			// `git worktree prune` cannot race a concurrent `worktree new`
+			// mutating .git/worktrees (P7-GIT-02 review follow-up).
+			if dsgit.IsRepo(repoPath) {
+				_ = r.WorktreePrune(ctx, repoPath)
+			}
+			if err := store.MarkWorktreeRemoved(ctx, wt.ID); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		// Unreadable path is an error, not "missing": surface it instead of
+		// silently leaving the worktree behind forever.
+		logging.Logger(ctx).Warn("worktree cleanup skipped: stat failed", "worktree", wt.ID, "path", wt.Path, "error", err.Error())
+		return false, nil
+	}
+
+	dirty, err := r.DirtyState(ctx, wt.Path)
+	if err != nil {
+		logging.Logger(ctx).Warn("worktree cleanup skipped: dirty-state check failed", "worktree", wt.ID, "path", wt.Path, "error", err.Error())
+		return false, nil
+	}
+	if dirty != dsgit.DirtyClean && !force {
+		return false, nil
+	}
+	if refreshKey := project.ID + "\x00" + wt.BaseRef; !refreshed[refreshKey] {
+		refreshed[refreshKey] = true
+		if err := refreshWorktreeBaseLocked(ctx, r, repoPath, wt.BaseRef); err != nil {
+			_, _ = fmt.Fprintf(stdout, "warning: could not refresh %s for worktree %s: %v; using local ref\n", wt.BaseRef, wt.ID, err)
+		}
+	}
+	mergeLabel := "merged"
+	mergedOut, err := r.Run(ctx, wt.Path, "branch", "--merged", wt.BaseRef, "--list", wt.Branch)
+	if err != nil || !strings.Contains(mergedOut, wt.Branch) {
+		squashMerged, squashErr := r.IsSquashMerged(ctx, wt.Path, wt.Branch, wt.BaseRef)
+		if squashErr != nil || !squashMerged {
+			return false, nil
+		}
+		mergeLabel = "merged (squash)"
+	}
+	// P7-GIT-01 TOCTOU re-check: DirtyState again immediately before remove,
+	// under the held repo lock, so concurrent edits after the first check
+	// cannot be reaped without --force.
+	dirty, err = r.DirtyState(ctx, wt.Path)
+	if err != nil {
+		logging.Logger(ctx).Warn("worktree cleanup skipped: dirty-state check failed", "worktree", wt.ID, "path", wt.Path, "error", err.Error())
+		return false, nil
+	}
+	if dirty != dsgit.DirtyClean && !force {
+		return false, nil
+	}
+	// Recovery breadcrumb: content-equivalence can match a
+	// coincidentally-identical unrelated commit (documented
+	// limitation), so name the deleted branch's tip — recreating
+	// it is one `git branch <name> <sha>` away until git gc.
+	tip := ""
+	if out, terr := r.RevParse(ctx, repoPath, wt.Branch); terr == nil {
+		tip = strings.TrimSpace(out)
+	}
+	if err := r.WorktreeRemove(ctx, repoPath, wt.Path, force); err != nil {
+		logging.Logger(ctx).Warn("worktree cleanup skipped: removal failed", "worktree", wt.ID, "path", wt.Path, "error", err.Error())
+		return false, nil
+	}
+	if _, err := r.Run(ctx, repoPath, "branch", "-D", wt.Branch); err != nil {
+		_, _ = fmt.Fprintf(stdout, "warning: failed to delete branch %s for removed worktree %s: %v\n", wt.Branch, wt.ID, err)
+	}
+	if err := store.MarkWorktreeRemoved(ctx, wt.ID); err != nil {
+		return false, err
+	}
+	if tip != "" {
+		_, _ = fmt.Fprintf(stdout, "Removed worktree %s (%s; branch %s was at %s)\n", wt.ID, mergeLabel, wt.Branch, tip)
+	} else {
+		_, _ = fmt.Fprintf(stdout, "Removed worktree %s (%s)\n", wt.ID, mergeLabel)
+	}
+	return true, nil
+}
+
+// refreshWorktreeBaseLocked parses remote/branch and fetches. Caller must hold
+// the project repo lock (its only caller, cleanupOneWorktree, acquires it for
+// the whole reap sequence — a lock-taking wrapper here would deadlock).
+func refreshWorktreeBaseLocked(ctx context.Context, r dsgit.Runner, repoPath, baseRef string) error {
 	remote, branch, ok := strings.Cut(baseRef, "/")
 	if !ok || remote == "" || branch == "" {
 		return fmt.Errorf("base ref must be remote/branch, got %q", baseRef)
 	}
-	unlock, err := acquireRepoLock(opts.paths().Home, project.ID)
-	if err != nil {
-		return err
-	}
-	defer unlock()
 	return r.Fetch(ctx, repoPath, remote, branch)
 }
 
