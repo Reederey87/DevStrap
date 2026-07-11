@@ -92,14 +92,14 @@ func TestLaunchdManagerUninstallIdempotent(t *testing.T) {
 	if err := os.WriteFile(plistPath, []byte("<plist/>"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := mgr.Uninstall(t.Context(), "com.devstrap.run-loop"); err != nil {
+	if _, err := mgr.Uninstall(t.Context(), "com.devstrap.run-loop"); err != nil {
 		t.Fatalf("Uninstall: %v", err)
 	}
 	if _, err := os.Stat(plistPath); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("plist still present after uninstall: %v", err)
 	}
 	// A second uninstall (plist already gone) is still a no-error no-op.
-	if err := mgr.Uninstall(t.Context(), "com.devstrap.run-loop"); err != nil {
+	if _, err := mgr.Uninstall(t.Context(), "com.devstrap.run-loop"); err != nil {
 		t.Fatalf("second Uninstall: %v", err)
 	}
 }

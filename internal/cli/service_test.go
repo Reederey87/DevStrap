@@ -47,9 +47,9 @@ func (f *fakeServiceManager) Install(_ context.Context, spec platform.ServiceSpe
 	return f.installNotes, f.installErr
 }
 
-func (f *fakeServiceManager) Uninstall(_ context.Context, _ string) error {
+func (f *fakeServiceManager) Uninstall(_ context.Context, _ string) ([]string, error) {
 	f.uninstalled = true
-	return f.uninstallErr
+	return nil, f.uninstallErr
 }
 
 func (f *fakeServiceManager) Status(_ context.Context, _ string) (platform.ServiceStatus, error) {

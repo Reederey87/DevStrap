@@ -31,6 +31,24 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-11 — fix(platform): headless systemd service uninstall (P7-XP-03)
+
+Changed:
+- `internal/platform/platform.go`: `ServiceManager.Uninstall` now returns advisory notes (mirroring `Install`) so the CLI never branches on the OS; `UnsupportedServiceManager` updated.
+- `internal/platform/service_linux.go`: `Uninstall` no longer bails on an unreachable `--user` manager — best-effort `disable --now` and `daemon-reload` run only when the manager is reachable, the unit file is ALWAYS removed (launchd parity), and an advisory note names the finish-from-a-session commands when the manager was unreachable and a unit file was actually removed (a headless uninstall of a never-installed service stays a note-free no-op).
+- `internal/platform/service_darwin.go` + the cli test fake: signature parity, no behavior change.
+- `internal/cli/service.go`: uninstall prints notes verbatim (even under `--quiet`), exactly like install.
+- Tests: `TestSystemdUninstallRemovesUnitFileWhenManagerUnreachable`, `TestSystemdUninstallDeadBusStillRemovesUnit`, `TestSystemdUninstallHeadlessNotInstalledIsNoteFreeNoOp`, `TestSystemdUninstallReachableManagerKeepsFullSequence`.
+- `spec/06` + `spec/13`: the headless-uninstall contract documented (install keeps failing closed; removal must not).
+- `docs/audits/README.md`: `P7-XP-03` moved open → *Recently shipped*; Pass-7 counts re-derived from the table (28→27 open; P2 12→11).
+
+Validated:
+- `gofmt -w cmd internal`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOOS=linux go build ./...` + `GOOS=linux go vet ./internal/platform/`; native `GOCACHE=/tmp/devstrap-gocache go test ./internal/platform/ ./internal/cli/ -count=1`; full `go test -race ./...`. The linux-tagged uninstall tests execute in CI's ubuntu job (Docker unavailable locally this run).
+- Provenance: implemented by Grok (grok-4.5) from a line-level coordinator spec (the job's stopReason read "Cancelled" but the diff was complete and spec-faithful — verified from git state per the standing trust-git-status rule); coordinator (fable-5) line-by-line review added the removed-nothing note suppression; Codex review pre-merge.
+
+Follow-ups:
+- None.
+
 ## 2026-07-11 — fix(cli): journaled all-or-nothing restore promotion + maintenance lock (P7-DATA-05)
 
 Changed:

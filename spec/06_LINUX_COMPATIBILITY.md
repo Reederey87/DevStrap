@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-01
+last_reviewed: 2026-07-11
 tracks_code: [internal/platform/**, internal/devicekeys/**, .github/**]
 ---
 # Linux Compatibility Plan
@@ -103,13 +103,16 @@ Environment="PATH=/usr/local/bin/…:/home/you/.local/bin:/usr/local/bin:/usr/bi
 WantedBy=default.target
 ```
 
-Shipped commands (the adapter runs `systemctl --user daemon-reload`/`enable`/`restart`, gated behind a `systemctl --user show-environment` availability probe — a missing systemd or D-Bus-less session fails closed as `ErrUnsupported`, never a confusing raw error):
+Shipped commands (the adapter runs `systemctl --user daemon-reload`/`enable`/`restart`; **install** is gated behind a `systemctl --user show-environment` availability probe — a missing systemd or D-Bus-less session fails closed as `ErrUnsupported`, never a confusing raw error):
 
 ```bash
 devstrap service install     # render unit → daemon-reload → enable → restart
 devstrap service status      # is-active + `journalctl --user -u …` hint (also --json)
-devstrap service uninstall   # disable --now → remove unit → daemon-reload (idempotent)
+devstrap service uninstall   # best-effort disable --now → ALWAYS remove unit → daemon-reload
+                             # when reachable (idempotent; works headless)
 ```
+
+**Headless uninstall (`P7-XP-03`).** `Uninstall` mirrors launchd: the availability probe no longer gates removal. When the `--user` manager is unreachable (SSH, cron, no session D-Bus) the adapter still deletes the unit file — the durable install artifact `status` reports — and returns an advisory note (a new `ServiceManager.Uninstall` notes return, printed verbatim even under `--quiet`): if a lingering session still runs the service, finish with `systemctl --user disable --now devstrap-run-loop.service && systemctl --user daemon-reload` from a user session. A headless uninstall that finds no unit file stays a clean, note-free no-op. Install keeps failing closed — installing needs the manager; removing must not.
 
 `ExecStart` words are systemd-quoted (whitespace/quotes double-quoted, `%` doubled to escape specifier expansion); `ExecPath` comes from `os.Executable()` (symlinks resolved) and is refused at an ephemeral `$TMPDIR`/`go-build` path.
 
