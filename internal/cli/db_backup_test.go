@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/state"
 )
@@ -367,6 +368,65 @@ func TestRestoreJSONIsSingleDocument(t *testing.T) {
 	}
 	if len(got.Items) == 0 {
 		t.Fatalf("expected non-empty items, got %+v", got)
+	}
+}
+
+// TestRestoreJSONCarriesKeychainCustodyWarning proves the custody guidance —
+// the warning that originally corrupted the --json stream — rides the payload's
+// warnings array instead of preceding it (P7-CLI-01).
+func TestRestoreJSONCarriesKeychainCustodyWarning(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init: %v stderr=%s", err, stderr)
+	}
+	// Flip the recorded custody to keychain so the restored DB reports it
+	// (RecordKeyCustody is write-once and init already recorded file custody).
+	// The backup itself still runs under DEVSTRAP_NO_KEYCHAIN=1 (effective file
+	// custody), so key material is captured from the KeyDir and the real
+	// keychain is never touched.
+	ctx := context.Background()
+	store, err := state.Open(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetLocalMeta(ctx, "key_custody", string(devicekeys.CustodyKeychain)); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	_ = store.Close()
+
+	archive := filepath.Join(t.TempDir(), "workspace.tar")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "db", "backup", "--full", archive); err != nil {
+		t.Fatalf("db backup --full: %v stderr=%s", err, stderr)
+	}
+
+	// Un-force file custody for the restore so EffectiveKeyCustody(keychain)
+	// stays keychain and the guidance fires.
+	t.Setenv(platform.NoKeychainEnv, "0")
+	restoreHome := filepath.Join(t.TempDir(), ".devstrap-restore")
+	stdout, stderr, err := executeForTest("--home", restoreHome, "--root", root, "--json", "db", "restore", archive)
+	if err != nil {
+		t.Fatalf("db restore --json: %v stderr=%s stdout=%s", err, stderr, stdout)
+	}
+	if strings.Contains(stdout, "warning:") {
+		t.Fatalf("stdout must not contain raw warning: text outside JSON: %s", stdout)
+	}
+	var got restoreResult
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("full stdout is not a single JSON document: %v\n%s", err, stdout)
+	}
+	found := false
+	for _, w := range got.Warnings {
+		if strings.Contains(w, "keychain custody") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("warnings = %v, want the keychain-custody guidance", got.Warnings)
 	}
 }
 

@@ -100,20 +100,28 @@ func runFullBackup(ctx context.Context, opts *options, store *state.Store, out s
 		return err
 	}
 
-	if len(result.MissingBlobs) > 0 {
-		result.Warnings = append(result.Warnings, fmt.Sprintf(
-			"%d referenced blob(s) missing on disk and omitted (run `devstrap doctor`): %s",
-			len(result.MissingBlobs), strings.Join(result.MissingBlobs, ", ")))
-	}
 	if result.Keys == 0 {
 		result.Warnings = append(result.Warnings, "no key material captured; this archive cannot decrypt secrets on its own")
 	}
 	if !result.Config {
 		result.Warnings = append(result.Warnings, "no config.yaml found; the hub pointer and custom root will not be restored")
 	}
+	// The missing-blob warning goes LAST so the human branch can list the refs
+	// one per indented line directly beneath it; JSON consumers get the refs
+	// structured in missing_blobs.
+	if len(result.MissingBlobs) > 0 {
+		result.Warnings = append(result.Warnings, fmt.Sprintf(
+			"%d referenced blob(s) missing on disk and omitted (run `devstrap doctor`):",
+			len(result.MissingBlobs)))
+	}
 	return opts.render(stdout, func(w io.Writer) error {
 		for _, msg := range result.Warnings {
 			if _, err := fmt.Fprintf(w, "warning: %s\n", msg); err != nil {
+				return err
+			}
+		}
+		for _, ref := range result.MissingBlobs {
+			if _, err := fmt.Fprintf(w, "  %s\n", ref); err != nil {
 				return err
 			}
 		}
