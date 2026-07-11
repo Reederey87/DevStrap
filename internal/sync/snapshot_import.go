@@ -48,6 +48,9 @@ func ImportSnapshot(ctx context.Context, st *state.Store, snap Snapshot, snapsho
 				return err
 			}
 		}
+		if err := importTrustTx(ctx, tx, snap.Trust); err != nil {
+			return err
+		}
 		for _, a := range snap.Anchors {
 			if err := tx.UpsertChainAnchor(ctx, a.DeviceID, a.Seq, a.ContentHash, a.HLC, snapshotSHA256); err != nil {
 				return err
@@ -155,6 +158,48 @@ func importEnvTx(ctx context.Context, tx *state.Tx, namespaceID string, env *Sna
 		Refs:     env.Refs,
 	}, envEvent); err != nil {
 		return fmt.Errorf("import env profile for namespace %s: %w", namespaceID, err)
+	}
+	return nil
+}
+
+// importTrustTx re-derives terminal device trust from the snapshot
+// (P7-SYNC-01), mirroring the EventDeviceRevoked/EventDeviceLost apply path in
+// events.go: ensure a placeholder row for an unknown target, then the
+// sticky/monotonic ApplyRemoteDeviceTrustTx (only pending/approved flip; the
+// local device never flips; revoked<->lost churn and re-imports are no-ops).
+// needs_rotation is flagged once when any row ACTUALLY changed, so a re-import
+// can never re-flag values an operator already rotated and cleared. A
+// malformed row is a hard error that aborts the whole import transaction —
+// the caller verified the snapshot, so malformed trust means a defective
+// producer, and partial application would be worse than refusal.
+//
+// The wck_rotation_pending marker (the receiver OWING an epoch rotation after
+// learning of a revocation) is deliberately not set here — that asymmetry is
+// shared with the events.go apply path and is tracked as P7-SYNC-04.
+func importTrustTx(ctx context.Context, tx *state.Tx, trust []SnapshotTrust) error {
+	changedAny := false
+	for _, tr := range trust {
+		if tr.DeviceID == "" {
+			return fmt.Errorf("import snapshot trust: empty device id")
+		}
+		switch tr.State {
+		case "revoked", "lost":
+		default:
+			return fmt.Errorf("import snapshot trust: unsupported state %q for device %s", tr.State, tr.DeviceID)
+		}
+		if err := tx.EnsureRemoteDeviceTx(ctx, tr.DeviceID); err != nil {
+			return err
+		}
+		changed, err := tx.ApplyRemoteDeviceTrustTx(ctx, tr.DeviceID, tr.State)
+		if err != nil {
+			return err
+		}
+		changedAny = changedAny || changed
+	}
+	if changedAny {
+		if _, err := tx.MarkEncryptedBindingsNeedingRotationTx(ctx); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -37,8 +37,27 @@ import (
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
 )
 
-// snapshotVersion is the single supported snapshot document/envelope version.
-const snapshotVersion = 1
+// snapshotVersion is the snapshot document/envelope version this binary writes
+// and the ONLY one it imports. v2 adds the terminal device-trust projection
+// (P7-SYNC-01): a v1 snapshot silently lacks revocation state — importing one
+// would let a snapshot-recovering device keep a revoked device approved — so
+// the envelope/document checks stay exact-equality fail-closed and an old
+// binary refuses v2 rather than silently ignoring the projection. Retention
+// MANIFESTS are trust-neutral (floors only) and stay readable at v1 via
+// retentionManifestVersionOK, so an upgraded compactor can still reconcile a
+// pre-existing v1 hub and publish v2 over it.
+const snapshotVersion = 2
+
+// retentionManifestVersionOK reports whether a retention manifest version is
+// readable by this binary. v1 manifests differ from v2 only by the version
+// stamp (the floors map is trust-neutral — reading one can never reintroduce
+// the P7-SYNC-01 revocation hole, which lives exclusively in the snapshot
+// DOCUMENT), so accepting them keeps upgrade deployable: the first upgraded
+// compactor must parse the pre-existing v1 manifest before it can publish v2.
+// This is the seam where a future min-reader version range (P7-PROD-03) lands.
+func retentionManifestVersionOK(v int) bool {
+	return v == 1 || v == snapshotVersion
+}
 
 // Signature domains for the snapshot-exchange plane. devstrap:snapshot:v1 is
 // RESERVED and unused in v1 — snapshot-object integrity comes from the
@@ -78,13 +97,17 @@ var ErrRetentionConflict = errors.New("retention manifest changed concurrently")
 // to hide (or accidentally losing) its own truncation history.
 var ErrRetentionRollback = errors.New("retention floor rollback")
 
-// Snapshot is the plaintext full-state snapshot document (snapshot.v1): the
+// Snapshot is the plaintext full-state snapshot document (snapshot.v2): the
 // derived namespace map with source-event coordinates for LWW convergence,
-// surviving tombstones, per-device chain anchors, and the per-device floor the
-// producing compactor is about to publish. Device-local state (conflicts,
-// key_grant_waits, sync_skipped_events) is deliberately excluded, and grant
-// events are NOT embedded — device approval re-grants all held epochs as fresh
-// events, which always land above the floor.
+// surviving tombstones, terminal device-trust rows, per-device chain anchors,
+// and the per-device floor the producing compactor is about to publish.
+// Device-LOCAL state (conflicts, key_grant_waits, sync_skipped_events) is
+// deliberately excluded, and grant events are NOT embedded — device approval
+// re-grants all held epochs as fresh events, which always land above the
+// floor. Terminal device trust (revoked/lost) IS deliberately included
+// (P7-SYNC-01): compaction deletes the device.revoked/device.lost event below
+// the floor, so without this projection a snapshot-recovering device would
+// keep the revoked device approved forever.
 type Snapshot struct {
 	V           int                 `json:"v"`
 	WorkspaceID string              `json:"workspace_id"`
@@ -96,6 +119,20 @@ type Snapshot struct {
 	Anchors     []ChainAnchor       `json:"anchors,omitempty"`
 	Entries     []SnapshotEntry     `json:"entries,omitempty"`
 	Tombstones  []SnapshotTombstone `json:"tombstones,omitempty"`
+	Trust       []SnapshotTrust     `json:"trust,omitempty"`
+}
+
+// SnapshotTrust is one terminal device-trust row (P7-SYNC-01). State is
+// "revoked" or "lost" only — never pending/approved/local. It carries no
+// source-event coordinates: the revoke event may already be compacted away on
+// the builder (a compactor that itself snapshot-bootstrapped never held it),
+// and the apply is sticky/monotonic with no HLC compare, so State-only import
+// is exactly equivalent to replaying the revoke event. When P7-SYNC-02 records
+// a revoked_at_hlc, it becomes an additive omitempty field here — absence
+// means "unknown, apply sticky".
+type SnapshotTrust struct {
+	DeviceID string `json:"device_id"`
+	State    string `json:"state"`
 }
 
 // ChainAnchor is one origin device's hash-chain anchor: the content hash of
@@ -423,8 +460,8 @@ func SignRetentionManifest(m *RetentionManifest, privateSigningKey string) error
 // decision (the key must belong to a locally pinned, approved device) —
 // this only proves the manifest bytes were signed by that key.
 func VerifyRetentionManifest(m RetentionManifest, publicSigningKey string) error {
-	if m.V != snapshotVersion {
-		return fmt.Errorf("%w: retention manifest version %d, want %d", ErrSnapshotVerification, m.V, snapshotVersion)
+	if !retentionManifestVersionOK(m.V) {
+		return fmt.Errorf("%w: retention manifest version %d, want 1 or %d", ErrSnapshotVerification, m.V, snapshotVersion)
 	}
 	if m.Sig == "" {
 		return fmt.Errorf("%w: retention manifest is unsigned", ErrSnapshotVerification)
@@ -448,8 +485,8 @@ func ParseRetentionManifest(raw []byte) (RetentionManifest, error) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return RetentionManifest{}, fmt.Errorf("parse retention manifest: %w", err)
 	}
-	if m.V != snapshotVersion {
-		return RetentionManifest{}, fmt.Errorf("parse retention manifest: version %d, want %d", m.V, snapshotVersion)
+	if !retentionManifestVersionOK(m.V) {
+		return RetentionManifest{}, fmt.Errorf("parse retention manifest: version %d, want 1 or %d", m.V, snapshotVersion)
 	}
 	if m.Floors == nil {
 		return RetentionManifest{}, errors.New("parse retention manifest: missing floors map")

@@ -121,7 +121,11 @@ func recoverFromSnapshot(ctx context.Context, stdout io.Writer, store *state.Sto
 	}
 	info, err := dssync.ParseSnapshotEnvelope(obj)
 	if err != nil {
-		return false, appError{code: exitInvalidConfig, err: err}
+		// A version mismatch here usually means the hub snapshot predates this
+		// binary (snapshot.v1 lacks the P7-SYNC-01 device-trust projection and
+		// is refused rather than silently imported) — name the remedy.
+		return false, appError{code: exitInvalidConfig, err: fmt.Errorf(
+			"%w; if the hub snapshot predates this version, run `devstrap hub compact` from an upgraded device to publish a fresh one", err)}
 	}
 	if info.ProducedBy != m.Snapshot.ProducedBy || info.Epoch != m.Snapshot.Epoch || info.KID != m.Snapshot.KID || info.HLC != m.Snapshot.HLC {
 		return false, appError{code: exitInvalidConfig, err: fmt.Errorf(
