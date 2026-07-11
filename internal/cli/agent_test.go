@@ -70,3 +70,24 @@ func setupAgentDiffRepo(t *testing.T) (string, string) {
 	runGit(t, repo, "commit", "-m", "initial")
 	return repo, strings.TrimSpace(runGitOutput(t, repo, "rev-parse", "HEAD"))
 }
+
+// TestAgentSensitiveParityWithSandboxDenyList pins P7-SEC-01 (CodeRabbit
+// parity): the wrapper-level file classifier must flag the same git/cloud
+// credential files the OS sandbox masks, so a path that is kernel-denied is
+// not simultaneously waved through by the coarse wrapper policy.
+func TestAgentSensitiveParityWithSandboxDenyList(t *testing.T) {
+	for _, f := range []string{".gitconfig", ".git-credentials", ".netrc"} {
+		if !agentTokenLooksSensitive("/home/dev/" + f) {
+			t.Errorf("agentTokenLooksSensitive(%q) = false, want true (sandbox masks it)", f)
+		}
+	}
+	root := "/work/tree"
+	for _, p := range []string{
+		"/home/dev/.gitconfig", "/home/dev/.git-credentials",
+		"/home/dev/.config/gcloud/credentials.db", "/home/dev/.azure/accessTokens.json",
+	} {
+		if !agentPathLooksSensitive(root, p) {
+			t.Errorf("agentPathLooksSensitive(%q) = false, want true (outside worktree + credential path)", p)
+		}
+	}
+}

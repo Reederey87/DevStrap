@@ -740,7 +740,8 @@ func agentTokenLooksSensitive(token string) bool {
 	// AGEN-05: match the scan detector's sensitive-file set so the agent
 	// deny list and the scanner cannot drift.
 	switch base {
-	case ".netrc", ".npmrc", ".pypirc", "id_rsa", "id_ed25519",
+	case ".netrc", ".npmrc", ".pypirc", ".gitconfig", ".git-credentials",
+		"id_rsa", "id_ed25519",
 		"credentials.json", "service-account.json":
 		return true
 	}
@@ -766,7 +767,7 @@ func agentPathLooksSensitive(root, path string) bool {
 	}
 	lower := strings.ToLower(filepath.ToSlash(path))
 	// AGEN-05: expanded deny set to match the spec and scan detector.
-	denyParts := []string{"/.ssh", "/.aws", "/.snowflake", "/.config/gh", "/.config/gcloud", "/.azure", "/.gnupg", "/.kube", "/.docker", "/.git-credentials"}
+	denyParts := []string{"/.ssh", "/.aws", "/.snowflake", "/.config/gh", "/.config/gcloud", "/.azure", "/.gnupg", "/.kube", "/.docker", "/.gitconfig", "/.git-credentials"}
 	for _, part := range denyParts {
 		if strings.Contains(lower, part+"/") || strings.HasSuffix(lower, part) {
 			return true

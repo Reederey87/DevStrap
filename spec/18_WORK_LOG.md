@@ -97,6 +97,8 @@ Validated:
 - `DEVSTRAP_NO_KEYCHAIN=1 go test ./internal/platform/... ./internal/cli/...`
 - `DEVSTRAP_NO_KEYCHAIN=1 go test -race ./internal/platform/...`
 
+- Post-review (CodeRabbit, two Major applied): (1) parity — the wrapper-level `agentPathLooksSensitive`/`agentTokenLooksSensitive` now also flag `.gitconfig` and `.git-credentials` (the OS sandbox masked them but the coarse wrapper policy waved them through), pinned by `TestAgentSensitiveParityWithSandboxDenyList`; (2) the SECU-02 spec claim is scoped — HOME-repoint is environment isolation only (blocks relative lookups, NOT absolute-path reads); absolute credential reads are denied by the OS deny-list only on full-fidelity backends (Seatbelt/bubblewrap), while the Landlock fallback keeps credential paths readable unless `--read-confine` is on.
+
 Follow-ups:
 - `P7-SEC-03` (separate finding): under `--sandbox require` the Landlock fallback still cannot subtract the standalone credential deny — auto-engaging read-confine there subsumes these paths.
 
