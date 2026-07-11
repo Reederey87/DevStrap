@@ -225,6 +225,7 @@ type AgentRun struct {
 	DiffSummary        string `json:"diff_summary,omitempty"`
 	TestSummary        string `json:"test_summary,omitempty"`
 	RunnerPID          int    `json:"runner_pid,omitempty"`
+	RunnerStartedAt    int64  `json:"runner_started_at,omitempty"`
 	SandboxBackend     string `json:"sandbox_backend,omitempty"`
 	SandboxMode        string `json:"sandbox_mode,omitempty"`
 	SandboxLimitations string `json:"sandbox_limitations,omitempty"` // JSON array string, "" when none
@@ -4085,9 +4086,9 @@ func (s *Store) InsertAgentRun(ctx context.Context, run AgentRun) (AgentRun, err
 	}
 	now := timestampNow()
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO agent_runs (id, namespace_id, worktree_id, engine, task, policy_id, status, base_ref, base_sha, branch, log_path, diff_summary, test_summary, runner_pid, sandbox_backend, sandbox_mode, sandbox_limitations, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-`, run.ID, run.NamespaceID, nullEmpty(run.WorktreeID), run.Engine, run.Task, nullEmpty(run.PolicyID), run.Status, nullEmpty(run.BaseRef), nullEmpty(run.BaseSHA), nullEmpty(run.Branch), nullEmpty(run.LogPath), nullEmpty(run.DiffSummary), nullEmpty(run.TestSummary), nullZero(int64(run.RunnerPID)), run.SandboxBackend, run.SandboxMode, run.SandboxLimitations, now, now)
+INSERT INTO agent_runs (id, namespace_id, worktree_id, engine, task, policy_id, status, base_ref, base_sha, branch, log_path, diff_summary, test_summary, runner_pid, runner_started_at, sandbox_backend, sandbox_mode, sandbox_limitations, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+`, run.ID, run.NamespaceID, nullEmpty(run.WorktreeID), run.Engine, run.Task, nullEmpty(run.PolicyID), run.Status, nullEmpty(run.BaseRef), nullEmpty(run.BaseSHA), nullEmpty(run.Branch), nullEmpty(run.LogPath), nullEmpty(run.DiffSummary), nullEmpty(run.TestSummary), nullZero(int64(run.RunnerPID)), nullZero(run.RunnerStartedAt), run.SandboxBackend, run.SandboxMode, run.SandboxLimitations, now, now)
 	if err != nil {
 		return AgentRun{}, fmt.Errorf("insert agent run: %w", err)
 	}
@@ -4125,11 +4126,11 @@ func (s *Store) AgentRunByID(ctx context.Context, id string) (AgentRun, error) {
 	err := s.db.QueryRowContext(ctx, `
 SELECT id, namespace_id, COALESCE(worktree_id, ''), engine, task, COALESCE(policy_id, ''), status,
        COALESCE(base_ref, ''), COALESCE(base_sha, ''), COALESCE(branch, ''), COALESCE(log_path, ''),
-       COALESCE(diff_summary, ''), COALESCE(test_summary, ''), COALESCE(runner_pid, 0),
+       COALESCE(diff_summary, ''), COALESCE(test_summary, ''), COALESCE(runner_pid, 0), COALESCE(runner_started_at, 0),
        COALESCE(sandbox_backend, ''), COALESCE(sandbox_mode, ''), COALESCE(sandbox_limitations, '')
 FROM agent_runs
 WHERE id = ?;
-`, id).Scan(&run.ID, &run.NamespaceID, &run.WorktreeID, &run.Engine, &run.Task, &run.PolicyID, &run.Status, &run.BaseRef, &run.BaseSHA, &run.Branch, &run.LogPath, &run.DiffSummary, &run.TestSummary, &run.RunnerPID, &run.SandboxBackend, &run.SandboxMode, &run.SandboxLimitations)
+`, id).Scan(&run.ID, &run.NamespaceID, &run.WorktreeID, &run.Engine, &run.Task, &run.PolicyID, &run.Status, &run.BaseRef, &run.BaseSHA, &run.Branch, &run.LogPath, &run.DiffSummary, &run.TestSummary, &run.RunnerPID, &run.RunnerStartedAt, &run.SandboxBackend, &run.SandboxMode, &run.SandboxLimitations)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return AgentRun{}, fmt.Errorf("unknown agent run %q", id)
@@ -4143,7 +4144,7 @@ func (s *Store) ListAgentRuns(ctx context.Context) ([]AgentRun, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, namespace_id, COALESCE(worktree_id, ''), engine, task, COALESCE(policy_id, ''), status,
        COALESCE(base_ref, ''), COALESCE(base_sha, ''), COALESCE(branch, ''), COALESCE(log_path, ''),
-       COALESCE(diff_summary, ''), COALESCE(test_summary, ''), COALESCE(runner_pid, 0),
+       COALESCE(diff_summary, ''), COALESCE(test_summary, ''), COALESCE(runner_pid, 0), COALESCE(runner_started_at, 0),
        COALESCE(sandbox_backend, ''), COALESCE(sandbox_mode, ''), COALESCE(sandbox_limitations, '')
 FROM agent_runs
 ORDER BY created_at DESC, id DESC;
@@ -4155,7 +4156,7 @@ ORDER BY created_at DESC, id DESC;
 	var runs []AgentRun
 	for rows.Next() {
 		var run AgentRun
-		if err := rows.Scan(&run.ID, &run.NamespaceID, &run.WorktreeID, &run.Engine, &run.Task, &run.PolicyID, &run.Status, &run.BaseRef, &run.BaseSHA, &run.Branch, &run.LogPath, &run.DiffSummary, &run.TestSummary, &run.RunnerPID, &run.SandboxBackend, &run.SandboxMode, &run.SandboxLimitations); err != nil {
+		if err := rows.Scan(&run.ID, &run.NamespaceID, &run.WorktreeID, &run.Engine, &run.Task, &run.PolicyID, &run.Status, &run.BaseRef, &run.BaseSHA, &run.Branch, &run.LogPath, &run.DiffSummary, &run.TestSummary, &run.RunnerPID, &run.RunnerStartedAt, &run.SandboxBackend, &run.SandboxMode, &run.SandboxLimitations); err != nil {
 			return nil, fmt.Errorf("scan agent run: %w", err)
 		}
 		runs = append(runs, run)
@@ -4167,7 +4168,7 @@ func (s *Store) RunningAgentRunsWithPID(ctx context.Context) ([]AgentRun, error)
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, namespace_id, COALESCE(worktree_id, ''), engine, task, COALESCE(policy_id, ''), status,
        COALESCE(base_ref, ''), COALESCE(base_sha, ''), COALESCE(branch, ''), COALESCE(log_path, ''),
-       COALESCE(diff_summary, ''), COALESCE(test_summary, ''), COALESCE(runner_pid, 0),
+       COALESCE(diff_summary, ''), COALESCE(test_summary, ''), COALESCE(runner_pid, 0), COALESCE(runner_started_at, 0),
        COALESCE(sandbox_backend, ''), COALESCE(sandbox_mode, ''), COALESCE(sandbox_limitations, '')
 FROM agent_runs
 WHERE status = 'running' AND runner_pid IS NOT NULL
@@ -4180,7 +4181,7 @@ ORDER BY created_at DESC, id DESC;
 	var runs []AgentRun
 	for rows.Next() {
 		var run AgentRun
-		if err := rows.Scan(&run.ID, &run.NamespaceID, &run.WorktreeID, &run.Engine, &run.Task, &run.PolicyID, &run.Status, &run.BaseRef, &run.BaseSHA, &run.Branch, &run.LogPath, &run.DiffSummary, &run.TestSummary, &run.RunnerPID, &run.SandboxBackend, &run.SandboxMode, &run.SandboxLimitations); err != nil {
+		if err := rows.Scan(&run.ID, &run.NamespaceID, &run.WorktreeID, &run.Engine, &run.Task, &run.PolicyID, &run.Status, &run.BaseRef, &run.BaseSHA, &run.Branch, &run.LogPath, &run.DiffSummary, &run.TestSummary, &run.RunnerPID, &run.RunnerStartedAt, &run.SandboxBackend, &run.SandboxMode, &run.SandboxLimitations); err != nil {
 			return nil, fmt.Errorf("scan running agent run: %w", err)
 		}
 		runs = append(runs, run)
@@ -4194,7 +4195,7 @@ func (s *Store) RunningAgentRunsByWorktree(ctx context.Context, worktreeID strin
 	rows, err := s.db.QueryContext(ctx, `
 SELECT id, namespace_id, COALESCE(worktree_id, ''), engine, task, COALESCE(policy_id, ''), status,
        COALESCE(base_ref, ''), COALESCE(base_sha, ''), COALESCE(branch, ''), COALESCE(log_path, ''),
-       COALESCE(diff_summary, ''), COALESCE(test_summary, ''), COALESCE(runner_pid, 0),
+       COALESCE(diff_summary, ''), COALESCE(test_summary, ''), COALESCE(runner_pid, 0), COALESCE(runner_started_at, 0),
        COALESCE(sandbox_backend, ''), COALESCE(sandbox_mode, ''), COALESCE(sandbox_limitations, '')
 FROM agent_runs
 WHERE status = 'running' AND worktree_id = ?
@@ -4207,7 +4208,7 @@ ORDER BY created_at DESC, id DESC;
 	var runs []AgentRun
 	for rows.Next() {
 		var run AgentRun
-		if err := rows.Scan(&run.ID, &run.NamespaceID, &run.WorktreeID, &run.Engine, &run.Task, &run.PolicyID, &run.Status, &run.BaseRef, &run.BaseSHA, &run.Branch, &run.LogPath, &run.DiffSummary, &run.TestSummary, &run.RunnerPID, &run.SandboxBackend, &run.SandboxMode, &run.SandboxLimitations); err != nil {
+		if err := rows.Scan(&run.ID, &run.NamespaceID, &run.WorktreeID, &run.Engine, &run.Task, &run.PolicyID, &run.Status, &run.BaseRef, &run.BaseSHA, &run.Branch, &run.LogPath, &run.DiffSummary, &run.TestSummary, &run.RunnerPID, &run.RunnerStartedAt, &run.SandboxBackend, &run.SandboxMode, &run.SandboxLimitations); err != nil {
 			return nil, fmt.Errorf("scan running agent run by worktree: %w", err)
 		}
 		runs = append(runs, run)

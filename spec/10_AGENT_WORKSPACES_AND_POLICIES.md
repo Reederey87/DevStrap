@@ -320,8 +320,8 @@ uncommitted, _ := r.Run(ctx, wt.Path, "status", "--short")
 
 **Shipped behavior.**
 1. `agent pr` rejects unless `Status == "complete"` with `exitConflict`, matching the stale-base refusal class; `--allow-incomplete` warns and proceeds.
-2. Migration `00021_agent_run_runner_pid.sql` records `agent_runs.runner_pid` for new runs. `agent list`, `agent show`, `agent pr`, and `doctor` sweep `running` rows whose recorder PID is dead to `interrupted`; rows with no recorded PID are left `running`.
-3. Tests cover failed-run refusal/override, dead-PID reconciliation before PR gating, live-PID preservation, and NULL-PID preservation.
+2. Migration `00021_agent_run_runner_pid.sql` records `agent_runs.runner_pid`; migration `00024_agent_run_runner_started_at.sql` adds the runner's opaque platform start-time identity. `agent list`, `agent show`, `agent pr`, and `doctor` sweep `running` rows whose recorder PID is dead or has been recycled to `interrupted`; rows with no PID are left `running`, and rows with no start identity retain PID-only behavior (`P7-GIT-03`).
+3. Tests cover failed-run refusal/override, dead-PID reconciliation before PR gating, matching and recycled live-PID identities, and NULL-PID preservation.
 
 **Example.**
 ```sql

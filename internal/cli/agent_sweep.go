@@ -12,7 +12,7 @@ func sweepStaleAgentRuns(ctx context.Context, store *state.Store) (reconciled in
 		return 0, 0, err
 	}
 	for _, run := range runs {
-		if processAlive(run.RunnerPID) {
+		if processIdentityAlive(run.RunnerPID, run.RunnerStartedAt) {
 			continue
 		}
 		if err := store.UpdateAgentRunStatus(ctx, run.ID, "interrupted"); err != nil {

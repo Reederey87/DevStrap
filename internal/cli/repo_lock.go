@@ -8,15 +8,19 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/Reederey87/DevStrap/internal/platform"
 )
 
 var (
 	repoLockStaleAfter   = 30 * time.Minute
 	repoLockProcessAlive = processAlive
+	processStartTime     = platform.ProcessStartTime
 )
 
 type repoLockInfo struct {
 	PID        int    `json:"pid"`
+	StartedAt  int64  `json:"started_at,omitempty"`
 	Hostname   string `json:"hostname"`
 	AcquiredAt string `json:"acquired_at"`
 }
@@ -106,8 +110,10 @@ func tryAcquireRepoLock(lockPath string) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
+	startedAt, _ := processStartTime(os.Getpid())
 	info := repoLockInfo{
 		PID:        os.Getpid(),
+		StartedAt:  startedAt,
 		Hostname:   hostname(),
 		AcquiredAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}
@@ -147,12 +153,13 @@ func repoLockIsStale(lockPath string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("parse repo lock acquired_at: %w", err)
 	}
-	// GIT-01: liveness is authoritative over age. A lock whose holder is
-	// provably alive on the same host must never be considered stale
-	// regardless of acquired_at. The age-based fallback applies only when
-	// liveness is indeterminate (cross-host) or the PID is confirmed dead.
+	// GIT-01/P7-GIT-03: same-host liveness is authoritative over age, but a
+	// recorded process start-time identity must also match so PID reuse cannot
+	// keep a crashed holder's lock alive forever. The age-based fallback applies
+	// only when liveness is indeterminate (cross-host) or the PID is confirmed
+	// dead.
 	if info.Hostname == hostname() && info.PID > 0 {
-		return !repoLockProcessAlive(info.PID), nil
+		return !processIdentityAlive(info.PID, info.StartedAt), nil
 	}
 	return time.Since(acquiredAt) > repoLockStaleAfter, nil
 }
@@ -196,6 +203,25 @@ func processAlive(pid int) bool {
 		return false
 	}
 	return process.Signal(syscall.Signal(0)) == nil
+}
+
+// processIdentityAlive reports whether pid is alive AND, when a start-time
+// identity was recorded, still the same process (PID-reuse guard, P7-GIT-03).
+// It is the single identity check behind both repo-lock staleness and the
+// agent-run sweep; liveness routes through the repoLockProcessAlive seam so
+// tests can fake it in one place.
+func processIdentityAlive(pid int, startedAt int64) bool {
+	if !repoLockProcessAlive(pid) {
+		return false
+	}
+	if startedAt == 0 {
+		return true
+	}
+	current, err := processStartTime(pid)
+	if err != nil {
+		return true // Indeterminate: never reclaim a holder we cannot disprove.
+	}
+	return current == startedAt
 }
 
 func hostname() string {

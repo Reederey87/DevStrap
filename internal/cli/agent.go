@@ -346,6 +346,7 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 					return state.AgentRun{}, state.Worktree{}, err
 				}
 				logPath := filepath.Join(opts.paths().Home, "logs", "agent-runs", runID+".log")
+				runnerStartedAt, _ := processStartTime(os.Getpid())
 				run, err := store.InsertAgentRun(cmd.Context(), state.AgentRun{
 					ID:                 runID,
 					NamespaceID:        project.ID,
@@ -355,6 +356,7 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 					PolicyID:           policy,
 					Status:             "running",
 					RunnerPID:          os.Getpid(),
+					RunnerStartedAt:    runnerStartedAt,
 					BaseRef:            wt.BaseRef,
 					BaseSHA:            wt.BaseSHA,
 					Branch:             wt.Branch,
