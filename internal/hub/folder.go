@@ -434,7 +434,11 @@ var hubProcessStartTime = platform.ProcessStartTime
 // hubLockOwnerAlive reports whether the recorded same-host owner is still the
 // process that took the lock. A live PID with a different start identity is a
 // recycled PID — the real holder is dead (P7-GIT-03 semantics). A zero or
-// unavailable identity keeps the conservative liveness-only answer.
+// unavailable identity keeps the conservative liveness-only answer. A false
+// "alive" (Linux boot-relative tick collision after reboot, or identity 0)
+// deliberately has no mtime backstop — the timeout error names the owner for
+// manual recovery — because any TTL override would reintroduce the suspended-
+// holder steal this design exists to prevent (spec/15 residual).
 func hubLockOwnerAlive(owner fsLockOwner) bool {
 	if !hubProcessAlive(owner.PID) {
 		return false

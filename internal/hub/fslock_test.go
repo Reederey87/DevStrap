@@ -173,6 +173,59 @@ func TestFSLockDeadPIDBrokenImmediately(t *testing.T) {
 	release()
 }
 
+func TestFSLockHeartbeatStopsWhenLockVanishes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.lock")
+	lock := testFSLock(path)
+	lock.heartbeat = 5 * time.Millisecond
+	release, err := lock.acquire()
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	// Simulate a break: the lock file disappears and a successor appears.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(30 * time.Millisecond) // let the heartbeat observe ErrNotExist and stop
+	writeFSLockOwner(t, path, localFSLockOwner(t, os.Getpid(), strings.Repeat("d", 32)))
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(info.ModTime()) < 30*time.Minute {
+		t.Fatal("stopped heartbeat still refreshed the successor's mtime")
+	}
+	release() // must not remove the successor (foreign nonce)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("release after break removed the successor's lock: %v", err)
+	}
+}
+
+func TestFSLockEmptyFileUsesTTLPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.lock")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lock := testFSLock(path)
+	// Fresh mtime: not stale, second acquire times out.
+	if _, err := lock.acquire(); err == nil {
+		t.Fatal("empty fresh lock file was broken before the TTL")
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	release, err := lock.acquire()
+	if err != nil {
+		t.Fatalf("acquire over expired empty lock: %v", err)
+	}
+	release()
+}
+
 func TestFSLockRecycledPIDBrokenImmediately(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hub.lock")
 	owner := localFSLockOwner(t, os.Getpid(), strings.Repeat("c", 32))

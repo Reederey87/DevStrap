@@ -46,6 +46,8 @@ Validated:
 - `go run ./cmd/spec-drift --base origin/main --head HEAD`
 - Implementer: Codex (gpt-5.6) from a written line-level spec; coordinator line-by-line review added the `ProcessStartTime` recycled-PID identity (review finding: a crashed holder whose PID was recycled to a long-lived process would otherwise wedge the lock forever, since the same-host live path ignores mtime).
 
+- Post-review (opus, dual-review): MERGE-READY verdict; two accepted residuals sharpened in spec/15 with concrete scenarios — (pre-existing, narrowed) two independent breakers that both verified the same stale record can interleave so the slower path-based `Remove` deletes the faster one's fresh lock (candidate close: flock-serialized decide+remove on a sibling breaker file — valid because the lock lives on the local filesystem); and a false-"alive" same-host owner (Linux boot-relative tick collision after reboot, identity 0 on unsupported platforms) wedges the lock until that process exits, deliberately without an mtime backstop (any TTL override would reintroduce the suspended-holder steal). Two review-suggested tests added: `TestFSLockHeartbeatStopsWhenLockVanishes`, `TestFSLockEmptyFileUsesTTLPath`.
+
 ## 2026-07-11 — fix(hub): os.Root-confined carrier file access (P7-SEC-04)
 
 Changed:
@@ -60,6 +62,8 @@ Validated:
 - Post-review (opus, dual-review): MERGE-READY; one consistency hardening applied — `writeMarkerLocked` now writes through the same `os.Root` handle (Lstat + O_EXCL create) instead of path-based `os.Stat`/`os.WriteFile`, so the marker write's confinement is structural rather than dependent on `validateMarkerLocked` having run first.
 
 Follow-ups:
+- Optional hardening: flock-serialize the fsLock breaker section (closes the two-breaker interleave, spec/15 residual).
+
 - None.
 
 ## 2026-07-11 — fix(state): migration 00023 rollback fails closed on populated env LWW coordinates (P7-DATA-07)
@@ -116,6 +120,7 @@ Validated:
 
 Follow-ups:
 - Repair ergonomics (optional): a `devstrap sync --accept-rewritten-carrier` that re-adopts AND resets the hub push/pull cursors (re-push is idempotent via conditional-put dedup) would automate lossy-accept repair instead of relying on the compact/snapshot path.
+
 ## 2026-07-11 — fix(git): guard repo locks and agent-run sweeps against PID reuse (P7-GIT-03)
 
 Changed:
