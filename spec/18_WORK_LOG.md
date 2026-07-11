@@ -111,6 +111,7 @@ Changed:
 Validated:
 - `go run github.com/goreleaser/goreleaser/v2@latest check`
 - `python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/release.yml'))"`
+- `bash -n` over the extracted 0-or-5 validation step (shell syntax of the array/`[[ ]]` gate)
 - `go run ./cmd/spec-drift --base origin/main --head HEAD`
 - `gofmt -w cmd internal` (no Go source changes)
 - `DEVSTRAP_NO_KEYCHAIN=1 go test ./cmd/... ./internal/cli/...`
