@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-03
+last_reviewed: 2026-07-10
 tracks_code: [cmd/**, internal/**, internal/config/**, .github/**, .goreleaser.yaml, scripts/**]
 ---
 # System Architecture
@@ -421,8 +421,12 @@ above `v0.1.0`, making the stable run rebuild rc artifacts (observed live on the
    per archive via syft. The signature transitively covers every artifact listed in
    `checksums.txt`. README documents the `cosign verify-blob` + `sha256sum -c` verification
    flow, and the `provenance` job attaches a SLSA v1 attestation (shipped PR #117). A dormant
-   `notarize:` block (Developer ID + notarization, the P4-SEC-05 remainder) self-activates via
-   `isEnvSet` once the `MACOS_*` secrets exist — see `RELEASING.md` "Enabling notarization".
+   `notarize:` block (Developer ID + notarization, the P4-SEC-05 remainder) keeps its existing
+   `isEnvSet "MACOS_SIGN_P12"` activation, while the release workflow enforces that exactly
+   zero or all five `MACOS_*` secrets are set before GoReleaser runs. Because the publisher
+   runs on Ubuntu and cannot execute `spctl`, Gatekeeper assessment of the published darwin
+   binary on a Mac is a required manual post-release smoke step — see `RELEASING.md`
+   "Enabling notarization".
 3. **`curl | sh` installer** — `scripts/install.sh`, served raw from `main`. POSIX sh; picks
    os/arch, resolves the latest tag (or `DEVSTRAP_VERSION`), verifies the tarball against
    `checksums.txt` **before** extraction, installs into `/usr/local/bin` or `~/.local/bin`

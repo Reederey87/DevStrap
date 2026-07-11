@@ -61,12 +61,13 @@ signs:
 
 # Apple Developer ID signing + notarization (the P4-SEC-05 remainder). DORMANT
 # by design: `enabled` templates to false until the MACOS_SIGN_P12 secret
-# exists in the release workflow env, so this block is inert today and
-# self-activates the moment the five MACOS_* Actions secrets are set — no
-# config change needed. Enrollment checklist + activation steps live in
-# RELEASING.md ("Enabling notarization"). Once active, remove the cask's
-# quarantine-strip hook below. Deadline: Homebrew drops support for
-# Gatekeeper-failing casks 2026-09-01.
+# exists in the release workflow env. The workflow enforces a 0-or-5 gate
+# before GoReleaser, so this block remains inert with no secrets and activates
+# only after all five MACOS_* Actions secrets are set together — no config
+# change needed. Enrollment checklist + activation steps live in RELEASING.md
+# ("Enabling notarization"). Once active, remove the cask's quarantine-strip
+# hook below. Deadline: Homebrew drops support for Gatekeeper-failing casks
+# 2026-09-01.
 notarize:
   macos:
     - enabled: '{{ isEnvSet "MACOS_SIGN_P12" }}'

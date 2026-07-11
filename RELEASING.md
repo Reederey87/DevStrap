@@ -107,8 +107,10 @@ keyless (its Fulcio identity is recorded in the Rekor transparency log) — not 
 The release binaries are ad-hoc signed today, so `brew install --cask`'s quarantine bit would
 block them — the cask strips it in a post-install hook. Homebrew **removes support for
 Gatekeeper-failing casks on 2026-09-01**, so Developer ID signing + notarization must be live
-before then. The `.goreleaser.yaml` `notarize:` block is already wired and self-activates when
-the secrets below exist (`isEnvSet "MACOS_SIGN_P12"`); nothing else changes.
+before then. The `.goreleaser.yaml` `notarize:` block is already wired. The release workflow
+accepts exactly zero or all five secrets below, failing before GoReleaser and naming the set
+and missing secret names if configuration is partial. With all five present, the existing
+`isEnvSet "MACOS_SIGN_P12"` expression activates notarization; nothing else changes.
 
 One-time enrollment checklist:
 
@@ -127,16 +129,23 @@ One-time enrollment checklist:
    gh secret set MACOS_NOTARY_ISSUER_ID --repo Reederey87/DevStrap
    ```
 
-   Set **all five in one sitting**: with only `MACOS_SIGN_P12` present, GoReleaser signs but
-   silently skips notarization — Gatekeeper still fails, while the binaries stop being ad-hoc
-   signed. All-or-nothing.
+   Set **all five in one sitting**. The release workflow enforces this 0-or-5 contract before
+   GoReleaser runs and fails with only the set and missing secret names (never their values)
+   when configuration is partial.
 
-5. Cut an rc; on the published darwin binaries verify Gatekeeper acceptance:
+5. Cut an rc. The release job runs on Ubuntu, where `spctl` is unavailable, so this is a
+   **required manual post-release smoke step**: download and extract a published darwin
+   archive on a Mac, then verify the binary's signature and Gatekeeper acceptance:
 
    ```bash
+   gh release download vX.Y.Z -R Reederey87/DevStrap -p 'devstrap_*_darwin_arm64.tar.gz'
+   tar -xzf devstrap_*_darwin_arm64.tar.gz
    codesign -dv ./devstrap        # TeamIdentifier set, not "adhoc"
-   spctl -a -vvv -t install ./devstrap
+   spctl --assess --type execute -vvv ./devstrap
    ```
+
+   A rejected or unnotarized binary blocks the release; do not promote the rc or update the
+   Homebrew cask until this command passes.
 
 6. Remove the cask's `xattr -dr com.apple.quarantine` post-install hook from
    `.goreleaser.yaml` (and this file's smoke-checklist mention of it) in the same PR that

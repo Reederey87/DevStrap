@@ -101,6 +101,22 @@ Validated:
 
 Follow-ups:
 - `P7-SEC-03` (separate finding): under `--sandbox require` the Landlock fallback still cannot subtract the standalone credential deny — auto-engaging read-confine there subsumes these paths.
+## 2026-07-10 — chore(release): gate macOS notarization on all five MACOS_* secrets (0-or-5) + Gatekeeper verification (P7-QUAL-03)
+
+Changed:
+- `.github/workflows/release.yml`: added a pre-GoReleaser 0-or-5 validation step for `MACOS_SIGN_P12`, `MACOS_SIGN_PASSWORD`, `MACOS_NOTARY_KEY`, `MACOS_NOTARY_KEY_ID`, and `MACOS_NOTARY_ISSUER_ID`. Partial configuration fails early and reports exactly the set/missing names without printing values; the dormant `isEnvSet "MACOS_SIGN_P12"` activation remains unchanged.
+- `.goreleaser.yaml`, `RELEASING.md`, and `spec/03_SYSTEM_ARCHITECTURE.md`: documented the all-five-at-once contract. Since the release publisher runs on Ubuntu, `spctl` cannot run in-job; the enrollment checklist now requires downloading and extracting a darwin artifact on a Mac and passing `spctl --assess --type execute` before promotion or cask update.
+- `docs/audits/README.md`: moved `P7-QUAL-03` from the Pass 7 open table to *Recently shipped* and reconciled the open counts.
+
+Validated:
+- `go run github.com/goreleaser/goreleaser/v2@latest check`
+- `python3 -c "import yaml,sys; yaml.safe_load(open('.github/workflows/release.yml'))"`
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `gofmt -w cmd internal` (no Go source changes)
+- `DEVSTRAP_NO_KEYCHAIN=1 go test ./cmd/... ./internal/cli/...`
+
+Follow-ups:
+- Full signing, notarization, and Gatekeeper runtime verification is impossible until the next tag. On that release, complete the required manual macOS `spctl` smoke step before promotion or Homebrew cask update.
 
 ## 2026-07-10 — chore(deps): bump golang.org/x/crypto v0.52.0, golang.org/x/net v0.55.0
 
