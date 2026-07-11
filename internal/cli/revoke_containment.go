@@ -113,11 +113,10 @@ func resumeRevokeContainment(ctx context.Context, stdout io.Writer, opts *option
 	if err != nil || !pending {
 		return err
 	}
-	if malformed {
-		_, _ = fmt.Fprintln(stdout, "warning: revoke containment marker is malformed; leaving it pending for manual repair")
-		return nil
-	}
 	if !rotationAccounted {
+		// The rotation half of containment hasn't run/been owed this cycle;
+		// don't do the rest yet. (A malformed marker still opened the rotation
+		// gate, so a rotation was attempted — this branch is the not-yet case.)
 		return nil
 	}
 	if _, err := store.MarkEncryptedBindingsNeedingRotation(ctx); err != nil {
@@ -126,6 +125,21 @@ func resumeRevokeContainment(ctx context.Context, stdout io.Writer, opts *option
 	}
 	if _, err := rewrapBlobsOnRevoke(ctx, store, opts, hub); err != nil {
 		_, _ = fmt.Fprintf(stdout, "warning: pending revoke blob re-encryption incomplete: %v\n", err)
+		return nil
+	}
+	if malformed {
+		// A malformed record names no devices, but the rotation that just ran
+		// (or is durably owed) excludes EVERY locally-revoked device — so the
+		// only containment left is per-device ack deletion, which we cannot
+		// target and which `hub compact` reclaims anyway. Clear the whole row
+		// so the rotation gate does not fire on every subsequent sync (a
+		// storm); the global containment above has run. Fail-closed only on
+		// the read side (never treat a corrupt marker as "nothing pending");
+		// here containment is proven done, so clearing is correct.
+		if cerr := store.DeleteLocalMeta(ctx, revokeContainmentPendingMetaKey); cerr != nil {
+			return cerr
+		}
+		_, _ = fmt.Fprintln(stdout, "Recovered a malformed revoke-containment marker: rotation + secret flags + blob rewrap re-run; cleared (per-device ack cleanup deferred to hub compact)")
 		return nil
 	}
 	ids := sortedPendingRevokeIDs(devices)

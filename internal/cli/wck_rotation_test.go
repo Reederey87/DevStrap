@@ -280,7 +280,47 @@ func TestRevokeContainmentMalformedRecordStaysPending(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, ok, err := st.GetLocalMeta(ctx, revokeContainmentPendingMetaKey); err != nil || !ok {
-		t.Fatalf("malformed marker was cleared: ok=%v err=%v", ok, err)
+		t.Fatalf("malformed marker was cleared by a by-device clear: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestSyncClearsMalformedContainmentMarker pins the CodeRabbit fix: a malformed
+// marker previously opened the rotation gate on every sync (a Rotate storm)
+// because resume only warned and never cleared it. Now a sync runs the
+// device-independent containment (rotation + bindings flag + rewrap) and
+// DELETES the whole malformed row, so the gate stops firing; per-device ack
+// cleanup defers to hub compact.
+func TestSyncClearsMalformedContainmentMarker(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	ctx := context.Background()
+	home, root := rotateTestHome(t)
+	// Establish a real revoke (full home + a valid, then corrupted, marker).
+	previous := currentWorkspaceKeyEpochOnRevoke
+	currentWorkspaceKeyEpochOnRevoke = func(context.Context, *options, *state.Store) (int64, error) {
+		return 0, errors.New("injected current epoch failure")
+	}
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "devices", "revoke", "dev_rotate_peer"); err != nil {
+		currentWorkspaceKeyEpochOnRevoke = previous
+		t.Fatalf("revoke: %v (%s)", err, stderr)
+	}
+	currentWorkspaceKeyEpochOnRevoke = previous
+
+	st := openTestStore(t, home)
+	if err := st.SetLocalMeta(ctx, revokeContainmentPendingMetaKey, "{garbage"); err != nil {
+		t.Fatal(err)
+	}
+
+	hubFile := filepath.Join(t.TempDir(), "hub.json")
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "sync", "--hub-file", hubFile, "--namespace-only")
+	if err != nil {
+		t.Fatalf("sync: %v (stdout=%s stderr=%s)", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Recovered a malformed revoke-containment marker") {
+		t.Fatalf("sync output = %q, want malformed-marker recovery", stdout)
+	}
+	st2 := openTestStore(t, home)
+	if _, pending, _, err := revokeContainmentPending(ctx, st2); err != nil || pending {
+		t.Fatalf("malformed containment still pending after sync = %v, %v; want cleared", pending, err)
 	}
 }
 
