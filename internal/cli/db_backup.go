@@ -154,6 +154,15 @@ func runFullBackup(ctx context.Context, opts *options, store *state.Store, out s
 		WorkspaceID: workspaceID,
 		DeviceID:    device.ID,
 		KeyCustody:  string(custody),
+		// Required is the independent recoverable core — set explicitly, NOT
+		// mirrored from Entries, so the verify-side subset check is a real
+		// guarantee (opus review): a crafted archive whose manifest omits the
+		// device keys fails closed even before the completeness probe.
+		Required: []string{
+			backupEntryDB,
+			path.Join(backupDirKeys, device.ID+".agekey"),
+			path.Join(backupDirKeys, device.ID+".signing.key"),
+		},
 	}
 
 	result, err := writeBackupTar(out, tmpDB, paths, refs, keySourceDir, keyNames, manifest)
@@ -321,7 +330,6 @@ func writeBackupTar(out, dbPath string, paths config.Paths, refs []string, keySo
 		size, sum, addErr := addFileToTar(tw, name, src)
 		if addErr == nil {
 			manifest.Entries = append(manifest.Entries, backupManifestEntry{Name: name, Size: size, SHA256: sum})
-			manifest.Required = append(manifest.Required, name)
 		}
 		return addErr
 	}

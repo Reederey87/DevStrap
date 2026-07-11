@@ -44,6 +44,8 @@ Validated:
 - `gofmt -w cmd internal`; `GOCACHE=/tmp/devstrap-gocache go test ./internal/state/ ./internal/cli/ -count=1`; `GOCACHE=/tmp/devstrap-gocache go test ./cmd/devstrap -run 'TestScript/db_' -count=1`.
 - Provenance: ported from the interrupted prior session's `fix/p7-data-backup-hardening` combined branch (its DATA-04 slice), adapted by Codex (gpt-5.6) onto the shipped PR-#162 DATA-03 base; coordinator line-by-line review.
 
+- Post-review (opus, dual-review): MERGE-READY; two dispositions — (fixed) `manifest.Required` was tautological (mirrored from `Entries`), it is now set independently to the recoverable core (`state.db` + the device age/signing key files) so the verify-side subset check is a real guarantee; (accepted, documented) the manifest is in-archive and unsigned — it detects corruption/truncation, not tampering; authenticity rests on the completeness probe + DB validation, and the prose deliberately does not claim tamper-resistance.
+
 Follow-ups:
 - P7-DATA-05 (journaled all-or-nothing promotion + `db restore --recover`) ports next from the same reference branch.
 
