@@ -1953,3 +1953,93 @@ UPDATE draft_snapshots SET created_at = ? WHERE source_event_id = ?;
 		t.Fatalf("BlobRef = %q, want winner's blob", latest.BlobRef)
 	}
 }
+
+// TestRetainedBlobRefsDeterministicTiebreakMatchesPrune (P7-SYNC-03): on an
+// HLC tie, RetainedBlobRefs (the `hub gc --dry-run` preview) must rank the
+// same canonical (source_event_device_id, source_event_id) winner that
+// PruneDraftSnapshots actually keeps, not the locally-newest created_at/id
+// row — otherwise a dry-run preview can name the opposite blob as retained
+// from what the real prune run would keep.
+func TestRetainedBlobRefsDeterministicTiebreakMatchesPrune(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureWorkspace(ctx, "personal", "/tmp/Code"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.EnsureDevice(ctx, "test-device"); err != nil {
+		t.Fatal(err)
+	}
+	project, err := st.UpsertProject(ctx, UpsertProjectParams{
+		Path: "work/draft-retained-tie",
+		Type: "draft_project",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const sameHLC int64 = 1_700_000_000_000
+	// Canonical winner: higher device id (and higher event id) — insert first.
+	winner := Event{ID: "evt_z_winner", DeviceID: "device_z", HLC: sameHLC}
+	// Canonical loser: lower device id — insert second so local wall-clock/
+	// snap id would win under the old ORDER BY created_at DESC, id DESC.
+	loser := Event{ID: "evt_a_loser", DeviceID: "device_a", HLC: sameHLC}
+
+	winnerBlob := "age_blob:" + strings.Repeat("a", 64)
+	loserBlob := "age_blob:" + strings.Repeat("b", 64)
+	if err := st.RecordDraftSnapshot(ctx, project.ID, winnerBlob, 10, 1, winner); err != nil {
+		t.Fatalf("RecordDraftSnapshot winner: %v", err)
+	}
+	if err := st.RecordDraftSnapshot(ctx, project.ID, loserBlob, 20, 2, loser); err != nil {
+		t.Fatalf("RecordDraftSnapshot loser: %v", err)
+	}
+
+	// Force created_at so old ordering demonstrably prefers the loser even if
+	// both RecordDraftSnapshot calls shared the same nanosecond timestamp.
+	early := formatTimestamp(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	late := formatTimestamp(time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC))
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE draft_snapshots SET created_at = ? WHERE source_event_id = ?;
+`, early, winner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+UPDATE draft_snapshots SET created_at = ? WHERE source_event_id = ?;
+`, late, loser.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	retained, err := st.RetainedBlobRefs(ctx, 1)
+	if err != nil {
+		t.Fatalf("RetainedBlobRefs: %v", err)
+	}
+	if len(retained) != 1 || retained[0] != winnerBlob {
+		t.Fatalf("RetainedBlobRefs = %v, want [%s] (dry-run preview must agree with the canonical prune winner)", retained, winnerBlob)
+	}
+
+	// Confirm the real prune run keeps the SAME blob the dry-run preview named.
+	pruned, err := st.PruneDraftSnapshots(ctx, 1)
+	if err != nil {
+		t.Fatalf("PruneDraftSnapshots: %v", err)
+	}
+	if pruned != 1 {
+		t.Fatalf("pruned = %d, want 1", pruned)
+	}
+	latest, err := st.LatestDraftSnapshot(ctx, project.ID)
+	if err != nil {
+		t.Fatalf("LatestDraftSnapshot: %v", err)
+	}
+	if latest == nil || latest.BlobRef != winnerBlob {
+		var gotBlob string
+		if latest != nil {
+			gotBlob = latest.BlobRef
+		}
+		t.Fatalf("surviving blob after prune = %q, want %q (must match the dry-run preview)", gotBlob, winnerBlob)
+	}
+}

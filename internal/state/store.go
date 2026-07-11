@@ -2369,6 +2369,9 @@ func (s *Store) ClearPendingHubDelete(ctx context.Context, ref string) error {
 // plus the top-`keep` draft snapshot refs per namespace. `hub gc --dry-run` uses
 // this so its preview matches what a real run (prune + delete) would leave
 // referenced, instead of counting soon-to-be-pruned superseded snapshots as live.
+// Ranks by the same canonical (hlc, source_event_device_id, source_event_id)
+// coordinate as PruneDraftSnapshots so the dry-run preview never names a
+// different blob than the real prune actually keeps (P7-SYNC-03).
 func (s *Store) RetainedBlobRefs(ctx context.Context, keep int) ([]string, error) {
 	if keep < 1 {
 		keep = 1
@@ -2379,7 +2382,7 @@ UNION
 SELECT blob_ref FROM (
   SELECT blob_ref, ROW_NUMBER() OVER (
     PARTITION BY namespace_id
-    ORDER BY COALESCE(source_event_hlc, 0) DESC, created_at DESC, id DESC
+    ORDER BY COALESCE(source_event_hlc, 0) DESC, COALESCE(source_event_device_id, '') DESC, COALESCE(source_event_id, '') DESC
   ) AS rn
   FROM draft_snapshots
   WHERE blob_ref LIKE 'age_blob:%'
