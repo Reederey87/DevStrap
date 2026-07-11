@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -230,6 +231,48 @@ func TestFSLockEmptyFileUsesTTLPath(t *testing.T) {
 // INCOMPLETE record (e.g. a crash left only {"hostname":...}, PID 0) must be
 // judged by the mtime TTL like any corrupt lock — never insta-broken via the
 // "PID 0 is dead" path, and never held forever.
+// TestFSLockPublishedRecordIsAlwaysComplete (CodeRabbit): the lock file is
+// link-published from a fully-written staged record, so a concurrent reader
+// must NEVER observe an empty or torn owner record — the create-then-write
+// shape this replaces had exactly that window.
+func TestFSLockPublishedRecordIsAlwaysComplete(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.lock")
+	stopPoll := make(chan struct{})
+	pollDone := make(chan struct{})
+	var torn atomic.Int32
+	go func() {
+		defer close(pollDone)
+		for {
+			select {
+			case <-stopPoll:
+				return
+			default:
+			}
+			raw, err := os.ReadFile(path)
+			if err == nil {
+				var owner fsLockOwner
+				if len(raw) == 0 || json.Unmarshal(raw, &owner) != nil || !validFSLockOwner(owner) {
+					torn.Add(1)
+					return
+				}
+			}
+		}
+	}()
+	for i := 0; i < 50; i++ {
+		lock := testFSLock(path)
+		release, err := lock.acquire()
+		if err != nil {
+			t.Fatalf("acquire %d: %v", i, err)
+		}
+		release()
+	}
+	close(stopPoll)
+	<-pollDone
+	if torn.Load() != 0 {
+		t.Fatal("a concurrent reader observed an empty or torn owner record")
+	}
+}
+
 func TestFSLockPartialOwnerRecordUsesTTLPath(t *testing.T) {
 	hostname, err := os.Hostname()
 	if err != nil {

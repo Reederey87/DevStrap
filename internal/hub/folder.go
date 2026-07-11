@@ -453,6 +453,38 @@ func hubLockOwnerAlive(owner fsLockOwner) bool {
 	return current == owner.StartedAt
 }
 
+// stageOwnerRecord writes this process's complete owner record to a private
+// temp file beside the lock, ready for an atomic link-publish. The caller
+// removes the temp file whether or not the link wins.
+func (l fsLock) stageOwnerRecord() (fsLockOwner, string, error) {
+	nonceBytes := make([]byte, 16)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		return fsLockOwner{}, "", fmt.Errorf("generate hub lock nonce: %w", err)
+	}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return fsLockOwner{}, "", fmt.Errorf("get hostname for hub lock: %w", err)
+	}
+	startedAt, _ := hubProcessStartTime(os.Getpid()) // 0 on unsupported platforms: liveness-only fallback
+	owner := fsLockOwner{
+		Version:    1,
+		PID:        os.Getpid(),
+		Hostname:   hostname,
+		Nonce:      hex.EncodeToString(nonceBytes),
+		AcquiredAt: time.Now().Format(time.RFC3339),
+		StartedAt:  startedAt,
+	}
+	raw, err := json.Marshal(owner)
+	if err != nil {
+		return fsLockOwner{}, "", fmt.Errorf("marshal hub lock owner: %w", err)
+	}
+	tmpName := l.path + ".stage-" + owner.Nonce
+	if err := os.WriteFile(tmpName, raw, 0o600); err != nil { //nolint:gosec // private hub cache dir
+		return fsLockOwner{}, "", fmt.Errorf("stage hub lock owner: %w", err)
+	}
+	return owner, tmpName, nil
+}
+
 // acquire takes the in-process mutex plus the cross-process lock file and
 // returns the release func.
 func (l fsLock) acquire() (func(), error) {
@@ -463,49 +495,21 @@ func (l fsLock) acquire() (func(), error) {
 	}
 	deadline := time.Now().Add(l.wait)
 	for {
-		f, err := os.OpenFile(l.path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // lock file under the private hub cache dir
+		// Publish atomically: build the COMPLETE owner record in a private
+		// temp file, then os.Link it to the lock path. Link fails with EEXIST
+		// when the lock is held (the same mutual exclusion O_EXCL gave), and a
+		// contender can never observe an empty or torn record — the previous
+		// create-then-write shape had a window where a suspension between the
+		// two left a fresh empty file that aged into a TTL break, stealing a
+		// live holder's lock (CodeRabbit).
+		owner, tmpName, err := l.stageOwnerRecord()
+		if err != nil {
+			l.mu.Unlock()
+			return nil, err
+		}
+		err = os.Link(tmpName, l.path)
+		_ = os.Remove(tmpName)
 		if err == nil {
-			nonceBytes := make([]byte, 16)
-			if _, randErr := rand.Read(nonceBytes); randErr != nil {
-				_ = f.Close()
-				_ = os.Remove(l.path)
-				l.mu.Unlock()
-				return nil, fmt.Errorf("generate hub lock nonce: %w", randErr)
-			}
-			hostname, hostErr := os.Hostname()
-			if hostErr != nil {
-				_ = f.Close()
-				_ = os.Remove(l.path)
-				l.mu.Unlock()
-				return nil, fmt.Errorf("get hostname for hub lock: %w", hostErr)
-			}
-			startedAt, _ := hubProcessStartTime(os.Getpid()) // 0 on unsupported platforms: liveness-only fallback
-			owner := fsLockOwner{
-				Version:    1,
-				PID:        os.Getpid(),
-				Hostname:   hostname,
-				Nonce:      hex.EncodeToString(nonceBytes),
-				AcquiredAt: time.Now().Format(time.RFC3339),
-				StartedAt:  startedAt,
-			}
-			raw, marshalErr := json.Marshal(owner)
-			if marshalErr != nil {
-				_ = f.Close()
-				_ = os.Remove(l.path)
-				l.mu.Unlock()
-				return nil, fmt.Errorf("marshal hub lock owner: %w", marshalErr)
-			}
-			if _, writeErr := f.Write(raw); writeErr != nil {
-				_ = f.Close()
-				_ = os.Remove(l.path)
-				l.mu.Unlock()
-				return nil, fmt.Errorf("write hub lock owner: %w", writeErr)
-			}
-			if closeErr := f.Close(); closeErr != nil {
-				_ = os.Remove(l.path)
-				l.mu.Unlock()
-				return nil, fmt.Errorf("close hub lock owner: %w", closeErr)
-			}
 			stop := make(chan struct{})
 			done := make(chan struct{})
 			go func() {

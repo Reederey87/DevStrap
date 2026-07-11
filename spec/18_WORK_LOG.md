@@ -48,6 +48,8 @@ Validated:
 
 - Post-review (opus, dual-review): MERGE-READY verdict; two accepted residuals sharpened in spec/15 with concrete scenarios — (pre-existing, narrowed) two independent breakers that both verified the same stale record can interleave so the slower path-based `Remove` deletes the faster one's fresh lock (candidate close: flock-serialized decide+remove on a sibling breaker file — valid because the lock lives on the local filesystem); and a false-"alive" same-host owner (Linux boot-relative tick collision after reboot, identity 0 on unsupported platforms) wedges the lock until that process exits, deliberately without an mtime backstop (any TTL override would reintroduce the suspended-holder steal). Two review-suggested tests added: `TestFSLockHeartbeatStopsWhenLockVanishes`, `TestFSLockEmptyFileUsesTTLPath`.
 
+- Post-review (CodeRabbit, round 2): (Major fixed) the owner record is now STAGED in full and link-published atomically (`stageOwnerRecord` + `os.Link`, EEXIST = contention), replacing the O_EXCL create-then-write shape whose empty-file window could age into a TTL break stealing a suspended creator's lock; pinned by `TestFSLockPublishedRecordIsAlwaysComplete` (concurrent reader never observes an empty/torn record across 50 acquire/release cycles) alongside the earlier `TestFSLockPartialOwnerRecordUsesTTLPath` (incomplete records fall to the TTL, never the dead-PID-0 path, via `validFSLockOwner`). (Minor fixed) the ledger row and spec/15 now qualify immediate recycled-PID detection on a usable, resolvable process identity.
+
 ## 2026-07-11 — fix(hub): os.Root-confined carrier file access (P7-SEC-04)
 
 Changed:
