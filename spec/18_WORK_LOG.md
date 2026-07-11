@@ -46,6 +46,7 @@ Validated:
 - `GOCACHE=/tmp/devstrap-gocache go test ./cmd/devstrap -run 'TestScript/db_full_backup' -count=1`
 - `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` (0 issues)
 - Implementer: grok-4.5 from a written line-level spec; coordinator line-by-line review (one fix applied: the unreadable-blob tar error now wraps the underlying error instead of always claiming "missing on disk").
+- Post-review (Codex): accepted-with-residual — the referenced ciphertext files are not frozen between the retry loop's final stat pass and the tar write, so a rotation landing in that window still fails the backup. Deliberate: the failure is LOUD (hard error, partial archive removed), never a silent omission; re-running the backup is the remedy. Documented at writeBackupTar.
 
 ## 2026-07-11 — fix(hub): fsLock owner identity + nonce-verified break/release (P7-QUAL-07)
 
