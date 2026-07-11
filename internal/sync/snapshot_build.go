@@ -34,6 +34,10 @@ func BuildSnapshot(ctx context.Context, st *state.Store, producedBy string, hlc 
 	if err != nil {
 		return Snapshot{}, err
 	}
+	trust, err := st.SnapshotTrust(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
 
 	snap := Snapshot{
 		WorkspaceID: workspaceID,
@@ -101,6 +105,16 @@ func BuildSnapshot(ctx context.Context, st *state.Store, producedBy string, hlc 
 			Seq:         a.Seq,
 			ContentHash: a.ContentHash,
 			HLC:         a.HLC,
+		})
+	}
+	// Terminal device trust rides in the snapshot (P7-SYNC-01): the
+	// device.revoked/device.lost events below the floor are about to be
+	// deleted, so this projection is the only way a snapshot-bootstrapped
+	// device ever learns the revocation.
+	for _, tr := range trust {
+		snap.Trust = append(snap.Trust, SnapshotTrust{
+			DeviceID: tr.DeviceID,
+			State:    tr.TrustState,
 		})
 	}
 	return snap, nil

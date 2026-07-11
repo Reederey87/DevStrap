@@ -79,6 +79,15 @@ type SnapshotTombstone struct {
 	SourceEventID       string
 }
 
+// SnapshotTrustRow is one terminal device-trust row (revoked/lost) read for
+// snapshot production (P7-SYNC-01): compaction deletes the device.revoked/
+// device.lost event, so the snapshot must carry the derived terminal state or
+// a snapshot-bootstrapped device keeps the revoked device approved forever.
+type SnapshotTrustRow struct {
+	DeviceID   string
+	TrustState string
+}
+
 // SnapshotChainAnchor is one origin device's hash-chain anchor for the snapshot:
 // the content hash of the last event the snapshot covers for that device (at
 // seq = floor-1).
@@ -229,6 +238,31 @@ ORDER BY path_key;
 			return nil, fmt.Errorf("scan snapshot tombstone: %w", err)
 		}
 		out = append(out, ts)
+	}
+	return out, rows.Err()
+}
+
+// SnapshotTrust returns every device row in a TERMINAL trust state
+// (revoked/lost) in deterministic id order (P7-SYNC-01). pending/approved rows
+// are excluded by design — approval re-grants ride as fresh events above the
+// floor — and the local device can never match (its state is 'local').
+func (s *Store) SnapshotTrust(ctx context.Context) ([]SnapshotTrustRow, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, trust_state FROM devices
+WHERE trust_state IN ('revoked', 'lost')
+ORDER BY id;
+`)
+	if err != nil {
+		return nil, fmt.Errorf("read snapshot device trust: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []SnapshotTrustRow
+	for rows.Next() {
+		var tr SnapshotTrustRow
+		if err := rows.Scan(&tr.DeviceID, &tr.TrustState); err != nil {
+			return nil, fmt.Errorf("scan snapshot device trust: %w", err)
+		}
+		out = append(out, tr)
 	}
 	return out, rows.Err()
 }

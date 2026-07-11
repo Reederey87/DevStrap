@@ -42,6 +42,10 @@ func testSnapshot() Snapshot {
 			SourceEventDeviceID: "dev_b",
 			SourceEventID:       "evt_2",
 		}},
+		Trust: []SnapshotTrust{{
+			DeviceID: "dev_c",
+			State:    "revoked",
+		}},
 	}
 }
 
@@ -81,6 +85,9 @@ func TestSealUnsealSnapshotRoundTrip(t *testing.T) {
 	}
 	if got.Floor.After("dev_b") != 3 || len(got.Anchors) != 2 {
 		t.Fatalf("floor/anchors did not round-trip: %+v %+v", got.Floor, got.Anchors)
+	}
+	if len(got.Trust) != 1 || got.Trust[0].DeviceID != "dev_c" || got.Trust[0].State != "revoked" {
+		t.Fatalf("trust did not round-trip: %+v", got.Trust)
 	}
 }
 

@@ -31,6 +31,27 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-10 — fix(sync): carry terminal device-trust in snapshot.v2 (P7-SYNC-01, the Pass-7 P1)
+
+Changed:
+- `internal/sync/snapshot.go`: `snapshotVersion` 1→2; new `Trust []SnapshotTrust{DeviceID, State}` on the snapshot document (revoked/lost only, State-only — no source-event coordinates: the revoke event may already be compacted away on the builder, and `ApplyRemoteDeviceTrustTx` is sticky/monotonic with no HLC compare, so State-only import is exactly equivalent to replay; `P7-SYNC-02`'s future `revoked_at_hlc` becomes an additive `omitempty` field). Envelope/document version checks stay exact-equality fail-closed (old binaries refuse v2; this binary refuses trust-less v1 snapshots); retention-manifest READS accept `{1,2}` via `retentionManifestVersionOK` (floors are trust-neutral, and the first upgraded compactor must reconcile the pre-existing v1 manifest before it can publish v2 — a pure bump would wedge its own remedy) while `SignRetentionManifest` stamps 2. The helper is the seam where `P7-PROD-03`'s min-reader range lands.
+- `internal/state/snapshot_reads.go`: `SnapshotTrustRow` + `Store.SnapshotTrust` (revoked/lost rows, deterministic id order).
+- `internal/sync/snapshot_build.go`: fifth store read populates `snap.Trust`.
+- `internal/sync/snapshot_import.go`: `importTrustTx` inside the existing single import transaction, mirroring the `EventDeviceRevoked`/`EventDeviceLost` apply exactly (`EnsureRemoteDeviceTx` → `ApplyRemoteDeviceTrustTx`; `MarkEncryptedBindingsNeedingRotationTx` once on an actual flip; never flips local; re-import no-op; malformed row aborts the WHOLE import fail-closed). The `wck_rotation_pending` marker is deliberately NOT set here — the same asymmetry exists on the events apply path and is tracked as `P7-SYNC-04`.
+- `internal/cli/snapshot_recovery.go`: envelope-parse failures now name the remedy (run `hub compact` from an upgraded device).
+- Tests: `internal/sync/snapshot_trust_test.go` (build carries terminal trust only; import flips approved→revoked/pending→lost + flags rotation; re-import no-re-flag; own-device never flips; unknown target → revoked placeholder; malformed row aborts atomically; trust import≡replay pin; version fail-closed matrix incl. hand-sealed v1 document; retention-manifest v1-accept/v3-refuse); `testSnapshot()` round-trips a trust row; e2e `cmd/devstrap/testdata/script/hub_compact_trust_recovery.txtar` pins the full P1 scenario — A/B/C converge, C offline, A revokes B (epoch 2) and compacts (revoke event AND C's epoch-2 grant deleted below the floor), C returns → keyless defer (fail-closed), operator re-approves C (grants land above the floor), C snapshot-recovers → **B lands revoked on C with rotation flagged**, and revoked B's own sync stays locked out at the snapshot gate.
+- Docs: `spec/07` snapshot-object inventory rewritten for v2 (trust rows, both-ways fail-closed versioning, manifest read-compat) and the TRUST-01 "whole fleet learns the decision"/"fleet-wide" claims qualified (pre-fix they held only for devices online across the revoke-to-compaction window); `spec/15` P6-SYNC-01 threat section gains the compaction-survival note + the accepted stale-snapshot-re-flip residual; ledger row moved to *Recently shipped* (Pass-7 open 47→46, P1 1→0).
+
+Validated:
+- `gofmt -l cmd internal` (clean)
+- `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run`
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `DEVSTRAP_NO_KEYCHAIN=1 go test -race ./...` (incl. the untouched `import_replay_property_test.go` import≡replay property and the new txtar)
+
+Follow-ups:
+- `P7-SYNC-04`: remote/snapshot trust flips should make the RECEIVER owe a WCK rotation (`wck_rotation_pending`) — next PR in this wave.
+- Observed while building the e2e (pre-existing, distinct from P7-SYNC-01): a device offline across a revoke-triggered rotation ALSO misses its new-epoch grant, and compaction deletes that grant, so it defers keyless until an operator re-approves it (`devices approve` re-grants held epochs above the floor). Fail-closed and recoverable, but nothing re-emits grants automatically and `doctor` on the stuck device cannot name the cause — worth a finding in the next audit pass.
+
 ## 2026-07-10 — chore(deps): bump golang.org/x/crypto v0.52.0, golang.org/x/net v0.55.0
 
 Changed:
