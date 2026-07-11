@@ -136,10 +136,24 @@ func (m SystemdUserManager) Uninstall(ctx context.Context, label string) ([]stri
 	// must still be removable over SSH/headless (no user D-Bus). Match launchd —
 	// best-effort supervisor teardown, then unconditional unit-file removal.
 	managerErr := m.available(ctx)
+	// A canceled/expired context must abort here: available() would classify it
+	// as "manager unreachable" and the headless path would proceed to removal —
+	// a canceled uninstall must not delete anything (Codex review).
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	unitName := label + ".service"
+	var teardownNote string
 	if managerErr == nil {
-		// disable --now failure means the unit was not enabled/loaded — idempotent.
-		_, _, _ = runSystemctl(ctx, systemdDisableNowArgs(unitName))
+		// disable --now usually fails only for the benign not-enabled/not-loaded
+		// case (idempotent). Distinguish a REAL teardown failure by probing
+		// is-active: only a service that is provably still running earns an
+		// advisory — the unit file is removed either way (Codex review).
+		if _, _, err := runSystemctl(ctx, systemdDisableNowArgs(unitName)); err != nil {
+			if _, _, activeErr := runSystemctl(ctx, systemdIsActiveArgs(unitName)); activeErr == nil {
+				teardownNote = "systemctl --user disable --now " + unitName + " failed and the service is still active; the unit file was removed anyway — inspect with: systemctl --user status " + unitName
+			}
+		}
 	}
 	unitDir, err := m.unitDir()
 	if err != nil {
@@ -152,6 +166,9 @@ func (m SystemdUserManager) Uninstall(ctx context.Context, label string) ([]stri
 	if managerErr == nil {
 		if _, stderr, err := runSystemctl(ctx, systemdReloadArgs()); err != nil {
 			return nil, fmt.Errorf("systemctl daemon-reload: %w: %s", err, stderr)
+		}
+		if teardownNote != "" {
+			return []string{teardownNote}, nil
 		}
 		return nil, nil
 	}

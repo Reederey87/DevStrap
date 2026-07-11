@@ -3,6 +3,7 @@
 package platform
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -160,6 +161,56 @@ func TestSystemdUninstallHeadlessNotInstalledIsNoteFreeNoOp(t *testing.T) {
 	}
 	if len(notes) != 0 {
 		t.Errorf("notes = %v, want none when nothing was removed", notes)
+	}
+}
+
+func TestSystemdUninstallCanceledContextRemovesNothing(t *testing.T) {
+	// A canceled context must abort before any removal: available() would
+	// misread it as "manager unreachable" and the headless path would delete
+	// the unit file of an uninstall the caller already gave up on.
+	t.Setenv("PATH", t.TempDir())
+	unitDir := t.TempDir()
+	label := "devstrap-run-loop"
+	mgr := SystemdUserManager{UnitDir: unitDir}
+	unitPath := systemdUnitPath(unitDir, label)
+	if err := os.WriteFile(unitPath, []byte("[Unit]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := mgr.Uninstall(ctx, label); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Uninstall err = %v, want context.Canceled", err)
+	}
+	if _, err := os.Stat(unitPath); err != nil {
+		t.Errorf("unit file was touched by a canceled uninstall: %v", err)
+	}
+}
+
+func TestSystemdUninstallStillActiveAfterDisableFailureGetsAdvisory(t *testing.T) {
+	// disable --now fails but is-active says the service is still running: the
+	// unit file is removed, and the caller gets an advisory naming the live
+	// service instead of a silent "uninstalled".
+	stubExec(t, "systemctl", `case "$2" in
+	disable) exit 1 ;;
+	is-active) echo active; exit 0 ;;
+	*) exit 0 ;;
+	esac`)
+	unitDir := t.TempDir()
+	label := "devstrap-run-loop"
+	mgr := SystemdUserManager{UnitDir: unitDir}
+	unitPath := systemdUnitPath(unitDir, label)
+	if err := os.WriteFile(unitPath, []byte("[Unit]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	notes, err := mgr.Uninstall(t.Context(), label)
+	if err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	if _, err := os.Stat(unitPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("unit file still present after uninstall: %v", err)
+	}
+	if len(notes) != 1 || !strings.Contains(notes[0], "still active") {
+		t.Errorf("notes = %v, want still-active advisory", notes)
 	}
 }
 
