@@ -36,6 +36,7 @@ Entries are newest-first: each code-modifying cycle prepends ONE dated entry at 
 Changed:
 - `internal/cli/db_backup.go`: `fullBackupResult` gains `Warnings []string`; the three pre-render `Fprintf(stdout, "warning: …")` sites in `runFullBackup` (missing blobs, no keys, no config) append to `result.Warnings` instead. Human render prints each as `warning: <msg>` before the summary line. `runRestore` uses a typed `restoreResult{Restored, Items, Warnings}`; `warnKeychainCustodyRestore` becomes `keychainCustodyRestoreWarning` returning `""` or the two-line custody message, appended to `result.Warnings` when non-empty. Nothing writes to stdout outside the render callback under `--json`.
 - Tests: `TestFullBackupJSONWarningsInPayload` (deleted blob → full stdout unmarshals; `warnings` mentions missing blobs); `TestRestoreJSONIsSingleDocument` (fresh-home restore `--json` is one document with `restored`/`items`, no raw `warning:` text).
+- Review pass (Codex): human output keeps the original one-ref-per-indented-line missing-blob list (the summary warning is appended last so the refs print directly beneath it; JSON carries refs structured in `missing_blobs`); `TestRestoreJSONCarriesKeychainCustodyWarning` pins the custody guidance riding the payload's `warnings` array.
 - Docs: `spec/13` notes `--json` carries warnings in the payload `warnings` array (`last_reviewed` 2026-07-11); ledger moves `P7-CLI-01` open → *Recently shipped* (Pass-7 open 41→40, P2 22→21).
 
 Validated:
