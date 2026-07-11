@@ -65,6 +65,12 @@ type ServiceStatus struct {
 	Detail    string
 	// UnitPath is the on-disk plist/unit file backing the service.
 	UnitPath string
+	// ExecPath is the binary the installed unit/plist launches (best-effort
+	// parse of our own rendered file; empty when unparseable).
+	ExecPath string
+	// ExecPathMissing is true when ExecPath is non-empty and no longer exists
+	// on disk — the brew-upgrade / deleted-binary case (P7-XP-05).
+	ExecPathMissing bool
 }
 
 type ServiceManager interface {
@@ -80,6 +86,12 @@ type ServiceManager interface {
 	// even when the OS manager is unreachable (the headless/SSH case).
 	Uninstall(ctx context.Context, label string) (notes []string, err error)
 	Status(ctx context.Context, label string) (ServiceStatus, error)
+}
+
+func prependMissingExecPathDetail(status *ServiceStatus) {
+	if status.ExecPathMissing {
+		status.Detail = "ExecPath missing: " + status.ExecPath + "; " + status.Detail
+	}
 }
 
 type Keychain interface {

@@ -275,6 +275,14 @@ func checkService(ctx context.Context, opts *options) []checkResult {
 	if !status.Installed {
 		return []checkResult{{Name: "run-loop service", Status: checkOK, Detail: "not installed (optional; `devstrap service install` for unattended sync)"}}
 	}
+	if status.ExecPathMissing {
+		return []checkResult{{
+			Name:   "run-loop service",
+			Status: checkWarn,
+			Detail: fmt.Sprintf("installed service ExecPath is missing: %s", status.ExecPath),
+			Remedy: "re-run devstrap service install (the installed unit points at a binary that no longer exists — e.g. after a brew upgrade)",
+		}}
+	}
 	if status.Running {
 		return []checkResult{{Name: "run-loop service", Status: checkOK, Detail: fmt.Sprintf("installed and running (%s)", status.Detail)}}
 	}

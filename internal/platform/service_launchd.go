@@ -136,6 +136,45 @@ func renderLaunchdPlist(spec ServiceSpec) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// extractLaunchdExecPath best-effort parses the first ProgramArguments string
+// from the plist shape rendered above. XML tokenization both bounds the search
+// to that array and decodes the standard XML entities used by xmlEscape.
+func extractLaunchdExecPath(plist []byte) string {
+	decoder := xml.NewDecoder(bytes.NewReader(plist))
+	seenProgramArguments := false
+	inProgramArguments := false
+	for {
+		tok, err := decoder.Token()
+		if err != nil {
+			return ""
+		}
+		switch token := tok.(type) {
+		case xml.StartElement:
+			switch {
+			case token.Name.Local == "key":
+				var key string
+				if err := decoder.DecodeElement(&key, &token); err != nil {
+					return ""
+				}
+				seenProgramArguments = key == "ProgramArguments"
+			case seenProgramArguments && token.Name.Local == "array":
+				inProgramArguments = true
+				seenProgramArguments = false
+			case inProgramArguments && token.Name.Local == "string":
+				var execPath string
+				if err := decoder.DecodeElement(&execPath, &token); err != nil {
+					return ""
+				}
+				return execPath
+			}
+		case xml.EndElement:
+			if inProgramArguments && token.Name.Local == "array" {
+				return ""
+			}
+		}
+	}
+}
+
 // serviceLabelPattern constrains service labels to filename- and argv-safe
 // characters. A label reaches filepath.Join (the plist/unit path), a launchctl
 // domain target, and a systemd unit name — a "/", "..", or whitespace in any

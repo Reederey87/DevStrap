@@ -3,8 +3,10 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -121,6 +123,51 @@ func TestServiceInstallRefusesTempExecPath(t *testing.T) {
 	}
 }
 
+func TestResolveServiceExecPathPrefersStableSymlinkDir(t *testing.T) {
+	stableDir := filepath.Join(string(os.PathSeparator), "fake-stable", "bin")
+	stableExe := filepath.Join(stableDir, "devstrap")
+	cellarTarget := filepath.Join(string(os.PathSeparator), "opt", "fakebrew", "Cellar", "devstrap", "1.2.3", "bin", "devstrap")
+	previous := stableServiceBinDirs
+	stableServiceBinDirs = []string{stableDir}
+	t.Cleanup(func() { stableServiceBinDirs = previous })
+
+	t.Run("stable symlink survives Cellar target", func(t *testing.T) {
+		got, err := resolveServiceExecPathFrom(stableExe, func(string) (string, error) { return cellarTarget, nil })
+		if err != nil || got != stableExe {
+			t.Fatalf("resolve = (%q, %v), want stable path %q", got, err, stableExe)
+		}
+	})
+
+	t.Run("direct Cellar path is refused", func(t *testing.T) {
+		_, err := resolveServiceExecPathFrom("/random/bin/devstrap", func(string) (string, error) { return cellarTarget, nil })
+		if err == nil || !strings.Contains(err.Error(), "brew upgrade") || !strings.Contains(err.Error(), "--exec-path") {
+			t.Fatalf("error = %v, want brew-upgrade and --exec-path remedy", err)
+		}
+		var appErr appError
+		if !errors.As(err, &appErr) || appErr.code != exitInvalidConfig {
+			t.Fatalf("error = %#v, want exitInvalidConfig appError", err)
+		}
+	})
+
+	t.Run("ephemeral target wins over stable directory", func(t *testing.T) {
+		target := filepath.Join(os.TempDir(), "go-build123", "devstrap")
+		_, err := resolveServiceExecPathFrom(stableExe, func(string) (string, error) { return target, nil })
+		if err == nil || !strings.Contains(err.Error(), "ephemeral path") {
+			t.Fatalf("error = %v, want ephemeral-path refusal", err)
+		}
+	})
+
+	t.Run("explicit exec path remains verbatim", func(t *testing.T) {
+		const absolute = "/custom/bin/devstrap"
+		if got, err := resolveServiceExecPath(absolute); err != nil || got != absolute {
+			t.Fatalf("absolute explicit path = (%q, %v), want %q", got, err, absolute)
+		}
+		if _, err := resolveServiceExecPath("relative/devstrap"); err == nil || !strings.Contains(err.Error(), "must be absolute") {
+			t.Fatalf("relative explicit path error = %v, want absolute-path refusal", err)
+		}
+	})
+}
+
 func TestServiceInstallRequiresHubConfig(t *testing.T) {
 	f := &fakeServiceManager{}
 	withFakeService(t, f)
@@ -210,7 +257,7 @@ func TestServiceUninstallIdempotent(t *testing.T) {
 }
 
 func TestServiceStatusJSON(t *testing.T) {
-	f := &fakeServiceManager{statusVal: platform.ServiceStatus{Installed: true, Running: false, Detail: "not loaded", UnitPath: "/x/fake.plist"}}
+	f := &fakeServiceManager{statusVal: platform.ServiceStatus{Installed: true, Running: false, Detail: "not loaded", UnitPath: "/x/fake.plist", ExecPath: "/x/devstrap", ExecPathMissing: true}}
 	withFakeService(t, f)
 	stdout, _, err := executeForTest("--home", t.TempDir(), "--json", "service", "status")
 	if err != nil {
@@ -220,9 +267,21 @@ func TestServiceStatusJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 		t.Fatalf("unmarshal %q: %v", stdout, err)
 	}
-	want := serviceStatusJSON{Manager: "fake", Label: "fake.run-loop", Installed: true, Running: false, Detail: "not loaded", UnitPath: "/x/fake.plist"}
+	want := serviceStatusJSON{Manager: "fake", Label: "fake.run-loop", Installed: true, Running: false, Detail: "not loaded", UnitPath: "/x/fake.plist", ExecPath: "/x/devstrap", ExecPathMissing: true}
 	if got != want {
 		t.Errorf("status json = %+v, want %+v", got, want)
+	}
+}
+
+func TestServiceStatusHumanReportsMissingExecPath(t *testing.T) {
+	f := &fakeServiceManager{statusVal: platform.ServiceStatus{Installed: true, UnitPath: "/x/fake.plist", ExecPath: "/x/devstrap", ExecPathMissing: true}}
+	withFakeService(t, f)
+	stdout, _, err := executeForTest("--home", t.TempDir(), "service", "status")
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if !strings.Contains(stdout, "exec:      /x/devstrap (MISSING — re-run 'devstrap service install')") {
+		t.Errorf("stdout = %q, want missing ExecPath remedy", stdout)
 	}
 }
 

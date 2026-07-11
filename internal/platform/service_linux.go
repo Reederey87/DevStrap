@@ -203,9 +203,18 @@ func (m SystemdUserManager) Status(ctx context.Context, label string) (ServiceSt
 		return status, fmt.Errorf("stat unit file: %w", err)
 	}
 	status.Installed = true
+	if unit, err := os.ReadFile(unitPath); err == nil {
+		status.ExecPath = extractSystemdExecPath(unit)
+		if status.ExecPath != "" {
+			if _, err := os.Stat(status.ExecPath); os.IsNotExist(err) {
+				status.ExecPathMissing = true
+			}
+		}
+	}
 	logHint := "logs: journalctl --user -u " + unitName
 	if err := m.available(ctx); err != nil {
 		status.Detail = "installed; systemd user manager unreachable (run from a user session to query run state); " + logHint
+		prependMissingExecPathDetail(&status)
 		return status, nil
 	}
 	stdout, _, err := runSystemctl(ctx, systemdIsActiveArgs(unitName))
@@ -215,6 +224,7 @@ func (m SystemdUserManager) Status(ctx context.Context, label string) (ServiceSt
 		state = "unknown"
 	}
 	status.Detail = state + "; " + logHint
+	prependMissingExecPathDetail(&status)
 	return status, nil
 }
 

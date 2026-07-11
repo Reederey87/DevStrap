@@ -130,3 +130,39 @@ exit 0`)
 		t.Errorf("Detail = %q, want it to mention pid 4242", status.Detail)
 	}
 }
+
+func TestServiceStatusReportsMissingExecPath(t *testing.T) {
+	stubExec(t, "launchctl", `if [ "$1" = "print" ]; then exit 1; fi
+exit 0`)
+	agentsDir := t.TempDir()
+	execPath := filepath.Join(t.TempDir(), "devstrap")
+	if err := os.WriteFile(execPath, []byte("binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mgr := LaunchdManager{AgentsDir: agentsDir, UID: 501}
+	spec := ServiceSpec{Label: "com.devstrap.run-loop", ExecPath: execPath, Args: []string{"run-loop"}}
+	if _, err := mgr.Install(t.Context(), spec); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if err := os.Remove(execPath); err != nil {
+		t.Fatal(err)
+	}
+	status, err := mgr.Status(t.Context(), spec.Label)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if status.ExecPath != execPath || !status.ExecPathMissing || !strings.Contains(status.Detail, "ExecPath missing") {
+		t.Errorf("status = %+v, want missing ExecPath %q", status, execPath)
+	}
+
+	if err := os.WriteFile(launchdPlistPath(agentsDir, spec.Label), []byte("<plist>mangled"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status, err = mgr.Status(t.Context(), spec.Label)
+	if err != nil {
+		t.Fatalf("Status(mangled): %v", err)
+	}
+	if status.ExecPath != "" || status.ExecPathMissing {
+		t.Errorf("mangled status = %+v, want empty parsed ExecPath", status)
+	}
+}

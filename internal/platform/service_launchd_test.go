@@ -51,6 +51,16 @@ func TestRenderLaunchdPlistGolden(t *testing.T) {
 	checkGolden(t, "run_loop.plist.golden", got)
 }
 
+func TestExtractLaunchdExecPathGolden(t *testing.T) {
+	plist, err := os.ReadFile(filepath.Join("testdata", "run_loop.plist.golden"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := extractLaunchdExecPath(plist); got != "/usr/local/bin/devstrap" {
+		t.Errorf("extractLaunchdExecPath = %q, want /usr/local/bin/devstrap", got)
+	}
+}
+
 func TestRenderLaunchdPlistEscapesXML(t *testing.T) {
 	spec := ServiceSpec{
 		Label:    "com.devstrap.run-loop",

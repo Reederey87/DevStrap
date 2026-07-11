@@ -147,12 +147,14 @@ func newServiceUninstallCommand(stdout io.Writer, opts *options) *cobra.Command 
 
 // serviceStatusJSON is the --json shape for `service status`.
 type serviceStatusJSON struct {
-	Manager   string `json:"manager"`
-	Label     string `json:"label"`
-	Installed bool   `json:"installed"`
-	Running   bool   `json:"running"`
-	Detail    string `json:"detail"`
-	UnitPath  string `json:"unit_path"`
+	Manager         string `json:"manager"`
+	Label           string `json:"label"`
+	Installed       bool   `json:"installed"`
+	Running         bool   `json:"running"`
+	Detail          string `json:"detail"`
+	UnitPath        string `json:"unit_path"`
+	ExecPath        string `json:"exec_path,omitempty"`
+	ExecPathMissing bool   `json:"exec_path_missing,omitempty"`
 }
 
 func newServiceStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
@@ -178,12 +180,14 @@ func newServiceStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 				enc := json.NewEncoder(stdout)
 				enc.SetIndent("", "  ")
 				return enc.Encode(serviceStatusJSON{
-					Manager:   mgr.Name(),
-					Label:     resolvedLabel,
-					Installed: status.Installed,
-					Running:   status.Running,
-					Detail:    status.Detail,
-					UnitPath:  status.UnitPath,
+					Manager:         mgr.Name(),
+					Label:           resolvedLabel,
+					Installed:       status.Installed,
+					Running:         status.Running,
+					Detail:          status.Detail,
+					UnitPath:        status.UnitPath,
+					ExecPath:        status.ExecPath,
+					ExecPathMissing: status.ExecPathMissing,
 				})
 			}
 			_, _ = fmt.Fprintf(stdout, "manager:   %s\n", mgr.Name())
@@ -196,6 +200,11 @@ func newServiceStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if status.UnitPath != "" {
 				_, _ = fmt.Fprintf(stdout, "unit:      %s\n", status.UnitPath)
 			}
+			if status.ExecPathMissing {
+				_, _ = fmt.Fprintf(stdout, "exec:      %s (MISSING — re-run 'devstrap service install')\n", status.ExecPath)
+			} else if status.ExecPath != "" {
+				_, _ = fmt.Fprintf(stdout, "exec:      %s\n", status.ExecPath)
+			}
 			return nil
 		},
 	}
@@ -205,10 +214,12 @@ func newServiceStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 
 // resolveServiceExecPath resolves the devstrap binary the service will run. An
 // explicit --exec-path is honored verbatim but must be absolute. Otherwise the
-// path comes from os.Executable() with symlinks resolved, and is REFUSED when
-// it points at an ephemeral location (the OS temp dir or a `go build`/`go run`
-// cache): baking such a path into a launchd/systemd unit would wire the service
-// to a binary that disappears.
+// path comes from os.Executable() with symlinks resolved, except that a symlink
+// in a stable install bin directory is preserved so Homebrew upgrades do not
+// strand the service on a versioned Cellar binary (P7-XP-01). The resolved path
+// is still REFUSED when it points at an ephemeral location (the OS temp dir or
+// a `go build`/`go run` cache): baking such a path into a launchd/systemd unit
+// would wire the service to a binary that disappears.
 func resolveServiceExecPath(execPath string) (string, error) {
 	if execPath != "" {
 		if !filepath.IsAbs(execPath) {
@@ -220,7 +231,21 @@ func resolveServiceExecPath(execPath string) (string, error) {
 	if err != nil {
 		return "", appError{code: exitInvalidConfig, err: fmt.Errorf("resolve this binary's path: %w", err)}
 	}
-	resolved, err := filepath.EvalSymlinks(exe)
+	return resolveServiceExecPathFrom(exe, filepath.EvalSymlinks)
+}
+
+// stableServiceBinDirs is a variable only to let tests model a stable install
+// directory without writing to system-owned paths.
+var stableServiceBinDirs = func() []string {
+	dirs := []string{"/opt/homebrew/bin", "/usr/local/bin"}
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".local", "bin"))
+	}
+	return dirs
+}()
+
+func resolveServiceExecPathFrom(exe string, evalSymlinks func(string) (string, error)) (string, error) {
+	resolved, err := evalSymlinks(exe)
 	if err != nil {
 		return "", appError{code: exitInvalidConfig, err: fmt.Errorf("resolve this binary's path: %w", err)}
 	}
@@ -228,7 +253,31 @@ func resolveServiceExecPath(execPath string) (string, error) {
 		return "", appError{code: exitInvalidConfig, err: fmt.Errorf(
 			"this devstrap binary lives at an ephemeral path (%s); install devstrap to a stable location (e.g. /usr/local/bin) and re-run, or pass --exec-path <abs path>", resolved)}
 	}
+	// Preserve only known install-entry directories. The resolved target was
+	// checked first so a stable-looking symlink cannot bless a temporary binary.
+	if isStableBinDir(filepath.Dir(filepath.Clean(exe))) {
+		return exe, nil
+	}
+	cellarSegment := string(os.PathSeparator) + "Cellar" + string(os.PathSeparator)
+	if strings.Contains(resolved, cellarSegment) {
+		return "", appError{code: exitInvalidConfig, err: fmt.Errorf(
+			"the versioned Homebrew Cellar path %s would break on brew upgrade; re-run via the stable symlink (e.g. /opt/homebrew/bin/devstrap) or pass --exec-path <abs path>", resolved)}
+	}
 	return resolved, nil
+}
+
+func isStableBinDir(dir string) bool {
+	abs, err := filepath.Abs(filepath.Clean(dir))
+	if err != nil {
+		return false
+	}
+	for _, stable := range stableServiceBinDirs {
+		stableAbs, err := filepath.Abs(filepath.Clean(stable))
+		if err == nil && abs == stableAbs {
+			return true
+		}
+	}
+	return false
 }
 
 // isEphemeralExecPath reports whether p is under the OS temp dir or a Go build

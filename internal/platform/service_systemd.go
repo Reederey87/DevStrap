@@ -72,6 +72,53 @@ func systemdQuote(word string) string {
 	return `"` + escaped + `"`
 }
 
+// systemdUnquoteFirstWord reverses systemdQuote for the first ExecStart word.
+// It deliberately accepts only the quoted/unquoted forms our renderer emits;
+// malformed hand-edited units degrade to an unknown ExecPath.
+func systemdUnquoteFirstWord(line string) (string, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", false
+	}
+	var word strings.Builder
+	if line[0] != '"' {
+		end := strings.IndexAny(line, " \t")
+		if end < 0 {
+			end = len(line)
+		}
+		return strings.ReplaceAll(line[:end], "%%", "%"), true
+	}
+	for i := 1; i < len(line); i++ {
+		switch line[i] {
+		case '"':
+			return strings.ReplaceAll(word.String(), "%%", "%"), true
+		case '\\':
+			i++
+			if i >= len(line) || (line[i] != '\\' && line[i] != '"') {
+				return "", false
+			}
+			word.WriteByte(line[i])
+		default:
+			word.WriteByte(line[i])
+		}
+	}
+	return "", false
+}
+
+func extractSystemdExecPath(unit []byte) string {
+	for _, line := range strings.Split(string(unit), "\n") {
+		if !strings.HasPrefix(line, "ExecStart=") {
+			continue
+		}
+		execPath, ok := systemdUnquoteFirstWord(strings.TrimPrefix(line, "ExecStart="))
+		if ok {
+			return execPath
+		}
+		return ""
+	}
+	return ""
+}
+
 // rejectServiceControlChars refuses any spec whose interpolated strings carry
 // ASCII control characters (including \n, \r, NUL) or DEL. Shared by both
 // renderers: the systemd unit is line-oriented (injection), and launchd would

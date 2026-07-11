@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-10
+last_reviewed: 2026-07-11
 tracks_code: [internal/platform/**, internal/cli/open.go, internal/cli/hydrate.go, .github/**]
 ---
 # Mac-First Implementation Guide
@@ -89,12 +89,12 @@ devstrap service status      # installed / running / detail / unit (also --json)
 devstrap service uninstall   # bootout + remove the plist (idempotent)
 ```
 
-The adapter renders the plist with Go `text/template` (every value XML-escaped through `encoding/xml.EscapeText`) using `os.UserHomeDir()` and `os.Executable()` (symlinks resolved), and writes it atomically at mode `0600`. It manages the service with the **modern per-domain verbs** — `launchctl bootstrap gui/<uid> <plist>` and `launchctl bootout gui/<uid>/<label>` (a best-effort `bootout` precedes `bootstrap` so a reinstall is idempotent; because `bootout` tears the old job down asynchronously the adapter then polls `launchctl print` until the label leaves the domain, so reinstalling over a *running* service does not race into an EIO `Bootstrap failed: 5` — caught in live dogfood) and `launchctl print` for status — never the deprecated `load`/`unload`. `ExecPath` is refused when it resolves to an ephemeral `$TMPDIR`/`go-build` path (install `devstrap` to a stable location or pass `--exec-path <abs>`); `PATH` is seeded to `<execdir>:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`. Do not hardcode `/Users/USER`, `~`, or Homebrew paths; launchd does not expand them in plist fields.
+The adapter renders the plist with Go `text/template` (every value XML-escaped through `encoding/xml.EscapeText`) using `os.UserHomeDir()` and `os.Executable()` (symlinks resolved), and writes it atomically at mode `0600`. It manages the service with the **modern per-domain verbs** — `launchctl bootstrap gui/<uid> <plist>` and `launchctl bootout gui/<uid>/<label>` (a best-effort `bootout` precedes `bootstrap` so a reinstall is idempotent; because `bootout` tears the old job down asynchronously the adapter then polls `launchctl print` until the label leaves the domain, so reinstalling over a *running* service does not race into an EIO `Bootstrap failed: 5` — caught in live dogfood) and `launchctl print` for status — never the deprecated `load`/`unload`. `ExecPath` is refused when it resolves to an ephemeral `$TMPDIR`/`go-build` path (install `devstrap` to a stable location or pass `--exec-path <abs>`); when the invoked path sits in a stable install bin dir (`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`) the symlink itself is baked unresolved so `brew upgrade` moving the Cellar target cannot brick the LaunchAgent, and a path that still resolves into a `Cellar/` segment is refused (`P7-XP-01`); `Status` best-effort parses `ProgramArguments[0]` from the plist and reports `ExecPath missing: <path>` when the baked binary is gone, with a matching `doctor` warning (`P7-XP-05`); `PATH` is seeded to `<execdir>:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`. Do not hardcode `/Users/USER`, `~`, or Homebrew paths; launchd does not expand them in plist fields.
 
 Troubleshooting (`launchctl print` surfaces `last exit code = N`):
 
 - **exit 78** (`EX_CONFIG`) — the plist is malformed or references a missing path. Re-run `devstrap service install`; it rewrites and re-bootstraps the plist atomically.
-- **exit 127** — the service could not find the `devstrap` binary or a sibling tool (`git`) on the seeded `PATH`. Install `devstrap` to a stable directory and re-run `devstrap service install` so `ExecPath`/`PATH` point at it.
+- **exit 127** — the service could not find the `devstrap` binary or a sibling tool (`git`) on the seeded `PATH`. Install `devstrap` to a stable directory and re-run `devstrap service install` so `ExecPath`/`PATH` point at it. `service status` and `doctor` now name this case directly (`ExecPath missing: <path>`, `P7-XP-05`).
 
 The deferred native daemon (`devstrapd serve`) would install its own `com.devstrap.devstrapd` LaunchAgent later and run in the foreground under launchd; `devstrap service` targets the shipped `run-loop` today.
 

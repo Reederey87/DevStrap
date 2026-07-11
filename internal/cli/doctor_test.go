@@ -185,3 +185,27 @@ func TestDoctorWarnsWhenServiceInstalledButStopped(t *testing.T) {
 		t.Errorf("remedy = %q, want the inspection hint", got.Remedy)
 	}
 }
+
+func TestDoctorWarnsWhenServiceExecPathMissing(t *testing.T) {
+	f := &fakeServiceManager{statusVal: platform.ServiceStatus{
+		Installed:       true,
+		Running:         false,
+		ExecPath:        "/opt/homebrew/Cellar/devstrap/old/bin/devstrap",
+		ExecPathMissing: true,
+	}}
+	withFakeService(t, f)
+
+	v := viper.New()
+	v.Set("home", t.TempDir())
+	results := checkService(context.Background(), &options{v: v})
+	if len(results) != 1 || results[0].Status != checkWarn {
+		t.Fatalf("checkService results = %+v, want one warning", results)
+	}
+	if !strings.Contains(results[0].Detail, f.statusVal.ExecPath) {
+		t.Errorf("detail = %q, want missing path", results[0].Detail)
+	}
+	wantRemedy := "re-run devstrap service install (the installed unit points at a binary that no longer exists — e.g. after a brew upgrade)"
+	if results[0].Remedy != wantRemedy {
+		t.Errorf("remedy = %q, want %q", results[0].Remedy, wantRemedy)
+	}
+}

@@ -33,6 +33,15 @@ func TestSystemdQuoteEscapesSpacesAndPercent(t *testing.T) {
 	}
 }
 
+func TestSystemdQuoteUnquoteFirstWordRoundTrip(t *testing.T) {
+	for _, word := range []string{"plain", "with spaces", `quote"inside`, `back\slash space`, "100% ready"} {
+		got, ok := systemdUnquoteFirstWord(systemdQuote(word) + " trailing-arg")
+		if !ok || got != word {
+			t.Errorf("round trip %q = (%q, %t)", word, got, ok)
+		}
+	}
+}
+
 func TestSystemdArgvBuilders(t *testing.T) {
 	if got := systemdProbeArgs(); !equalStrings(got, []string{"systemctl", "--user", "show-environment"}) {
 		t.Errorf("probe argv = %v", got)

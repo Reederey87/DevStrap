@@ -249,3 +249,40 @@ exit 0`)
 		t.Errorf("shim log missing daemon-reload:\n%s", got)
 	}
 }
+
+func TestServiceStatusReportsMissingExecPath(t *testing.T) {
+	stubExec(t, "systemctl", `if [ "$2" = "is-active" ]; then echo inactive; exit 3; fi
+exit 0`)
+	stubExec(t, "loginctl", `echo yes`)
+	unitDir := t.TempDir()
+	execPath := filepath.Join(t.TempDir(), "devstrap with space")
+	if err := os.WriteFile(execPath, []byte("binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mgr := SystemdUserManager{UnitDir: unitDir}
+	spec := ServiceSpec{Label: "devstrap-run-loop", ExecPath: execPath, Args: []string{"run-loop"}}
+	if _, err := mgr.Install(t.Context(), spec); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if err := os.Remove(execPath); err != nil {
+		t.Fatal(err)
+	}
+	status, err := mgr.Status(t.Context(), spec.Label)
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if status.ExecPath != execPath || !status.ExecPathMissing || !strings.Contains(status.Detail, "ExecPath missing") {
+		t.Errorf("status = %+v, want missing ExecPath %q", status, execPath)
+	}
+
+	if err := os.WriteFile(systemdUnitPath(unitDir, spec.Label), []byte("ExecStart=\"mangled\\q\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status, err = mgr.Status(t.Context(), spec.Label)
+	if err != nil {
+		t.Fatalf("Status(mangled): %v", err)
+	}
+	if status.ExecPath != "" || status.ExecPathMissing {
+		t.Errorf("mangled status = %+v, want empty parsed ExecPath", status)
+	}
+}
