@@ -285,7 +285,7 @@ If the hub no longer retains events after a cursor, the device must fall back to
 `devstrap sync` is **eager clone-everything**, not a lazy/placeholder/VFS scheme. After the namespace events apply (steps 4-5), the device walks every non-deleted entry and brings the whole `~/Code` tree toward `available` in one pass — materializing **by content type**, honoring the file-sync split (never blanket file-sync, never route repo content through the hub):
 
 - `git_repo` → blobless/partial clone or fetch (`git clone --filter=blob:none`) from the entry's **existing** remote, riding git's own integrity-checked transport. Repo content never traverses the DevStrap hub.
-- `local_git` / `draft_project` → download the newest `draft.snapshot.created` encrypted bundle from the hub blob store and extract it (see Draft sync model). [shipped, `DRAFT-*`]
+- `local_git` / `draft_project` → download the newest `draft.snapshot.created` encrypted bundle from the hub blob store and extract it (see Draft sync model); "newest" is the highest `(hlc, source_event_device_id, source_event_id)` coordinate so every device materializes the same bundle on an HLC tie (`P7-SYNC-03`). [shipped, `DRAFT-*`]
 - env profiles → decrypt `age_blob:<sha256>` env blobs / resolve provider refs and hydrate the bound env files (see `09_SECRETS_AND_ENVIRONMENT.md`).
 - `node_modules` / build artifacts → **never synced**; rebuilt on hydrate from the tooling profile (`npm`/`pnpm`/`uv install`).
 
@@ -596,7 +596,7 @@ Draft project snapshot (`draft.snapshot.created`, workstream `DRAFT-*`):
 Restore (pulled during sync materialization for `local_git` / `draft_project`):
 
 ```text
-1. select the newest draft.snapshot.created for the path in HLC order
+1. select the newest draft.snapshot.created for the path by canonical (hlc, source_event_device_id, source_event_id) order (P7-SYNC-03; not local created_at/id)
 2. GET the age_blob:<sha256> from the hub blob store
 3. decrypt locally with the device age identity
 4. extract to the skeleton path

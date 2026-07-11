@@ -31,6 +31,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-11 — fix(sync): deterministic draft-snapshot latest/prune tiebreak (P7-SYNC-03)
+
+Changed:
+- `internal/state/store.go`: `LatestDraftSnapshot`'s `ORDER BY` and `PruneDraftSnapshots`' window-function `ORDER BY` both changed from `COALESCE(source_event_hlc, 0) DESC, created_at DESC, id DESC` to `COALESCE(source_event_hlc, 0) DESC, COALESCE(source_event_device_id, '') DESC, COALESCE(source_event_id, '') DESC` — the canonical `(hlc, source_event_device_id, source_event_id)` fleet tiebreak already used by `samePathLess`/`envCoordLess` (`internal/sync/events.go`). `created_at` (local wall clock) and `id` (a locally-minted `snap_<uuidv7>`) both differ per device for the same source event, so on an HLC tie two devices could pick different "latest" snapshots to materialize, or keep different snapshots after prune GC — including prune on one device discarding the blob another device's `LatestDraftSnapshot` considers canonical. Both functions' doc comments note the shared coordinate.
+- `internal/state/store_test.go`: `TestLatestDraftSnapshotDeterministicTiebreak` and `TestPruneDraftSnapshotsDeterministicTiebreak` — each inserts the canonical winner (higher `(device_id, event_id)`) first via `RecordDraftSnapshot`, then the loser, then force-sets the winner's `created_at` earlier than the loser's so the OLD ordering demonstrably prefers the loser; the prune test additionally asserts `PruneDraftSnapshots(keep=1)` prunes exactly one row and the survivor agrees with `LatestDraftSnapshot`.
+- `spec/07_NAMESPACE_AND_SYNC_MODEL.md`: the materialize `draft_project` bullet and the draft restore steps now state that "newest" means the highest `(hlc, source_event_device_id, source_event_id)` coordinate, not local `created_at`/`id`.
+- `docs/audits/README.md`: `P7-SYNC-03` moved open → *Recently shipped*; Pass-7 open 36→35, P3 19→18.
+
+Validated:
+- `gofmt -w cmd internal`
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/state/ -run 'TestLatestDraftSnapshot|TestPruneDraftSnapshots' -count=1` (both new tests pass)
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/state/ -count=1`
+
+Follow-ups:
+- None.
+
 ## 2026-07-11 — fix(hub): refuse rewound or deleted git-carrier history (P7-HUB-02)
 
 Changed:
