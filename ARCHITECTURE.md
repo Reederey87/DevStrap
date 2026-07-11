@@ -134,11 +134,12 @@ Every agent task gets a fresh worktree created from the *fetched* `origin/<defau
 never a stale local branch — with the base SHA recorded so `agent pr` can refuse to push work
 built on a moved base. Runs are logged to a `0600` file and tracked in a queryable registry.
 
-The wrapper's command/file policy is **guardrails, not a sandbox**. On macOS an OS-enforced
-Seatbelt sandbox now wraps the child (`--sandbox auto|off|require`): writes are confined to the
-worktree, credential paths (`~/.ssh`, `~/.aws`, …) are denied, and network is blocked for
-read-only policies. Linux OS-level confinement (bubblewrap/landlock/seccomp) is the next slice;
-until it lands the Linux wrapper is advisory and says so at run start.
+The wrapper's command/file policy is **guardrails, not a sandbox** — it layers beneath an
+OS-enforced sandbox on both platforms (`--sandbox auto|off|require`). On macOS a Seatbelt profile
+wraps the child: writes are confined to the worktree, credential paths (`~/.ssh`, `~/.aws`, …) are
+denied, and network is blocked for read-only policies. On Linux the child runs under bubblewrap,
+falling back to Landlock+seccomp where user namespaces are restricted; the Landlock path keeps
+credential reads readable and says so at run start.
 
 **Depth:** [`spec/10_AGENT_WORKSPACES_AND_POLICIES.md`](spec/10_AGENT_WORKSPACES_AND_POLICIES.md).
 
@@ -146,9 +147,10 @@ until it lands the Linux wrapper is advisory and says so at run start.
 
 DevStrap is honest about its edges. Not yet built, by design:
 
-- **The local daemon** (`devstrapd`), its socket API, an FSEvents-specific Mac watcher, and
-  LaunchAgent/systemd installers — every CLI command works correctly without a daemon; local
-  reconciliation is the explicit `devstrap scan` plus the portable `run-loop`.
+- **The local daemon** (`devstrapd`), its socket API, and an FSEvents-specific Mac watcher —
+  every CLI command works correctly without a daemon; local reconciliation is the explicit
+  `devstrap scan` plus the portable `run-loop` (which `devstrap service install` already wraps in
+  an unattended LaunchAgent/systemd user unit).
 - **StrapFS** — the optional lazy virtual filesystem, deferred until the product loop is proven.
 - **A bespoke HTTP/SSE relay** and a hosted control plane for production device enrollment —
   the git/folder/R2 carriers cover the transport today.

@@ -31,6 +31,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-11 — docs: truth-up service-installer and OS-sandbox claims across six files (P7-DOC-01)
+
+Changed:
+- Six files described two shipped capabilities as unbuilt/future/advisory; corrected to match the code and each file's own already-shipped statements. Both capabilities: `devstrap service install|uninstall|status` (launchd LaunchAgent / systemd `--user` unit wrapping `run-loop`, `P4-PROD-04`, 2026-07-06) and the OS-enforced agent sandbox (macOS Seatbelt default, Linux bubblewrap → Landlock+seccomp fallback, `P4-GIT-03`, 2026-07-05).
+- `spec/00_START_HERE.md`: Phase-3 list parenthetical now states the OS-enforced sandbox shipped; the near-term-direction sentence moves `P4-GIT-03` out of "remaining candidates" (leaving only the later `AD-1` slices); the "Not implemented yet" list drops the sandbox clause (project-env allowlists + non-generic engine adapters stay).
+- `spec/06_LINUX_COMPATIBILITY.md`: the two "deferred `service install`" references in the `P6-XP-04` problem/steps now say it shipped (`P4-PROD-04`), consistent with the file's own §"systemd user service — shipped" heading.
+- `spec/10_AGENT_WORKSPACES_AND_POLICIES.md`: the wrapper-policy heading and the two "later: sandbox/container" bullets now describe the wrapper as guardrails layered *beneath* the shipped OS sandbox, with containerization as the residual later slice (matching the file's own detailed shipped-sandbox paragraph).
+- `spec/15_SECURITY_THREAT_MODEL.md`: the agent-controls "OS sandbox before public release" item now cites the shipped sandbox, consistent with the file's own §"Security decisions" shipped note.
+- `ARCHITECTURE.md`: the Linux-confinement "next slice / advisory" paragraph now states both platforms are OS-sandboxed; the "deliberately not built" daemon item drops the installer clause (daemon/socket/FSEvents stay unbuilt).
+- `docs/quickstart.md`: the sandbox note now covers macOS Seatbelt AND Linux bubblewrap → Landlock+seccomp, with the wrapper policy framed as guardrails beneath.
+- `last_reviewed` bumped to 2026-07-11 on the four touched `spec/` files; the daemon/`devstrapd` (socket API, FSEvents watcher) references were left unchanged (genuinely unbuilt).
+
+Validated:
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` (docs-only; no Go tests).
+
 ## 2026-07-12 — ci(release): stage-then-promote stable releases (P7-QUAL-01)
 
 Changed:

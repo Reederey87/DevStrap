@@ -141,7 +141,6 @@ Full detail and `file:line` evidence in [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7
 | P7-PROD-02 | P2 | Zero-knowledge hub has no server-side lifecycle/quota enforcement; a key-less operator can't bound a tenant (extends `P4-HUB-15`) | L |
 | P7-PROD-03 | P2 | No version-skew policy; fail-closed snapshot/envelope checks wedge a `brew`-upgraded mixed-version fleet | M |
 | P7-PROD-04 | P2 | No control-plane identity; `workspace_id` is client-minted with no account/device/quota binding (extends `P4-SEC-08`) | L |
-| P7-DOC-01 | P2 | Shipped `devstrap service` + OS sandbox described as unbuilt/future/advisory across six files | M |
 | P7-SEC-03 | P3 | `--sandbox require` fails closed for network/read-confine but not credential reads on the Landlock fallback | S |
 | P7-SEC-05 | P3 | `TRUST-01` gives one compromised approved device a fleet-wide revocation + rotation-lockout DoS (threat-model doc gap) | S |
 | P7-SYNC-02 | P3 | `TRUST-01` makes convergence delivery-order-dependent for a revoked device's pre-revocation events | M |
