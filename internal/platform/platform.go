@@ -75,7 +75,10 @@ type ServiceManager interface {
 	// Install returns OS-idiomatic advisory notes (e.g. the Linux linger note)
 	// alongside any error, so the CLI never has to branch on the OS.
 	Install(ctx context.Context, spec ServiceSpec) (notes []string, err error)
-	Uninstall(ctx context.Context, label string) error
+	// Uninstall returns OS-idiomatic advisory notes (mirroring Install) so the
+	// CLI never has to branch on the OS; the unit/plist file is always removed
+	// even when the OS manager is unreachable (the headless/SSH case).
+	Uninstall(ctx context.Context, label string) (notes []string, err error)
 	Status(ctx context.Context, label string) (ServiceStatus, error)
 }
 
@@ -160,8 +163,8 @@ func (m UnsupportedServiceManager) Install(context.Context, ServiceSpec) ([]stri
 	return nil, fmt.Errorf("%w: %s service manager is not implemented", ErrUnsupported, m.Name())
 }
 
-func (m UnsupportedServiceManager) Uninstall(context.Context, string) error {
-	return fmt.Errorf("%w: %s service manager is not implemented", ErrUnsupported, m.Name())
+func (m UnsupportedServiceManager) Uninstall(context.Context, string) ([]string, error) {
+	return nil, fmt.Errorf("%w: %s service manager is not implemented", ErrUnsupported, m.Name())
 }
 
 func (m UnsupportedServiceManager) Status(context.Context, string) (ServiceStatus, error) {

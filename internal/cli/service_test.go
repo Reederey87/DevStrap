@@ -15,13 +15,14 @@ import (
 // fakeServiceManager is an in-memory platform.ServiceManager injected via the
 // serviceBackend seam so the CLI tests never touch launchctl/systemctl.
 type fakeServiceManager struct {
-	nameVal      string
-	labelVal     string
-	installNotes []string
-	installErr   error
-	uninstallErr error
-	statusVal    platform.ServiceStatus
-	statusErr    error
+	nameVal        string
+	labelVal       string
+	installNotes   []string
+	installErr     error
+	uninstallNotes []string
+	uninstallErr   error
+	statusVal      platform.ServiceStatus
+	statusErr      error
 
 	installedSpec *platform.ServiceSpec
 	uninstalled   bool
@@ -47,9 +48,9 @@ func (f *fakeServiceManager) Install(_ context.Context, spec platform.ServiceSpe
 	return f.installNotes, f.installErr
 }
 
-func (f *fakeServiceManager) Uninstall(_ context.Context, _ string) error {
+func (f *fakeServiceManager) Uninstall(_ context.Context, _ string) ([]string, error) {
 	f.uninstalled = true
-	return f.uninstallErr
+	return f.uninstallNotes, f.uninstallErr
 }
 
 func (f *fakeServiceManager) Status(_ context.Context, _ string) (platform.ServiceStatus, error) {
@@ -163,6 +164,21 @@ func TestServiceInstallEnvContainsNoSecrets(t *testing.T) {
 	}
 	if f.installedSpec.Env != nil {
 		t.Errorf("spec.Env = %v, want nil (the CLI bakes no env; adapters add only PATH)", f.installedSpec.Env)
+	}
+}
+
+func TestServiceUninstallPrintsAdapterNotesEvenQuiet(t *testing.T) {
+	f := &fakeServiceManager{
+		statusVal:      platform.ServiceStatus{Installed: true},
+		uninstallNotes: []string{"systemd user manager unreachable; removed the unit file only"},
+	}
+	withFakeService(t, f)
+	_, stderr, err := executeForTest("--home", t.TempDir(), "--quiet", "service", "uninstall")
+	if err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if !strings.Contains(stderr, "removed the unit file only") {
+		t.Errorf("stderr = %q, want the adapter note printed verbatim even under --quiet", stderr)
 	}
 }
 

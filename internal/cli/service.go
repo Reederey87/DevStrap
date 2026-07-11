@@ -121,7 +121,8 @@ func newServiceUninstallCommand(stdout io.Writer, opts *options) *cobra.Command 
 			// Best-effort pre-check so we can report the idempotent "not
 			// installed" case; a Status error here never blocks uninstall.
 			status, _ := mgr.Status(cmd.Context(), resolvedLabel)
-			if err := mgr.Uninstall(cmd.Context(), resolvedLabel); err != nil {
+			notes, err := mgr.Uninstall(cmd.Context(), resolvedLabel)
+			if err != nil {
 				if errors.Is(err, platform.ErrUnsupported) {
 					return appError{code: exitGeneric, err: fmt.Errorf("background service is not supported on this platform/session: %w", err)}
 				}
@@ -131,6 +132,11 @@ func newServiceUninstallCommand(stdout io.Writer, opts *options) *cobra.Command 
 				opts.progressf(stderr, "uninstalled %s service %q\n", mgr.Name(), resolvedLabel)
 			} else {
 				opts.progressf(stderr, "%s service %q not installed; nothing to do\n", mgr.Name(), resolvedLabel)
+			}
+			// Notes are operator advisories (e.g. headless systemd unit-file-only
+			// removal), not mere progress — print them verbatim even under --quiet.
+			for _, note := range notes {
+				_, _ = fmt.Fprintln(stderr, note)
 			}
 			return nil
 		},

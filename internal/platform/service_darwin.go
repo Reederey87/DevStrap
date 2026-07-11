@@ -116,20 +116,20 @@ func (m LaunchdManager) waitUntilBootedOut(ctx context.Context, uid int, label s
 	}
 }
 
-func (m LaunchdManager) Uninstall(ctx context.Context, label string) error {
+func (m LaunchdManager) Uninstall(ctx context.Context, label string) ([]string, error) {
 	if err := validateServiceLabel(label); err != nil {
-		return fmt.Errorf("launchd: %w", err)
+		return nil, fmt.Errorf("launchd: %w", err)
 	}
 	agentsDir, err := m.agentsDir()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// bootout failure means the service was not loaded — idempotent uninstall.
 	_, _ = runLaunchctl(ctx, launchdBootoutArgs(m.uid(), label))
 	if err := os.Remove(launchdPlistPath(agentsDir, label)); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove plist: %w", err)
+		return nil, fmt.Errorf("remove plist: %w", err)
 	}
-	return nil
+	return nil, nil
 }
 
 func (m LaunchdManager) Status(ctx context.Context, label string) (ServiceStatus, error) {
