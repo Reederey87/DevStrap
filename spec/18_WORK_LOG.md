@@ -43,6 +43,7 @@ Validated:
 - `gofmt -w cmd internal`
 - `GOCACHE=/tmp/devstrap-gocache go test ./internal/state/ ./internal/cli/ -count=1`
 - Implementer: Codex (gpt-5.6) from a written line-level spec, after two grok-4.5 attempts died mid-run without writing (model-picker escalation); coordinator line-by-line review.
+- Post-review (Codex): accepted-with-residual — the populated check and `goose.Down` run in separate transactions (goose owns its own), so a concurrent process writing a coordinate inside that gap can still lose it; documented at the guard, and the P7-DATA-05 maintenance state lock (which `db down` will also take) is the closing mechanism.
 
 ## 2026-07-11 — fix(sync): deterministic draft-snapshot latest/prune tiebreak (P7-SYNC-03)
 
@@ -62,7 +63,7 @@ Validated:
 - Dual review: coordinator line-by-line pass + Codex `/codex:review`; the Codex pass caught the `RetainedBlobRefs` gap (fixed above in a follow-up commit on the PR).
 
 Follow-ups:
-- None.
+- Take the P7-DATA-05 maintenance state lock in `db down` when it lands, closing the check→Down cross-process window.
 
 ## 2026-07-11 — fix(hub): refuse rewound or deleted git-carrier history (P7-HUB-02)
 
