@@ -31,6 +31,26 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-11 — fix(hub): refuse rewound or deleted git-carrier history (P7-HUB-02)
+
+Changed:
+- `internal/hub/gitcarrier.go`: added the atomic cache-side `head.json` last-known-good head record with retention hash/ProducedAt/floors; every accepted fetch and successful push records it, and compaction records its squashed head after the force-push. Fetch now accepts same-head and descendant updates, admits a non-descendant only when the checked-out retention manifest strictly advances, refuses branch deletion after first contact, and fails closed on corrupt continuity state with the exact cache-removal recovery path. Retention is read directly through the inner `R2Hub` while the carrier mutex is held; signature authenticity remains the sync layer's responsibility.
+- `internal/git/git.go`: `CommandError` now retains/exposes the subprocess exit status so the continuity check distinguishes `git merge-base --is-ancestor` exit 1 from operational failures instead of treating every error as a non-ancestor.
+- Tests: new real-bare-remote continuity coverage for branch deletion, same/second-device rewind refusal, explicit cache-removal recovery, compacting-device and observer-device legitimate compaction, old-manifest parentless replacement refusal, first-write TOFU/head creation, corrupt `head.json`, and pushed-head equality. The pre-existing compaction test now mirrors production order by publishing retention before squashing.
+- Docs/spec: architecture, sync-model, threat-model, self-hosting recovery guidance, and the Pass-7 audit ledger document the guard, its complement to signed retention monotonicity, and the dumb-carrier availability residual; `P7-HUB-02` moved to Recently shipped (Pass-7 counts re-derived from the open table at merge — serial wave).
+
+Validated:
+- `gofmt -w internal/git internal/hub`
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/git ./internal/hub`
+- Full required gate results recorded at handoff.
+
+- Review pass (Grok, 2 Majors fixed): the strict-advance rule falsely refused legitimate compaction for any device that observed the advanced PRE-squash retention tip (production compact PutRetentions on a normal commit, then squashes reusing the SAME manifest bytes) and wedged a compactor that crashed before persisting the squashed head. Acceptance now also passes a byte-identical manifest fingerprint, and a new content gate (when the prior head is in the odb) refuses any rewrite deleting an event object at or above the new floors — closing the same-manifest data-dropping rewrite the fingerprint alone cannot distinguish. An unparsed recorded fingerprint only accepts identical bytes; `fetchedSHA` now updates after compaction. New tests: observer-of-advanced-tip accepts squash, crash-before-head-save compactor self-heals, floor-regression refused, no-retention parentless refused, event-dropping parentless refused.
+
+- Post-review (coordinator + CodeRabbit): the `gitHeadState` comment and the self-hosting recovery section now state the byte-identical-fingerprint acceptance alongside strict advance (they contradicted the implementation); the recovery section additionally states that cache-removal re-adoption does not re-upload history (push watermarks are untouched, so events a rewind erased are not re-sent) and recommends `devstrap hub compact` from an up-to-date device after knowingly accepting a lossy carrier, so the sealed snapshot covers pre-rewind state for later bootstraps.
+
+Follow-ups:
+- Repair ergonomics (optional): a `devstrap sync --accept-rewritten-carrier` that re-adopts AND resets the hub push/pull cursors (re-push is idempotent via conditional-put dedup) would automate lossy-accept repair instead of relying on the compact/snapshot path.
+
 ## 2026-07-11 — fix(git): guard repo locks and agent-run sweeps against PID reuse (P7-GIT-03)
 
 Changed:

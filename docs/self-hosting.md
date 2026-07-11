@@ -117,6 +117,37 @@ otherwise they read the configured hub):
 clients they are serialized by an advisory sweep lock so two of them can't interleave. The lock
 is advisory — it protects cooperating clients, not a hostile writer.
 
+### Carrier history was rewritten
+
+For a Git carrier, this refusal means the configured branch disappeared or its fetched head is
+not descended from the last head this device verified, and the new tree does not carry the
+retention manifest a `devstrap hub compact` squash presents — either strictly advanced, or
+byte-identical to the one this device last verified (the parentless squash reuses the pre-squash
+manifest bytes). DevStrap stops before it can silently re-found the carrier from one device's
+partial local backlog.
+
+First run `devstrap status` and `devstrap sync` on another trusted, up-to-date device. If that
+device also refuses, restore or recreate the carrier repository from the host's backup. If the
+other device confirms that the current carrier is intentionally correct, it is safe to re-adopt
+that confirmed head on the refusing device by removing only its carrier cache and syncing again:
+
+```bash
+rm -rf ~/.devstrap/hub-git/<hash>
+devstrap sync
+```
+
+The actual cache is `~/.devstrap/hub-git/<hash>/` (with `repo/`, `repo.lock`, `observed.json`,
+and `head.json` beneath it); the refusal prints its exact path. Removing it discards only the
+local carrier clone and continuity record, not workspace state or the remote carrier. Do this
+only after a trusted device has verified the remote: deletion deliberately opens a fresh TOFU
+adoption for that carrier head.
+
+Note that re-adoption does not re-upload history: each device's push watermark still records
+what it already pushed, so events the rewind erased from the carrier are not re-sent. If you
+accept a carrier known to be missing history rather than restoring the host's backup, run
+`devstrap hub compact` from an up-to-date device afterwards — the sealed snapshot it publishes
+covers pre-rewind state for any device that later bootstraps from the carrier.
+
 ## Zero-knowledge, restated
 
 The hub cannot read your data. Confidentiality holds by construction: blobs are age-encrypted

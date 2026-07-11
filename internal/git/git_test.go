@@ -448,6 +448,19 @@ func TestRunTimesOutAndReportsTimeoutError(t *testing.T) {
 	}
 }
 
+func TestCommandErrorExposesSubprocessExitCode(t *testing.T) {
+	script := writeFakeGit(t, "#!/bin/sh\nexit 1\n")
+	r := Runner{Bin: script, Timeout: 5 * time.Second}
+	_, err := r.Run(context.Background(), "", "merge-base", "--is-ancestor", "old", "new")
+	var cmdErr CommandError
+	if !errors.As(err, &cmdErr) {
+		t.Fatalf("Run err = %#v, want CommandError", err)
+	}
+	if got := cmdErr.ExitCode(); got != 1 {
+		t.Fatalf("CommandError.ExitCode() = %d, want 1", got)
+	}
+}
+
 func TestCloneTimeoutIsTerminalAndDoesNotRetryOrWipe(t *testing.T) {
 	tmp := t.TempDir()
 	countPath := filepath.Join(tmp, "count")
