@@ -52,6 +52,51 @@ jobs:
         uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
         with:
           version: v2.12
+      - name: ShellCheck installer
+        run: shellcheck scripts/install.sh
+
+  installer-smoke:
+    name: Installer smoke (${{ matrix.os }})
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # v3
+      - name: Resolve latest release
+        id: release
+        run: |
+          redirect=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/Reederey87/DevStrap/releases/latest)
+          version=${redirect##*/}
+          case "$version" in v*) ;; *) echo "could not resolve latest release from $redirect" >&2; exit 1 ;; esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Install latest release with verified signature and checksum
+        env:
+          DEVSTRAP_VERSION: ${{ steps.release.outputs.version }}
+          DEVSTRAP_INSTALL_DIR: ${{ runner.temp }}/bin
+        run: |
+          bash scripts/install.sh
+          "$RUNNER_TEMP/bin/devstrap" version
+      - name: Refuse installation without cosign
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          DEVSTRAP_VERSION: ${{ steps.release.outputs.version }}
+          DEVSTRAP_INSTALL_DIR: ${{ runner.temp }}/no-cosign-bin
+        run: |
+          # Assert the refusal happens for the RIGHT reason — an unrelated
+          # earlier failure (bad version, download error) must not pass this.
+          if out=$(PATH=/usr/bin:/bin bash scripts/install.sh 2>&1); then
+            echo "installer unexpectedly succeeded without cosign" >&2
+            exit 1
+          fi
+          printf '%s\n' "$out"
+          printf '%s' "$out" | grep -q "cosign not found" || {
+            echo "installer failed for a reason other than missing cosign" >&2
+            exit 1
+          }
 
   test:
     name: Go tests

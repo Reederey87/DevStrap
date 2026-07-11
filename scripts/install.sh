@@ -5,13 +5,16 @@
 #   curl -fsSL https://raw.githubusercontent.com/Reederey87/DevStrap/main/scripts/install.sh | sh
 #
 # Environment overrides:
-#   DEVSTRAP_VERSION      release tag to install (e.g. v0.1.0); default: latest release
-#   DEVSTRAP_INSTALL_DIR  install directory; default: /usr/local/bin if writable,
-#                         otherwise ~/.local/bin (created if needed)
+#   DEVSTRAP_VERSION                release tag to install (e.g. v0.1.0); default: latest release
+#   DEVSTRAP_INSTALL_DIR            install directory; default: /usr/local/bin if writable,
+#                                   otherwise ~/.local/bin (created if needed)
+#   DEVSTRAP_INSTALL_CHECKSUM_ONLY  set to 1 to permit checksum-only verification without cosign
+#   DEVSTRAP_INSTALL_NO_SLSA        set to 1 to skip optional SLSA provenance verification
 #
-# The script downloads the release tarball AND checksums.txt, verifies the
-# sha256 before extracting, and never invokes sudo. If the default install
-# directory is not writable, it falls back to ~/.local/bin and tells you.
+# The script verifies the release-workflow cosign signature over checksums.txt,
+# optionally verifies SLSA provenance, then always verifies sha256 before
+# extracting. It never invokes sudo. If the default install directory is not
+# writable, it falls back to ~/.local/bin and tells you.
 set -eu
 
 REPO="Reederey87/DevStrap"
@@ -67,6 +70,57 @@ curl -fsSL -o "${tmp}/${archive}" "${base_url}/${archive}" ||
   fail "download failed: ${base_url}/${archive}"
 curl -fsSL -o "${tmp}/checksums.txt" "${base_url}/checksums.txt" ||
   fail "download failed: ${base_url}/checksums.txt"
+
+bundle_available=1
+if ! curl -fsSL -o "${tmp}/checksums.txt.sigstore.json" "${base_url}/checksums.txt.sigstore.json"; then
+  http_status=$(curl -sSL -o /dev/null -w '%{http_code}' "${base_url}/checksums.txt.sigstore.json") || http_status=""
+  if [ "$http_status" = "404" ]; then
+    if [ "${DEVSTRAP_INSTALL_CHECKSUM_ONLY:-}" = "1" ]; then
+      echo "WARNING: this release has no signature bundle; signature verification skipped (DEVSTRAP_INSTALL_CHECKSUM_ONLY=1); relying on TLS + sha256 only" >&2
+      bundle_available=0
+    else
+      fail "this release has no signature bundle; refusing checksum-only verification (re-run with DEVSTRAP_INSTALL_CHECKSUM_ONLY=1 to accept TLS + sha256 only)"
+    fi
+  else
+    fail "download failed: ${base_url}/checksums.txt.sigstore.json"
+  fi
+fi
+
+if [ "$bundle_available" = "1" ]; then
+  if command -v cosign >/dev/null 2>&1; then
+    if ! cosign_out=$(cosign verify-blob \
+      --certificate-identity "https://github.com/Reederey87/DevStrap/.github/workflows/release.yml@refs/tags/${version}" \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      --bundle "${tmp}/checksums.txt.sigstore.json" \
+      "${tmp}/checksums.txt" 2>&1); then
+      printf '%s\n' "$cosign_out" >&2
+      fail "cosign signature verification FAILED for checksums.txt — the release may have been tampered with; refusing to install"
+    fi
+    echo "Signature verified (cosign, release workflow identity)."
+  elif [ "${DEVSTRAP_INSTALL_CHECKSUM_ONLY:-}" = "1" ]; then
+    echo "WARNING: cosign signature verification skipped (DEVSTRAP_INSTALL_CHECKSUM_ONLY=1); relying on TLS + sha256 (plus SLSA provenance if slsa-verifier is installed)" >&2
+  else
+    fail "cosign not found; install it with 'brew install cosign' or from https://docs.sigstore.dev/cosign/system_config/installation/, or re-run with DEVSTRAP_INSTALL_CHECKSUM_ONLY=1 to accept checksum-only verification"
+  fi
+fi
+
+# A release without a signature bundle predates provenance too — skip SLSA
+# when the bundle 404'd and the checksum-only hatch was taken.
+if [ "$bundle_available" = "1" ] && [ "${DEVSTRAP_INSTALL_NO_SLSA:-}" != "1" ]; then
+  if command -v slsa-verifier >/dev/null 2>&1; then
+    curl -fsSL -o "${tmp}/multiple.intoto.jsonl" "${base_url}/multiple.intoto.jsonl" ||
+      fail "download failed: ${base_url}/multiple.intoto.jsonl"
+    if ! slsa_out=$(slsa-verifier verify-artifact --provenance-path "${tmp}/multiple.intoto.jsonl" \
+      --source-uri github.com/Reederey87/DevStrap --source-tag "${version}" \
+      "${tmp}/${archive}" 2>&1); then
+      printf '%s\n' "$slsa_out" >&2
+      fail "SLSA provenance verification FAILED for ${archive}; refusing to install"
+    fi
+    echo "SLSA provenance verified."
+  else
+    echo "note: SLSA provenance verification skipped (slsa-verifier not found); install it from https://github.com/slsa-framework/slsa-verifier#installation"
+  fi
+fi
 
 # Extract the one matching checksum line FIRST and fail hard when it is
 # absent — piping an empty grep result into `sha256sum -c` must never be able

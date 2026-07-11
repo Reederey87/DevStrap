@@ -31,6 +31,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-11 — fix(installer): authenticate shipped checksums and provenance (P7-QUAL-02)
+
+Changed:
+- `scripts/install.sh` now downloads `checksums.txt.sigstore.json` and verifies the checksum file with cosign pinned to the exact DevStrap release-workflow identity before any archive hash is trusted. Missing cosign and missing bundles fail closed by default; `DEVSTRAP_INSTALL_CHECKSUM_ONLY=1` is an explicit loud-warning escape hatch (bundle absence is accepted only on a confirmed 404). The existing sha256 verification remains always on and unchanged after the new signature stage.
+- When `slsa-verifier` is installed, the installer downloads `multiple.intoto.jsonl` and verifies the selected archive against `github.com/Reederey87/DevStrap` at the selected tag; absence is a noted skip, and `DEVSTRAP_INSTALL_NO_SLSA=1` explicitly disables this optional layer.
+- `.github/workflows/ci.yml` adds installer ShellCheck coverage and a push-to-main Ubuntu/macOS latest-release installer smoke with cosign, including an Ubuntu fail-closed negative run with cosign removed from `PATH`.
+- `docs/install.md` documents automatic verification, both environment controls, fail-closed behavior, and the tag-pinned installer URL for high-assurance use. `RELEASING.md` adds positive and no-cosign-negative tag-installer release smokes. Specs 03/16 record the distribution contract and CI coverage; the audit ledger moves `P7-QUAL-02` to *Recently shipped* and reconciles Pass 7 to 40 open.
+
+Validated:
+- `shellcheck scripts/install.sh`; `bash -n scripts/install.sh`; `gofmt -w cmd internal`.
+- Local `DEVSTRAP_VERSION=v0.1.1` functional installer check recorded in the implementation handoff.
+
+- Review pass (Grok, Minors fixed): the CI no-cosign negative test now asserts the refusal REASON (greps `cosign not found`) instead of any non-zero exit; cosign/slsa-verifier stderr is surfaced on failure instead of discarded; the checksum-only-hatch wording and docs now state precisely which layers remain (SLSA still runs when the bundle exists and slsa-verifier is present; a pre-bundle 404 skips SLSA too); redundant `continue-on-error: false` dropped; `sigstore/cosign-installer` SHA-pinned.
+
 ## 2026-07-11 — fix(cli,platform): stable service ExecPath + missing-ExecPath detection (P7-XP-01, P7-XP-05)
 
 Changed:
