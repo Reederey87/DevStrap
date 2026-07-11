@@ -1996,6 +1996,12 @@ type DraftSnapshot struct {
 
 // LatestDraftSnapshot returns the most recent draft bundle snapshot for a
 // project, or nil with no error when no snapshot exists (DRAFT-02).
+// Selection uses the canonical (hlc, source_event_device_id, source_event_id)
+// coordinate so every device picks the same snapshot on an HLC tie. Legacy
+// rows without source-event coordinates all collapse to (0, ”, ”), so local
+// created_at/id ride as FINAL tiebreakers only — stamped rows are unique on
+// the canonical triple (migration 00012), so the local fields never influence
+// cross-device selection.
 func (s *Store) LatestDraftSnapshot(ctx context.Context, namespaceID string) (*DraftSnapshot, error) {
 	var snap DraftSnapshot
 	err := s.db.QueryRowContext(ctx, `
@@ -2003,7 +2009,7 @@ SELECT id, namespace_id, blob_ref, byte_size, file_count,
        COALESCE(source_event_hlc, 0), COALESCE(source_event_device_id, ''), COALESCE(source_event_id, '')
 FROM draft_snapshots
 WHERE namespace_id = ?
-ORDER BY COALESCE(source_event_hlc, 0) DESC, created_at DESC, id DESC
+ORDER BY COALESCE(source_event_hlc, 0) DESC, COALESCE(source_event_device_id, '') DESC, COALESCE(source_event_id, '') DESC, created_at DESC, id DESC
 LIMIT 1;
 `, namespaceID).Scan(&snap.ID, &snap.NamespaceID, &snap.BlobRef, &snap.ByteSize, &snap.FileCount,
 		&snap.SourceEventHLC, &snap.SourceEventDeviceID, &snap.SourceEventID)
@@ -2138,6 +2144,9 @@ SELECT DISTINCT blob_ref FROM draft_snapshots WHERE blob_ref LIKE 'age_blob:%';
 // so without pruning every superseded snapshot keeps its blob "referenced"
 // forever and neither local nor hub GC can reclaim a stale draft blob. keep is
 // clamped to >= 1 so the current snapshot (highest HLC) is always retained.
+// Survival order uses the same canonical (hlc, source_event_device_id,
+// source_event_id) coordinate as LatestDraftSnapshot so every device keeps the
+// same snapshots on an HLC tie (P7-SYNC-03).
 // Returns the number of rows pruned.
 func (s *Store) PruneDraftSnapshots(ctx context.Context, keep int) (int, error) {
 	if keep < 1 {
@@ -2149,7 +2158,7 @@ WHERE id IN (
   SELECT id FROM (
     SELECT id, ROW_NUMBER() OVER (
       PARTITION BY namespace_id
-      ORDER BY COALESCE(source_event_hlc, 0) DESC, created_at DESC, id DESC
+      ORDER BY COALESCE(source_event_hlc, 0) DESC, COALESCE(source_event_device_id, '') DESC, COALESCE(source_event_id, '') DESC, created_at DESC, id DESC
     ) AS rn
     FROM draft_snapshots
   ) WHERE rn > ?
@@ -2364,6 +2373,9 @@ func (s *Store) ClearPendingHubDelete(ctx context.Context, ref string) error {
 // plus the top-`keep` draft snapshot refs per namespace. `hub gc --dry-run` uses
 // this so its preview matches what a real run (prune + delete) would leave
 // referenced, instead of counting soon-to-be-pruned superseded snapshots as live.
+// Ranks by the same canonical (hlc, source_event_device_id, source_event_id)
+// coordinate as PruneDraftSnapshots so the dry-run preview never names a
+// different blob than the real prune actually keeps (P7-SYNC-03).
 func (s *Store) RetainedBlobRefs(ctx context.Context, keep int) ([]string, error) {
 	if keep < 1 {
 		keep = 1
@@ -2374,7 +2386,7 @@ UNION
 SELECT blob_ref FROM (
   SELECT blob_ref, ROW_NUMBER() OVER (
     PARTITION BY namespace_id
-    ORDER BY COALESCE(source_event_hlc, 0) DESC, created_at DESC, id DESC
+    ORDER BY COALESCE(source_event_hlc, 0) DESC, COALESCE(source_event_device_id, '') DESC, COALESCE(source_event_id, '') DESC, created_at DESC, id DESC
   ) AS rn
   FROM draft_snapshots
   WHERE blob_ref LIKE 'age_blob:%'

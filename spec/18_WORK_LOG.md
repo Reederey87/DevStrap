@@ -31,6 +31,26 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-11 — fix(sync): deterministic draft-snapshot latest/prune tiebreak (P7-SYNC-03)
+
+Changed:
+- `internal/state/store.go`: `LatestDraftSnapshot`'s `ORDER BY`, `PruneDraftSnapshots`' window-function `ORDER BY`, and `RetainedBlobRefs`' window-function `ORDER BY` all changed from `COALESCE(source_event_hlc, 0) DESC, created_at DESC, id DESC` to `COALESCE(source_event_hlc, 0) DESC, COALESCE(source_event_device_id, '') DESC, COALESCE(source_event_id, '') DESC` — the canonical `(hlc, source_event_device_id, source_event_id)` fleet tiebreak already used by `samePathLess`/`envCoordLess` (`internal/sync/events.go`). `created_at` (local wall clock) and `id` (a locally-minted `snap_<uuidv7>`) both differ per device for the same source event, so on an HLC tie two devices could pick different "latest" snapshots to materialize, keep different snapshots after prune GC, or (via `RetainedBlobRefs`, which backs `hub gc --dry-run`) preview a different blob as retained than the real prune run actually keeps. `RetainedBlobRefs` was a Codex post-implementation review catch (the same anti-pattern, backing `hub gc --dry-run`, missed by the initial fix). All three functions' doc comments note the shared coordinate.
+- `internal/state/store_test.go`: `TestLatestDraftSnapshotDeterministicTiebreak`, `TestPruneDraftSnapshotsDeterministicTiebreak`, and `TestRetainedBlobRefsDeterministicTiebreakMatchesPrune` — each inserts the canonical winner (higher `(device_id, event_id)`) first via `RecordDraftSnapshot`, then the loser, then force-sets the winner's `created_at` earlier than the loser's so the OLD ordering demonstrably prefers the loser (verified by manually reverting each fix in turn and confirming its test fails); the prune and retained-refs tests additionally assert prune and the dry-run preview agree on the same surviving blob.
+- `spec/07_NAMESPACE_AND_SYNC_MODEL.md`: the materialize `draft_project` bullet and the draft restore steps now state that "newest" means the highest `(hlc, source_event_device_id, source_event_id)` coordinate, not local `created_at`/`id`.
+- `docs/audits/README.md`: `P7-SYNC-03` moved open → *Recently shipped*; Pass-7 open 36→35, P3 19→18.
+
+Validated:
+- `gofmt -w cmd internal`
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/state/ -run 'TestLatestDraftSnapshot|TestPruneDraftSnapshots|TestRetainedBlobRefs' -count=1` (all three new tests pass; each is constructed so the old `created_at DESC, id DESC` ordering demonstrably prefers the loser)
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/state/ -count=1`
+- `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` (0 issues)
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...` (all green)
+- Dual review: coordinator line-by-line pass + Codex `/codex:review`; the Codex pass caught the `RetainedBlobRefs` gap (fixed above in a follow-up commit on the PR).
+
+Follow-ups:
+- None.
+
 ## 2026-07-11 — fix(hub): refuse rewound or deleted git-carrier history (P7-HUB-02)
 
 Changed:
