@@ -138,6 +138,30 @@ func TestResolveServiceExecPathPrefersStableSymlinkDir(t *testing.T) {
 		}
 	})
 
+	t.Run("keg-only opt/<formula>/bin symlink survives Cellar target", func(t *testing.T) {
+		// /opt/homebrew/opt/devstrap@1/bin is the ONLY entrypoint for a
+		// keg-only/versioned formula and is upgrade-stable like the bin dirs.
+		for _, exe := range []string{
+			"/opt/homebrew/opt/devstrap@1/bin/devstrap",
+			"/usr/local/opt/devstrap@1/bin/devstrap",
+			"/home/linuxbrew/.linuxbrew/opt/devstrap/bin/devstrap",
+		} {
+			got, err := resolveServiceExecPathFrom(exe, func(string) (string, error) { return cellarTarget, nil })
+			if err != nil || got != exe {
+				t.Fatalf("resolve(%q) = (%q, %v), want the opt symlink kept", exe, got, err)
+			}
+		}
+		// A deeper or shallower opt path is NOT the keg pattern.
+		for _, exe := range []string{
+			"/opt/homebrew/opt/devstrap@1/libexec/bin/devstrap",
+			"/opt/homebrew/opt/bin/devstrap",
+		} {
+			if _, err := resolveServiceExecPathFrom(exe, func(string) (string, error) { return cellarTarget, nil }); err == nil {
+				t.Fatalf("resolve(%q) succeeded, want Cellar refusal", exe)
+			}
+		}
+	})
+
 	t.Run("direct Cellar path is refused", func(t *testing.T) {
 		_, err := resolveServiceExecPathFrom("/random/bin/devstrap", func(string) (string, error) { return cellarTarget, nil })
 		if err == nil || !strings.Contains(err.Error(), "brew upgrade") || !strings.Contains(err.Error(), "--exec-path") {

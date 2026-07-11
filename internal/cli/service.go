@@ -237,12 +237,34 @@ func resolveServiceExecPath(execPath string) (string, error) {
 // stableServiceBinDirs is a variable only to let tests model a stable install
 // directory without writing to system-owned paths.
 var stableServiceBinDirs = func() []string {
-	dirs := []string{"/opt/homebrew/bin", "/usr/local/bin"}
+	dirs := []string{"/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin"}
 	if home, err := os.UserHomeDir(); err == nil {
 		dirs = append(dirs, filepath.Join(home, ".local", "bin"))
 	}
 	return dirs
 }()
+
+// stableBrewPrefixes back the keg-only/versioned-formula case: Homebrew's
+// `<prefix>/opt/<formula>/bin` symlinks are upgrade-stable (unlike Cellar) and
+// are the ONLY entrypoint for a keg-only or versioned formula, which may have
+// no global bin link at all (Codex review on P7-XP-01).
+var stableBrewPrefixes = []string{"/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew"}
+
+// isStableBrewOptBin reports whether dir is exactly `<brew prefix>/opt/<one
+// formula segment>/bin`.
+func isStableBrewOptBin(dir string) bool {
+	for _, prefix := range stableBrewPrefixes {
+		rel, err := filepath.Rel(prefix+"/opt", dir)
+		if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+			continue
+		}
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		if len(parts) == 2 && parts[0] != "" && parts[1] == "bin" {
+			return true
+		}
+	}
+	return false
+}
 
 func resolveServiceExecPathFrom(exe string, evalSymlinks func(string) (string, error)) (string, error) {
 	resolved, err := evalSymlinks(exe)
@@ -277,7 +299,7 @@ func isStableBinDir(dir string) bool {
 			return true
 		}
 	}
-	return false
+	return isStableBrewOptBin(abs)
 }
 
 // isEphemeralExecPath reports whether p is under the OS temp dir or a Go build

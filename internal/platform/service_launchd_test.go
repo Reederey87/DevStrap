@@ -61,6 +61,22 @@ func TestExtractLaunchdExecPathGolden(t *testing.T) {
 	}
 }
 
+func TestExtractLaunchdExecPathRejectsForeignShapes(t *testing.T) {
+	// Well-formed XML that is NOT our rendered shape must degrade to "",
+	// never return a string from the wrong nested value (Codex review).
+	cases := map[string]string{
+		"value wrapped in dict":   `<plist><dict><key>ProgramArguments</key><dict><array><string>/wrong</string></array></dict></dict></plist>`,
+		"nested array first":      `<plist><dict><key>ProgramArguments</key><array><array><string>/wrong</string></array><string>/real</string></array></dict></plist>`,
+		"empty array":             `<plist><dict><key>ProgramArguments</key><array></array></dict></plist>`,
+		"no ProgramArguments key": `<plist><dict><key>Label</key><string>x</string></dict></plist>`,
+	}
+	for name, doc := range cases {
+		if got := extractLaunchdExecPath([]byte(doc)); got != "" {
+			t.Errorf("%s: extractLaunchdExecPath = %q, want empty", name, got)
+		}
+	}
+}
+
 func TestRenderLaunchdPlistEscapesXML(t *testing.T) {
 	spec := ServiceSpec{
 		Label:    "com.devstrap.run-loop",
