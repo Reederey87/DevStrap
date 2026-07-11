@@ -226,6 +226,35 @@ func TestFSLockEmptyFileUsesTTLPath(t *testing.T) {
 	release()
 }
 
+// TestFSLockPartialOwnerRecordUsesTTLPath (CodeRabbit): a parseable but
+// INCOMPLETE record (e.g. a crash left only {"hostname":...}, PID 0) must be
+// judged by the mtime TTL like any corrupt lock — never insta-broken via the
+// "PID 0 is dead" path, and never held forever.
+func TestFSLockPartialOwnerRecordUsesTTLPath(t *testing.T) {
+	hostname, err := os.Hostname()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "hub.lock")
+	if err := os.WriteFile(path, []byte(fmt.Sprintf("{\"hostname\":%q}", hostname)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lock := testFSLock(path)
+	// Fresh mtime: NOT stale (would have been insta-broken via dead-PID-0).
+	if _, err := lock.acquire(); err == nil {
+		t.Fatal("fresh partial owner record was broken before the TTL")
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	release, err := lock.acquire()
+	if err != nil {
+		t.Fatalf("acquire over expired partial record: %v", err)
+	}
+	release()
+}
+
 func TestFSLockRecycledPIDBrokenImmediately(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hub.lock")
 	owner := localFSLockOwner(t, os.Getpid(), strings.Repeat("c", 32))

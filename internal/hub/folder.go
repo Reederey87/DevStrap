@@ -576,7 +576,7 @@ func (l fsLock) acquire() (func(), error) {
 func (l fsLock) isStale() bool {
 	raw, err := os.ReadFile(l.path) //nolint:gosec // lock path is the private hub cache lock
 	var owner fsLockOwner
-	if err == nil && len(raw) > 0 && json.Unmarshal(raw, &owner) == nil {
+	if err == nil && len(raw) > 0 && json.Unmarshal(raw, &owner) == nil && validFSLockOwner(owner) {
 		hostname, hostErr := os.Hostname()
 		if hostErr == nil && owner.Hostname == hostname {
 			return !hubLockOwnerAlive(owner)
@@ -584,6 +584,15 @@ func (l fsLock) isStale() bool {
 	}
 	info, statErr := os.Stat(l.path)
 	return statErr == nil && time.Since(info.ModTime()) > l.stale
+}
+
+// validFSLockOwner gates the owner-aware staleness rules on a COMPLETE record:
+// json.Unmarshal accepts partial/unknown-shape JSON, and a fragment like
+// {"hostname":"<local>"} would otherwise read PID 0 as a provably dead owner
+// and break the lock instantly. Anything less than a full v1 record is judged
+// by the mtime TTL like every other unparseable lock (CodeRabbit).
+func validFSLockOwner(o fsLockOwner) bool {
+	return o.Version == 1 && o.PID > 0 && o.Hostname != "" && o.Nonce != ""
 }
 
 func readFSLockOwner(path string) (fsLockOwner, bool) {
