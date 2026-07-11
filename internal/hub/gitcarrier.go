@@ -531,17 +531,32 @@ func (g *GitCarrierHub) validateMarkerLocked() error {
 	return nil
 }
 
-// writeMarkerLocked seeds the carrier marker on a bootstrap write.
+// writeMarkerLocked seeds the carrier marker on a bootstrap write. It rides
+// the same os.Root confinement as every other checkout write so its safety is
+// structural, not dependent on a validateMarkerLocked having run first
+// (P7-SEC-04 review).
 func (g *GitCarrierHub) writeMarkerLocked() error {
-	path := filepath.Join(g.dir, gitMarkerFile)
-	if _, err := os.Stat(path); err == nil {
+	root, err := os.OpenRoot(g.dir)
+	if err != nil {
+		return fmt.Errorf("open git hub root: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+	if _, err := root.Lstat(gitMarkerFile); err == nil {
 		return nil
 	}
 	raw, err := json.Marshal(gitCarrierMarker{Version: 1, WorkspaceID: g.workspaceID})
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, raw, 0o600)
+	f, err := root.OpenFile(gitMarkerFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create git hub marker: %w", err)
+	}
+	if _, err := f.Write(raw); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write git hub marker: %w", err)
+	}
+	return f.Close()
 }
 
 // commitLocked stages everything and commits when the tree changed. The
