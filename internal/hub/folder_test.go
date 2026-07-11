@@ -1,9 +1,11 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -198,6 +200,230 @@ func TestFolderHubRefusesReplacedRoot(t *testing.T) {
 	}
 	if _, err := h.Pull(ctx, nil); err == nil {
 		t.Fatal("read through a replaced root succeeded; want refusal")
+	}
+}
+
+// TestWriteFileAtomicSuccessNoResidue pins P7-HUB-05: a rename-based put
+// publishes the full body and leaves no ".tmp-*" residue in the object dir.
+func TestWriteFileAtomicSuccessNoResidue(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "retention.json")
+	body := bytes.Repeat([]byte("new-retention-body-"), 4096) // multi-block payload
+	if err := writeFileAtomic(path, body); err != nil {
+		t.Fatalf("writeFileAtomic: %v", err)
+	}
+	got, err := os.ReadFile(path) //nolint:gosec // test-controlled temp path
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("read body len=%d, want full %d bytes", len(got), len(body))
+	}
+	assertNoTmpResidue(t, dir)
+}
+
+// TestWriteFileAtomicCleansTempOnFailure pins that a failed rename does not
+// leave a partial target or an orphan ".tmp-*" file for readers to trip on.
+func TestWriteFileAtomicCleansTempOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	// Make the destination a directory so rename(file → dir) fails; the helper
+	// must remove the temp and must not replace the destination.
+	path := filepath.Join(dir, "retention.json")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := writeFileAtomic(path, bytes.Repeat([]byte("x"), 8192))
+	if err == nil {
+		t.Fatal("writeFileAtomic over an existing directory succeeded; want rename failure")
+	}
+	info, serr := os.Stat(path)
+	if serr != nil || !info.IsDir() {
+		t.Fatalf("destination after failed write: info=%v err=%v; want directory left intact", info, serr)
+	}
+	assertNoTmpResidue(t, dir)
+}
+
+// TestFsObjectStorePutObjectAtomicFullBody exercises PutObject through the
+// folder carrier's store: a large body is fully readable and no ".tmp-*"
+// residue remains under the shared root after success (P7-HUB-05).
+func TestFsObjectStorePutObjectAtomicFullBody(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store := &fsObjectStore{root: root, obsPath: filepath.Join(t.TempDir(), "observed.json")}
+	key := "workspaces/ws_test/meta/retention.json"
+	body := bytes.Repeat([]byte("put-object-body-"), 8192)
+	if err := store.PutObject(ctx, key, body, false); err != nil {
+		t.Fatalf("PutObject: %v", err)
+	}
+	got, err := store.GetObject(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("GetObject len=%d, want full %d bytes", len(got), len(body))
+	}
+	assertNoTmpResidue(t, root)
+}
+
+// TestFsObjectStorePutObjectIfMatchAtomicFullBody proves a CAS rewrite of a
+// large retention-like object is rename-based: the reader sees the full new
+// body (never a half-written mix) and no ".tmp-*" residue remains.
+func TestFsObjectStorePutObjectIfMatchAtomicFullBody(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store := &fsObjectStore{root: root, obsPath: filepath.Join(t.TempDir(), "observed.json")}
+	key := "workspaces/ws_test/meta/retention.json"
+	oldBody := []byte(`{"v":1,"floors":{"dev_a":1}}`)
+	if err := store.PutObject(ctx, key, oldBody, true); err != nil {
+		t.Fatalf("seed PutObject: %v", err)
+	}
+	_, etag, err := store.GetObjectWithETag(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newBody := bytes.Repeat([]byte("if-match-new-body-"), 8192)
+	if err := store.PutObjectIfMatch(ctx, key, newBody, etag); err != nil {
+		t.Fatalf("PutObjectIfMatch: %v", err)
+	}
+	got, err := store.GetObject(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, newBody) {
+		t.Fatalf("after PutObjectIfMatch len=%d, want full new body %d (not old %d)", len(got), len(newBody), len(oldBody))
+	}
+	assertNoTmpResidue(t, root)
+}
+
+// TestListKeysIgnoresTmpPrefix pins that orphan writeFileAtomic temps are not
+// surfaced as hub objects (crash between create and rename).
+func TestListKeysIgnoresTmpPrefix(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store := &fsObjectStore{root: root, obsPath: filepath.Join(t.TempDir(), "observed.json")}
+	key := "workspaces/ws_test/meta/retention.json"
+	if err := store.PutObject(ctx, key, []byte(`{"v":1}`), true); err != nil {
+		t.Fatal(err)
+	}
+	metaDir := filepath.Join(root, "workspaces", "ws_test", "meta")
+	orphan := filepath.Join(metaDir, ".tmp-orphan-leftover")
+	if err := os.WriteFile(orphan, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	objs, _, err := store.ListObjectsV2(ctx, "workspaces/ws_test/", "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, o := range objs {
+		if strings.Contains(o.Key, ".tmp-") {
+			t.Fatalf("ListObjectsV2 returned orphan temp key %q", o.Key)
+		}
+	}
+	if len(objs) != 1 || objs[0].Key != key {
+		t.Fatalf("ListObjectsV2 = %+v, want only %s", objs, key)
+	}
+}
+
+// TestListKeysReclaimsStaleTempOrphans pins the post-review cleanup: an
+// hour-old crash orphan is deleted on the next list, while a FRESH temp (a
+// possibly in-flight upload from another device via the cloud drive) is
+// retained — only skipped from the key set.
+func TestListKeysReclaimsStaleTempOrphans(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store := &fsObjectStore{root: root, obsPath: filepath.Join(t.TempDir(), "observed.json")}
+	key := "workspaces/ws_test/meta/retention.json"
+	if err := store.PutObject(ctx, key, []byte(`{"v":1}`), true); err != nil {
+		t.Fatal(err)
+	}
+	metaDir := filepath.Join(root, "workspaces", "ws_test", "meta")
+	stale := filepath.Join(metaDir, ".tmp-stale-orphan")
+	fresh := filepath.Join(metaDir, ".tmp-fresh-upload")
+	for _, p := range []string{stale, fresh} {
+		if err := os.WriteFile(p, []byte("partial"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * staleTempAge)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.ListObjectsV2(ctx, "workspaces/ws_test/", "", 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale temp orphan survived the list sweep: %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh temp was reclaimed too aggressively: %v", err)
+	}
+}
+
+// TestFsObjectStoreConcurrentOverwriteNeverTearsReads pins the rename-based
+// replacement guarantee the write-then-read tests cannot (an in-place
+// os.WriteFile would pass those): while a writer flips a large object between
+// two generations, every concurrent read observes one FULL generation — never
+// an empty, truncated, or mixed body (post-review MINOR, P7-HUB-05).
+func TestFsObjectStoreConcurrentOverwriteNeverTearsReads(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	store := &fsObjectStore{root: root, obsPath: filepath.Join(t.TempDir(), "observed.json")}
+	key := "workspaces/ws_test/meta/retention.json"
+	const genSize = 1 << 16
+	genA := bytes.Repeat([]byte{'a'}, genSize)
+	genB := bytes.Repeat([]byte{'b'}, genSize)
+	if err := store.PutObject(ctx, key, genA, true); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		for i := 0; i < 50; i++ {
+			body := genA
+			if i%2 == 0 {
+				body = genB
+			}
+			if err := store.PutObject(ctx, key, body, false); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	for {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("writer: %v", err)
+			}
+			return
+		default:
+		}
+		got, err := store.GetObject(ctx, key)
+		if err != nil {
+			t.Fatalf("concurrent GetObject: %v", err)
+		}
+		if len(got) != genSize {
+			t.Fatalf("torn read: length %d, want %d", len(got), genSize)
+		}
+		if !bytes.Equal(got, genA) && !bytes.Equal(got, genB) {
+			t.Fatalf("torn read: body mixes generations (first byte %q)", got[0])
+		}
+	}
+}
+
+func assertNoTmpResidue(t *testing.T, root string) {
+	t.Helper()
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.HasPrefix(d.Name(), ".tmp-") {
+			t.Errorf("leftover temp file: %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
