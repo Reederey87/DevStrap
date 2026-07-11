@@ -203,6 +203,7 @@ func (m SystemdUserManager) Status(ctx context.Context, label string) (ServiceSt
 		return status, fmt.Errorf("stat unit file: %w", err)
 	}
 	status.Installed = true
+	//nolint:gosec // unitPath is our own systemd user-unit for a validated label (validateServiceLabel), not user input.
 	if unit, err := os.ReadFile(unitPath); err == nil {
 		status.ExecPath = extractSystemdExecPath(unit)
 		if status.ExecPath != "" {

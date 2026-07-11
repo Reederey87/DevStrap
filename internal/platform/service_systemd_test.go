@@ -42,6 +42,27 @@ func TestSystemdQuoteUnquoteFirstWordRoundTrip(t *testing.T) {
 	}
 }
 
+func TestExtractSystemdExecPath(t *testing.T) {
+	unit, err := renderSystemdUnit(ServiceSpec{
+		Label:    "devstrap-run-loop",
+		ExecPath: "/opt/bin/devstrap with space",
+		Args:     []string{"run-loop", "--interval", "5m"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := extractSystemdExecPath(unit); got != "/opt/bin/devstrap with space" {
+		t.Errorf("extractSystemdExecPath = %q, want the rendered ExecPath", got)
+	}
+	// A hand-mangled unit degrades to an unknown ExecPath, never a panic.
+	if got := extractSystemdExecPath([]byte("ExecStart=\"mangled\\q\"\n")); got != "" {
+		t.Errorf("extractSystemdExecPath(mangled) = %q, want empty", got)
+	}
+	if got := extractSystemdExecPath([]byte("[Unit]\nDescription=x\n")); got != "" {
+		t.Errorf("extractSystemdExecPath(no ExecStart) = %q, want empty", got)
+	}
+}
+
 func TestSystemdArgvBuilders(t *testing.T) {
 	if got := systemdProbeArgs(); !equalStrings(got, []string{"systemctl", "--user", "show-environment"}) {
 		t.Errorf("probe argv = %v", got)
