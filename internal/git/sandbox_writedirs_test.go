@@ -57,6 +57,43 @@ func TestWorktreeSandboxWriteDirs(t *testing.T) {
 	}
 }
 
+// TestWorktreeSandboxWriteDirsMainCheckout covers the gitDirAbs == commonAbs
+// branch: in a plain (main) checkout the grant is exactly objects/refs/logs —
+// no per-worktree admin dir, and still never the common dir root or its
+// hooks/config.
+func TestWorktreeSandboxWriteDirsMainCheckout(t *testing.T) {
+	repo, r := initSquashMergeRepo(t)
+	ctx := context.Background()
+
+	dirs, err := r.WorktreeSandboxWriteDirs(ctx, repo)
+	if err != nil {
+		t.Fatalf("WorktreeSandboxWriteDirs: %v", err)
+	}
+	if len(dirs) != 3 {
+		t.Fatalf("want 3 grant dirs (objects/refs/logs) in a main checkout, got %d: %v", len(dirs), dirs)
+	}
+
+	commonReal := mustEval(t, filepath.Join(repo, ".git"))
+	var bases []string
+	for _, d := range dirs {
+		if d == commonReal {
+			t.Errorf("grant includes the common dir root %q — would expose hooks/config (sandbox escape)", d)
+		}
+		if strings.Contains(d, string(os.PathSeparator)+"hooks") || strings.HasSuffix(d, string(os.PathSeparator)+"config") {
+			t.Errorf("grant includes a hooks/config path %q", d)
+		}
+		if strings.Contains(d, string(os.PathSeparator)+"worktrees"+string(os.PathSeparator)) {
+			t.Errorf("main checkout must not grant a per-worktree admin dir, got %q", d)
+		}
+		bases = append(bases, filepath.Base(d))
+	}
+	for _, want := range []string{"objects", "refs", "logs"} {
+		if !contains(bases, want) {
+			t.Errorf("missing grant for %s; bases=%v", want, bases)
+		}
+	}
+}
+
 // TestWorktreeSandboxWriteDirsNonRepo returns (nil, nil) outside a git worktree
 // so the caller grants nothing without special-casing.
 func TestWorktreeSandboxWriteDirsNonRepo(t *testing.T) {
