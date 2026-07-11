@@ -1631,6 +1631,57 @@ func TestEnvProfilesForBlobRef(t *testing.T) {
 	}
 }
 
+// TestAllBlobRefsInFile proves snapshot enumeration freezes the row-set: a
+// binding added to the live store after VACUUM INTO is invisible to the backup
+// file (P7-DATA-03).
+func TestAllBlobRefsInFile(t *testing.T) {
+	ctx := context.Background()
+	st, project := newEnvProfileTestStore(t, ctx, "work/acme/api")
+	defer st.Close()
+
+	const first = "age_blob:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if _, err := st.SaveCapturedEnvProfile(ctx, project.ID, "default", []string{"API_TOKEN"}, first); err != nil {
+		t.Fatal(err)
+	}
+
+	backupPath := filepath.Join(t.TempDir(), "snap.db")
+	if err := st.Backup(ctx, backupPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// Live store gains a second binding after the snapshot was taken.
+	projectB, err := st.UpsertProject(ctx, UpsertProjectParams{
+		Path:          "work/acme/web",
+		Type:          "git_repo",
+		RemoteURL:     "git@github.com:acme/web.git",
+		RemoteKey:     "github.com/acme/web",
+		DefaultBranch: "main",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const second = "age_blob:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	if _, err := st.SaveCapturedEnvProfile(ctx, projectB.ID, "default", []string{"WEB_TOKEN"}, second); err != nil {
+		t.Fatal(err)
+	}
+
+	live, err := st.AllBlobRefs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(live) != 2 {
+		t.Fatalf("live AllBlobRefs = %v, want both bindings", live)
+	}
+
+	frozen, err := AllBlobRefsInFile(ctx, backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frozen) != 1 || frozen[0] != first {
+		t.Fatalf("AllBlobRefsInFile = %v, want only %q", frozen, first)
+	}
+}
+
 func TestMustVerifyEventIncludesTrustAffectingTypes(t *testing.T) {
 	for _, eventType := range []string{"project.deleted", "project.renamed", "env.profile.updated", "device.revoked", "device.lost"} {
 		if !mustVerifyEvent(eventType) {

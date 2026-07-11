@@ -50,13 +50,23 @@ var backupTargets = []string{backupEntryDB, backupEntryConfig, backupDirBlobs, b
 
 // fullBackupResult is the machine-readable summary of a full backup.
 type fullBackupResult struct {
-	Path         string   `json:"path"`
-	Config       bool     `json:"config"`
-	Blobs        int      `json:"blobs"`
-	Keys         int      `json:"keys"`
-	MissingBlobs []string `json:"missing_blobs,omitempty"`
-	Warnings     []string `json:"warnings,omitempty"`
+	Path     string   `json:"path"`
+	Config   bool     `json:"config"`
+	Blobs    int      `json:"blobs"`
+	Keys     int      `json:"keys"`
+	Warnings []string `json:"warnings,omitempty"`
 }
+
+// backupSnapshotAttempts is how many VACUUM INTO + snapshot-enumerate passes
+// runFullBackup will try before treating a missing referenced blob as fatal
+// (P7-DATA-03). Concurrent rotation/GC can legitimately delete a superseded
+// blob between attempts; a fresh snapshot will not reference it.
+const backupSnapshotAttempts = 3
+
+// backupEnumerateHook is a test seam called at the top of each
+// snapshotAndEnumerate attempt (nil-checked). Tests inject concurrent drift
+// (delete ciphertext, repoint bindings) between attempts.
+var backupEnumerateHook func(attempt int)
 
 // restoreResult is the machine-readable summary of a restore (P7-CLI-01).
 type restoreResult struct {
@@ -81,15 +91,13 @@ func runFullBackup(ctx context.Context, opts *options, store *state.Store, out s
 	defer func() { _ = os.RemoveAll(stageDir) }()
 
 	tmpDB := filepath.Join(stageDir, backupEntryDB)
-	if err := store.Backup(ctx, tmpDB); err != nil { // VACUUM INTO + chmod 0600 + validate
-		return err
-	}
-
-	refs, err := store.AllBlobRefs(ctx)
+	refs, err := snapshotAndEnumerate(ctx, store, tmpDB, paths)
 	if err != nil {
 		return err
 	}
 
+	// Key material still stages from the live store (append-mostly custody
+	// data; snapshot purity applies to blob refs — P7-DATA-03).
 	keySourceDir, keyNames, err := stageBackupKeys(ctx, opts, store, filepath.Join(stageDir, backupDirKeys))
 	if err != nil {
 		return err
@@ -106,28 +114,83 @@ func runFullBackup(ctx context.Context, opts *options, store *state.Store, out s
 	if !result.Config {
 		result.Warnings = append(result.Warnings, "no config.yaml found; the hub pointer and custom root will not be restored")
 	}
-	// The missing-blob warning goes LAST so the human branch can list the refs
-	// one per indented line directly beneath it; JSON consumers get the refs
-	// structured in missing_blobs.
-	if len(result.MissingBlobs) > 0 {
-		result.Warnings = append(result.Warnings, fmt.Sprintf(
-			"%d referenced blob(s) missing on disk and omitted (run `devstrap doctor`):",
-			len(result.MissingBlobs)))
-	}
 	return opts.render(stdout, func(w io.Writer) error {
 		for _, msg := range result.Warnings {
 			if _, err := fmt.Fprintf(w, "warning: %s\n", msg); err != nil {
 				return err
 			}
 		}
-		for _, ref := range result.MissingBlobs {
-			if _, err := fmt.Fprintf(w, "  %s\n", ref); err != nil {
-				return err
-			}
-		}
 		_, err := fmt.Fprintf(w, "full backup written: %s (config: %t, %d blob(s), %d key file(s))\n", result.Path, result.Config, result.Blobs, result.Keys)
 		return err
 	}, result)
+}
+
+// snapshotAndEnumerate takes a VACUUM INTO snapshot, enumerates blob refs from
+// that frozen DB file (not the live store), and verifies each ciphertext is
+// present on disk. Concurrent rotation/GC may delete a superseded blob; on
+// missing refs the loop retries with a fresh snapshot up to
+// backupSnapshotAttempts times. Still-missing refs after the last attempt are
+// a hard conflict (P7-DATA-03).
+func snapshotAndEnumerate(ctx context.Context, store *state.Store, tmpDB string, paths config.Paths) ([]string, error) {
+	blobDir := filepath.Join(paths.Home, backupDirBlobs)
+	var lastMissing []string
+	for attempt := 1; attempt <= backupSnapshotAttempts; attempt++ {
+		if backupEnumerateHook != nil {
+			backupEnumerateHook(attempt)
+		}
+		_ = os.Remove(tmpDB)
+		// Drop any -wal/-shm left by a prior open of the snapshot file.
+		_ = os.Remove(tmpDB + "-wal")
+		_ = os.Remove(tmpDB + "-shm")
+		if err := store.Backup(ctx, tmpDB); err != nil {
+			return nil, err
+		}
+		refs, err := state.AllBlobRefsInFile(ctx, tmpDB)
+		if err != nil {
+			return nil, err
+		}
+		missing, err := missingBlobRefs(blobDir, refs)
+		if err != nil {
+			// Not an absence: permission/I-O failures are immediately fatal
+			// with their real cause — retrying cannot help and reporting them
+			// as "missing on disk" would misdirect the operator (CodeRabbit).
+			return nil, appError{code: exitInvalidConfig, err: fmt.Errorf("full backup: inspect referenced ciphertext: %w", err)}
+		}
+		if len(missing) == 0 {
+			return refs, nil
+		}
+		lastMissing = missing
+	}
+	sort.Strings(lastMissing)
+	return nil, appError{
+		code: exitConflict,
+		err: fmt.Errorf(
+			"full backup: %s referenced secret ciphertext is missing on disk; run `devstrap doctor`",
+			strings.Join(lastMissing, ", ")),
+	}
+}
+
+// missingBlobRefs returns the refs whose ciphertext files are ABSENT (or whose
+// ref is malformed). A stat failure that is not absence — permission denial,
+// transient I/O — is returned as an error instead of being folded into
+// "missing", so the operator sees the real cause. Same ref→filename mapping
+// as writeBackupTar.
+func missingBlobRefs(blobDir string, refs []string) ([]string, error) {
+	var missing []string
+	for _, ref := range refs {
+		hash, err := envBlobHash(ref)
+		if err != nil {
+			missing = append(missing, ref)
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(blobDir, hash+".age")); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("stat ciphertext for %s: %w", ref, err)
+			}
+			missing = append(missing, ref)
+		}
+	}
+	return missing, nil
 }
 
 // stageBackupKeys resolves this device's key material into a directory tree that
@@ -188,9 +251,10 @@ func stageBackupKeys(ctx context.Context, opts *options, store *state.Store, key
 	return keysStage, names, nil
 }
 
-// writeBackupTar assembles the archive. Blob refs whose ciphertext is missing on
-// disk are skipped (not fatal) and reported in the result so the operator learns
-// which captured secrets are already unrecoverable.
+// writeBackupTar assembles the archive. A missing or unopenable referenced blob
+// is a hard error: snapshotAndEnumerate already proved existence, so vanishing
+// between stat and tar-write is a real failure. The deferred remove-on-error
+// path cleans up any partial archive (P7-DATA-03).
 func writeBackupTar(out, dbPath string, paths config.Paths, refs []string, keySourceDir string, keyNames []string) (result fullBackupResult, err error) {
 	//nolint:gosec // out is an explicit user-selected output path.
 	f, err := os.OpenFile(out, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, backupEntryMode)
@@ -233,16 +297,19 @@ func writeBackupTar(out, dbPath string, paths config.Paths, refs []string, keySo
 	for _, ref := range refs {
 		hash, herr := envBlobHash(ref)
 		if herr != nil {
-			result.MissingBlobs = append(result.MissingBlobs, ref)
-			continue
+			return fullBackupResult{}, appError{
+				code: exitConflict,
+				err:  fmt.Errorf("full backup: invalid blob ref %s: %w", ref, herr),
+			}
 		}
 		src := filepath.Join(blobDir, hash+".age")
-		if _, serr := os.Stat(src); serr != nil {
-			result.MissingBlobs = append(result.MissingBlobs, ref)
-			continue
-		}
 		if err := addFileToTar(tw, path.Join(backupDirBlobs, hash+".age"), src); err != nil {
-			return fullBackupResult{}, err
+			return fullBackupResult{}, appError{
+				code: exitConflict,
+				err: fmt.Errorf(
+					"full backup: referenced secret ciphertext for %s is unreadable (run `devstrap doctor`): %w",
+					ref, err),
+			}
 		}
 		result.Blobs++
 	}
@@ -255,7 +322,6 @@ func writeBackupTar(out, dbPath string, paths config.Paths, refs []string, keySo
 		}
 		result.Keys++
 	}
-	sort.Strings(result.MissingBlobs)
 
 	if err := tw.Close(); err != nil {
 		return fullBackupResult{}, fmt.Errorf("finalize backup archive: %w", err)
