@@ -65,6 +65,8 @@ Validated:
 - `DEVSTRAP_NO_KEYCHAIN=1 go test ./internal/hub/...`
 - `DEVSTRAP_NO_KEYCHAIN=1 go test -race ./internal/hub/... ./internal/cli/...`
 
+- Post-review (Codex gpt-5.6, two MINORs, both applied; plus one unsolicited worker edit kept after review): (1) `listKeys` now RECLAIMS `.tmp-*` crash orphans once safely stale (`staleTempAge` = 1h — a same-machine writer finishes in seconds and another device's in-flight cloud-drive upload carries a fresh mtime), instead of skipping them forever; best-effort remove, retried on the next list. (2) `TestFsObjectStoreConcurrentOverwriteNeverTearsReads` pins the rename guarantee the write-then-read tests could not (an in-place `os.WriteFile` would have passed those): concurrent readers of a large object flipping between two generations always observe one FULL generation. Plus `TestListKeysReclaimsStaleTempOrphans` (stale reclaimed, fresh retained). (3) `writeFileAtomic` also fsyncs the parent DIRECTORY after the rename (best-effort — not all filesystems support it) so the directory-entry update survives a power loss; without it a crash immediately after return could revert to the prior (still-complete, never torn) generation. This slice arrived as an unsolicited late edit from the implementing agent after sign-off; it was reviewed line-by-line, judged sound, gosec-annotated, and kept.
+
 Follow-ups:
 - None for this finding; residual cloud-drive mid-replication window stays accepted (spec/15).
 

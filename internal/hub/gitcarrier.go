@@ -726,6 +726,10 @@ func (s *fsObjectStore) writeTimestamp(key string) error {
 	return writeFileAtomic(path, []byte(time.Now().UTC().Format(time.RFC3339Nano)))
 }
 
+// staleTempAge is how old an orphan writeFileAtomic temp must be before
+// listKeys reclaims it (crash between create and rename).
+const staleTempAge = time.Hour
+
 // writeFileAtomic writes body to path via a same-directory temp file, fsync,
 // and rename so a local reader never observes a partially written object.
 // Rename atomicity holds only within one filesystem and REDUCES but does not
@@ -758,6 +762,15 @@ func writeFileAtomic(path string, body []byte) error {
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("rename hub object: %w", err)
+	}
+	// Fsync the directory so the rename's directory-entry update survives a
+	// power loss immediately after this call returns; without it a crash can
+	// revert the directory entry to the prior (still-complete, never torn)
+	// generation. Best-effort: some filesystems/platforms don't support
+	// directory fsync, so a failure here is not surfaced as a write error.
+	if dirFile, err := os.Open(dir); err == nil { //nolint:gosec // G304: dir is the target's parent inside the carrier root; callers resolve keys via safePath
+		_ = dirFile.Sync()
+		_ = dirFile.Close()
 	}
 	return nil
 }
@@ -911,6 +924,7 @@ func (s *fsObjectStore) DeleteObject(_ context.Context, key string) error {
 // root-relative), skipping .git, the timestamp sidecars, and the marker.
 func (s *fsObjectStore) listKeys() ([]string, error) {
 	var keys []string
+	var staleTemps []string
 	err := filepath.WalkDir(s.root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
@@ -932,8 +946,16 @@ func (s *fsObjectStore) listKeys() ([]string, error) {
 		if key == gitMarkerFile {
 			return nil
 		}
-		// Orphan writeFileAtomic temps (crash between create and rename).
+		// Orphan writeFileAtomic temps (crash between create and rename):
+		// never surfaced as objects, and collected for reclamation once
+		// safely stale — a same-machine writer finishes in seconds and
+		// another device's in-flight upload rides the cloud drive with a
+		// fresh mtime, so an hour-old temp is definitionally abandoned
+		// (post-review MINOR, P7-HUB-05).
 		if strings.HasPrefix(filepath.Base(key), ".tmp-") {
+			if info, ierr := d.Info(); ierr == nil && time.Since(info.ModTime()) > staleTempAge {
+				staleTemps = append(staleTemps, path)
+			}
 			return nil
 		}
 		keys = append(keys, key)
@@ -941,6 +963,12 @@ func (s *fsObjectStore) listKeys() ([]string, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list git hub objects: %w", err)
+	}
+	// Best-effort reclamation after the walk (not inside the callback — no
+	// mid-walk tree mutation, and no walk-relative filesystem op for gosec's
+	// G122). A failed remove just retries on the next list.
+	for _, p := range staleTemps {
+		_ = os.Remove(p)
 	}
 	sort.Strings(keys)
 	return keys, nil
