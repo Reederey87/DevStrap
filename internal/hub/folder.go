@@ -110,9 +110,13 @@ func NewFolderHub(dir, workspaceID, cacheRoot string) (*FolderHub, error) {
 	if err != nil {
 		return nil, fmt.Errorf("folder hub: resolve folder %q: %w", dir, err)
 	}
+	rootInfo, err := os.Stat(resolved)
+	if err != nil {
+		return nil, fmt.Errorf("folder hub: stat resolved folder %q: %w", resolved, err)
+	}
 	sum := sha256.Sum256([]byte(resolved))
 	base := filepath.Join(cacheRoot, hex.EncodeToString(sum[:])[:16])
-	store := &fsObjectStore{root: resolved, obsPath: filepath.Join(base, "observed.json")}
+	store := &fsObjectStore{root: resolved, rootInfo: rootInfo, obsPath: filepath.Join(base, "observed.json")}
 	return &FolderHub{
 		workspaceID:   workspaceID,
 		dir:           resolved,
@@ -157,9 +161,11 @@ func (f *FolderHub) guard(fn func() error) error {
 // The constructor resolves symlinks once, but the folder carrier's root is a
 // replicated/shared directory — unlike the git carrier's private clone — so a
 // root (or any parent component) later swapped for a symlink would otherwise
-// redirect every read and write outside the registered folder. safePath only
-// Lstats components BELOW the root, which cannot catch this (review P2). Same
-// use-time revalidation stance as the scan symlink boundary.
+// redirect every read and write outside the registered folder. After this
+// check, each object-store call opens an os.Root and verifies that handle still
+// denotes the directory registered here; all shared-tree file APIs then ride
+// that handle until the call completes. Same use-time revalidation stance as
+// the scan symlink boundary.
 func (f *FolderHub) revalidateRoot() error {
 	real, err := filepath.EvalSymlinks(f.dir)
 	if err != nil {
