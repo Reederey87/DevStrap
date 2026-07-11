@@ -76,11 +76,9 @@ const (
 	// workspaces/ listing prefix, so Hub enumeration never sees it.
 	gitTimesPrefix = ".devstrap-meta/times/"
 	// fsLockStale is when a same-machine cross-process lock (shared by the git
-	// and folder carriers via fsLock) is considered abandoned. A LIVE holder
-	// heartbeats the lock file's mtime every fsLockHeartbeat (even while blocked
-	// in a long git subprocess — the heartbeat is a goroutine), so a lock this
-	// stale means its holder died; age alone would otherwise steal the shared
-	// checkout from a holder legitimately inside a long fetch.
+	// and folder carriers via fsLock) is considered abandoned when owner
+	// liveness cannot be established. A live same-host holder is never broken,
+	// regardless of mtime; legacy, corrupt, and cross-host records use this TTL.
 	fsLockStale = 10 * time.Minute
 	// fsLockHeartbeat is how often a live holder refreshes the lock mtime.
 	fsLockHeartbeat = time.Minute

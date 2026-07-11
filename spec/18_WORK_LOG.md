@@ -31,6 +31,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-11 — fix(hub): fsLock owner identity + nonce-verified break/release (P7-QUAL-07)
+
+Changed:
+- `internal/hub/folder.go`: the shared carrier lock (`fsLock`, used by both the git and folder carriers) now writes an immutable JSON owner record at O_EXCL create — `{version, pid, hostname, nonce (16B crypto/rand hex), acquired_at, started_at}` — instead of a bare PID it never read back. Staleness is owner-aware: same-host owners are judged by process liveness paired with the opaque `platform.ProcessStartTime` identity (P7-GIT-03 semantics — a live PID with a different start identity is a recycled PID, broken immediately; a genuinely live holder is NEVER broken regardless of mtime, so suspend/sleep past the TTL now times out the second acquirer with an owner-naming error instead of stealing the checkout); legacy bare-PID, corrupt, and cross-host records age out on the mtime TTL exactly as before (the upgrade path — a corrupt lock must read as breakable-after-TTL, never held-forever). Stale break double-reads the owner bytes and removes only when unchanged (unreadable files additionally require stable identity/size/mtime); release removes only its own nonce generation, killing the break-then-release cascade theft; the heartbeat goroutine stops when the lock file disappears rather than resurrecting a successor's mtime.
+- `internal/hub/fslock_test.go` (new): owner roundtrip, timeout-names-owner, legacy bare-PID fresh/backdated, corrupt-JSON fresh/backdated, dead-PID immediate break, recycled-PID (live PID + mismatched start identity) immediate break, live-PID-never-stale (backdated mtime), release-after-broken leaves the successor, and break double-read race — all under `-race`.
+- `internal/hub/gitcarrier.go`: lock-semantics comment updated (constants and construction unchanged).
+- `spec/03_SYSTEM_ARCHITECTURE.md` (folder-carrier fsLock sentence) + `spec/15_SECURITY_THREAT_MODEL.md` (git- and folder-carrier lock paragraphs): owner-aware staleness, recycled-PID identity, nonce-verified break/release, and the bounded verify-then-remove residual (no portable compare-and-delete) documented; the mtime-only stale-break residual retired.
+- `docs/audits/README.md`: `P7-QUAL-07` moved open → *Recently shipped*; Pass-7 open/P2 counts re-derived from the table at merge time (multi-PR wave).
+
+Validated:
+- `gofmt -w cmd internal`
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/hub/ -count=1 -race`
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- Implementer: Codex (gpt-5.6) from a written line-level spec; coordinator line-by-line review added the `ProcessStartTime` recycled-PID identity (review finding: a crashed holder whose PID was recycled to a long-lived process would otherwise wedge the lock forever, since the same-host live path ignores mtime).
+
 ## 2026-07-11 — fix(hub): os.Root-confined carrier file access (P7-SEC-04)
 
 Changed:
@@ -79,8 +94,9 @@ Validated:
 - Dual review: coordinator line-by-line pass + Codex `/codex:review`; the Codex pass caught the `RetainedBlobRefs` gap (fixed above in a follow-up commit on the PR).
 
 Follow-ups:
-- Take the P7-DATA-05 maintenance state lock in `db down` when it lands, closing the check→Down cross-process window.
+- None.
 
+- Take the P7-DATA-05 maintenance state lock in `db down` when it lands, closing the check→Down cross-process window.
 ## 2026-07-11 — fix(hub): refuse rewound or deleted git-carrier history (P7-HUB-02)
 
 Changed:
@@ -100,7 +116,6 @@ Validated:
 
 Follow-ups:
 - Repair ergonomics (optional): a `devstrap sync --accept-rewritten-carrier` that re-adopts AND resets the hub push/pull cursors (re-push is idempotent via conditional-put dedup) would automate lossy-accept repair instead of relying on the compact/snapshot path.
-
 ## 2026-07-11 — fix(git): guard repo locks and agent-run sweeps against PID reuse (P7-GIT-03)
 
 Changed:

@@ -40,16 +40,20 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
 )
@@ -386,10 +390,24 @@ func (f *FolderHub) CompactEventsBelow(ctx context.Context, floors dssync.Cursor
 
 // fsLock is the cross-process file lock shared by the filesystem-backed hub
 // carriers (git and folder). It pairs an in-process mutex with an O_EXCL lock
-// file whose mtime a heartbeat goroutine keeps warm while held, so the stale
-// breaker can only ever fire on a DEAD holder — a live process blocked in a
-// long operation keeps its lock warm and can never have its shared checkout /
-// folder stolen underneath it. The lock file lives OUTSIDE any synced tree.
+// file whose mtime a heartbeat goroutine keeps warm while held. Same-host
+// owner liveness is authoritative: a live holder is never broken regardless
+// of mtime, with the PID paired to an opaque platform start-time identity so
+// a recycled PID reads as dead rather than wedging the lock forever
+// (mirroring the repo-lock semantics from P7-GIT-03). Legacy, corrupt, and
+// cross-host records use the stale TTL. The lock file lives OUTSIDE any
+// synced tree.
+type fsLockOwner struct {
+	Version    int    `json:"version"`
+	PID        int    `json:"pid"`
+	Hostname   string `json:"hostname"`
+	Nonce      string `json:"nonce"`
+	AcquiredAt string `json:"acquired_at"`
+	// StartedAt is the opaque same-host process start identity from
+	// platform.ProcessStartTime; 0 when the platform cannot supply one.
+	StartedAt int64 `json:"started_at,omitempty"`
+}
+
 type fsLock struct {
 	mu        *sync.Mutex
 	path      string
@@ -397,6 +415,38 @@ type fsLock struct {
 	heartbeat time.Duration
 	stale     time.Duration
 	sleep     func(time.Duration)
+}
+
+var hubProcessAlive = func(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return true // liveness is indeterminate, not provably dead
+	}
+	return !errors.Is(process.Signal(syscall.Signal(0)), syscall.ESRCH)
+}
+
+// hubProcessStartTime is a test seam over the platform start-time identity.
+var hubProcessStartTime = platform.ProcessStartTime
+
+// hubLockOwnerAlive reports whether the recorded same-host owner is still the
+// process that took the lock. A live PID with a different start identity is a
+// recycled PID — the real holder is dead (P7-GIT-03 semantics). A zero or
+// unavailable identity keeps the conservative liveness-only answer.
+func hubLockOwnerAlive(owner fsLockOwner) bool {
+	if !hubProcessAlive(owner.PID) {
+		return false
+	}
+	if owner.StartedAt == 0 {
+		return true
+	}
+	current, err := hubProcessStartTime(owner.PID)
+	if err != nil {
+		return true // identity indeterminate: never steal on a lookup failure
+	}
+	return current == owner.StartedAt
 }
 
 // acquire takes the in-process mutex plus the cross-process lock file and
@@ -411,8 +461,47 @@ func (l fsLock) acquire() (func(), error) {
 	for {
 		f, err := os.OpenFile(l.path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // lock file under the private hub cache dir
 		if err == nil {
-			_, _ = fmt.Fprintf(f, "%d\n", os.Getpid())
-			_ = f.Close()
+			nonceBytes := make([]byte, 16)
+			if _, randErr := rand.Read(nonceBytes); randErr != nil {
+				_ = f.Close()
+				_ = os.Remove(l.path)
+				l.mu.Unlock()
+				return nil, fmt.Errorf("generate hub lock nonce: %w", randErr)
+			}
+			hostname, hostErr := os.Hostname()
+			if hostErr != nil {
+				_ = f.Close()
+				_ = os.Remove(l.path)
+				l.mu.Unlock()
+				return nil, fmt.Errorf("get hostname for hub lock: %w", hostErr)
+			}
+			startedAt, _ := hubProcessStartTime(os.Getpid()) // 0 on unsupported platforms: liveness-only fallback
+			owner := fsLockOwner{
+				Version:    1,
+				PID:        os.Getpid(),
+				Hostname:   hostname,
+				Nonce:      hex.EncodeToString(nonceBytes),
+				AcquiredAt: time.Now().Format(time.RFC3339),
+				StartedAt:  startedAt,
+			}
+			raw, marshalErr := json.Marshal(owner)
+			if marshalErr != nil {
+				_ = f.Close()
+				_ = os.Remove(l.path)
+				l.mu.Unlock()
+				return nil, fmt.Errorf("marshal hub lock owner: %w", marshalErr)
+			}
+			if _, writeErr := f.Write(raw); writeErr != nil {
+				_ = f.Close()
+				_ = os.Remove(l.path)
+				l.mu.Unlock()
+				return nil, fmt.Errorf("write hub lock owner: %w", writeErr)
+			}
+			if closeErr := f.Close(); closeErr != nil {
+				_ = os.Remove(l.path)
+				l.mu.Unlock()
+				return nil, fmt.Errorf("close hub lock owner: %w", closeErr)
+			}
 			stop := make(chan struct{})
 			done := make(chan struct{})
 			go func() {
@@ -425,14 +514,20 @@ func (l fsLock) acquire() (func(), error) {
 						return
 					case <-ticker.C:
 						now := time.Now()
-						_ = os.Chtimes(l.path, now, now)
+						if err := os.Chtimes(l.path, now, now); errors.Is(err, os.ErrNotExist) {
+							return
+						}
 					}
 				}
 			}()
 			return func() {
 				close(stop)
 				<-done
-				_ = os.Remove(l.path)
+				raw, readErr := os.ReadFile(l.path) //nolint:gosec // lock path is the private hub cache lock
+				var current fsLockOwner
+				if readErr == nil && json.Unmarshal(raw, &current) == nil && current.Nonce == owner.Nonce {
+					_ = os.Remove(l.path)
+				}
 				l.mu.Unlock()
 			}, nil
 		}
@@ -440,14 +535,61 @@ func (l fsLock) acquire() (func(), error) {
 			l.mu.Unlock()
 			return nil, fmt.Errorf("acquire hub lock %s: %w", l.path, err)
 		}
-		if info, serr := os.Stat(l.path); serr == nil && time.Since(info.ModTime()) > l.stale {
-			_ = os.Remove(l.path) // no heartbeat for l.stale: the holder is dead
+		before, readErr := os.ReadFile(l.path) //nolint:gosec // lock path is the private hub cache lock
+		beforeInfo, beforeStatErr := os.Stat(l.path)
+		if os.IsNotExist(readErr) || os.IsNotExist(beforeStatErr) {
 			continue
 		}
+		if l.isStale() {
+			after, rereadErr := os.ReadFile(l.path) //nolint:gosec // lock path is the private hub cache lock
+			afterInfo, afterStatErr := os.Stat(l.path)
+			unchanged := readErr == nil && rereadErr == nil && bytes.Equal(before, after)
+			if readErr != nil && rereadErr != nil && beforeStatErr == nil && afterStatErr == nil {
+				// An unreadable legacy/corrupt lock must still age out. With no
+				// bytes to compare, require stable file identity and metadata.
+				unchanged = os.SameFile(beforeInfo, afterInfo) &&
+					beforeInfo.Size() == afterInfo.Size() &&
+					beforeInfo.ModTime().Equal(afterInfo.ModTime())
+			}
+			if unchanged {
+				if removeErr := os.Remove(l.path); removeErr == nil || os.IsNotExist(removeErr) {
+					continue
+				}
+			}
+		}
 		if time.Now().After(deadline) {
+			if owner, ok := readFSLockOwner(l.path); ok {
+				l.mu.Unlock()
+				return nil, fmt.Errorf("acquire hub lock %s: timed out; held by pid %d on %s since %s", l.path, owner.PID, owner.Hostname, owner.AcquiredAt)
+			}
 			l.mu.Unlock()
 			return nil, fmt.Errorf("acquire hub lock %s: timed out (another devstrap process is using this hub?)", l.path)
 		}
 		l.sleep(50 * time.Millisecond)
 	}
+}
+
+func (l fsLock) isStale() bool {
+	raw, err := os.ReadFile(l.path) //nolint:gosec // lock path is the private hub cache lock
+	var owner fsLockOwner
+	if err == nil && len(raw) > 0 && json.Unmarshal(raw, &owner) == nil {
+		hostname, hostErr := os.Hostname()
+		if hostErr == nil && owner.Hostname == hostname {
+			return !hubLockOwnerAlive(owner)
+		}
+	}
+	info, statErr := os.Stat(l.path)
+	return statErr == nil && time.Since(info.ModTime()) > l.stale
+}
+
+func readFSLockOwner(path string) (fsLockOwner, bool) {
+	raw, err := os.ReadFile(path) //nolint:gosec // path is the private hub cache lock
+	if err != nil || len(raw) == 0 {
+		return fsLockOwner{}, false
+	}
+	var owner fsLockOwner
+	if json.Unmarshal(raw, &owner) != nil {
+		return fsLockOwner{}, false
+	}
+	return owner, true
 }
