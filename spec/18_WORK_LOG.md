@@ -31,6 +31,23 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-11 — fix(cli,platform): stable service ExecPath + missing-ExecPath detection (P7-XP-01, P7-XP-05)
+
+Changed:
+- `internal/cli/service.go` `resolveServiceExecPath` (split as `resolveServiceExecPathFrom` with an injectable `evalSymlinks` seam): the ephemeral check still runs on the RESOLVED target first (a stable-dir symlink can never bless a `$TMPDIR`/`go-build` binary); when the INVOKED path sits in a stable install bin dir (`/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin` — `stableServiceBinDirs`, exact cleaned-dir equality) the symlink itself is baked unresolved so `brew upgrade` moving the Cellar target cannot brick the unit; a path that still resolves into a segment-aware `/Cellar/` is refused (`exitInvalidConfig`) with a stable-symlink/`--exec-path` remedy; anything else keeps today's resolved-path behavior.
+- `internal/platform`: `ServiceStatus` gains `ExecPath`/`ExecPathMissing`; both `Status` impls best-effort parse the installed unit's launch binary — launchd via a bounded `encoding/xml` tokenizer over our own rendered `ProgramArguments` (`extractLaunchdExecPath`, `service_launchd.go`), systemd via `systemdUnquoteFirstWord` (the exact inverse of `systemdQuote`: `\\`/`\"` unescape then `%%`→`%`, `service_systemd.go`) — and prepend `ExecPath missing: <path>` to the detail when the binary is gone; a hand-mangled file degrades to an unknown ExecPath, never an error.
+- `internal/cli`: `service status` reports `exec:`/`(MISSING — re-run 'devstrap service install')` and the `--json` shape gains `exec_path`/`exec_path_missing`; `doctor`'s `checkService` warns with a re-run remedy when the ExecPath is missing (takes precedence over the generic installed-but-stopped warn — a still-running process whose binary was deleted also warns).
+- Tests: stable-symlink preference, Cellar refusal, ephemeral-wins-over-stable, explicit `--exec-path` passthrough (`TestResolveServiceExecPathPrefersStableSymlinkDir`); per-OS `TestServiceStatusReportsMissingExecPath` incl. mangled-file degradation; golden-plist extraction; `systemdQuote` round-trip (spaces/quotes/backslashes/`%`); JSON + human status; doctor warn.
+- `spec/05` + `spec/06` + `spec/13`: the stable-symlink/Cellar contract and ExecPath-missing surfacing documented.
+- `docs/audits/README.md`: `P7-XP-01` + `P7-XP-05` moved open → *Recently shipped*; Pass-7 counts re-derived (27→25 open; P2 11→10, P3 16→15).
+
+Validated:
+- `gofmt -w cmd internal`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOOS=linux go build ./...` + `go vet ./internal/platform/`; `GOCACHE=/tmp/devstrap-gocache go test ./internal/cli/ ./internal/platform/ -count=1`; full `go test -race ./... -count=1`. Linux-tagged tests execute in CI's ubuntu job.
+- Provenance: implemented by Codex (gpt-5.6) from a line-level coordinator spec (clean run, one declared test-fixture deviation — the stable-to-Cellar case uses the injected seam with a synthetic path, since a real `t.TempDir()` target would correctly trip the ephemeral refusal first); coordinator (fable-5) line-by-line review; rebased over `P7-XP-03` (kept both PRs' spec/13 bullets and both linux test blocks); Codex review pre-merge.
+
+Follow-ups:
+- None.
+
 ## 2026-07-11 — fix(platform): headless systemd service uninstall (P7-XP-03)
 
 Changed:
