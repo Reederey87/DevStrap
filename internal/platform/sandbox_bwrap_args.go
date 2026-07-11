@@ -71,6 +71,14 @@ func bwrapArgs(spec SandboxSpec, maskDirs, maskFiles []string, opts bwrapOptions
 	if spec.TmpDir != "" {
 		args = append(args, "--bind", spec.TmpDir, spec.TmpDir)
 	}
+	// The linked worktree's git storage dirs (objects/refs/logs/per-worktree
+	// admin) so `git commit` writes succeed — NOT the common dir's hooks/config
+	// (P7-SANDBOX-01). --bind-try tolerates an absent dir (e.g. no reflog).
+	for _, dir := range spec.GitDirs {
+		if dir != "" {
+			args = append(args, "--bind-try", dir, dir)
+		}
+	}
 	// Mount ops are processed sequentially and later mounts override earlier
 	// ones, so credential masks MUST come after the read-write binds. Under
 	// read confinement the credential paths are already outside the exposed

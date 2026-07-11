@@ -98,7 +98,7 @@ func (p passthroughSandbox) Command(_ context.Context, spec platform.SandboxSpec
 // silently vanished.
 func TestAgentSandboxSpecFailsClosedWithoutUserHome(t *testing.T) {
 	t.Setenv("HOME", "")
-	if _, err := agentSandboxSpec("/wt", "/tmp/run", "/log", agentSandboxLaunch{devstrapHome: "/dsh"}, "arun_test"); err == nil {
+	if _, err := agentSandboxSpec("/wt", "/tmp/run", "/log", nil, agentSandboxLaunch{devstrapHome: "/dsh"}, "arun_test"); err == nil {
 		t.Fatal("agentSandboxSpec succeeded without a resolvable user home; want fail-closed error")
 	}
 }
@@ -106,7 +106,7 @@ func TestAgentSandboxSpecFailsClosedWithoutUserHome(t *testing.T) {
 func TestAgentSandboxSpecAnchorsRealUserHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	spec, err := agentSandboxSpec("/wt", "/tmp/run", "/log", agentSandboxLaunch{devstrapHome: "/dsh", denyNetwork: true}, "arun_test")
+	spec, err := agentSandboxSpec("/wt", "/tmp/run", "/log", nil, agentSandboxLaunch{devstrapHome: "/dsh", denyNetwork: true}, "arun_test")
 	if err != nil {
 		t.Fatalf("agentSandboxSpec: %v", err)
 	}

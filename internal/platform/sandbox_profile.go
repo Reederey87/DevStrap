@@ -51,7 +51,10 @@ func sbplProfile(spec SandboxSpec, denyReadDirs, denyReadFiles []string) string 
 		b.WriteString(")\n")
 	}
 	b.WriteString("(allow file-write*\n")
-	for _, dir := range []string{spec.WorktreeDir, spec.TmpDir} {
+	// WorktreeDir + TmpDir, plus the linked worktree's git storage dirs
+	// (objects/refs/logs/per-worktree-admin) so `git commit` works — but NOT
+	// the common dir's hooks/config (P7-SANDBOX-01).
+	for _, dir := range append([]string{spec.WorktreeDir, spec.TmpDir}, spec.GitDirs...) {
 		if dir == "" {
 			continue
 		}

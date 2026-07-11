@@ -126,6 +126,20 @@ func applyLandlockPolicy(spec SandboxSpec) error {
 		// such renames inside the worktree.
 		rules = append(rules, landlock.RWDirs(rw...).WithRefer())
 	}
+	// The linked worktree's git storage dirs (objects/refs/logs/per-worktree
+	// admin) so `git commit` succeeds — NOT the common dir's hooks/config
+	// (P7-SANDBOX-01). Separate rule so a rare absent dir (no reflog yet) is
+	// skipped rather than failing the whole ruleset; WithRefer for git's
+	// tmp-object -> objects/xx rename promotion.
+	var gitRW []string
+	for _, dir := range spec.GitDirs {
+		if dir != "" {
+			gitRW = append(gitRW, dir)
+		}
+	}
+	if len(gitRW) > 0 {
+		rules = append(rules, landlock.RWDirs(gitRW...).WithRefer().IgnoreIfMissing())
+	}
 	// Shell plumbing (`> /dev/null`) and pty allocation; IgnoreIfMissing
 	// because minimal containers lack some nodes. Wider than bwrap's fresh
 	// --dev (these nodes are machine-shared), named in landlockLimitations.
