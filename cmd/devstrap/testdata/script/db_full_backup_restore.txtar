@@ -31,10 +31,12 @@ exec sh -c 'echo "API_KEY=roundtrip-secret" > $WORK/Code/work/proj/.env'
 exec devstrap env capture work/proj .env
 stdout 'Captured'
 
-# Full backup: one tar with state.db + config.yaml + blobs + keys.
+# Full backup: one tar with state.db + config.yaml + blobs + keys + manifest.
 exec devstrap db backup --full $WORK/backup.tar
 stdout 'config: true'
 exists $WORK/backup.tar
+exec tar -tf $WORK/backup.tar
+stdout 'manifest.json'
 
 # The DB-only backup path still works and writes a bare .db.
 exec devstrap db backup $WORK/state-only.db

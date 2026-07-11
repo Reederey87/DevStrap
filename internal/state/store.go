@@ -261,6 +261,30 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	return &Store{db: db, keyDir: filepath.Join(filepath.Dir(path), "keys")}, nil
 }
 
+// OpenSnapshot opens a standalone SQLite database file read-only for
+// enumeration (P7-DATA-03/04): no migration, no chmod, no WAL side files.
+func OpenSnapshot(ctx context.Context, path string) (*Store, error) {
+	db, err := sql.Open("sqlite", snapshotSQLiteDSN(path))
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite snapshot: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("configure sqlite snapshot: %w", err)
+	}
+	if err := assertForeignKeysEnabled(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := foreignKeyCheck(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &Store{db: db, keyDir: filepath.Join(filepath.Dir(path), "keys")}, nil
+}
+
 func sqliteDSN(path string) string {
 	q := url.Values{}
 	for _, pragma := range []string{
@@ -273,6 +297,20 @@ func sqliteDSN(path string) string {
 		q.Add("_pragma", pragma)
 	}
 	q.Set("_txlock", "immediate")
+	return (&url.URL{Scheme: "file", Path: path, RawQuery: q.Encode()}).String()
+}
+
+func snapshotSQLiteDSN(path string) string {
+	q := url.Values{}
+	q.Set("mode", "ro")
+	q.Set("immutable", "1")
+	for _, pragma := range []string{
+		"busy_timeout(5000)",
+		"foreign_keys(1)",
+		"query_only(1)",
+	} {
+		q.Add("_pragma", pragma)
+	}
 	return (&url.URL{Scheme: "file", Path: path, RawQuery: q.Encode()}).String()
 }
 
@@ -353,7 +391,7 @@ func (s *Store) Backup(ctx context.Context, outputPath string) error {
 	}
 	// DATA-01: validate the backup after VACUUM INTO so corruption is caught
 	// before a restore depends on it. Remove the partial backup on failure.
-	if err := validateBackup(ctx, outputPath); err != nil {
+	if err := validateBackup(ctx, sqliteDSN(outputPath)); err != nil {
 		_ = os.Remove(outputPath)
 		return fmt.Errorf("backup failed validation: %w", err)
 	}
@@ -365,11 +403,17 @@ func (s *Store) Backup(ctx context.Context, outputPath string) error {
 // exported so `db restore` can prove an extracted state.db is intact before it
 // is promoted into place.
 func ValidateDBFile(ctx context.Context, path string) error {
-	return validateBackup(ctx, path)
+	return validateBackup(ctx, sqliteDSN(path))
 }
 
-func validateBackup(ctx context.Context, path string) error {
-	dsn := sqliteDSN(path)
+// ValidateDBFileReadOnly runs the same quick_check + foreign_key_check through
+// the read-only snapshot DSN, so validation cannot alter a manifest-verified
+// staged database before it is promoted (P7-DATA-04).
+func ValidateDBFileReadOnly(ctx context.Context, path string) error {
+	return validateBackup(ctx, snapshotSQLiteDSN(path))
+}
+
+func validateBackup(ctx context.Context, dsn string) error {
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return fmt.Errorf("open backup for validation: %w", err)
@@ -2142,16 +2186,11 @@ func (s *Store) ApprovedRecipients(ctx context.Context) ([]string, error) {
 	return recipients, nil
 }
 
-// allBlobRefsQuerier is the minimal surface needed to list age_blob refs from
-// either a live Store or a standalone snapshot file (P7-DATA-03).
-type allBlobRefsQuerier interface {
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-}
-
-// allBlobRefs returns every distinct age_blob:<sha256> reference from the
-// given querier (env bindings + draft snapshots).
-func allBlobRefs(ctx context.Context, db allBlobRefsQuerier) ([]string, error) {
-	rows, err := db.QueryContext(ctx, `
+// AllBlobRefs returns every distinct age_blob:<sha256> reference in the store
+// (env bindings + draft snapshots) (HUB-04/HUB-05). These are the blobs that
+// may need rewrapping on device revoke or GC when unreferenced.
+func (s *Store) AllBlobRefs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
 SELECT DISTINCT encrypted_value_ref FROM secret_bindings WHERE encrypted_value_ref IS NOT NULL AND encrypted_value_ref LIKE 'age_blob:%'
 UNION
 SELECT DISTINCT blob_ref FROM draft_snapshots WHERE blob_ref LIKE 'age_blob:%';
@@ -2169,29 +2208,6 @@ SELECT DISTINCT blob_ref FROM draft_snapshots WHERE blob_ref LIKE 'age_blob:%';
 		refs = append(refs, ref)
 	}
 	return refs, rows.Err()
-}
-
-// AllBlobRefs returns every distinct age_blob:<sha256> reference in the store
-// (env bindings + draft snapshots) (HUB-04/HUB-05). These are the blobs that
-// may need rewrapping on device revoke or GC when unreferenced.
-func (s *Store) AllBlobRefs(ctx context.Context) ([]string, error) {
-	return allBlobRefs(ctx, s.db)
-}
-
-// AllBlobRefsInFile reads the age_blob refs from a standalone snapshot/backup
-// DB file so backup decisions are made against the frozen row-set, not the
-// live store (P7-DATA-03).
-func AllBlobRefsInFile(ctx context.Context, path string) ([]string, error) {
-	dsn := sqliteDSN(path)
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open snapshot for blob refs: %w", err)
-	}
-	defer func() { _ = db.Close() }()
-	if err := db.PingContext(ctx); err != nil {
-		return nil, fmt.Errorf("ping snapshot for blob refs: %w", err)
-	}
-	return allBlobRefs(ctx, db)
 }
 
 // PruneDraftSnapshots deletes superseded draft snapshot rows, keeping the most

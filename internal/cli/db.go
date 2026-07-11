@@ -96,7 +96,7 @@ func newDBCommand(stdout io.Writer, opts *options) *cobra.Command {
 	backupCmd.Flags().BoolVar(&fullBackup, "full", false, "write a tar archive with the database, encrypted blobs, and key material")
 	cmd.AddCommand(backupCmd)
 
-	var restoreForce bool
+	var restoreForce, restoreAllowLegacy bool
 	restoreCmd := &cobra.Command{
 		Use:   "restore [archive.tar]",
 		Short: "Restore a full backup archive into the state directory",
@@ -109,10 +109,11 @@ func newDBCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("resolve archive path: %w", err)}
 			}
-			return runRestore(cmd.Context(), opts, in, restoreForce, stdout)
+			return runRestore(cmd.Context(), opts, in, restoreForce, restoreAllowLegacy, stdout)
 		},
 	}
 	restoreCmd.Flags().BoolVar(&restoreForce, "force", false, "overwrite a non-empty state directory")
+	restoreCmd.Flags().BoolVar(&restoreAllowLegacy, "allow-legacy", false, "restore a pre-P7 archive without manifest integrity verification")
 	cmd.AddCommand(restoreCmd)
 
 	cmd.AddCommand(&cobra.Command{

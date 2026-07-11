@@ -62,6 +62,39 @@ func TestOpenConfiguresSQLiteAndSecuresFile(t *testing.T) {
 	}
 }
 
+func TestOpenSnapshotIsReadOnlyAndCreatesNoWALSideFiles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	st, err := Open(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(path + "-wal")
+	_ = os.Remove(path + "-shm")
+
+	snap, err := OpenSnapshot(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snap.Close()
+	if _, err := snap.AllBlobRefs(t.Context()); err != nil {
+		t.Fatalf("AllBlobRefs: %v", err)
+	}
+	if _, err := snap.db.ExecContext(t.Context(), `INSERT INTO local_meta(key, value) VALUES ('snapshot-write', 'no')`); err == nil {
+		t.Fatal("write through OpenSnapshot unexpectedly succeeded")
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if _, err := os.Stat(path + suffix); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("snapshot created %s side file: %v", suffix, err)
+		}
+	}
+}
+
 func TestOpenRejectsExistingForeignKeyViolations(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	db, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: path}).String())
@@ -1631,10 +1664,10 @@ func TestEnvProfilesForBlobRef(t *testing.T) {
 	}
 }
 
-// TestAllBlobRefsInFile proves snapshot enumeration freezes the row-set: a
+// TestOpenSnapshotFreezesBlobRefs proves snapshot enumeration freezes the row-set: a
 // binding added to the live store after VACUUM INTO is invisible to the backup
 // file (P7-DATA-03).
-func TestAllBlobRefsInFile(t *testing.T) {
+func TestOpenSnapshotFreezesBlobRefs(t *testing.T) {
 	ctx := context.Background()
 	st, project := newEnvProfileTestStore(t, ctx, "work/acme/api")
 	defer st.Close()
@@ -1673,12 +1706,17 @@ func TestAllBlobRefsInFile(t *testing.T) {
 		t.Fatalf("live AllBlobRefs = %v, want both bindings", live)
 	}
 
-	frozen, err := AllBlobRefsInFile(ctx, backupPath)
+	snap, err := OpenSnapshot(ctx, backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snap.Close()
+	frozen, err := snap.AllBlobRefs(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(frozen) != 1 || frozen[0] != first {
-		t.Fatalf("AllBlobRefsInFile = %v, want only %q", frozen, first)
+		t.Fatalf("snapshot AllBlobRefs = %v, want only %q", frozen, first)
 	}
 }
 
