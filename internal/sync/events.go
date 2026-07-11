@@ -952,6 +952,21 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 			if _, err := tx.MarkEncryptedBindingsNeedingRotationTx(ctx); err != nil {
 				return err
 			}
+			// P7-SYNC-04: a device that only LEARNS of a revocation (rather than
+			// running it) still owes the forward-secrecy rotation — otherwise, if
+			// the revoker's own rotation failed and it went offline, the fleet
+			// keeps sealing under the epoch the revoked device holds. Arm the
+			// owed-rotation marker transactionally with the flip; the receiver's
+			// next sync rotation gate mints epoch+1 excluding the revoked device.
+			// Guarded on epoch>0 inside the helper (a keyless device holds no key
+			// to protect and its rotation gate skips epoch 0).
+			epoch, eerr := tx.CurrentKeyEpochTx(ctx)
+			if eerr != nil {
+				return eerr
+			}
+			if err := tx.SetWCKRotationPendingTx(ctx, epoch); err != nil {
+				return err
+			}
 		}
 		return nil
 	case EventDeviceKeyGranted:

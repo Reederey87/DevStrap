@@ -173,9 +173,15 @@ func importEnvTx(ctx context.Context, tx *state.Tx, namespaceID string, env *Sna
 // the caller verified the snapshot, so malformed trust means a defective
 // producer, and partial application would be worse than refusal.
 //
-// The wck_rotation_pending marker (the receiver OWING an epoch rotation after
-// learning of a revocation) is deliberately not set here — that asymmetry is
-// shared with the events.go apply path and is tracked as P7-SYNC-04.
+// P7-SYNC-04: when any row actually flips, the importer also OWES a WCK
+// rotation, exactly as the events.go apply path does — an EXISTING device
+// recovering via snapshot past the retention floor (it already holds a key, so
+// epoch>0) must mint epoch+1 excluding the revoked device rather than keep
+// sealing under an epoch it still holds. A genuinely keyless fresh bootstrap
+// never reaches here (recoverFromSnapshot defers before unsealing/importing
+// when it holds no WCK) and is covered transitively by the granting key-holder.
+// The marker is armed once, transactionally with the flips, and its storm-guard
+// makes re-imports inert.
 func importTrustTx(ctx context.Context, tx *state.Tx, trust []SnapshotTrust) error {
 	changedAny := false
 	for _, tr := range trust {
@@ -198,6 +204,15 @@ func importTrustTx(ctx context.Context, tx *state.Tx, trust []SnapshotTrust) err
 	}
 	if changedAny {
 		if _, err := tx.MarkEncryptedBindingsNeedingRotationTx(ctx); err != nil {
+			return err
+		}
+		// P7-SYNC-04: owe the forward-secrecy rotation on the importer too (see
+		// the events.go apply path). Guarded on epoch>0 inside the helper.
+		epoch, err := tx.CurrentKeyEpochTx(ctx)
+		if err != nil {
+			return err
+		}
+		if err := tx.SetWCKRotationPendingTx(ctx, epoch); err != nil {
 			return err
 		}
 	}

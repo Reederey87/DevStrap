@@ -87,11 +87,14 @@ stderr 'allow-epoch-gap'
 exec sh -c 'DREC=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices recipient); DSIG=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices recipient --signing); DFP=$(devstrap --home=$WORK/homeD --root=$WORK/CodeD devices recipient --fingerprint); devstrap --home=$WORK/homeC --root=$WORK/CodeC devices enroll dev_e --name e --os linux --arch arm64 --age-recipient "$DREC" --signing-public-key "$DSIG" --approve --allow-epoch-gap --fingerprint "$DFP"'
 stdout 'enrolled as approved'
 
-# Recovery: B (holding epochs 1+2) re-approves C, granting every held epoch;
-# after B pushes and C pulls, the quarantined epoch-2 event replays, the
-# conflict auto-resolves, and a2-proj materializes on C.
+# Recovery: B re-approves C, granting every held epoch. P7-SYNC-04: B learned of
+# D's revocation via the synced device.revoked event on its line-64 sync, so it
+# OWED and performed the forward-secrecy rotation itself (epoch 2 -> 3) — a
+# device that only learns of a revoke, not just the revoker, must exclude the
+# revoked device, and a newer epoch alone is not proof it was (so B does not
+# stand down on A's epoch 2). B therefore holds epochs 1+2+3 and grants all 3.
 exec sh -c 'C_ID=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices list | awk "NR==1{print \$1}"); CFP=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices recipient --fingerprint); devstrap --home=$WORK/homeB --root=$WORK/CodeB devices approve "$C_ID" --fingerprint "$CFP"'
-stderr 'Granted 2 workspace key epoch'
+stderr 'Granted 3 workspace key epoch'
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
 exec devstrap --home=$WORK/homeC --root=$WORK/CodeC sync --hub-file=$WORK/hub.json
 exec sh -c 'test -d $WORK/CodeC/work/a2-proj/.git'
