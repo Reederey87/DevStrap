@@ -565,6 +565,52 @@ func TestRestoreCompletenessRequiresHeldWCKFile(t *testing.T) {
 	}
 }
 
+// TestRestoreRefusesSemanticallyInvalidKeyMaterial (Codex review): key files
+// that PARSE but do not match the archived database's device row — or a WCK
+// whose bytes contradict its kid fingerprint — must refuse the restore, not
+// merely files that are absent. Exercised via the legacy (manifest-less) path
+// because a tampered file would otherwise be caught earlier by the manifest
+// hash check.
+func TestRestoreRefusesSemanticallyInvalidKeyMaterial(t *testing.T) {
+	home, root, archive := newFullBackupForTest(t)
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "db", "backup", "--full", archive); err != nil {
+		t.Fatalf("backup: %v %s", err, stderr)
+	}
+	stage := extractArchiveForTest(t, archive)
+	// Replace the device identity with a DIFFERENT valid age key: parses fine,
+	// derived recipient no longer matches the archived database.
+	keys, err := os.ReadDir(filepath.Join(stage, backupDirKeys))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ageName := ""
+	for _, k := range keys {
+		if strings.HasSuffix(k.Name(), ".agekey") {
+			ageName = k.Name()
+			break
+		}
+	}
+	if ageName == "" {
+		t.Fatal("no staged agekey")
+	}
+	wrong, err := devicekeys.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, backupDirKeys, ageName), []byte(wrong.Private+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(stage, backupEntryManifest)); err != nil {
+		t.Fatal(err)
+	}
+	tampered := filepath.Join(t.TempDir(), "wrong-key.tar")
+	repackStageForTest(t, stage, tampered)
+	_, stderr, err := executeForTest("--home", filepath.Join(t.TempDir(), "restore"), "--root", root, "db", "restore", tampered, "--allow-legacy")
+	if err == nil || !strings.Contains(stderr, "does not match the archived database") {
+		t.Fatalf("restore err=%v stderr=%q", err, stderr)
+	}
+}
+
 // TestExtractBackupTarRejectsZipSlip is the zip-slip regression: a crafted entry
 // escaping the destination (or otherwise outside the known layout) is rejected
 // and nothing is written outside the staging directory (P6-DATA-04).

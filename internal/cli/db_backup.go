@@ -726,10 +726,28 @@ func verifyRestoreCompleteness(ctx context.Context, stage string) error {
 	if err != nil {
 		return err
 	}
-	for _, name := range []string{device.ID + ".agekey", device.ID + ".signing.key"} {
-		if info, err := os.Stat(filepath.Join(stage, backupDirKeys, name)); err != nil || !info.Mode().IsRegular() {
-			return missing("key " + name)
-		}
+	// Key material must be semantically valid, not merely present (Codex
+	// review): a valid-but-wrong or corrupted key file would restore
+	// "successfully" into a workspace that can neither decrypt nor sign.
+	// Parse the staged identities and hold their derived public halves
+	// against the archived database's device row.
+	unusable := func(what string, err error) error {
+		return appError{code: exitInvalidConfig, err: fmt.Errorf("backup archive is unrecoverable: %s: %w", what, err)}
+	}
+	stagedKeys := devicekeys.NewFileStore(filepath.Join(stage, backupDirKeys))
+	identity, err := stagedKeys.Read(device.ID)
+	if err != nil {
+		return unusable("device identity "+device.ID+".agekey does not parse", err)
+	}
+	if device.PublicKey != "" && identity.Recipient != device.PublicKey {
+		return unusable("device identity "+device.ID+".agekey", fmt.Errorf("derived recipient does not match the archived database's device public key"))
+	}
+	signing, err := stagedKeys.ReadSigning(device.ID)
+	if err != nil {
+		return unusable("signing key "+device.ID+".signing.key does not parse", err)
+	}
+	if device.SigningPublicKey != "" && signing.Public != device.SigningPublicKey {
+		return unusable("signing key "+device.ID+".signing.key", fmt.Errorf("derived public key does not match the archived database's device signing key"))
 	}
 	workspaceID, err := snap.WorkspaceID(ctx)
 	if err != nil {
@@ -744,8 +762,18 @@ func verifyRestoreCompleteness(ctx context.Context, stage string) error {
 		if key.KID != "" {
 			name = fmt.Sprintf("wck-%s-%d-%s.key", workspaceID, key.Epoch, key.KID)
 		}
-		if info, err := os.Stat(filepath.Join(stage, backupDirKeys, name)); err != nil || !info.Mode().IsRegular() {
+		wck, err := stagedKeys.ReadWCK(workspaceID, key.Epoch, key.KID)
+		if err != nil {
 			return missing("key " + name)
+		}
+		if len(wck) != 32 {
+			return unusable("key "+name, fmt.Errorf("decoded to %d bytes, want 32", len(wck)))
+		}
+		if key.KID != "" {
+			sum := sha256.Sum256(wck)
+			if !strings.EqualFold(hex.EncodeToString(sum[:]), key.KID) {
+				return unusable("key "+name, fmt.Errorf("content does not match its recorded kid fingerprint"))
+			}
 		}
 	}
 	return nil
