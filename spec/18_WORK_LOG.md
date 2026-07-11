@@ -31,6 +31,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-10 — chore(deps): bump golang.org/x/crypto v0.52.0, golang.org/x/net v0.55.0
+
+Changed:
+- `go.mod`/`go.sum`: `golang.org/x/crypto` v0.51.0→v0.52.0, `golang.org/x/net` v0.54.0→v0.55.0. Supersedes Dependabot #143/#126, which cannot pass the spec-drift gate (go.mod changes require a spec touch); rewritten as one manual PR per the gate's contract.
+- `spec/16_TEST_PLAN.md`: dated history note on the dependency bump.
+
+Validated:
+- `gofmt -l cmd internal` (clean — no Go source changes)
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `DEVSTRAP_NO_KEYCHAIN=1 go test -race ./...`
+
+Follow-ups:
+- None
+
 ## 2026-07-10 — docs(product): commercialization spec, website plan, README rewrite, AGENTS tightening
 
 Changed:
