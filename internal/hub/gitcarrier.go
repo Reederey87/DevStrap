@@ -42,6 +42,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -50,6 +51,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -494,11 +496,15 @@ func (g *GitCarrierHub) refreshLocked(ctx context.Context) error {
 // symlinked marker is refused outright — reading or later rewriting it must
 // never follow a hostile tree outside the checkout.
 func (g *GitCarrierHub) validateMarkerLocked() error {
-	markerPath := filepath.Join(g.dir, gitMarkerFile)
-	if info, lerr := os.Lstat(markerPath); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+	root, err := os.OpenRoot(g.dir)
+	if err != nil {
+		return fmt.Errorf("open git hub root: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+	if info, lerr := root.Lstat(gitMarkerFile); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("git hub %s: %s is a symlink; refusing", redactedRemote(g.remote), gitMarkerFile)
 	}
-	raw, err := os.ReadFile(markerPath) //nolint:gosec // fixed name under the checkout root, symlink-refused above
+	raw, err := root.ReadFile(gitMarkerFile)
 	if errors.Is(err, os.ErrNotExist) {
 		empty, eerr := dirEmptyExceptGit(g.dir)
 		if eerr != nil {
@@ -525,17 +531,32 @@ func (g *GitCarrierHub) validateMarkerLocked() error {
 	return nil
 }
 
-// writeMarkerLocked seeds the carrier marker on a bootstrap write.
+// writeMarkerLocked seeds the carrier marker on a bootstrap write. It rides
+// the same os.Root confinement as every other checkout write so its safety is
+// structural, not dependent on a validateMarkerLocked having run first
+// (P7-SEC-04 review).
 func (g *GitCarrierHub) writeMarkerLocked() error {
-	path := filepath.Join(g.dir, gitMarkerFile)
-	if _, err := os.Stat(path); err == nil {
+	root, err := os.OpenRoot(g.dir)
+	if err != nil {
+		return fmt.Errorf("open git hub root: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+	if _, err := root.Lstat(gitMarkerFile); err == nil {
 		return nil
 	}
 	raw, err := json.Marshal(gitCarrierMarker{Version: 1, WorkspaceID: g.workspaceID})
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, raw, 0o600)
+	f, err := root.OpenFile(gitMarkerFile, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create git hub marker: %w", err)
+	}
+	if _, err := f.Write(raw); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("write git hub marker: %w", err)
+	}
+	return f.Close()
 }
 
 // commitLocked stages everything and commits when the tree changed. The
@@ -922,6 +943,12 @@ func (g *GitCarrierHub) CompactEventsBelow(ctx context.Context, floors dssync.Cu
 // everything for one extra grace window — fail-safe by construction.
 type fsObjectStore struct {
 	root string
+	// rootInfo pins a shared folder carrier to the directory registered at
+	// construction. A Root opened after guard-time revalidation is compared
+	// against it, closing a swap between the path check and OpenRoot.
+	// Git carriers leave this nil because their checkout is private and reset
+	// under the carrier lock before every operation batch.
+	rootInfo fs.FileInfo
 	// obsPath is the per-clone observation index (key -> RFC3339Nano first
 	// seen by THIS clone). Outside the checkout: never committed, never reset.
 	obsPath string
@@ -934,67 +961,105 @@ type fsObjectStore struct {
 }
 
 func (s *fsObjectStore) keyPath(key string) (string, error) {
-	if key == "" || strings.HasPrefix(key, "/") || strings.Contains(key, "\\") || strings.Contains(key, "..") {
+	if key == "" || strings.HasPrefix(key, "/") || strings.Contains(key, "\\") {
 		return "", fmt.Errorf("%w: %q", dssync.ErrInvalidBlobKey, key)
 	}
-	return s.safePath(key)
-}
-
-// safePath resolves a validated slash key under the checkout root, refusing
-// any path component that is a symlink: a hostile carrier tree can commit a
-// symlink (e.g. `workspaces -> /etc`) that survives `reset --hard`, and
-// following it would read or write OUTSIDE the checkout. Components that do
-// not exist yet (the write path creates them) have nothing to follow and are
-// fine.
-func (s *fsObjectStore) safePath(key string) (string, error) {
-	cur := s.root
 	for _, part := range strings.Split(key, "/") {
-		if part == "" {
+		if part == "" || part == "." || part == ".." {
 			return "", fmt.Errorf("%w: %q", dssync.ErrInvalidBlobKey, key)
 		}
-		cur = filepath.Join(cur, part)
-		info, err := os.Lstat(cur)
-		if errors.Is(err, os.ErrNotExist) {
-			return filepath.Join(s.root, filepath.FromSlash(key)), nil
-		}
-		if err != nil {
-			return "", fmt.Errorf("stat git hub path component: %w", err)
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return "", fmt.Errorf("%w: %q traverses a symlink in the carrier tree", dssync.ErrInvalidBlobKey, key)
-		}
 	}
-	return cur, nil
+	return key, nil
 }
 
-func (s *fsObjectStore) timePath(key string) (string, error) {
-	return s.safePath(gitTimesPrefix + key)
-}
-
-func (s *fsObjectStore) writeTimestamp(key string) error {
-	path, err := s.timePath(key)
+func (s *fsObjectStore) openRoot() (*os.Root, error) {
+	root, err := os.OpenRoot(s.root)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("open hub object root: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if s.rootInfo != nil {
+		info, serr := root.Stat(".")
+		if serr != nil {
+			_ = root.Close()
+			return nil, fmt.Errorf("stat hub object root: %w", serr)
+		}
+		if !os.SameFile(s.rootInfo, info) {
+			_ = root.Close()
+			return nil, fmt.Errorf("folder hub: root %q no longer denotes the registered directory; refusing to operate outside it", s.root)
+		}
+	}
+	return root, nil
+}
+
+func timePath(key string) string {
+	return gitTimesPrefix + key
+}
+
+func (s *fsObjectStore) writeTimestamp(root *os.Root, key string) error {
+	name := timePath(key)
+	if err := root.MkdirAll(path.Dir(name), 0o700); err != nil {
 		return err
 	}
 	// Sidecars live in the shared folder for the folder carrier; use the same
-	// atomic write as object payloads (P7-HUB-05).
-	return writeFileAtomic(path, []byte(time.Now().UTC().Format(time.RFC3339Nano)))
+	// confined atomic write as object payloads (P7-HUB-05/P7-SEC-04).
+	return writeRootFileAtomic(root, name, []byte(time.Now().UTC().Format(time.RFC3339Nano)))
 }
 
-// staleTempAge is how old an orphan writeFileAtomic temp must be before
-// listKeys reclaims it (crash between create and rename).
+// writeRootFileAtomic publishes a complete root-relative object using a
+// same-directory temp, fsync, and Root.Rename. Rename is filesystem-atomic but
+// cannot eliminate a cloud drive's mid-replication window (P7-HUB-05).
+func writeRootFileAtomic(root *os.Root, name string, body []byte) error {
+	dir := path.Dir(name)
+	var tmp *os.File
+	var tmpPath string
+	for i := 0; i < 100; i++ {
+		var suffix [8]byte
+		if _, err := io.ReadFull(rand.Reader, suffix[:]); err != nil {
+			return fmt.Errorf("name hub object temp: %w", err)
+		}
+		tmpPath = path.Join(dir, ".tmp-"+hex.EncodeToString(suffix[:]))
+		var err error
+		tmp, err = root.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("create hub object temp: %w", err)
+		}
+	}
+	if tmp == nil {
+		return errors.New("create hub object temp: exhausted unique names")
+	}
+	defer func() { _ = root.Remove(tmpPath) }()
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write hub object temp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("fsync hub object temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close hub object temp: %w", err)
+	}
+	if err := root.Rename(tmpPath, name); err != nil {
+		return fmt.Errorf("rename hub object: %w", err)
+	}
+	if dirFile, err := root.Open(dir); err == nil {
+		_ = dirFile.Sync()
+		_ = dirFile.Close()
+	}
+	return nil
+}
+
+// staleTempAge is how old an orphan object-write temp must be before listKeys
+// reclaims it (crash between create and rename).
 const staleTempAge = time.Hour
 
-// writeFileAtomic writes body to path via a same-directory temp file, fsync,
-// and rename so a local reader never observes a partially written object.
-// Rename atomicity holds only within one filesystem and REDUCES but does not
-// eliminate the cloud-drive mid-replication window (a drive may still observe
-// or replicate the new inode mid-upload); that residual is documented in
-// spec/15 (P7-HUB-05). Temp files use the ".tmp-*" prefix so listKeys can ignore
-// any orphan left by a crash between create and rename.
+// writeFileAtomic writes a private-cache file outside the object-store root
+// (notably head.json) via a same-directory temp file, fsync, and rename.
+// This is deliberately separate from writeRootFileAtomic: private cache files
+// live beside the clone, outside the confined shared object tree.
 func writeFileAtomic(path string, body []byte) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
@@ -1026,20 +1091,18 @@ func writeFileAtomic(path string, body []byte) error {
 	// revert the directory entry to the prior (still-complete, never torn)
 	// generation. Best-effort: some filesystems/platforms don't support
 	// directory fsync, so a failure here is not surfaced as a write error.
-	if dirFile, err := os.Open(dir); err == nil { //nolint:gosec // G304: dir is the target's parent inside the carrier root; callers resolve keys via safePath
+	if dirFile, err := os.Open(dir); err == nil { //nolint:gosec // private-cache helper; object-store writes use writeRootFileAtomic
 		_ = dirFile.Sync()
 		_ = dirFile.Close()
 	}
 	return nil
 }
 
-func (s *fsObjectStore) modTime(key string) time.Time {
+func (s *fsObjectStore) modTime(root *os.Root, key string) time.Time {
 	sidecar := time.Time{}
-	if tp, terr := s.timePath(key); terr == nil {
-		if raw, err := os.ReadFile(tp); err == nil { //nolint:gosec // safePath denies escapes and symlinked components
-			if t, perr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(raw))); perr == nil {
-				sidecar = t
-			}
+	if raw, err := root.ReadFile(timePath(key)); err == nil {
+		if t, perr := time.Parse(time.RFC3339Nano, strings.TrimSpace(string(raw))); perr == nil {
+			sidecar = t
 		}
 	}
 	// Floor at this clone's first observation: a skewed-slow writer's sidecar
@@ -1115,19 +1178,24 @@ func (s *fsObjectStore) PutObject(_ context.Context, key string, body []byte, if
 	}
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
+	root, err := s.openRoot()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
 	if ifNoneMatch {
-		if _, err := os.Stat(path); err == nil {
+		if _, err := root.Stat(path); err == nil {
 			return ErrPreconditionFailed
 		}
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := root.MkdirAll(filepath.ToSlash(filepath.Dir(path)), 0o700); err != nil {
 		return fmt.Errorf("create git hub object dir: %w", err)
 	}
-	if err := writeFileAtomic(path, body); err != nil {
+	if err := writeRootFileAtomic(root, path, body); err != nil {
 		return fmt.Errorf("write git hub object: %w", err)
 	}
 	s.observeLocked(key, time.Now().UTC())
-	return s.writeTimestamp(key)
+	return s.writeTimestamp(root, key)
 }
 
 func (s *fsObjectStore) GetObject(_ context.Context, key string) ([]byte, error) {
@@ -1135,7 +1203,12 @@ func (s *fsObjectStore) GetObject(_ context.Context, key string) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(path) //nolint:gosec // keyPath/safePath confine the key under the checkout root and deny symlinked components
+	root, err := s.openRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	data, err := root.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("%w: %s", dssync.ErrBlobNotFound, key)
 	}
@@ -1150,7 +1223,12 @@ func (s *fsObjectStore) ObjectExists(_ context.Context, key string) (bool, error
 	if err != nil {
 		return false, err
 	}
-	if _, err := os.Stat(path); err == nil {
+	root, err := s.openRoot()
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = root.Close() }()
+	if _, err := root.Stat(path); err == nil {
 		return true, nil
 	} else if errors.Is(err, os.ErrNotExist) {
 		return false, nil
@@ -1166,13 +1244,16 @@ func (s *fsObjectStore) DeleteObject(_ context.Context, key string) error {
 	}
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	root, err := s.openRoot()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	if err := root.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("delete git hub object: %w", err)
 	}
-	if tp, terr := s.timePath(key); terr == nil {
-		if err := os.Remove(tp); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("delete git hub object sidecar: %w", err)
-		}
+	if err := root.Remove(timePath(key)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("delete git hub object sidecar: %w", err)
 	}
 	s.forgetObservedLocked(key)
 	return nil
@@ -1180,22 +1261,21 @@ func (s *fsObjectStore) DeleteObject(_ context.Context, key string) error {
 
 // listKeys walks the checkout collecting object keys (slash-separated,
 // root-relative), skipping .git, the timestamp sidecars, and the marker.
-func (s *fsObjectStore) listKeys() ([]string, error) {
+func (s *fsObjectStore) listKeys(root *os.Root) ([]string, error) {
 	var keys []string
 	var staleTemps []string
-	err := filepath.WalkDir(s.root, func(path string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(root.FS(), ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil
 			}
 			return err
 		}
-		rel, rerr := filepath.Rel(s.root, path)
-		if rerr != nil {
-			return rerr
-		}
-		key := filepath.ToSlash(rel)
+		key := path
 		if d.IsDir() {
+			if key == "." {
+				return nil
+			}
 			if key == ".git" || key == strings.TrimSuffix(gitTimesPrefix, "/") || key == ".devstrap-meta" {
 				return filepath.SkipDir
 			}
@@ -1226,14 +1306,19 @@ func (s *fsObjectStore) listKeys() ([]string, error) {
 	// mid-walk tree mutation, and no walk-relative filesystem op for gosec's
 	// G122). A failed remove just retries on the next list.
 	for _, p := range staleTemps {
-		_ = os.Remove(p)
+		_ = root.Remove(p)
 	}
 	sort.Strings(keys)
 	return keys, nil
 }
 
 func (s *fsObjectStore) ListObjectsV2(_ context.Context, prefix, startAfter string, maxKeys int) ([]dssync.BlobInfo, string, error) {
-	all, err := s.listKeys()
+	root, err := s.openRoot()
+	if err != nil {
+		return nil, "", err
+	}
+	defer func() { _ = root.Close() }()
+	all, err := s.listKeys(root)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1254,13 +1339,18 @@ func (s *fsObjectStore) ListObjectsV2(_ context.Context, prefix, startAfter stri
 	}
 	objs := make([]dssync.BlobInfo, 0, limit)
 	for _, key := range keys[:limit] {
-		objs = append(objs, dssync.BlobInfo{Key: key, LastModified: s.modTime(key)})
+		objs = append(objs, dssync.BlobInfo{Key: key, LastModified: s.modTime(root, key)})
 	}
 	return objs, next, nil
 }
 
 func (s *fsObjectStore) ListCommonPrefixes(_ context.Context, prefix, delimiter string) ([]string, error) {
-	all, err := s.listKeys()
+	root, err := s.openRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	all, err := s.listKeys(root)
 	if err != nil {
 		return nil, err
 	}
@@ -1289,13 +1379,18 @@ func (s *fsObjectStore) StatObject(_ context.Context, key string) (dssync.BlobIn
 	if err != nil {
 		return dssync.BlobInfo{}, err
 	}
-	if _, err := os.Stat(path); err != nil {
+	root, err := s.openRoot()
+	if err != nil {
+		return dssync.BlobInfo{}, err
+	}
+	defer func() { _ = root.Close() }()
+	if _, err := root.Stat(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return dssync.BlobInfo{}, fmt.Errorf("%w: %s", dssync.ErrBlobNotFound, key)
 		}
 		return dssync.BlobInfo{}, fmt.Errorf("stat git hub object: %w", err)
 	}
-	return dssync.BlobInfo{Key: key, LastModified: s.modTime(key)}, nil
+	return dssync.BlobInfo{Key: key, LastModified: s.modTime(root, key)}, nil
 }
 
 func (s *fsObjectStore) GetObjectWithETag(ctx context.Context, key string) ([]byte, string, error) {
@@ -1313,15 +1408,20 @@ func (s *fsObjectStore) PutObjectIfMatch(_ context.Context, key string, body []b
 	}
 	s.wmu.Lock()
 	defer s.wmu.Unlock()
-	current, rerr := os.ReadFile(path) //nolint:gosec // keyPath/safePath confine the key under the checkout root and deny symlinked components
+	root, err := s.openRoot()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	current, rerr := root.ReadFile(path)
 	if rerr != nil || fsETag(current) != etag {
 		return ErrPreconditionFailed
 	}
-	if err := writeFileAtomic(path, body); err != nil {
+	if err := writeRootFileAtomic(root, path, body); err != nil {
 		return fmt.Errorf("write git hub object: %w", err)
 	}
 	s.observeLocked(key, time.Now().UTC())
-	return s.writeTimestamp(key)
+	return s.writeTimestamp(root, key)
 }
 
 func fsETag(data []byte) string {

@@ -150,13 +150,15 @@ func TestGitCarrierDryRunMigrateWritesNothing(t *testing.T) {
 	}
 }
 
-// TestGitCarrierRefusesSymlinkedCarrierPaths pins the safePath confinement: a
-// hostile carrier tree that commits `workspaces` as a symlink pointing outside
-// the checkout must be refused at the object layer — reads must not follow it
-// (exfiltration) and writes must not land through it (clobbering).
+// TestGitCarrierRefusesSymlinkedCarrierPaths pins os.Root confinement after hub
+// construction: a hostile carrier update that replaces `workspaces` with a
+// symlink pointing outside the checkout must be refused at the object layer —
+// reads must not follow it (exfiltration) and writes must not land through it
+// (clobbering).
 func TestGitCarrierRefusesSymlinkedCarrierPaths(t *testing.T) {
 	ctx := context.Background()
 	remote := newBareCarrier(t)
+	h := newGitCarrierTestHub(t, remote, "victim-reader")
 	outside := t.TempDir()
 	if err := os.WriteFile(filepath.Join(outside, "victim"), []byte("host file"), 0o600); err != nil {
 		t.Fatal(err)
@@ -175,13 +177,12 @@ func TestGitCarrierRefusesSymlinkedCarrierPaths(t *testing.T) {
 	runGit(t, scratch, "-c", "user.name=t", "-c", "user.email=t@localhost", "commit", "--quiet", "-m", "hostile")
 	runGit(t, scratch, "push", "--quiet", "origin", "HEAD:refs/heads/main")
 
-	h := newGitCarrierTestHub(t, remote, "victim-reader")
 	const blobSHA = "dd00000000000000000000000000000000000000000000000000000000000001"
-	if _, err := h.GetBlob(ctx, blobSHA); err == nil || !strings.Contains(err.Error(), "symlink") {
-		t.Fatalf("GetBlob through a symlinked component = %v, want symlink refusal", err)
+	if _, err := h.GetBlob(ctx, blobSHA); err == nil {
+		t.Fatal("GetBlob through a symlinked component succeeded; want refusal")
 	}
-	if err := h.PutBlob(ctx, blobSHA, strings.NewReader("x")); err == nil || !strings.Contains(err.Error(), "symlink") {
-		t.Fatalf("PutBlob through a symlinked component = %v, want symlink refusal", err)
+	if err := h.PutBlob(ctx, blobSHA, strings.NewReader("x")); err == nil {
+		t.Fatal("PutBlob through a symlinked component succeeded; want refusal")
 	}
 	entries, err := os.ReadDir(outside)
 	if err != nil {

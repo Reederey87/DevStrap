@@ -31,6 +31,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-11 — fix(hub): os.Root-confined carrier file access (P7-SEC-04)
+
+Changed:
+- `internal/hub/gitcarrier.go` + `internal/hub/folder.go`: the fsObjectStore's check-then-use `safePath` (Lstat-walk, then open by path) is replaced by per-operation `os.Root` handles — every object read/write/stat/list/delete, the timestamp sidecars, and the atomic temp+fsync+rename writes (`writeRootFileAtomic`) now resolve through the Root's per-component O_NOFOLLOW + symlink-target recheck, so a component swapped for a symlink between check and open can no longer redirect I/O outside the carrier root. Key validation (empty/absolute/backslash/dot-segment refusal) is retained. The folder carrier pins root identity: `openRoot` compares the fresh handle's `Stat(".")` against the construction-time directory (`os.SameFile`), closing the residual swap window between `revalidateRoot` and `OpenRoot`; the git carrier's marker read also rides a Root handle. Private cache sidecars (`head.json`, `observed.json`) stay on plain os access by design (outside the store root).
+- Tests: post-construction intermediate-component symlink-swap refusal (read AND write, no escaped file) for both carriers; existing hub suites (incl. the P7-HUB-02 continuity set) green under `-race`.
+- `spec/15_SECURITY_THREAT_MODEL.md`: the folder-carrier check-then-use residual is retired; confinement is now enforced at the file API by `os.Root` (Go 1.26 stdlib).
+- `docs/audits/README.md`: `P7-SEC-04` moved open → *Recently shipped*; counts re-derived at merge (serial wave).
+
+Validated:
+- `gofmt -w cmd internal`; `GOCACHE=/tmp/devstrap-gocache go test ./internal/hub/ -count=1 -race`; `GOCACHE=/tmp/devstrap-gocache go test ./cmd/devstrap -run 'TestScript/sync_folder_hub|TestScript/sync_git_hub|TestScript/hub_' -count=1`.
+- Implementer: Codex (gpt-5.6) from a written spec (fix chosen per exa research: Go 1.24+ `os.Root` per-component O_NOFOLLOW; repo is on 1.26.5); coordinator line-by-line review.
+- Post-review (opus, dual-review): MERGE-READY; one consistency hardening applied — `writeMarkerLocked` now writes through the same `os.Root` handle (Lstat + O_EXCL create) instead of path-based `os.Stat`/`os.WriteFile`, so the marker write's confinement is structural rather than dependent on `validateMarkerLocked` having run first.
+
+Follow-ups:
+- None.
+
 ## 2026-07-11 — fix(state): migration 00023 rollback fails closed on populated env LWW coordinates (P7-DATA-07)
 
 Changed:

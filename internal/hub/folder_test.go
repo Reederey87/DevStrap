@@ -3,6 +3,7 @@ package hub
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,10 +175,7 @@ func TestFolderHubTwoDeviceConvergence(t *testing.T) {
 
 // TestFolderHubRefusesReplacedRoot pins the use-time root revalidation (review
 // P2): the constructor resolves the root once, but a long-lived hub whose
-// shared folder is later swapped for a symlink must refuse to follow it —
-// safePath only Lstats components below the root, so without the guard-time
-// check every subsequent read/write would silently land outside the registered
-// folder.
+// shared folder is later swapped for a symlink must refuse to follow it.
 func TestFolderHubRefusesReplacedRoot(t *testing.T) {
 	ctx := context.Background()
 	dir := filepath.Join(t.TempDir(), "shared")
@@ -200,6 +198,38 @@ func TestFolderHubRefusesReplacedRoot(t *testing.T) {
 	}
 	if _, err := h.Pull(ctx, nil); err == nil {
 		t.Fatal("read through a replaced root succeeded; want refusal")
+	}
+}
+
+// TestFolderHubRefusesSwappedIntermediateComponent pins P7-SEC-04 on the real
+// shared-tree surface: after construction, a co-user swaps an object-key
+// component for a symlink to an outside directory. Both reads and writes must
+// fail through os.Root, and the target must remain untouched.
+func TestFolderHubRefusesSwappedIntermediateComponent(t *testing.T) {
+	ctx := context.Background()
+	dir := filepath.Join(t.TempDir(), "shared")
+	h := newFolderTestHub(t, dir, t.TempDir())
+	outside := t.TempDir()
+	const readSHA = "dd00000000000000000000000000000000000000000000000000000000000001"
+	const writeSHA = "dd00000000000000000000000000000000000000000000000000000000000002"
+	outsideBlobs := filepath.Join(outside, "ws_test", "blobs")
+	if err := os.MkdirAll(outsideBlobs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideBlobs, readSHA), []byte("outside secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "workspaces")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	if _, err := h.GetBlob(ctx, readSHA); err == nil {
+		t.Fatal("GetBlob through a swapped intermediate component succeeded; want refusal")
+	}
+	if err := h.PutBlob(ctx, writeSHA, strings.NewReader("escaped write")); err == nil {
+		t.Fatal("PutBlob through a swapped intermediate component succeeded; want refusal")
+	}
+	if _, err := os.Stat(filepath.Join(outsideBlobs, writeSHA)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("outside write path stat = %v; no file must escape the store root", err)
 	}
 }
 
