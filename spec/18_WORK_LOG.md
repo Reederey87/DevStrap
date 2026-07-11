@@ -31,6 +31,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-11 — fix(cli): `db backup --full --json` / `db restore --json` emit a single clean JSON document (P7-CLI-01)
+
+Changed:
+- `internal/cli/db_backup.go`: `fullBackupResult` gains `Warnings []string`; the three pre-render `Fprintf(stdout, "warning: …")` sites in `runFullBackup` (missing blobs, no keys, no config) append to `result.Warnings` instead. Human render prints each as `warning: <msg>` before the summary line. `runRestore` uses a typed `restoreResult{Restored, Items, Warnings}`; `warnKeychainCustodyRestore` becomes `keychainCustodyRestoreWarning` returning `""` or the two-line custody message, appended to `result.Warnings` when non-empty. Nothing writes to stdout outside the render callback under `--json`.
+- Tests: `TestFullBackupJSONWarningsInPayload` (deleted blob → full stdout unmarshals; `warnings` mentions missing blobs); `TestRestoreJSONIsSingleDocument` (fresh-home restore `--json` is one document with `restored`/`items`, no raw `warning:` text).
+- Docs: `spec/13` notes `--json` carries warnings in the payload `warnings` array (`last_reviewed` 2026-07-11); ledger moves `P7-CLI-01` open → *Recently shipped* (Pass-7 open 41→40, P2 22→21).
+
+Validated:
+- `gofmt -w cmd internal`
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/cli/ -run 'Backup|Restore' -count=1`
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/cli/`
+
+Follow-ups:
+- None.
+
 ## 2026-07-10 — fix(sync): every device that learns of a revoke owes the WCK rotation (P7-SYNC-04)
 
 Changed:
