@@ -721,7 +721,45 @@ func (s *fsObjectStore) writeTimestamp(key string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(time.Now().UTC().Format(time.RFC3339Nano)), 0o600)
+	// Sidecars live in the shared folder for the folder carrier; use the same
+	// atomic write as object payloads (P7-HUB-05).
+	return writeFileAtomic(path, []byte(time.Now().UTC().Format(time.RFC3339Nano)))
+}
+
+// writeFileAtomic writes body to path via a same-directory temp file, fsync,
+// and rename so a local reader never observes a partially written object.
+// Rename atomicity holds only within one filesystem and REDUCES but does not
+// eliminate the cloud-drive mid-replication window (a drive may still observe
+// or replicate the new inode mid-upload); that residual is documented in
+// spec/15 (P7-HUB-05). Temp files use the ".tmp-*" prefix so listKeys can ignore
+// any orphan left by a crash between create and rename.
+func writeFileAtomic(path string, body []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create hub object temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod hub object temp: %w", err)
+	}
+	if _, err := tmp.Write(body); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write hub object temp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("fsync hub object temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close hub object temp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("rename hub object: %w", err)
+	}
+	return nil
 }
 
 func (s *fsObjectStore) modTime(key string) time.Time {
@@ -814,7 +852,7 @@ func (s *fsObjectStore) PutObject(_ context.Context, key string, body []byte, if
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create git hub object dir: %w", err)
 	}
-	if err := os.WriteFile(path, body, 0o600); err != nil {
+	if err := writeFileAtomic(path, body); err != nil {
 		return fmt.Errorf("write git hub object: %w", err)
 	}
 	s.observeLocked(key, time.Now().UTC())
@@ -892,6 +930,10 @@ func (s *fsObjectStore) listKeys() ([]string, error) {
 			return nil
 		}
 		if key == gitMarkerFile {
+			return nil
+		}
+		// Orphan writeFileAtomic temps (crash between create and rename).
+		if strings.HasPrefix(filepath.Base(key), ".tmp-") {
 			return nil
 		}
 		keys = append(keys, key)
@@ -989,7 +1031,7 @@ func (s *fsObjectStore) PutObjectIfMatch(_ context.Context, key string, body []b
 	if rerr != nil || fsETag(current) != etag {
 		return ErrPreconditionFailed
 	}
-	if err := os.WriteFile(path, body, 0o600); err != nil {
+	if err := writeFileAtomic(path, body); err != nil {
 		return fmt.Errorf("write git hub object: %w", err)
 	}
 	s.observeLocked(key, time.Now().UTC())

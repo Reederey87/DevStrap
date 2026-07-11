@@ -51,6 +51,22 @@ Validated:
 Follow-ups:
 - `P7-SYNC-04`: remote/snapshot trust flips should make the RECEIVER owe a WCK rotation (`wck_rotation_pending`) — next PR in this wave.
 - Observed while building the e2e (pre-existing, distinct from P7-SYNC-01): a device offline across a revoke-triggered rotation ALSO misses its new-epoch grant, and compaction deletes that grant, so it defers keyless until an operator re-approves it (`devices approve` re-grants held epochs above the floor). Fail-closed and recoverable, but nothing re-emits grants automatically and `doctor` on the stuck device cannot name the cause — worth a finding in the next audit pass.
+## 2026-07-10 — fix(hub): atomic temp+fsync+rename writes for mutable carrier objects (P7-HUB-05)
+
+Changed:
+- `internal/hub/gitcarrier.go`: added `writeFileAtomic` (same-dir `os.CreateTemp(".tmp-*")`, chmod 0600, write, `fsync`, close, `os.Rename`; temp removed on error). Wired into `fsObjectStore.PutObject` and `PutObjectIfMatch` (the folder-carrier exposure for torn `retention.json` / `sweep.lock`). Also wired `writeTimestamp` sidecars — they live in the shared folder for the folder carrier. Left alone: git carrier marker (`writeMarkerLocked`, private clone, shielded by `reset --hard`) and `observed.json` (`saveObsLocked`, machine-local under the private cache, never in the shared folder). `listKeys` ignores orphan `.tmp-*` basenames.
+- `internal/hub/folder_test.go`: success/no-residue, rename-failure cleanup, `PutObject`/`PutObjectIfMatch` full-body reads, and listKeys ignore of planted `.tmp-` orphans.
+- `spec/15_SECURITY_THREAT_MODEL.md`: folder-carrier residual notes atomic write + documented cloud-drive mid-replication window (`P7-HUB-05`).
+- `docs/audits/README.md`: `P7-HUB-05` moved open → Recently shipped; Pass 7 open count decremented.
+
+Validated:
+- `gofmt -w cmd internal`
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `DEVSTRAP_NO_KEYCHAIN=1 go test ./internal/hub/...`
+- `DEVSTRAP_NO_KEYCHAIN=1 go test -race ./internal/hub/... ./internal/cli/...`
+
+Follow-ups:
+- None for this finding; residual cloud-drive mid-replication window stays accepted (spec/15).
 
 ## 2026-07-10 — chore(deps): bump golang.org/x/crypto v0.52.0, golang.org/x/net v0.55.0
 
