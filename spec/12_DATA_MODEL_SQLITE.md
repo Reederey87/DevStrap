@@ -722,7 +722,7 @@ devstrap db backup ~/.devstrap/backups/state-20260623.db
 
 Backups use SQLite `VACUUM INTO`, not file copy, so WAL/SHM state is captured consistently. `db backup` (no `--full`) captures `state.db` **only**. This is a database snapshot, **not a recoverable workspace backup**: a workspace's captured secrets live outside the DB as `age`-encrypted blobs, and the DB holds only `age_blob:<sha256>` string refs. Restoring a lone `state.db` therefore leaves every `age_blob:` ref dangling — `env hydrate` fails and, on the file-custody path, the device identity and WCK epochs needed to decrypt even hub-synced draft blobs are gone. Use `--full` for disaster recovery.
 
-### Full backup / restore (disaster recovery, `P6-DATA-04` + `P7-DATA-03/04` — shipped)
+### Full backup / restore (disaster recovery, `P6-DATA-04` + `P7-DATA-03/04/05` — shipped)
 
 ```bash
 devstrap db backup --full ~/.devstrap/backups/workspace-20260704.tar   # state.db + blobs + keys
@@ -745,7 +745,9 @@ The `VACUUM INTO` file is authoritative: `state.OpenSnapshot` opens it read-only
 
 `db restore` extracts the archive into a sibling stage and, before touching live targets, verifies manifest format/version, every listed entry's size and SHA-256, required-set membership, and absence of unlisted files. It then validates the staged DB with read-only `quick_check` + `foreign_key_check` and cross-checks recovery dependencies against that DB: every blob ref must have a hash-matching `blobs/<sha>.age`, the current device age/signing keys must PARSE and their derived public halves must match the archived database's device row, and every held WCK must decode to 32 bytes whose SHA-256 matches its recorded kid. Pre-manifest archives fail closed unless `--allow-legacy` is explicit; legacy mode emits a warning, skips only manifest integrity, and still runs DB validation and completeness checks.
 
-After all verification succeeds, restore replaces `state.db`, `config.yaml`, `blobs/`, and `keys/` **in place** using the existing sequential per-target `.bak` sibling swap with rollback. It is not a wipe: un-captured state-dir contents (for example `quarantine/` and `logs/`) remain untouched, and existing captured targets require `--force`.
+After verification, promotion is all-or-nothing across `state.db`, `config.yaml`, `blobs/`, and `keys/`. `<home>/.restore-journal.json` is atomically written before the first rename and rewritten after each target promotion; it records the fixed target set, one unique shared `.bak` suffix, whether each target was staged/existed, and whether its promotion is durably done. Every old target is moved aside before any staged target is promoted, and all asides remain until every target is done. Recovery rolls forward by sweeping asides only when all targets are done; otherwise it rolls back in reverse target order to the exact pre-restore state. The journal is removed last.
+
+`devstrap db restore --recover` takes no archive and explicitly completes or reverses an interrupted promotion. A plain `db restore <archive>` auto-recovers first, then validates and restores the supplied archive. Normal state opens fail closed while a journal is pending, and `doctor` reports the journal with the `--recover` remedy. Full backup, restore, `db down`, and each run-loop tick share the state-home maintenance lock. The restore remains an in-place replacement, not a wipe: un-captured siblings such as `quarantine/` and `logs/` remain untouched, and existing captured targets require `--force`.
 
 **Restore runbook (recovering a workspace on a fresh or wiped machine):**
 
@@ -822,7 +824,11 @@ store.WithTx(ctx, func(tx *state.Tx) error {
 **Was.** `Backup` (`store.go`) was `VACUUM INTO` the `state.db` file only. Encrypted env values live outside the DB as `~/.devstrap/blobs/<hash>.age` and key material lives in `<statedir>/keys` (file custody) or the OS keychain (keychain custody), so a restored DB held dangling `age_blob:` refs; there was no `restore` command and `doctor.go` wrongly recommended restoring from a DB-only backup.
 
 **Shipped fix.**
+<<<<<<< HEAD
 1. `db backup --full <out.tar>` writes a single `tar` (stdlib `archive/tar`, no new deps) bundling `state.db` (via the reused `Store.Backup` `VACUUM INTO` primitive), `config.yaml` (the `hub:` pointer + custom `root:`, when present), the referenced `blobs/`, and `keys/` — captured verbatim from the KeyDir under file custody (with a hard-error guard that the device age + signing files are present), or escrowed out of the keychain under keychain custody via the new `devicekeys.HybridStore.ExportForBackup` (device age + Ed25519 signing identities, every held WCK epoch, and hub S3 credentials when present). A missing referenced blob is fatal after the snapshot-enumeration retry loop (P7-DATA-03); unreadable required key material fails the backup loudly. Every entry and the output file are `0600`. `db restore <in.tar>` replaces only the captured paths **in place** (leaving un-captured state-dir contents like `quarantine/`/`logs/` intact), refuses when a captured target already exists without `--force`, is zip-slip-guarded, validates the extracted DB (`quick_check` + `foreign_key_check`, via the new exported `state.ValidateDBFile`) before any swap, swaps each captured path via a `.bak` sibling + rename with rollback, and prints the keychain-custody reconciliation guidance when the restored DB records keychain custody.
+=======
+1. `db backup --full <out.tar>` writes a single `tar` bundling `state.db`, config, referenced blobs, custody-aware key escrow, and a final versioned manifest. **Superseded by P7-DATA-03/04/05:** refs/identity/held epochs now come from the read-only `VACUUM INTO` snapshot; missing blobs are fatal; restore verifies every manifest entry and DB-referenced recovery dependency; and one journal coordinates the all-target swap/recovery instead of independent per-target `.bak` swaps.
+>>>>>>> c0221bf (fix(cli): journaled all-or-nothing restore promotion + maintenance lock (P7-DATA-05))
 2. `doctor` gained a "dangling blob refs" check that stats each `AllBlobRefs` entry under `blobs/` and grades a missing one an error.
 3. The `doctor` `quick_check` remedy now points at `db backup --full`.
 

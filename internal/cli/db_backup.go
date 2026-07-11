@@ -13,7 +13,6 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -508,13 +507,14 @@ func runRestore(ctx context.Context, opts *options, in string, force, allowLegac
 	}
 	var restored []string
 	for _, name := range backupTargets {
-		swapped, err := swapBackupTarget(home, stage, name)
-		if err != nil {
-			return err
-		}
-		if swapped {
+		if _, err := os.Stat(filepath.Join(stage, name)); err == nil {
 			restored = append(restored, name)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect staged %s: %w", name, err)
 		}
+	}
+	if err := promoteAllTargets(home, stage, restoreJournalPath(home)); err != nil {
+		return err
 	}
 
 	result := restoreResult{Restored: home, Items: restored}
@@ -780,49 +780,13 @@ func verifyRestoreCompleteness(ctx context.Context, stage string) error {
 	return nil
 }
 
-// swapBackupTarget replaces home/name with stage/name when the archive carried
-// it, preserving the previous copy under a .bak sibling until the rename
-// succeeds and rolling back on failure. A target absent from the archive is a
-// no-op. Because it swaps a single top-level path (a file or a whole subtree),
-// un-captured siblings in home are never touched. Returns whether it restored.
-func swapBackupTarget(home, stage, name string) (bool, error) {
-	src := filepath.Join(stage, name)
-	if _, err := os.Stat(src); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
-		return false, fmt.Errorf("inspect staged %s: %w", name, err)
-	}
-	dst := filepath.Join(home, name)
-	aside := dst + ".bak-" + strconv.Itoa(os.Getpid())
-	existed := false
-	if _, err := os.Stat(dst); err == nil {
-		if err := os.Rename(dst, aside); err != nil {
-			return false, fmt.Errorf("move existing %s aside: %w", name, err)
-		}
-		existed = true
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return false, fmt.Errorf("inspect existing %s: %w", name, err)
-	}
-	if err := os.Rename(src, dst); err != nil {
-		if existed {
-			_ = os.Rename(aside, dst) // best-effort rollback
-		}
-		return false, fmt.Errorf("promote restored %s: %w", name, err)
-	}
-	if existed {
-		_ = os.RemoveAll(aside)
-	}
-	return true, nil
-}
-
 // stateDirHasBackupTargets reports whether the state dir already holds any of
 // the paths a restore would replace (P6-DATA-04). Scoping the non-empty refusal
 // to the captured targets means un-captured siblings (quarantine/, logs/) never
 // block a restore, and a genuinely fresh state dir restores without --force.
 func stateDirHasBackupTargets(home string) (bool, error) {
 	for _, name := range backupTargets {
-		if _, err := os.Stat(filepath.Join(home, name)); err == nil {
+		if _, err := os.Lstat(filepath.Join(home, name)); err == nil {
 			return true, nil
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return false, err

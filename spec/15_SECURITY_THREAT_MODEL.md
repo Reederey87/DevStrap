@@ -419,3 +419,9 @@ advertised to other users:
 - if the epoch design stays, obtain at least **one external cryptographic review** of the
   WCK epoch/rotation protocol before making the zero-knowledge claim load-bearing for
   third-party users.
+
+### Threat: tampered, incomplete, or interrupted local recovery (`P7-DATA-03/04/05`, mitigated)
+
+A full backup takes DB-derived inventory from the immutable read-only SQLite snapshot and fails if referenced ciphertext cannot be captured. Restore verifies the versioned manifest, every entry's SHA-256/size, the absence of unlisted files, SQLite integrity, and all DB-referenced blobs/device keys/held WCK files before touching the live home. Journaled all-target promotion keeps every old target under one shared aside suffix until every new target is durably marked done; recovery rolls forward only from that committed state and otherwise restores the exact prior generation in reverse. Pending-journal state opens fail closed until `db restore --recover` (or a plain restore's initial auto-recovery) completes. The state-home maintenance lock serializes promotion with full backup, `db down`, and run-loop ticks.
+
+Residuals: the manifest supplies integrity, not provenance—a local operator who can replace the whole tar can forge the manifest too, and authenticated backup signing is out of scope. One-shot `devstrap sync` deliberately does not take the maintenance lock, so operators must not run it concurrently with full backup/restore.

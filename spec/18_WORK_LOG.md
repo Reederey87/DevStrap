@@ -31,6 +31,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-11 — fix(cli): journaled all-or-nothing restore promotion + maintenance lock (P7-DATA-05)
+
+Changed:
+- `internal/cli/restore_journal.go` (new): restore promotion is one journaled transaction. A durable `.restore-journal.json` (atomic temp+fsync+rename + directory sync; pid/hostname/started-at + per-target staged/existed/done) is published BEFORE the first rename; every existing target moves aside under ONE shared `.bak-<pid>-<nanos>` suffix before any staged target promotes; each promote is durably recorded before the next; asides are swept and the journal removed ONLY after every target is Done. `recoverRestoreJournal` rolls FORWARD only from a durably all-Done journal (finish sweeping) and otherwise rolls BACK in reverse to the exact pre-restore state — including the crash-between-rename-and-record case — validating filesystem invariants first and retaining the journal fail-closed on damage or a crafted/unsafe journal (suffix shape validated; no slashes). A failed final journal sync whose commit record already published is detected by recovery rolling forward — the restore completed.
+- Hooks: `opts.openState` fences every command on a pending journal (double-stat straddling the open); `db restore --recover` (archive arg optional) completes-or-reverses an interrupted swap; plain restore auto-recovers first; `doctor` reports a pending journal.
+- Maintenance lock: restore, full backup, `db down`, and the run-loop tick serialize on a state-level maintenance lock (repo-lock primitive, P7-GIT-03 identity semantics; dead-PID break pinned by test). This CLOSES the `db down` check-vs-Down cross-process residual documented in the P7-DATA-07 entry (`internal/state/store.go` guard comment updated to past tense).
+- Tests: 13 named unit tests (all-or-nothing rollback incl. dangling-symlink pre-state, invariant-damage retention, openState/doctor fences, lock conflicts incl. db down + full backup, dead-PID lock break, plain-restore auto-recovery, `--recover` JSON purity, unsafe-journal no-mutation, rollback-failure journal retention) + e2e `db_restore_journal_recovery.txtar`.
+- `spec/13` + `spec/12` + `spec/15` + `spec/16`: journal/lock/recover contract documented.
+- `docs/audits/README.md`: `P7-DATA-05` moved open → *Recently shipped*; counts re-derived at merge (serial wave).
+
+Validated:
+- `gofmt -w cmd internal`; `GOCACHE=/tmp/devstrap-gocache go test ./internal/state/ ./internal/cli/ -count=1`; `GOCACHE=/tmp/devstrap-gocache go test ./cmd/devstrap -run 'TestScript/db_' -count=1`.
+- Provenance: ported from the interrupted prior session's `fix/p7-data-backup-hardening` (DATA-05 slice) by Codex (gpt-5.6); coordinator (fable-5) deep review walked the crash matrix (mid-aside, promote-without-record, all-Done-unswept, damaged journal, journal-write-failure-after-commit) — no findings.
+
+Follow-ups:
+- None.
 ## 2026-07-11 — fix(cli): versioned backup manifest + fail-closed restore verification (P7-DATA-04)
 
 Changed:

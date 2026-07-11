@@ -1,0 +1,22 @@
+# P7-DATA-05: an interrupted promotion blocks normal state opens until
+# recovery rolls the incomplete all-target swap back.
+
+env DEVSTRAP_HOME=$WORK/home
+env DEVSTRAP_ROOT=$WORK/Code
+env DEVSTRAP_NO_KEYCHAIN=1
+
+exec devstrap init $WORK/Code
+exec mv $WORK/home/state.db $WORK/home/state.db.bak-999999-1
+exec cp $WORK/home/state.db.bak-999999-1 $WORK/home/state.db
+exec sh -c 'printf "%s\n" ''{"version":1,"pid":999999,"hostname":"test","started_at":"2026-07-11T00:00:00Z","aside_suffix":".bak-999999-1","targets":[{"name":"state.db","staged":true,"existed":true,"done":false},{"name":"config.yaml","staged":false,"existed":false,"done":true},{"name":"blobs","staged":false,"existed":false,"done":true},{"name":"keys","staged":false,"existed":false,"done":true}]}'' > "$WORK/home/.restore-journal.json"'
+
+! exec devstrap status
+stderr 'db restore --recover'
+
+exec devstrap db restore --recover
+stdout 'interrupted restore rolled back; previous state intact'
+! exists $WORK/home/.restore-journal.json
+! exists $WORK/home/state.db.bak-999999-1
+
+exec devstrap status
+stdout 'Workspace:'

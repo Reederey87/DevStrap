@@ -215,6 +215,7 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 	results = append(results, checkTool("gh", false))
 	results = append(results, checkTool("go", false))
 	results = append(results, checkStateHome(paths)...)
+	results = append(results, checkRestoreJournal(paths.Home)...)
 	if _, err := os.Stat(paths.StateDB()); err == nil {
 		store, err := opts.openState(ctx)
 		if err != nil {
@@ -244,6 +245,16 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 	results = append(results, checkRepoLocks(paths.Home)...)
 	results = append(results, checkService(ctx, opts)...)
 	return results
+}
+
+func checkRestoreJournal(home string) []checkResult {
+	journalPath := restoreJournalPath(home)
+	if _, err := os.Stat(journalPath); err == nil {
+		return []checkResult{{Name: "restore journal", Status: checkError, Detail: "interrupted restore detected at " + journalPath, Remedy: "run `devstrap db restore --recover`"}}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return []checkResult{{Name: "restore journal", Status: checkError, Detail: err.Error(), Remedy: "run `devstrap db restore --recover`"}}
+	}
+	return nil
 }
 
 // checkService reports the background run-loop service's health (P4-PROD-04).
