@@ -224,7 +224,8 @@ func snapshotAndEnumerate(ctx context.Context, store *state.Store, tmpDB string,
 			// Not an absence: permission/I-O failures are immediately fatal
 			// with their real cause — retrying cannot help and reporting them
 			// as "missing on disk" would misdirect the operator (CodeRabbit).
-			return nil, appError{code: exitInvalidConfig, err: fmt.Errorf("full backup: inspect referenced ciphertext: %w", err)}
+			_ = snap.Close()
+			return nil, nil, appError{code: exitInvalidConfig, err: fmt.Errorf("full backup: inspect referenced ciphertext: %w", err)}
 		}
 		if len(missing) == 0 {
 			return refs, snap, nil
