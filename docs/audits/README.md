@@ -105,10 +105,11 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P7-HUB-05 | P3 | `fix/p7-hub-05` (2026-07-10) | Folder/git `fsObjectStore` mutable object writes use same-dir temp + fsync + rename (`writeFileAtomic`); timestamp sidecars too; post-review: stale `.tmp-` orphan reclamation, tear-proof concurrency test, best-effort parent-dir fsync. Torn `retention.json` no longer fail-closes every `Pull`. Residual: cloud-drive mid-replication window still documented in spec/15. |
 | P7-SEC-01 | P2 | `fix/p7-sec-01` (2026-07-10) | Sandbox credential deny-list gains `~/.config/gcloud` (GCP refresh tokens), `~/.azure` (Azure CLI tokens), and `~/.git-credentials` (git's plaintext `credential.helper store` — the `.gitconfig` that WAS masked merely points at it). Added to the single `sensitiveHomeDirs`/`sensitiveHomeFiles` source in `internal/platform/sandbox_profile.go`, so the Seatbelt profile, bubblewrap masks, `credentialAnchors`, and `readConfineRoots` all inherit them; the wrapper-level `denyParts` in `agent.go` gains the same three for parity. Regression-pinned by `TestBwrapSensitivePathsCoversCloudAndGitCredentials` and `TestCredentialAnchorsCoverCloudAndGitCredentials`. spec/05/10/15 enumerations updated. |
 | P7-QUAL-03 | P2 | `fix/p7-qual-03` (2026-07-10) | The Ubuntu release job now rejects partial macOS notarization configuration before GoReleaser with a 0-or-5 gate over all five `MACOS_*` secrets, reporting only set/missing names. GoReleaser's dormant `isEnvSet "MACOS_SIGN_P12"` activation is unchanged. Because Ubuntu cannot run `spctl`, `RELEASING.md` requires a manual post-release Gatekeeper assessment of the extracted darwin binary on a Mac before rc promotion or cask update. |
+| P7-CLI-01 | P2 | `fix/p7-cli-01-json-stream` (2026-07-11) | `db backup --full --json` and `db restore --json` no longer emit raw `warning:` text before the JSON payload. Warnings (missing blobs, no key material, no config, keychain-custody restore guidance) are carried in the result struct's `warnings` array and printed only in the human render branch; the entire stdout under `--json` is one parseable document. |
 
-### Pass 7 (2026-07-10) — 41 open of 47
+### Pass 7 (2026-07-10) — 40 open of 47
 
-Full detail and `file:line` evidence in [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md`](AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md). The header count equals the rows below (P1=0, P2=22, P3=19 = 41; `P7-SYNC-01` (the P1), `P7-SEC-01`, `P7-SEC-02`, `P7-QUAL-03`, `P7-HUB-05`, and `P7-SYNC-04` shipped 2026-07-10 — see *Recently shipped*). Two candidate findings were merged and are not counted twice: the revocation-compaction finding into `P7-SYNC-01`, and the post-revoke rotation-flag finding into `P7-SEC-02`.
+Full detail and `file:line` evidence in [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md`](AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md). The header count equals the rows below (P1=0, P2=21, P3=19 = 40; `P7-SYNC-01` (the P1), `P7-SEC-01`, `P7-SEC-02`, `P7-QUAL-03`, `P7-HUB-05`, `P7-SYNC-04`, and `P7-CLI-01` shipped 2026-07-10/11 — see *Recently shipped*). Two candidate findings were merged and are not counted twice: the revocation-compaction finding into `P7-SYNC-01`, and the post-revoke rotation-flag finding into `P7-SEC-02`.
 
 | ID | Sev | Finding | Effort |
 |---|---|---|---|
@@ -123,7 +124,6 @@ Full detail and `file:line` evidence in [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7
 | P7-GIT-01 | P2 | `worktree cleanup --merged` can reap a live agent worktree (no `agent_runs` check + TOCTOU) and force-delete its unpushed branch | M |
 | P7-GIT-02 | P2 | `worktree cleanup` mutates worktrees/branches outside the repo lock, unlike every other git-mutating path | S |
 | P7-GIT-03 | P2 | `processAlive` has no PID-reuse guard; repo-lock staleness + agent-run sweep can wedge after PID recycling | M |
-| P7-CLI-01 | P2 | `db backup/restore --json` emits warning text before the JSON payload, corrupting the stream | S |
 | P7-CLI-02 | P2 | `worktree cleanup` has no `Args` validator, silently swallowing a stray positional on a destructive blanket sweep | S |
 | P7-XP-01 | P2 | `service install` pins the Homebrew Cellar path; `brew upgrade` silently bricks the unit | M |
 | P7-XP-02 | P2 | `service install` never checks key custody; a keychain-custody store strands the headless run-loop | M |

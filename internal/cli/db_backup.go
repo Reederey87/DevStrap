@@ -55,6 +55,14 @@ type fullBackupResult struct {
 	Blobs        int      `json:"blobs"`
 	Keys         int      `json:"keys"`
 	MissingBlobs []string `json:"missing_blobs,omitempty"`
+	Warnings     []string `json:"warnings,omitempty"`
+}
+
+// restoreResult is the machine-readable summary of a restore (P7-CLI-01).
+type restoreResult struct {
+	Restored string   `json:"restored"`
+	Items    []string `json:"items"`
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // runFullBackup writes a self-contained tar archive of the state database, the
@@ -93,18 +101,22 @@ func runFullBackup(ctx context.Context, opts *options, store *state.Store, out s
 	}
 
 	if len(result.MissingBlobs) > 0 {
-		_, _ = fmt.Fprintf(stdout, "warning: %d referenced blob(s) missing on disk and omitted (run `devstrap doctor`):\n", len(result.MissingBlobs))
-		for _, ref := range result.MissingBlobs {
-			_, _ = fmt.Fprintf(stdout, "  %s\n", ref)
-		}
+		result.Warnings = append(result.Warnings, fmt.Sprintf(
+			"%d referenced blob(s) missing on disk and omitted (run `devstrap doctor`): %s",
+			len(result.MissingBlobs), strings.Join(result.MissingBlobs, ", ")))
 	}
 	if result.Keys == 0 {
-		_, _ = fmt.Fprintln(stdout, "warning: no key material captured; this archive cannot decrypt secrets on its own")
+		result.Warnings = append(result.Warnings, "no key material captured; this archive cannot decrypt secrets on its own")
 	}
 	if !result.Config {
-		_, _ = fmt.Fprintln(stdout, "warning: no config.yaml found; the hub pointer and custom root will not be restored")
+		result.Warnings = append(result.Warnings, "no config.yaml found; the hub pointer and custom root will not be restored")
 	}
 	return opts.render(stdout, func(w io.Writer) error {
+		for _, msg := range result.Warnings {
+			if _, err := fmt.Fprintf(w, "warning: %s\n", msg); err != nil {
+				return err
+			}
+		}
 		_, err := fmt.Fprintf(w, "full backup written: %s (config: %t, %d blob(s), %d key file(s))\n", result.Path, result.Config, result.Blobs, result.Keys)
 		return err
 	}, result)
@@ -369,31 +381,43 @@ func runRestore(ctx context.Context, opts *options, in string, force bool, stdou
 		}
 	}
 
-	warnKeychainCustodyRestore(ctx, opts, stdout)
+	result := restoreResult{Restored: home, Items: restored}
+	if msg := keychainCustodyRestoreWarning(ctx, opts); msg != "" {
+		result.Warnings = append(result.Warnings, msg)
+	}
 	return opts.render(stdout, func(w io.Writer) error {
+		for _, msg := range result.Warnings {
+			if _, err := fmt.Fprintf(w, "warning: %s\n", msg); err != nil {
+				return err
+			}
+		}
 		_, err := fmt.Fprintf(w, "restored state dir: %s (%s)\n", home, strings.Join(restored, ", "))
 		return err
-	}, map[string]any{"restored": home, "items": restored})
+	}, result)
 }
 
-// warnKeychainCustodyRestore prints the custody-reconciliation guidance when the
-// just-restored DB records keychain custody (P6-DATA-04). A --full archive lands
-// key material as FILES, but a keychain-custody store reads the keychain — which
-// is empty on a fresh machine — so without this warning the wedge is silent.
-func warnKeychainCustodyRestore(ctx context.Context, opts *options, stdout io.Writer) {
+// keychainCustodyRestoreWarning returns the custody-reconciliation guidance when
+// the just-restored DB records keychain custody (P6-DATA-04), or "" otherwise.
+// A --full archive lands key material as FILES, but a keychain-custody store
+// reads the keychain — which is empty on a fresh machine — so without this
+// warning the wedge is silent. Callers attach it to the result (P7-CLI-01).
+func keychainCustodyRestoreWarning(ctx context.Context, opts *options) string {
 	store, err := opts.openState(ctx)
 	if err != nil {
-		return
+		return ""
 	}
 	defer closeStore(store)
 	recorded, err := store.KeyCustody(ctx)
 	if err != nil {
-		return
+		return ""
 	}
 	if recorded == devicekeys.CustodyKeychain && state.EffectiveKeyCustody(recorded) == devicekeys.CustodyKeychain {
-		_, _ = fmt.Fprintf(stdout, "warning: this workspace records keychain custody, but the restored key material is on disk and the keychain is empty on a fresh machine.\n"+
-			"Run devstrap under %s=1 (file custody) or re-migrate the escrowed keys into the keychain before syncing.\n", platform.NoKeychainEnv)
+		return fmt.Sprintf(
+			"this workspace records keychain custody, but the restored key material is on disk and the keychain is empty on a fresh machine.\n"+
+				"Run devstrap under %s=1 (file custody) or re-migrate the escrowed keys into the keychain before syncing.",
+			platform.NoKeychainEnv)
 	}
+	return ""
 }
 
 // extractBackupTar unpacks an archive into dst. Every entry is validated against

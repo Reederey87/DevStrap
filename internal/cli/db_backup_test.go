@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -276,6 +277,96 @@ func TestExtractBackupTarRejectsSymlink(t *testing.T) {
 	dst := t.TempDir()
 	if err := extractBackupTar(bytes.NewReader(buf.Bytes()), dst); err == nil {
 		t.Fatal("expected symlink entry to be rejected")
+	}
+}
+
+// TestFullBackupJSONWarningsInPayload proves that under --json, missing-blob
+// warnings are carried in the payload's warnings array and the entire stdout is
+// a single parseable JSON document (P7-CLI-01).
+func TestFullBackupJSONWarningsInPayload(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init: %v stderr=%s", err, stderr)
+	}
+	registerEnvProject(t, home, root, "top-secret")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "env", "capture", "work/proj", ".env"); err != nil {
+		t.Fatalf("env capture: %v stderr=%s", err, stderr)
+	}
+
+	// Delete the referenced blob so the full backup must warn and omit it.
+	blobDir := filepath.Join(home, "blobs")
+	entries, err := os.ReadDir(blobDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if err := os.Remove(filepath.Join(blobDir, e.Name())); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	archive := filepath.Join(t.TempDir(), "workspace.tar")
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "--json", "db", "backup", "--full", archive)
+	if err != nil {
+		t.Fatalf("db backup --full --json: %v stderr=%s stdout=%s", err, stderr, stdout)
+	}
+
+	var got fullBackupResult
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("full stdout is not a single JSON document: %v\n%s", err, stdout)
+	}
+	if len(got.Warnings) == 0 {
+		t.Fatalf("expected non-empty warnings, got %+v", got)
+	}
+	found := false
+	for _, w := range got.Warnings {
+		if strings.Contains(w, "referenced blob(s) missing") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("warnings = %v, want one mentioning referenced blob(s) missing", got.Warnings)
+	}
+}
+
+// TestRestoreJSONIsSingleDocument proves that under --json, restore emits one
+// JSON document for the entire stdout with no leading "warning:" text (P7-CLI-01).
+func TestRestoreJSONIsSingleDocument(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init: %v stderr=%s", err, stderr)
+	}
+	archive := filepath.Join(t.TempDir(), "workspace.tar")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "db", "backup", "--full", archive); err != nil {
+		t.Fatalf("db backup --full: %v stderr=%s", err, stderr)
+	}
+
+	// Restore into a fresh home so no --force is required.
+	restoreHome := filepath.Join(t.TempDir(), ".devstrap-restore")
+	stdout, stderr, err := executeForTest("--home", restoreHome, "--root", root, "--json", "db", "restore", archive)
+	if err != nil {
+		t.Fatalf("db restore --json: %v stderr=%s stdout=%s", err, stderr, stdout)
+	}
+	if strings.Contains(stdout, "warning:") {
+		t.Fatalf("stdout must not contain raw warning: text outside JSON: %s", stdout)
+	}
+
+	var got restoreResult
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("full stdout is not a single JSON document: %v\n%s", err, stdout)
+	}
+	if got.Restored != restoreHome {
+		t.Fatalf("restored = %q, want %q", got.Restored, restoreHome)
+	}
+	if len(got.Items) == 0 {
+		t.Fatalf("expected non-empty items, got %+v", got)
 	}
 }
 
