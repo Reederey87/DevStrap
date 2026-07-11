@@ -1997,7 +1997,11 @@ type DraftSnapshot struct {
 // LatestDraftSnapshot returns the most recent draft bundle snapshot for a
 // project, or nil with no error when no snapshot exists (DRAFT-02).
 // Selection uses the canonical (hlc, source_event_device_id, source_event_id)
-// coordinate so every device picks the same snapshot on an HLC tie.
+// coordinate so every device picks the same snapshot on an HLC tie. Legacy
+// rows without source-event coordinates all collapse to (0, ”, ”), so local
+// created_at/id ride as FINAL tiebreakers only — stamped rows are unique on
+// the canonical triple (migration 00012), so the local fields never influence
+// cross-device selection.
 func (s *Store) LatestDraftSnapshot(ctx context.Context, namespaceID string) (*DraftSnapshot, error) {
 	var snap DraftSnapshot
 	err := s.db.QueryRowContext(ctx, `
@@ -2005,7 +2009,7 @@ SELECT id, namespace_id, blob_ref, byte_size, file_count,
        COALESCE(source_event_hlc, 0), COALESCE(source_event_device_id, ''), COALESCE(source_event_id, '')
 FROM draft_snapshots
 WHERE namespace_id = ?
-ORDER BY COALESCE(source_event_hlc, 0) DESC, COALESCE(source_event_device_id, '') DESC, COALESCE(source_event_id, '') DESC
+ORDER BY COALESCE(source_event_hlc, 0) DESC, COALESCE(source_event_device_id, '') DESC, COALESCE(source_event_id, '') DESC, created_at DESC, id DESC
 LIMIT 1;
 `, namespaceID).Scan(&snap.ID, &snap.NamespaceID, &snap.BlobRef, &snap.ByteSize, &snap.FileCount,
 		&snap.SourceEventHLC, &snap.SourceEventDeviceID, &snap.SourceEventID)
@@ -2154,7 +2158,7 @@ WHERE id IN (
   SELECT id FROM (
     SELECT id, ROW_NUMBER() OVER (
       PARTITION BY namespace_id
-      ORDER BY COALESCE(source_event_hlc, 0) DESC, COALESCE(source_event_device_id, '') DESC, COALESCE(source_event_id, '') DESC
+      ORDER BY COALESCE(source_event_hlc, 0) DESC, COALESCE(source_event_device_id, '') DESC, COALESCE(source_event_id, '') DESC, created_at DESC, id DESC
     ) AS rn
     FROM draft_snapshots
   ) WHERE rn > ?
@@ -2382,7 +2386,7 @@ UNION
 SELECT blob_ref FROM (
   SELECT blob_ref, ROW_NUMBER() OVER (
     PARTITION BY namespace_id
-    ORDER BY COALESCE(source_event_hlc, 0) DESC, COALESCE(source_event_device_id, '') DESC, COALESCE(source_event_id, '') DESC
+    ORDER BY COALESCE(source_event_hlc, 0) DESC, COALESCE(source_event_device_id, '') DESC, COALESCE(source_event_id, '') DESC, created_at DESC, id DESC
   ) AS rn
   FROM draft_snapshots
   WHERE blob_ref LIKE 'age_blob:%'
