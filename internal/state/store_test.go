@@ -362,6 +362,145 @@ func TestMigrationDownAndUp(t *testing.T) {
 	}
 }
 
+func TestMigration00023DownRefusesPopulatedCoordinates(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureWorkspace(ctx, "test", "/tmp/Code"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+INSERT INTO env_profiles (
+  id, workspace_id, name, provider, mode,
+  source_event_hlc, source_event_device_id, source_event_id,
+  created_at, updated_at
+)
+SELECT 'env_test', id, 'test', 'devstrap_encrypted', 'runtime_only',
+       123, 'dev_source', 'evt_source', ?, ?
+FROM workspaces;
+`, timestampNow(), timestampNow()); err != nil {
+		t.Fatal(err)
+	}
+
+	// First step from 24 to 23 is unrelated and must remain unaffected.
+	if err := st.Down(); err != nil {
+		t.Fatal(err)
+	}
+	err = st.Down()
+	if err == nil {
+		t.Fatal("migration 00023 down succeeded with populated source-event coordinates")
+	}
+	if !strings.Contains(err.Error(), "source-event coordinates") {
+		t.Fatalf("migration 00023 down error = %q, want source-event coordinates refusal", err)
+	}
+	version, err := st.Version()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != 23 {
+		t.Fatalf("schema version after refused down = %d, want 23", version)
+	}
+
+	var hlc int64
+	var deviceID, eventID string
+	if err := st.db.QueryRowContext(ctx, `
+SELECT source_event_hlc, source_event_device_id, source_event_id
+FROM env_profiles
+WHERE id = 'env_test';
+`).Scan(&hlc, &deviceID, &eventID); err != nil {
+		t.Fatalf("read preserved env coordinates: %v", err)
+	}
+	if hlc != 123 || deviceID != "dev_source" || eventID != "evt_source" {
+		t.Fatalf("preserved coordinates = (%d, %q, %q), want (123, %q, %q)", hlc, deviceID, eventID, "dev_source", "evt_source")
+	}
+	for _, column := range []string{"source_event_hlc", "source_event_device_id", "source_event_id"} {
+		if !envProfilesHasColumn(t, st, column) {
+			t.Fatalf("env_profiles column %q missing after refused down", column)
+		}
+	}
+}
+
+func TestMigration00023DownEmptyCoordinatesSucceeds(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureWorkspace(ctx, "test", "/tmp/Code"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.ExecContext(ctx, `
+INSERT INTO env_profiles (id, workspace_id, name, provider, mode, created_at, updated_at)
+SELECT 'env_test', id, 'test', 'devstrap_encrypted', 'runtime_only', ?, ?
+FROM workspaces;
+`, timestampNow(), timestampNow()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.Down(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Down(); err != nil {
+		t.Fatalf("migration 00023 down with empty coordinates: %v", err)
+	}
+	version, err := st.Version()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version != 22 {
+		t.Fatalf("schema version after migration 00023 down = %d, want 22", version)
+	}
+	for _, column := range []string{"source_event_hlc", "source_event_device_id", "source_event_id"} {
+		if envProfilesHasColumn(t, st, column) {
+			t.Fatalf("env_profiles column %q remains after successful down", column)
+		}
+	}
+	if err := st.Migrate(); err != nil {
+		t.Fatalf("migrate after migration 00023 down: %v", err)
+	}
+	for _, column := range []string{"source_event_hlc", "source_event_device_id", "source_event_id"} {
+		if !envProfilesHasColumn(t, st, column) {
+			t.Fatalf("env_profiles column %q missing after re-migrate", column)
+		}
+	}
+}
+
+func envProfilesHasColumn(t *testing.T, st *Store, want string) bool {
+	t.Helper()
+	rows, err := st.db.Query(`PRAGMA table_info(env_profiles);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		if name == want {
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return false
+}
+
 func TestEventStateRollbackTogether(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
