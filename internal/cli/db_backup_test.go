@@ -4,10 +4,15 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -142,7 +147,8 @@ func assertBackupTarLayout(t *testing.T, archive string) {
 	}
 	defer func() { _ = f.Close() }()
 	tr := tar.NewReader(f)
-	var haveDB, haveConfig, haveBlob, haveKey bool
+	var haveDB, haveConfig, haveBlob, haveKey, haveManifest bool
+	var last string
 	for {
 		hdr, err := tr.Next()
 		if err != nil {
@@ -151,6 +157,7 @@ func assertBackupTarLayout(t *testing.T, archive string) {
 		if hdr.Mode != 0o600 {
 			t.Fatalf("entry %s mode = %o, want 600", hdr.Name, hdr.Mode)
 		}
+		last = hdr.Name
 		switch {
 		case hdr.Name == "state.db":
 			haveDB = true
@@ -160,12 +167,89 @@ func assertBackupTarLayout(t *testing.T, archive string) {
 			haveBlob = true
 		case strings.HasPrefix(hdr.Name, "keys/"):
 			haveKey = true
+		case hdr.Name == backupEntryManifest:
+			haveManifest = true
 		default:
 			t.Fatalf("unexpected archive entry %q", hdr.Name)
 		}
 	}
-	if !haveDB || !haveConfig || !haveBlob || !haveKey {
-		t.Fatalf("archive missing content: db=%v config=%v blob=%v key=%v", haveDB, haveConfig, haveBlob, haveKey)
+	if !haveDB || !haveConfig || !haveBlob || !haveKey || !haveManifest || last != backupEntryManifest {
+		t.Fatalf("archive missing content or manifest not last: db=%v config=%v blob=%v key=%v manifest=%v last=%q", haveDB, haveConfig, haveBlob, haveKey, haveManifest, last)
+	}
+}
+
+func TestFullBackupManifestHashesEveryEntryAndIsLast(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	home, root := filepath.Join(t.TempDir(), ".devstrap"), filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init: %v %s", err, stderr)
+	}
+	archive := filepath.Join(t.TempDir(), "backup.tar")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "db", "backup", "--full", archive); err != nil {
+		t.Fatalf("backup: %v %s", err, stderr)
+	}
+	f, err := os.Open(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	tr := tar.NewReader(f)
+	files := map[string][]byte{}
+	var order []string
+	for {
+		h, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[h.Name] = body
+		order = append(order, h.Name)
+	}
+	if order[len(order)-1] != backupEntryManifest {
+		t.Fatalf("last entry=%q", order[len(order)-1])
+	}
+	var manifest backupManifest
+	if err := json.Unmarshal(files[backupEntryManifest], &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Format != backupManifestFormat || manifest.Version != backupManifestVersion {
+		t.Fatalf("manifest format/version=%q/%d", manifest.Format, manifest.Version)
+	}
+	if len(manifest.Entries) != len(files)-1 {
+		t.Fatalf("manifest entries=%d files=%d", len(manifest.Entries), len(files))
+	}
+	// Required is the independently-set recoverable core (state.db + the two
+	// device key files), a strict subset of Entries — never a mirror of it.
+	listedNames := make(map[string]bool, len(manifest.Entries))
+	for _, entry := range manifest.Entries {
+		listedNames[entry.Name] = true
+	}
+	if len(manifest.Required) != 3 || manifest.Required[0] != backupEntryDB {
+		t.Fatalf("required=%v, want state.db + the two device key files", manifest.Required)
+	}
+	for _, req := range manifest.Required {
+		if !listedNames[req] {
+			t.Fatalf("required entry %s not listed in manifest entries", req)
+		}
+		if req != backupEntryDB && !strings.HasPrefix(req, backupDirBlobs+"/") && !strings.HasPrefix(req, backupDirKeys+"/") {
+			t.Fatalf("required entry %s is neither state.db nor a key file", req)
+		}
+	}
+	for _, entry := range manifest.Entries {
+		body, ok := files[entry.Name]
+		if !ok || int64(len(body)) != entry.Size {
+			t.Fatalf("entry %s missing/size mismatch", entry.Name)
+		}
+		sum := sha256.Sum256(body)
+		if got := fmt.Sprintf("%x", sum[:]); got != entry.SHA256 {
+			t.Fatalf("entry %s hash=%s want %s", entry.Name, got, entry.SHA256)
+		}
 	}
 }
 
@@ -215,6 +299,315 @@ func TestRestoreRefusesNonEmptyStateDir(t *testing.T) {
 		t.Fatalf("un-captured quarantine file destroyed by restore: %v", err)
 	} else if string(got) != "do-not-delete" {
 		t.Fatalf("quarantine file content changed: %q", got)
+	}
+}
+
+func extractArchiveForTest(t *testing.T, archive string) string {
+	t.Helper()
+	f, err := os.Open(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	stage := t.TempDir()
+	if err := extractBackupTar(f, stage); err != nil {
+		t.Fatal(err)
+	}
+	return stage
+}
+
+func repackStageForTest(t *testing.T, stage, archive string) {
+	t.Helper()
+	f, err := os.Create(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tw := tar.NewWriter(f)
+	var names []string
+	if err := filepath.WalkDir(stage, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(stage, p)
+		if err != nil {
+			return err
+		}
+		names = append(names, filepath.ToSlash(rel))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		if name == backupEntryManifest {
+			continue
+		}
+		if _, _, err := addFileToTar(tw, name, filepath.Join(stage, filepath.FromSlash(name))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if slices.Contains(names, backupEntryManifest) {
+		if _, _, err := addFileToTar(tw, backupEntryManifest, filepath.Join(stage, backupEntryManifest)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func newFullBackupForTest(t *testing.T) (string, string, string) {
+	t.Helper()
+	t.Setenv(platform.NoKeychainEnv, "1")
+	home, root := filepath.Join(t.TempDir(), ".devstrap"), filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init: %v %s", err, stderr)
+	}
+	registerEnvProject(t, home, root, "tamper-secret")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "env", "capture", "work/proj", ".env"); err != nil {
+		t.Fatalf("capture: %v %s", err, stderr)
+	}
+	archive := filepath.Join(t.TempDir(), "backup.tar")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "db", "backup", "--full", archive); err != nil {
+		t.Fatalf("backup: %v %s", err, stderr)
+	}
+	return home, root, archive
+}
+
+func TestRestoreRejectsTamperedEntriesBeforeSwap(t *testing.T) {
+	for _, tc := range []string{"blob", "key", "extra"} {
+		t.Run(tc, func(t *testing.T) {
+			_, root, archive := newFullBackupForTest(t)
+			stage := extractArchiveForTest(t, archive)
+			var target string
+			if tc == "extra" {
+				target = filepath.Join(stage, backupDirKeys, "extra.key")
+				if err := os.WriteFile(target, []byte("extra"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				dir := map[string]string{"blob": backupDirBlobs, "key": backupDirKeys}[tc]
+				entries, err := os.ReadDir(filepath.Join(stage, dir))
+				if err != nil || len(entries) == 0 {
+					t.Fatalf("entries: %v %v", entries, err)
+				}
+				target = filepath.Join(stage, dir, entries[0].Name())
+				raw, err := os.ReadFile(target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc == "blob" {
+					raw[0] ^= 0xff
+				} else {
+					raw = raw[:len(raw)/2]
+				}
+				if err := os.WriteFile(target, raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tampered := filepath.Join(t.TempDir(), "tampered.tar")
+			repackStageForTest(t, stage, tampered)
+			restoreHome := filepath.Join(t.TempDir(), "restore")
+			if err := os.MkdirAll(restoreHome, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(restoreHome, backupEntryConfig), []byte("workspace_name: live-before\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, stderr, err := executeForTest("--home", restoreHome, "--root", root, "db", "restore", tampered, "--force")
+			if err == nil || !strings.Contains(stderr, "manifest") {
+				t.Fatalf("restore err=%v stderr=%q", err, stderr)
+			}
+			if got, _ := os.ReadFile(filepath.Join(restoreHome, backupEntryConfig)); string(got) != "workspace_name: live-before\n" {
+				t.Fatalf("live target changed: %q", got)
+			}
+		})
+	}
+}
+
+func TestRestoreRejectsMissingOrShortArchiveBeforeSwap(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "Code")
+	for _, tc := range []struct {
+		name string
+		body []byte
+	}{
+		{name: "empty"},
+		{name: "short-tar-header", body: bytes.Repeat([]byte{'x'}, 100)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			archive := filepath.Join(t.TempDir(), "broken.tar")
+			if err := os.WriteFile(archive, tc.body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			restoreHome := filepath.Join(t.TempDir(), "restore")
+			if err := os.MkdirAll(restoreHome, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			live := filepath.Join(restoreHome, backupEntryConfig)
+			if err := os.WriteFile(live, []byte("workspace_name: live-before\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := executeForTest("--home", restoreHome, "--root", root, "db", "restore", archive, "--force"); err == nil {
+				t.Fatal("restore accepted an incomplete archive")
+			}
+			if got, err := os.ReadFile(live); err != nil || string(got) != "workspace_name: live-before\n" {
+				t.Fatalf("live target changed: %q err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestRestoreLegacyPolicyAndCompleteness(t *testing.T) {
+	_, root, archive := newFullBackupForTest(t)
+	stage := extractArchiveForTest(t, archive)
+	if err := os.Remove(filepath.Join(stage, backupEntryManifest)); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(t.TempDir(), "legacy.tar")
+	repackStageForTest(t, stage, legacy)
+	restoreHome := filepath.Join(t.TempDir(), "restore")
+	if _, stderr, err := executeForTest("--home", restoreHome, "--root", root, "db", "restore", legacy); err == nil || !strings.Contains(stderr, "--allow-legacy") {
+		t.Fatalf("legacy refusal err=%v stderr=%q", err, stderr)
+	}
+	stdout, stderr, err := executeForTest("--home", restoreHome, "--root", root, "db", "restore", legacy, "--allow-legacy")
+	if err != nil || !strings.Contains(stdout, "without manifest integrity verification") {
+		t.Fatalf("legacy restore err=%v stdout=%q stderr=%q", err, stdout, stderr)
+	}
+
+	incompleteStage := extractArchiveForTest(t, archive)
+	blobs, err := os.ReadDir(filepath.Join(incompleteStage, backupDirBlobs))
+	if err != nil || len(blobs) == 0 {
+		t.Fatalf("blobs=%v err=%v", blobs, err)
+	}
+	missingName := path.Join(backupDirBlobs, blobs[0].Name())
+	if err := os.Remove(filepath.Join(incompleteStage, filepath.FromSlash(missingName))); err != nil {
+		t.Fatal(err)
+	}
+	removeManifestEntryForTest(t, incompleteStage, missingName)
+	incomplete := filepath.Join(t.TempDir(), "incomplete.tar")
+	repackStageForTest(t, incompleteStage, incomplete)
+	if _, stderr, err := executeForTest("--home", filepath.Join(t.TempDir(), "incomplete-home"), "--root", root, "db", "restore", incomplete); err == nil || !strings.Contains(stderr, "archive is incomplete") {
+		t.Fatalf("incomplete restore err=%v stderr=%q", err, stderr)
+	}
+}
+
+func removeManifestEntryForTest(t *testing.T, stage, name string) {
+	t.Helper()
+	manifestPath := filepath.Join(stage, backupEntryManifest)
+	raw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest backupManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	manifest.Entries = slices.DeleteFunc(manifest.Entries, func(e backupManifestEntry) bool { return e.Name == name })
+	manifest.Required = slices.DeleteFunc(manifest.Required, func(required string) bool { return required == name })
+	raw, err = json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRestoreCompletenessRequiresHeldWCKFile(t *testing.T) {
+	home, root, archive := newFullBackupForTest(t)
+	st, err := state.Open(t.Context(), filepath.Join(home, backupEntryDB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceID, err := st.WorkspaceID(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordKeyEpoch(t.Context(), 1, "", "self"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := (devicekeys.FileStore{Dir: filepath.Join(home, backupDirKeys)}).WriteWCK(workspaceID, 1, "", bytes.Repeat([]byte{7}, 32)); err != nil {
+		t.Fatal(err)
+	}
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "db", "backup", "--full", archive); err != nil {
+		t.Fatalf("backup after rotate: %v %s", err, stderr)
+	}
+	stage := extractArchiveForTest(t, archive)
+	keys, err := os.ReadDir(filepath.Join(stage, backupDirKeys))
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingName := ""
+	for _, key := range keys {
+		if strings.HasPrefix(key.Name(), "wck-") {
+			missingName = path.Join(backupDirKeys, key.Name())
+			break
+		}
+	}
+	if missingName == "" {
+		t.Fatal("backup contained no held WCK file")
+	}
+	if err := os.Remove(filepath.Join(stage, filepath.FromSlash(missingName))); err != nil {
+		t.Fatal(err)
+	}
+	removeManifestEntryForTest(t, stage, missingName)
+	incomplete := filepath.Join(t.TempDir(), "missing-wck.tar")
+	repackStageForTest(t, stage, incomplete)
+	_, stderr, err := executeForTest("--home", filepath.Join(t.TempDir(), "restore"), "--root", root, "db", "restore", incomplete)
+	if err == nil || !strings.Contains(stderr, "archive is incomplete") || !strings.Contains(stderr, "wck-") {
+		t.Fatalf("restore err=%v stderr=%q", err, stderr)
+	}
+}
+
+// TestRestoreRefusesSemanticallyInvalidKeyMaterial (Codex review): key files
+// that PARSE but do not match the archived database's device row — or a WCK
+// whose bytes contradict its kid fingerprint — must refuse the restore, not
+// merely files that are absent. Exercised via the legacy (manifest-less) path
+// because a tampered file would otherwise be caught earlier by the manifest
+// hash check.
+func TestRestoreRefusesSemanticallyInvalidKeyMaterial(t *testing.T) {
+	home, root, archive := newFullBackupForTest(t)
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "db", "backup", "--full", archive); err != nil {
+		t.Fatalf("backup: %v %s", err, stderr)
+	}
+	stage := extractArchiveForTest(t, archive)
+	// Replace the device identity with a DIFFERENT valid age key: parses fine,
+	// derived recipient no longer matches the archived database.
+	keys, err := os.ReadDir(filepath.Join(stage, backupDirKeys))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ageName := ""
+	for _, k := range keys {
+		if strings.HasSuffix(k.Name(), ".agekey") {
+			ageName = k.Name()
+			break
+		}
+	}
+	if ageName == "" {
+		t.Fatal("no staged agekey")
+	}
+	wrong, err := devicekeys.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, backupDirKeys, ageName), []byte(wrong.Private+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(stage, backupEntryManifest)); err != nil {
+		t.Fatal(err)
+	}
+	tampered := filepath.Join(t.TempDir(), "wrong-key.tar")
+	repackStageForTest(t, stage, tampered)
+	_, stderr, err := executeForTest("--home", filepath.Join(t.TempDir(), "restore"), "--root", root, "db", "restore", tampered, "--allow-legacy")
+	if err == nil || !strings.Contains(stderr, "does not match the archived database") {
+		t.Fatalf("restore err=%v stderr=%q", err, stderr)
 	}
 }
 
@@ -398,6 +791,61 @@ func TestFullBackupMissingBlobFatal(t *testing.T) {
 	}
 }
 
+func TestFullBackupRejectsCorruptContentAddressedBlob(t *testing.T) {
+	home, root, _ := newFullBackupForTest(t)
+	entries, err := os.ReadDir(filepath.Join(home, backupDirBlobs))
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("blobs=%v err=%v", entries, err)
+	}
+	if err := os.WriteFile(filepath.Join(home, backupDirBlobs, entries[0].Name()), []byte("corrupt ciphertext"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(t.TempDir(), "corrupt.tar")
+	_, stderr, err := executeForTest("--home", home, "--root", root, "db", "backup", "--full", archive)
+	if err == nil || !strings.Contains(stderr, "does not match its content address") {
+		t.Fatalf("backup err=%v stderr=%q", err, stderr)
+	}
+	if _, err := os.Stat(archive); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partial archive remains: %v", err)
+	}
+}
+
+func TestFullBackupFailsWhenSnapshotHeldWCKDisappearsFromLiveCustody(t *testing.T) {
+	home, root, _ := newFullBackupForTest(t)
+	st, err := state.Open(t.Context(), filepath.Join(home, backupEntryDB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceID, err := st.WorkspaceID(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordKeyEpoch(t.Context(), 1, "", "self"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wckPath := filepath.Join(home, backupDirKeys, fmt.Sprintf("wck-%s-1.key", workspaceID))
+	if err := (devicekeys.FileStore{Dir: filepath.Join(home, backupDirKeys)}).WriteWCK(workspaceID, 1, "", bytes.Repeat([]byte{9}, 32)); err != nil {
+		t.Fatal(err)
+	}
+	backupAfterSnapshot = func() {
+		if err := os.Remove(wckPath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { backupAfterSnapshot = nil })
+	archive := filepath.Join(t.TempDir(), "missing-wck.tar")
+	_, stderr, err := executeForTest("--home", home, "--root", root, "db", "backup", "--full", archive)
+	if err == nil || !strings.Contains(stderr, "escrow key material") {
+		t.Fatalf("backup err=%v stderr=%q", err, stderr)
+	}
+	if _, err := os.Stat(archive); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("archive remains: %v", err)
+	}
+}
+
 // TestFullBackupRetriesOnDrift injects concurrent rotation drift on attempt 1
 // (delete ciphertext + repoint the live binding) so the first snapshot misses a
 // blob; consistency is restored before attempt 2 and the backup succeeds
@@ -436,17 +884,14 @@ func TestFullBackupRetriesOnDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldBlobPath := filepath.Join(home, "blobs", hash+".age")
-	ciphertext, err := os.ReadFile(oldBlobPath)
-	if err != nil {
-		_ = store.Close()
-		t.Fatal(err)
-	}
 	_ = store.Close()
 
 	// New content-addressed blob representing a completed rotation. The file
 	// is written only when consistency is restored (attempt 2), so attempt 1
 	// sees a snapshot that references a missing ciphertext.
-	newHash := strings.Repeat("ab", 32) // 64 hex chars
+	rotatedCiphertext := []byte("rotated ciphertext")
+	newSum := sha256.Sum256(rotatedCiphertext)
+	newHash := fmt.Sprintf("%x", newSum[:])
 	newRef := "age_blob:" + newHash
 	newBlobPath := filepath.Join(home, "blobs", newHash+".age")
 
@@ -469,7 +914,7 @@ func TestFullBackupRetriesOnDrift(t *testing.T) {
 			_ = st.Close()
 		case 2:
 			// Restore consistency: rotated ciphertext is now on disk.
-			if err := os.WriteFile(newBlobPath, ciphertext, 0o600); err != nil {
+			if err := os.WriteFile(newBlobPath, rotatedCiphertext, 0o600); err != nil {
 				t.Errorf("hook write new blob: %v", err)
 			}
 		}
@@ -525,7 +970,12 @@ func assertBackupTarRefsMatchDB(t *testing.T, archive string) {
 	if err := os.WriteFile(tmp, dbBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	refs, err := state.AllBlobRefsInFile(context.Background(), tmp)
+	snap, err := state.OpenSnapshot(context.Background(), tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snap.Close()
+	refs, err := snap.AllBlobRefs(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

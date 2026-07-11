@@ -1,0 +1,23 @@
+# P7-DATA-04: pre-manifest archives are refused by default and require the
+# explicit, loudly-warned legacy path. Byte tamper and archive/DB completeness
+# cases are covered in internal/cli unit tests where tar rewriting is hermetic.
+
+env DEVSTRAP_HOME=$WORK/home
+env DEVSTRAP_ROOT=$WORK/Code
+env DEVSTRAP_NO_KEYCHAIN=1
+env COPYFILE_DISABLE=1
+
+exec devstrap init $WORK/Code
+exec devstrap db backup --full $WORK/backup.tar
+mkdir $WORK/stage
+exec tar -xf $WORK/backup.tar -C $WORK/stage
+rm $WORK/stage/manifest.json
+exec sh -c 'cd $WORK/stage && tar -cf $WORK/legacy.tar state.db config.yaml keys/*'
+
+rm $WORK/home
+! exec devstrap db restore $WORK/legacy.tar
+stderr '--allow-legacy'
+
+exec devstrap db restore $WORK/legacy.tar --allow-legacy
+stdout 'warning: legacy backup restored without manifest integrity verification'
+exists $WORK/home/state.db

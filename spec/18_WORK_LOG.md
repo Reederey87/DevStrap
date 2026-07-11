@@ -31,6 +31,25 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-11 — fix(cli): versioned backup manifest + fail-closed restore verification (P7-DATA-04)
+
+Changed:
+- `internal/cli/db_backup.go`: full-backup archives now carry a `manifest.json` (format `devstrap-full-backup` v1: per-entry name/size/SHA-256, required set, workspace/device/custody metadata) written as the final tar entry while every other entry streams through a SHA-256 tee; referenced blobs are additionally re-verified against their content address during backup. `db restore` fails closed BEFORE any swap: manifest entries hash-verified against the stage, unlisted extras refused, missing/short archives refused; pre-manifest archives are refused unless `--allow-legacy` (`internal/cli/db.go`), and even legacy restores run the completeness probe. `verifyRestoreCompleteness` cross-checks the STAGED DB (opened read-only) — every referenced blob staged and hash-matching, device identity + signing key files present, held WCK epoch key files present — so a "successful" restore can no longer be unrecoverable.
+- `internal/state/store.go`: `OpenSnapshot` (read-only, immutable, `query_only` DSN — no WAL side files) + `ValidateDBFileReadOnly` so staged-DB validation cannot mutate manifest-verified bytes. **P7-DATA-03 completion:** `snapshotAndEnumerate` keeps the snapshot Store open and backup reads blob refs, custody, current device, workspace id, and held WCK epochs all from the same frozen row-set (the audit's "snapshot as authority for every archive decision"), pinned by the `backupAfterSnapshot` seam.
+- Tests: `TestFullBackupManifestHashesEveryEntryAndIsLast`, `TestRestoreRejectsTamperedEntriesBeforeSwap`, `TestRestoreRejectsMissingOrShortArchiveBeforeSwap`, `TestRestoreLegacyPolicyAndCompleteness`, `TestRestoreCompletenessRequiresHeldWCKFile`, `TestFullBackupRejectsCorruptContentAddressedBlob`, `TestFullBackupFailsWhenSnapshotHeldWCKDisappearsFromLiveCustody`, `TestOpenSnapshotIsReadOnlyAndCreatesNoWALSideFiles`, `TestOpenSnapshotFreezesBlobRefs`; e2e `db_restore_verify.txtar` + existing `db_full_backup_restore.txtar` extended.
+- `spec/13_CLI_DAEMON_API.md` + `spec/12_DATA_MODEL_SQLITE.md`: archive layout gains the manifest row; restore contract documents fail-closed verification and `--allow-legacy`.
+- `docs/audits/README.md`: `P7-DATA-04` moved open → *Recently shipped*; Pass-7 counts re-derived from the table at merge (serial wave).
+
+Validated:
+- `gofmt -w cmd internal`; `GOCACHE=/tmp/devstrap-gocache go test ./internal/state/ ./internal/cli/ -count=1`; `GOCACHE=/tmp/devstrap-gocache go test ./cmd/devstrap -run 'TestScript/db_' -count=1`.
+- Provenance: ported from the interrupted prior session's `fix/p7-data-backup-hardening` combined branch (its DATA-04 slice), adapted by Codex (gpt-5.6) onto the shipped PR-#162 DATA-03 base; coordinator line-by-line review.
+
+- Post-review (Codex, dual-review): (P2 fixed) the completeness probe now validates key material SEMANTICALLY, not just by presence — the staged device identity and signing key are parsed and their derived public halves compared against the archived database's device row, and each held WCK is base64-decoded, length-checked (32 bytes), and its SHA-256 verified against the recorded kid fingerprint; pinned by `TestRestoreRefusesSemanticallyInvalidKeyMaterial` (a parseable-but-wrong age key refuses the restore via the legacy path, where the manifest hash cannot catch it). (P3 fixed) the rebase-duplicated Pass-7 ledger summary paragraphs were removed across every open wave branch.
+- Post-review (opus, dual-review): MERGE-READY; two dispositions — (fixed) `manifest.Required` was tautological (mirrored from `Entries`), it is now set independently to the recoverable core (`state.db` + the device age/signing key files) so the verify-side subset check is a real guarantee; (accepted, documented) the manifest is in-archive and unsigned — it detects corruption/truncation, not tampering; authenticity rests on the completeness probe + DB validation, and the prose deliberately does not claim tamper-resistance.
+
+Follow-ups:
+- P7-DATA-05 (journaled all-or-nothing promotion + `db restore --recover`) ports next from the same reference branch.
+
 ## 2026-07-11 — fix(cli): db backup --full enumerates blob refs from the snapshot; missing blob fatal (P7-DATA-03)
 
 Changed:
