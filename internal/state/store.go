@@ -2142,11 +2142,16 @@ func (s *Store) ApprovedRecipients(ctx context.Context) ([]string, error) {
 	return recipients, nil
 }
 
-// AllBlobRefs returns every distinct age_blob:<sha256> reference in the store
-// (env bindings + draft snapshots) (HUB-04/HUB-05). These are the blobs that
-// may need rewrapping on device revoke or GC when unreferenced.
-func (s *Store) AllBlobRefs(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `
+// allBlobRefsQuerier is the minimal surface needed to list age_blob refs from
+// either a live Store or a standalone snapshot file (P7-DATA-03).
+type allBlobRefsQuerier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+// allBlobRefs returns every distinct age_blob:<sha256> reference from the
+// given querier (env bindings + draft snapshots).
+func allBlobRefs(ctx context.Context, db allBlobRefsQuerier) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `
 SELECT DISTINCT encrypted_value_ref FROM secret_bindings WHERE encrypted_value_ref IS NOT NULL AND encrypted_value_ref LIKE 'age_blob:%'
 UNION
 SELECT DISTINCT blob_ref FROM draft_snapshots WHERE blob_ref LIKE 'age_blob:%';
@@ -2164,6 +2169,29 @@ SELECT DISTINCT blob_ref FROM draft_snapshots WHERE blob_ref LIKE 'age_blob:%';
 		refs = append(refs, ref)
 	}
 	return refs, rows.Err()
+}
+
+// AllBlobRefs returns every distinct age_blob:<sha256> reference in the store
+// (env bindings + draft snapshots) (HUB-04/HUB-05). These are the blobs that
+// may need rewrapping on device revoke or GC when unreferenced.
+func (s *Store) AllBlobRefs(ctx context.Context) ([]string, error) {
+	return allBlobRefs(ctx, s.db)
+}
+
+// AllBlobRefsInFile reads the age_blob refs from a standalone snapshot/backup
+// DB file so backup decisions are made against the frozen row-set, not the
+// live store (P7-DATA-03).
+func AllBlobRefsInFile(ctx context.Context, path string) ([]string, error) {
+	dsn := sqliteDSN(path)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open snapshot for blob refs: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+	if err := db.PingContext(ctx); err != nil {
+		return nil, fmt.Errorf("ping snapshot for blob refs: %w", err)
+	}
+	return allBlobRefs(ctx, db)
 }
 
 // PruneDraftSnapshots deletes superseded draft snapshot rows, keeping the most

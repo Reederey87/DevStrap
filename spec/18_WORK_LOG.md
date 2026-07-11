@@ -31,6 +31,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-11 — fix(cli): db backup --full enumerates blob refs from the snapshot; missing blob fatal (P7-DATA-03)
+
+Changed:
+- `internal/state/store.go`: `AllBlobRefs` query extracted into a shared `allBlobRefs(ctx, querier)`; new exported `AllBlobRefsInFile(ctx, path)` opens a standalone snapshot/backup DB (same open path as `validateBackup`) so backup decisions read the frozen row-set, not the live store.
+- `internal/cli/db_backup.go`: `runFullBackup` replaces the live-store enumeration with `snapshotAndEnumerate` — up to `backupSnapshotAttempts` (3) VACUUM INTO + enumerate-from-snapshot + stat-every-ciphertext passes; a concurrent rotation/GC that deletes a superseded blob is healed by the fresh snapshot on the next attempt (drift injectable via the `backupEnumerateHook` test seam), while refs still missing after the last attempt are a hard `exitConflict` naming every ref (was: warn-and-skip with `missing_blobs` in the JSON result — a "successful" archive silently omitting referenced secrets). `writeBackupTar` treats an unreadable blob or malformed ref as fatal (enumerate already proved existence; remove-on-error still cleans the partial archive). `MissingBlobs` removed from `fullBackupResult`; key material deliberately still stages from the live store (append-mostly custody data; snapshot purity applies to blob refs). `--json` stdout remains a single document (P7-CLI-01).
+- Tests: `TestAllBlobRefsInFile` (post-snapshot live binding absent from the snapshot's refs), `TestFullBackupMissingBlobFatal` (error names the ref; no archive, no stray staging dirs), `TestFullBackupRetriesOnDrift` (attempt-1 drift heals by attempt 2; hook sees ≥2 attempts), `TestFullBackupJSONWarningsInPayload` repointed at the config-warning path; new e2e `db_full_backup_missing_blob.txtar` (rm ciphertext → nonzero exit, stderr names the class, no archive).
+- `spec/13_CLI_DAEMON_API.md` + `spec/12_DATA_MODEL_SQLITE.md`: snapshot-enumeration + fatal-missing-blob contract documented.
+- `docs/audits/README.md`: `P7-DATA-03` moved open → *Recently shipped*; Pass-7 counts re-derived from the table at merge (serial wave).
+
+Validated:
+- `gofmt -w cmd internal`
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
+- `GOCACHE=/tmp/devstrap-gocache go test ./cmd/devstrap -run 'TestScript/db_full_backup' -count=1`
+- `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` (0 issues)
+- Implementer: grok-4.5 from a written line-level spec; coordinator line-by-line review (one fix applied: the unreadable-blob tar error now wraps the underlying error instead of always claiming "missing on disk").
+
 ## 2026-07-11 — fix(hub): fsLock owner identity + nonce-verified break/release (P7-QUAL-07)
 
 Changed:

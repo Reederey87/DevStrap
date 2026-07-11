@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -281,13 +282,60 @@ func TestExtractBackupTarRejectsSymlink(t *testing.T) {
 	}
 }
 
-// TestFullBackupJSONWarningsInPayload proves that under --json, missing-blob
-// warnings are carried in the payload's warnings array and the entire stdout is
-// a single parseable JSON document (P7-CLI-01).
+// TestFullBackupJSONWarningsInPayload proves that under --json, non-fatal
+// warnings ride the payload's warnings array and the entire stdout is a single
+// parseable JSON document (P7-CLI-01). Missing blobs are fatal (P7-DATA-03);
+// this covers the remaining config/key warning path.
 func TestFullBackupJSONWarningsInPayload(t *testing.T) {
 	t.Setenv(platform.NoKeychainEnv, "1")
 	home := filepath.Join(t.TempDir(), ".devstrap")
 	root := filepath.Join(t.TempDir(), "Code")
+
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init: %v stderr=%s", err, stderr)
+	}
+	// Remove config.yaml so the backup warns about the missing hub pointer
+	// without failing (config is optional; blobs/keys are not).
+	if err := os.Remove(filepath.Join(home, "config.yaml")); err != nil {
+		t.Fatal(err)
+	}
+
+	archive := filepath.Join(t.TempDir(), "workspace.tar")
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "--json", "db", "backup", "--full", archive)
+	if err != nil {
+		t.Fatalf("db backup --full --json: %v stderr=%s stdout=%s", err, stderr, stdout)
+	}
+	if strings.Contains(stdout, "warning:") {
+		t.Fatalf("stdout must not contain raw warning: text outside JSON: %s", stdout)
+	}
+
+	var got fullBackupResult
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("full stdout is not a single JSON document: %v\n%s", err, stdout)
+	}
+	if got.Config {
+		t.Fatalf("expected config=false after deleting config.yaml, got %+v", got)
+	}
+	found := false
+	for _, w := range got.Warnings {
+		if strings.Contains(w, "no config.yaml") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("warnings = %v, want one mentioning no config.yaml", got.Warnings)
+	}
+}
+
+// TestFullBackupMissingBlobFatal proves a referenced blob whose ciphertext is
+// gone is a hard error: no archive is left at the output path and no staging
+// dir lingers (P7-DATA-03).
+func TestFullBackupMissingBlobFatal(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	outDir := t.TempDir()
 
 	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
 		t.Fatalf("init: %v stderr=%s", err, stderr)
@@ -297,7 +345,21 @@ func TestFullBackupJSONWarningsInPayload(t *testing.T) {
 		t.Fatalf("env capture: %v stderr=%s", err, stderr)
 	}
 
-	// Delete the referenced blob so the full backup must warn and omit it.
+	ctx := context.Background()
+	store, err := state.Open(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs, err := store.AllBlobRefs(ctx)
+	_ = store.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) == 0 {
+		t.Fatal("expected at least one blob ref after capture")
+	}
+	missingRef := refs[0]
+
 	blobDir := filepath.Join(home, "blobs")
 	entries, err := os.ReadDir(blobDir)
 	if err != nil {
@@ -309,28 +371,173 @@ func TestFullBackupJSONWarningsInPayload(t *testing.T) {
 		}
 	}
 
-	archive := filepath.Join(t.TempDir(), "workspace.tar")
-	stdout, stderr, err := executeForTest("--home", home, "--root", root, "--json", "db", "backup", "--full", archive)
+	archive := filepath.Join(outDir, "workspace.tar")
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "db", "backup", "--full", archive)
+	if err == nil {
+		t.Fatalf("expected full backup to fail with missing blob; stdout=%s", stdout)
+	}
+	errText := err.Error() + stderr
+	if !strings.Contains(errText, missingRef) {
+		t.Fatalf("error must name the missing ref %q; err=%v stderr=%s", missingRef, err, stderr)
+	}
+	if !strings.Contains(errText, "referenced secret ciphertext is missing on disk") {
+		t.Fatalf("error must mention missing ciphertext; err=%v stderr=%s", err, stderr)
+	}
+	if _, statErr := os.Stat(archive); !os.IsNotExist(statErr) {
+		t.Fatalf("archive must not exist after failed backup: %v", statErr)
+	}
+	// No stray staging dirs next to the output.
+	leftovers, err := os.ReadDir(outDir)
 	if err != nil {
-		t.Fatalf("db backup --full --json: %v stderr=%s stdout=%s", err, stderr, stdout)
+		t.Fatal(err)
 	}
-
-	var got fullBackupResult
-	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
-		t.Fatalf("full stdout is not a single JSON document: %v\n%s", err, stdout)
-	}
-	if len(got.Warnings) == 0 {
-		t.Fatalf("expected non-empty warnings, got %+v", got)
-	}
-	found := false
-	for _, w := range got.Warnings {
-		if strings.Contains(w, "referenced blob(s) missing") {
-			found = true
-			break
+	for _, e := range leftovers {
+		if strings.HasPrefix(e.Name(), ".devstrap-backup-") {
+			t.Fatalf("stray backup staging dir left behind: %s", e.Name())
 		}
 	}
-	if !found {
-		t.Fatalf("warnings = %v, want one mentioning referenced blob(s) missing", got.Warnings)
+}
+
+// TestFullBackupRetriesOnDrift injects concurrent rotation drift on attempt 1
+// (delete ciphertext + repoint the live binding) so the first snapshot misses a
+// blob; consistency is restored before attempt 2 and the backup succeeds
+// (P7-DATA-03).
+func TestFullBackupRetriesOnDrift(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init: %v stderr=%s", err, stderr)
+	}
+	registerEnvProject(t, home, root, "rotate-me")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "env", "capture", "work/proj", ".env"); err != nil {
+		t.Fatalf("env capture: %v stderr=%s", err, stderr)
+	}
+
+	ctx := context.Background()
+	store, err := state.Open(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs, err := store.AllBlobRefs(ctx)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	if len(refs) != 1 {
+		_ = store.Close()
+		t.Fatalf("refs = %v, want exactly one after capture", refs)
+	}
+	oldRef := refs[0]
+	hash, err := envBlobHash(oldRef)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	oldBlobPath := filepath.Join(home, "blobs", hash+".age")
+	ciphertext, err := os.ReadFile(oldBlobPath)
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	_ = store.Close()
+
+	// New content-addressed blob representing a completed rotation. The file
+	// is written only when consistency is restored (attempt 2), so attempt 1
+	// sees a snapshot that references a missing ciphertext.
+	newHash := strings.Repeat("ab", 32) // 64 hex chars
+	newRef := "age_blob:" + newHash
+	newBlobPath := filepath.Join(home, "blobs", newHash+".age")
+
+	var attempts []int
+	backupEnumerateHook = func(attempt int) {
+		attempts = append(attempts, attempt)
+		switch attempt {
+		case 1:
+			// Simulate rotation mid-backup: old ciphertext gone, live binding
+			// already repointed to the new ref whose file is not yet durable.
+			_ = os.Remove(oldBlobPath)
+			st, err := state.Open(ctx, filepath.Join(home, "state.db"))
+			if err != nil {
+				t.Errorf("hook open store: %v", err)
+				return
+			}
+			if err := st.UpdateBlobRef(ctx, oldRef, newRef); err != nil {
+				t.Errorf("hook UpdateBlobRef: %v", err)
+			}
+			_ = st.Close()
+		case 2:
+			// Restore consistency: rotated ciphertext is now on disk.
+			if err := os.WriteFile(newBlobPath, ciphertext, 0o600); err != nil {
+				t.Errorf("hook write new blob: %v", err)
+			}
+		}
+	}
+	t.Cleanup(func() { backupEnumerateHook = nil })
+
+	archive := filepath.Join(t.TempDir(), "workspace.tar")
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "db", "backup", "--full", archive)
+	if err != nil {
+		t.Fatalf("db backup --full after drift: %v stderr=%s stdout=%s", err, stderr, stdout)
+	}
+	if len(attempts) < 2 {
+		t.Fatalf("hook saw attempts %v, want at least 2", attempts)
+	}
+	if _, err := os.Stat(archive); err != nil {
+		t.Fatalf("archive missing after successful retry: %v", err)
+	}
+	assertBackupTarRefsMatchDB(t, archive)
+}
+
+// assertBackupTarRefsMatchDB opens the archive's state.db and checks every
+// blob ref it holds has a matching blobs/<sha>.age entry in the tar.
+func assertBackupTarRefsMatchDB(t *testing.T, archive string) {
+	t.Helper()
+	f, err := os.Open(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+
+	tr := tar.NewReader(f)
+	blobEntries := map[string]bool{}
+	var dbBytes []byte
+	for {
+		hdr, err := tr.Next()
+		if err != nil {
+			break
+		}
+		switch {
+		case hdr.Name == "state.db":
+			dbBytes, err = io.ReadAll(tr)
+			if err != nil {
+				t.Fatalf("read state.db from tar: %v", err)
+			}
+		case strings.HasPrefix(hdr.Name, "blobs/") && strings.HasSuffix(hdr.Name, ".age"):
+			blobEntries[hdr.Name] = true
+		}
+	}
+	if len(dbBytes) == 0 {
+		t.Fatal("archive missing state.db")
+	}
+	tmp := filepath.Join(t.TempDir(), "state.db")
+	if err := os.WriteFile(tmp, dbBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refs, err := state.AllBlobRefsInFile(context.Background(), tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range refs {
+		hash, err := envBlobHash(ref)
+		if err != nil {
+			t.Fatalf("ref %s: %v", ref, err)
+		}
+		want := "blobs/" + hash + ".age"
+		if !blobEntries[want] {
+			t.Fatalf("archive state.db references %s but tar has no %s (have %v)", ref, want, blobEntries)
+		}
 	}
 }
 
