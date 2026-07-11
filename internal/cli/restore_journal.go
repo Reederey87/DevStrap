@@ -52,7 +52,7 @@ func writeRestoreJournal(path string, journal restoreJournal) error {
 	raw = append(raw, '\n')
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, backupDirModePerm); err != nil {
-		return err
+		return fmt.Errorf("create restore journal dir: %w", err)
 	}
 	tmp, err := os.CreateTemp(dir, ".restore-journal-*")
 	if err != nil {
@@ -62,18 +62,18 @@ func writeRestoreJournal(path string, journal restoreJournal) error {
 	defer func() { _ = os.Remove(tmpName) }()
 	if err := tmp.Chmod(backupEntryMode); err != nil {
 		_ = tmp.Close()
-		return err
+		return fmt.Errorf("chmod restore journal temp: %w", err)
 	}
 	if _, err := tmp.Write(raw); err != nil {
 		_ = tmp.Close()
-		return err
+		return fmt.Errorf("write restore journal temp: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
-		return err
+		return fmt.Errorf("sync restore journal temp: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return fmt.Errorf("close restore journal temp: %w", err)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("publish restore journal: %w", err)
@@ -185,8 +185,11 @@ func recoverRestoreJournal(home string) (rolledBack bool, err error) {
 		return false, err
 	}
 	var j restoreJournal
-	if err := json.Unmarshal(raw, &j); err != nil || !validRestoreJournal(j) {
+	if err := json.Unmarshal(raw, &j); err != nil {
 		return false, fmt.Errorf("cannot parse restore journal %s; inspect it and recover the state directory manually (the journal was left untouched)", journalPath)
+	}
+	if !validRestoreJournal(j) {
+		return false, fmt.Errorf("restore journal %s parsed but fails its safety invariants (version/pid/aside-suffix/target shape); inspect it and recover the state directory manually (the journal was left untouched)", journalPath)
 	}
 
 	allDone := true

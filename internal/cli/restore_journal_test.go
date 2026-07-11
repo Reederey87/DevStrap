@@ -390,14 +390,32 @@ func TestRecoverRejectsUnsafeJournalWithoutMutation(t *testing.T) {
 	if err := writeRestoreJournal(restoreJournalPath(home), j); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := recoverRestoreJournal(home); err == nil || !strings.Contains(err.Error(), "cannot parse restore journal") {
+	before, err := os.ReadFile(restoreJournalPath(home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recoverRestoreJournal(home); err == nil || !strings.Contains(err.Error(), "fails its safety invariants") {
 		t.Fatalf("unsafe journal err=%v", err)
 	}
 	if got, err := os.ReadFile(outside); err != nil || string(got) != "keep" {
 		t.Fatalf("outside target changed: %q err=%v", got, err)
 	}
-	if _, err := os.Stat(restoreJournalPath(home)); err != nil {
+	// The rejected journal must be byte-for-byte untouched — recovery must not
+	// rewrite or "repair" state it refused to certify (CodeRabbit).
+	after, err := os.ReadFile(restoreJournalPath(home))
+	if err != nil {
 		t.Fatalf("unsafe journal removed: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("rejected journal was mutated:\nbefore=%s\nafter=%s", before, after)
+	}
+	// No stray files appeared under home either.
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != restoreJournalName {
+		t.Fatalf("home mutated: %v", entries)
 	}
 }
 
