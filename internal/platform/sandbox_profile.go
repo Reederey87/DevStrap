@@ -4,13 +4,18 @@ import (
 	"strings"
 )
 
-var sensitiveHomeDirs = []string{".ssh", ".aws", ".gnupg", ".config/gh", ".kube", ".docker"}
+// Credential DIRECTORIES at the home root. `.config/gcloud` (GCP refresh
+// tokens) and `.azure` (Azure CLI tokens) join the set for P7-SEC-01 — under
+// the default guarded policy a compromised child could otherwise read them by
+// absolute path and exfiltrate cloud credentials.
+var sensitiveHomeDirs = []string{".ssh", ".aws", ".gnupg", ".config/gh", ".config/gcloud", ".azure", ".kube", ".docker"}
 
 // Credential FILES at the home root — the same names the wrapper's
 // sensitive-token scanner flags (AGEN-05 alignment, review P3): .netrc
 // carries git-https creds, .npmrc/.pypirc registry tokens, .gitconfig
-// credential-helper config.
-var sensitiveHomeFiles = []string{".netrc", ".npmrc", ".pypirc", ".gitconfig"}
+// credential-helper config, and .git-credentials git's plaintext
+// credential.helper store (the file .gitconfig merely points at, P7-SEC-01).
+var sensitiveHomeFiles = []string{".netrc", ".npmrc", ".pypirc", ".gitconfig", ".git-credentials"}
 
 // sbplProfile renders the macOS Seatbelt (SBPL) profile for a SandboxSpec.
 // Kept build-tag-free and pure so the profile shape is unit-tested on every

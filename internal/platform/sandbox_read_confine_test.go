@@ -58,6 +58,29 @@ func TestReadConfineRoots(t *testing.T) {
 	}
 }
 
+// TestCredentialAnchorsCoverCloudAndGitCredentials pins P7-SEC-01: the anchor
+// set that both bwrap masks and the read-confine conflict guard consult must
+// include the git plaintext credential store and the GCP/Azure CLI token dirs.
+func TestCredentialAnchorsCoverCloudAndGitCredentials(t *testing.T) {
+	anchors := credentialAnchors("/home/dev", "/home/dev/.devstrap")
+	for _, want := range []string{
+		"/home/dev/.config/gcloud",
+		"/home/dev/.azure",
+		"/home/dev/.git-credentials",
+	} {
+		found := false
+		for _, a := range anchors {
+			if a == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("credentialAnchors missing %q (P7-SEC-01): %v", want, anchors)
+		}
+	}
+}
+
 func TestFirstReadAllowCredentialConflict(t *testing.T) {
 	home := "/home/dev"
 	devstrap := "/home/dev/.devstrap"

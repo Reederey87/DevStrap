@@ -83,6 +83,24 @@ Follow-ups:
 
 Follow-ups:
 - None.
+## 2026-07-10 — fix(sandbox): deny-list gains .git-credentials, .config/gcloud, .azure (P7-SEC-01)
+
+Changed:
+- `internal/platform/sandbox_profile.go`: `sensitiveHomeDirs` gains `.config/gcloud` and `.azure`; `sensitiveHomeFiles` gains `.git-credentials`. These two lists are the SINGLE source for the macOS Seatbelt deny profile, the bubblewrap masks, `credentialAnchors`, and `readConfineRoots`, so all backends and the read-confine conflict guard inherit the additions. Under the default `guarded` policy (allow-default reads) a compromised child could otherwise read git's plaintext HTTPS-token store and the GCP/Azure CLI token dirs by absolute path.
+- `internal/cli/agent.go`: the wrapper-level file-path `denyParts` gains `/.config/gcloud`, `/.azure`, `/.git-credentials` for parity with the OS deny set.
+- Tests: `TestBwrapSensitivePathsCoversCloudAndGitCredentials` and `TestCredentialAnchorsCoverCloudAndGitCredentials` explicitly pin the three new paths (the existing list-derived assertions would silently pass a regression that dropped them).
+- Docs: `spec/10` credential-deny enumeration + AGEN-05 deny-list note; `spec/15` SECU-02 reachability note; both `last_reviewed` bumped. Ledger row moved to *Recently shipped*.
+
+Validated:
+- `gofmt -l cmd internal`
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `DEVSTRAP_NO_KEYCHAIN=1 go test ./internal/platform/... ./internal/cli/...`
+- `DEVSTRAP_NO_KEYCHAIN=1 go test -race ./internal/platform/...`
+
+- Post-review (CodeRabbit, two Major applied): (1) parity — the wrapper-level `agentPathLooksSensitive`/`agentTokenLooksSensitive` now also flag `.gitconfig` and `.git-credentials` (the OS sandbox masked them but the coarse wrapper policy waved them through), pinned by `TestAgentSensitiveParityWithSandboxDenyList`; (2) the SECU-02 spec claim is scoped — HOME-repoint is environment isolation only (blocks relative lookups, NOT absolute-path reads); absolute credential reads are denied by the OS deny-list only on full-fidelity backends (Seatbelt/bubblewrap), while the Landlock fallback keeps credential paths readable unless `--read-confine` is on.
+
+Follow-ups:
+- `P7-SEC-03` (separate finding): under `--sandbox require` the Landlock fallback still cannot subtract the standalone credential deny — auto-engaging read-confine there subsumes these paths.
 
 ## 2026-07-10 — chore(deps): bump golang.org/x/crypto v0.52.0, golang.org/x/net v0.55.0
 
