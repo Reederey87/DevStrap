@@ -221,8 +221,25 @@ func TestFullBackupManifestHashesEveryEntryAndIsLast(t *testing.T) {
 	if manifest.Format != backupManifestFormat || manifest.Version != backupManifestVersion {
 		t.Fatalf("manifest format/version=%q/%d", manifest.Format, manifest.Version)
 	}
-	if len(manifest.Entries) != len(files)-1 || len(manifest.Required) != len(manifest.Entries) {
-		t.Fatalf("manifest entries=%d required=%d files=%d", len(manifest.Entries), len(manifest.Required), len(files))
+	if len(manifest.Entries) != len(files)-1 {
+		t.Fatalf("manifest entries=%d files=%d", len(manifest.Entries), len(files))
+	}
+	// Required is the independently-set recoverable core (state.db + the two
+	// device key files), a strict subset of Entries — never a mirror of it.
+	listedNames := make(map[string]bool, len(manifest.Entries))
+	for _, entry := range manifest.Entries {
+		listedNames[entry.Name] = true
+	}
+	if len(manifest.Required) != 3 || manifest.Required[0] != backupEntryDB {
+		t.Fatalf("required=%v, want state.db + the two device key files", manifest.Required)
+	}
+	for _, req := range manifest.Required {
+		if !listedNames[req] {
+			t.Fatalf("required entry %s not listed in manifest entries", req)
+		}
+		if req != backupEntryDB && !strings.HasPrefix(req, backupDirBlobs+"/") && !strings.HasPrefix(req, backupDirKeys+"/") {
+			t.Fatalf("required entry %s is neither state.db nor a key file", req)
+		}
 	}
 	for _, entry := range manifest.Entries {
 		body, ok := files[entry.Name]
