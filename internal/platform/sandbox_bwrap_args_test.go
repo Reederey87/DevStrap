@@ -144,6 +144,25 @@ func TestBwrapSensitivePathsMirrorsSeatbeltDenyList(t *testing.T) {
 	}
 }
 
+// TestBwrapSensitivePathsCoversCloudAndGitCredentials pins P7-SEC-01: the
+// masks must include the git plaintext credential store and the GCP/Azure CLI
+// token dirs, not only .ssh/.aws. A regression that drops any of them silently
+// re-exposes stored cloud/git-HTTPS credentials to a guarded agent child.
+func TestBwrapSensitivePathsCoversCloudAndGitCredentials(t *testing.T) {
+	dirs, files := bwrapSensitivePaths(SandboxSpec{
+		UserHome:           "/home/dev",
+		DenySensitiveReads: true,
+	})
+	for _, want := range []string{"/home/dev/.config/gcloud", "/home/dev/.azure"} {
+		if !slices.Contains(dirs, want) {
+			t.Fatalf("masked dirs missing %q (P7-SEC-01): %v", want, dirs)
+		}
+	}
+	if !slices.Contains(files, "/home/dev/.git-credentials") {
+		t.Fatalf("masked files missing /home/dev/.git-credentials (P7-SEC-01): %v", files)
+	}
+}
+
 func TestBwrapArgsReadConfineEnumeratesRootsAndSkipsMasks(t *testing.T) {
 	spec := SandboxSpec{
 		WorktreeDir:        "/work/tree",

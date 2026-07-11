@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-01
+last_reviewed: 2026-07-10
 tracks_code: [internal/platform/**, internal/cli/open.go, internal/cli/hydrate.go, .github/**]
 ---
 # Mac-First Implementation Guide
@@ -347,3 +347,4 @@ Cross-platform findings (`XP-*`, from `docs/audits/AUDIT_RECOMMENDATIONS_2026-06
 ## Audit follow-ups (2026-07-07)
 
 - **Seatbelt sandbox must grant the linked worktree's git dirs (`P7-SANDBOX-01`):** a DevStrap agent worktree is a git *linked* worktree whose index/objects/refs live in the parent clone's `.git`, outside the worktree dir — so under the default write confinement the kernel returned `EPERM` for `git add`/`git commit`, silently breaking the `agent run → agent pr` loop on Macs. The Seatbelt profile (and the Linux bwrap/Landlock backends) now also write-allow the linked worktree's `<git-common-dir>/{objects,refs,logs}` and the per-worktree admin dir, resolved by `git.Runner.WorktreeSandboxWriteDirs`; the common dir's `hooks/` and `config` are deliberately excluded (granting them would let the child plant a hook that runs unsandboxed). Kernel-proven by the env-gated `TestSeatbeltAllowsLinkedWorktreeCommit`. Full detail in `spec/10_AGENT_WORKSPACES_AND_POLICIES.md`.
+- **Sandbox credential deny-list gains cloud/git token stores (`P7-SEC-01`):** the single `sensitiveHomeDirs`/`sensitiveHomeFiles` set that feeds the Seatbelt profile, the Linux bwrap masks, `credentialAnchors`, and `readConfineRoots` now also denies `~/.config/gcloud` (GCP refresh tokens), `~/.azure` (Azure CLI tokens), and `~/.git-credentials` (git's plaintext `credential.helper store` — the `.gitconfig` that was already masked merely points at it). Regression-pinned by `TestBwrapSensitivePathsCoversCloudAndGitCredentials` / `TestCredentialAnchorsCoverCloudAndGitCredentials`.

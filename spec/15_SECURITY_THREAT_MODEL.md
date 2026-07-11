@@ -360,7 +360,7 @@ Key-custody status (`SECR-04`/`SECU-01`, refined by `P6-XP-04`): the file fallba
 ## Audit implementation notes (2026-06-28)
 
 - **SECU-01**: Key custody fallback now gated on `IsKeychainUnavailable(err)`; present-but-failing keychain fails closed.
-- **SECU-02**: `SSH_AUTH_SOCK` excluded from agent subprocess environment via `AgentAllowlist`; HOME repointed to worktree path so `~/.ssh`, `~/.aws`, `~/.config/gh` are not reachable.
+- **SECU-02**: `SSH_AUTH_SOCK` excluded from agent subprocess environment via `AgentAllowlist`; HOME repointed to worktree path so `~/.ssh`, `~/.aws`, `~/.config/gh`, `~/.config/gcloud`, `~/.azure`, and `~/.git-credentials` are not reachable (P7-SEC-01).
 - **SECU-03**: `verifyEventSignature` requires valid signatures from known approved devices for destructive event types (`project.deleted`, `project.renamed`) unconditionally, and for **all** non-local event types once any approved device is enrolled (`HUB-03` fail-closed-once-enrolled). The pre-enrollment bootstrap window for non-destructive events remains (`SEC-04`).
 - **SECU-04**: `redact.Writer` suppresses multi-line PEM private key blocks across line boundaries. Fixed `pemBegin` pattern indexing bug (was pointing to age-key pattern instead of PEM header). Added test coverage.
 - **SECU-05**: `devices enroll --approve` now requires `--signing-public-key`.
