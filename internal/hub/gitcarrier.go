@@ -52,6 +52,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -91,6 +92,19 @@ type gitCarrierMarker struct {
 	WorkspaceID string `json:"workspace_id"`
 }
 
+// gitHeadState is the persisted last-known-good carrier head (P7-HUB-02).
+// The retention fields fingerprint the retention manifest as checked out at
+// SHA; they let a non-compacting device distinguish a legitimate compaction
+// squash (manifest strictly advanced) from a rewound carrier.
+type gitHeadState struct {
+	Version             int              `json:"version"` // 1
+	SHA                 string           `json:"sha"`
+	ObservedAt          string           `json:"observed_at"`                // RFC3339Nano
+	RetentionSHA256     string           `json:"retention_sha256,omitempty"` // "" = no manifest at SHA
+	RetentionProducedAt int64            `json:"retention_produced_at_hlc,omitempty"`
+	RetentionFloors     map[string]int64 `json:"retention_floors,omitempty"`
+}
+
 // GitCarrierHub implements dssync.Hub over a private git repository.
 // Construct with NewGitCarrierHub. Safe for concurrent use; all operations
 // serialize on an in-process mutex plus a cross-process lock file, because
@@ -101,6 +115,7 @@ type GitCarrierHub struct {
 	workspaceID string
 	dir         string // working clone (the carrier checkout)
 	lockPath    string // cross-process lock, sibling of dir (never inside it)
+	headPath    string // persisted verified head, sibling of dir (never reset)
 	runner      git.Runner
 	mu          sync.Mutex
 	store       *fsObjectStore
@@ -149,6 +164,7 @@ func NewGitCarrierHub(remote, branch, workspaceID, cacheRoot string) (*GitCarrie
 		workspaceID:   workspaceID,
 		dir:           dir,
 		lockPath:      filepath.Join(base, "repo.lock"),
+		headPath:      filepath.Join(base, "head.json"),
 		runner:        git.NewRunner(),
 		store:         store,
 		r2:            R2Hub{S3: store, WorkspaceID: workspaceID},
@@ -156,6 +172,219 @@ func NewGitCarrierHub(remote, branch, workspaceID, cacheRoot string) (*GitCarrie
 		lockWait:      fsLockWait,
 		lockHeartbeat: fsLockHeartbeat,
 	}, nil
+}
+
+func (g *GitCarrierHub) headStateError(detail string, err error) error {
+	base := filepath.Dir(g.dir)
+	if err != nil {
+		return fmt.Errorf("git hub head state %s: %s: %w; remove the carrier cache to re-adopt the remote: rm -rf %s", g.headPath, detail, err, base)
+	}
+	return fmt.Errorf("git hub head state %s: %s; remove the carrier cache to re-adopt the remote: rm -rf %s", g.headPath, detail, base)
+}
+
+// loadHeadState reads the durable last verified carrier head. Corruption is
+// abnormal because writes are atomic, so it fails closed instead of silently
+// granting a new trust-on-first-use window.
+func (g *GitCarrierHub) loadHeadState() (gitHeadState, bool, error) {
+	raw, err := os.ReadFile(g.headPath) //nolint:gosec // constructor-fixed path under the carrier cache
+	if errors.Is(err, os.ErrNotExist) {
+		return gitHeadState{}, false, nil
+	}
+	if err != nil {
+		return gitHeadState{}, false, g.headStateError("cannot read persisted state", err)
+	}
+	var state gitHeadState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return gitHeadState{}, false, g.headStateError("cannot parse persisted state", err)
+	}
+	if state.Version != 1 {
+		return gitHeadState{}, false, g.headStateError(fmt.Sprintf("version %d is unsupported (want 1)", state.Version), nil)
+	}
+	if len(strings.TrimSpace(state.SHA)) < 8 {
+		return gitHeadState{}, false, g.headStateError("contains a missing or short sha", nil)
+	}
+	return state, true, nil
+}
+
+// saveHeadStateLocked fingerprints the retention head directly through the
+// inner store. Calling g.GetRetention here would re-enter readRefresh while
+// g.mu is held and deadlock.
+func (g *GitCarrierHub) saveHeadStateLocked(ctx context.Context, sha string) error {
+	state := gitHeadState{
+		Version:    1,
+		SHA:        strings.TrimSpace(sha),
+		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	raw, _, err := g.r2.GetRetention(ctx)
+	switch {
+	case errors.Is(err, dssync.ErrRetentionNotFound):
+		// No manifest at this head: the empty fingerprint is meaningful.
+	case err != nil:
+		return fmt.Errorf("read git hub retention for head state: %w", err)
+	default:
+		sum := sha256.Sum256(raw)
+		state.RetentionSHA256 = hex.EncodeToString(sum[:])
+		if manifest, perr := dssync.ParseRetentionManifest(raw); perr == nil {
+			state.RetentionProducedAt = manifest.ProducedAt
+			state.RetentionFloors = manifest.Floors
+		}
+	}
+	raw, err = json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("marshal git hub head state: %w", err)
+	}
+	if err := writeFileAtomic(g.headPath, raw); err != nil {
+		return fmt.Errorf("save git hub head state %s: %w", g.headPath, err)
+	}
+	return nil
+}
+
+func commandExitCode(err error) (int, bool) {
+	var exitErr interface{ ExitCode() int }
+	if !errors.As(err, &exitErr) {
+		return 0, false
+	}
+	return exitErr.ExitCode(), true
+}
+
+// checkHeadContinuityLocked refuses a carrier rewind unless the checked-out
+// tree plausibly represents hub compaction. Production compact publishes the
+// advanced manifest on a NORMAL commit first and the parentless squash keeps
+// those same manifest bytes, so a device that observed the advanced tip sees
+// the squash with an IDENTICAL fingerprint (not a strictly newer one) — both
+// shapes are accepted. This is only a transport-level plausibility gate: the
+// sync layer still verifies the retention manifest signature against pinned
+// approved devices.
+func (g *GitCarrierHub) checkHeadContinuityLocked(ctx context.Context, newSHA string) error {
+	last, ok, err := g.loadHeadState()
+	if err != nil || !ok {
+		return err
+	}
+	newSHA = strings.TrimSpace(newSHA)
+	if newSHA == last.SHA {
+		return nil
+	}
+
+	oldKnown := true
+	if _, err := g.runner.Run(ctx, g.dir, "cat-file", "-e", last.SHA+"^{commit}"); err != nil {
+		code, hasCode := commandExitCode(err)
+		// cat-file uses 128 for a syntactically valid object name that is not
+		// present in this object database (fresh clone / host-side GC).
+		if hasCode && code == 128 && (strings.Contains(strings.ToLower(err.Error()), "not a valid object") || strings.Contains(strings.ToLower(err.Error()), "bad object")) {
+			oldKnown = false
+		} else {
+			return fmt.Errorf("inspect last verified git hub head: %w", err)
+		}
+	}
+	if oldKnown {
+		if _, err := g.runner.Run(ctx, g.dir, "merge-base", "--is-ancestor", last.SHA, newSHA); err == nil {
+			return nil
+		} else if code, ok := commandExitCode(err); !ok || code != 1 {
+			return fmt.Errorf("check git hub head ancestry: %w", err)
+		}
+	}
+
+	advanced := false
+	var newFloors map[string]int64
+	haveNewFloors := false
+	raw, _, rerr := g.r2.GetRetention(ctx)
+	if rerr == nil {
+		if manifest, perr := dssync.ParseRetentionManifest(raw); perr == nil {
+			newFloors = manifest.Floors
+			haveNewFloors = true
+			switch {
+			case last.RetentionSHA256 == "":
+				// First-ever manifest observation (TOFU residual, spec/15).
+				advanced = true
+			case last.RetentionProducedAt == 0:
+				// The recorded fingerprint never parsed, so only identical
+				// bytes are judgeable (below).
+			case manifest.ProducedAt > last.RetentionProducedAt:
+				advanced = true
+				for dev, floor := range last.RetentionFloors {
+					if manifest.Floors[dev] < floor {
+						advanced = false
+						break
+					}
+				}
+			}
+		}
+		if !advanced && last.RetentionSHA256 != "" {
+			// The squash of exactly the retention state this device last
+			// verified: compact's parentless commit reuses the pre-squash
+			// manifest bytes. Also self-heals a compactor that crashed after
+			// its force-push but before persisting the squashed head.
+			sum := sha256.Sum256(raw)
+			advanced = hex.EncodeToString(sum[:]) == last.RetentionSHA256
+		}
+	} else if !errors.Is(rerr, dssync.ErrRetentionNotFound) {
+		return fmt.Errorf("read git hub retention for continuity check: %w", rerr)
+	}
+	if advanced && oldKnown {
+		// Content gate: a legitimate squash only deletes events BELOW the new
+		// floors. A rewrite that drops an at-or-above-floor event object is a
+		// data-losing rewind no manifest can explain, whatever it claims.
+		if err := g.checkCompactionDeletesLocked(ctx, last.SHA, newSHA, newFloors, haveNewFloors); err != nil {
+			return err
+		}
+	}
+	if advanced {
+		return nil
+	}
+	return fmt.Errorf("git hub %s: carrier history was rewritten — branch %s head %.8s is not a descendant of the last verified head %.8s and carries no advanced retention manifest; refusing to sync. If another trusted device confirms the carrier is correct (run devstrap status / devstrap sync there), re-adopt it by removing this device's carrier cache: rm -rf %s. Otherwise restore the carrier repository from the host's backup.", redactedRemote(g.remote), g.branch, newSHA, last.SHA, filepath.Dir(g.dir)) //nolint:staticcheck // P7-HUB-02 specifies this multi-sentence user-facing refusal verbatim.
+}
+
+// checkCompactionDeletesLocked verifies that every event object deleted between
+// the last verified head and the new head sits BELOW the new retention floors —
+// the only deletions `hub compact` performs. Event keys are the current
+// workspaces/<ws>/eventlog/<device>/<seq pad20>_<id>.json layout plus the
+// retired dual-read workspaces/<ws>/events/<hlc>/<device>/<seq>/<id>.json.
+func (g *GitCarrierHub) checkCompactionDeletesLocked(ctx context.Context, lastSHA, newSHA string, floors map[string]int64, haveFloors bool) error {
+	prefix := fmt.Sprintf("workspaces/%s/eventlog/", g.workspaceID)
+	legacyPrefix := fmt.Sprintf("workspaces/%s/events/", g.workspaceID)
+	out, err := g.runner.Run(ctx, g.dir, "diff", "--name-only", "--diff-filter=D", lastSHA, newSHA, "--", prefix, legacyPrefix)
+	if err != nil {
+		return fmt.Errorf("diff git hub event objects for continuity check: %w", err)
+	}
+	refuse := func(path string) error {
+		return fmt.Errorf("git hub %s: carrier history was rewritten — head %.8s deletes event object %s at or above the retention floors, which no compaction produces; refusing to sync. If another trusted device confirms the carrier is correct (run devstrap status / devstrap sync there), re-adopt it by removing this device's carrier cache: rm -rf %s. Otherwise restore the carrier repository from the host's backup.", redactedRemote(g.remote), newSHA, path, filepath.Dir(g.dir)) //nolint:staticcheck // P7-HUB-02 specifies this multi-sentence user-facing refusal verbatim.
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var device, seqText string
+		switch {
+		case strings.HasPrefix(line, prefix): // <device>/<seq pad20>_<event_id>.json
+			parts := strings.Split(strings.TrimPrefix(line, prefix), "/")
+			if len(parts) != 2 {
+				return refuse(line) // unrecognizable event key shape: fail closed
+			}
+			device = parts[0]
+			seqText, _, _ = strings.Cut(parts[1], "_")
+		case strings.HasPrefix(line, legacyPrefix): // <hlc>/<device>/<seq>/<event_id>.json
+			parts := strings.Split(strings.TrimPrefix(line, legacyPrefix), "/")
+			if len(parts) != 4 {
+				return refuse(line)
+			}
+			device, seqText = parts[1], parts[2]
+		default:
+			return refuse(line)
+		}
+		if !haveFloors {
+			return refuse(line) // events deleted with no floors to justify it
+		}
+		floor, ok := floors[device]
+		if !ok {
+			return refuse(line)
+		}
+		seq, perr := strconv.ParseInt(seqText, 10, 64)
+		if perr != nil || seq >= floor {
+			return refuse(line)
+		}
+	}
+	return nil
 }
 
 // lock takes the in-process mutex plus the cross-process lock file and returns
@@ -219,9 +448,25 @@ func (g *GitCarrierHub) refreshLocked(ctx context.Context) error {
 		if _, err := g.runner.Run(ctx, g.dir, "clean", "-fdq"); err != nil {
 			return fmt.Errorf("clean git hub clone: %w", err)
 		}
+		if err := g.validateMarkerLocked(); err != nil {
+			return err
+		}
+		if err := g.checkHeadContinuityLocked(ctx, sha); err != nil {
+			return err
+		}
+		if err := g.saveHeadStateLocked(ctx, sha); err != nil {
+			return err
+		}
 		g.fetchedSHA = sha
-		return g.validateMarkerLocked()
+		return nil
 	case errors.Is(err, git.ErrBranchNotFound):
+		last, ok, lerr := g.loadHeadState()
+		if lerr != nil {
+			return lerr
+		}
+		if ok {
+			return fmt.Errorf("git hub %s: branch %s no longer exists but this device previously verified head %.8s — the carrier was deleted or rewound; refusing to re-found it. Recreate/restore the carrier repo, or verify from another trusted device and rm -rf %s to re-initialize.", redactedRemote(g.remote), g.branch, last.SHA, filepath.Dir(g.dir)) //nolint:staticcheck // P7-HUB-02 specifies this multi-sentence user-facing refusal verbatim.
+		}
 		// Empty carrier: reset to an unborn branch with an empty tree so hub
 		// state is exactly the remote state (nothing durable lives locally).
 		if _, serr := g.runner.Run(ctx, g.dir, "symbolic-ref", "HEAD", "refs/heads/"+g.branch); serr != nil {
@@ -349,6 +594,13 @@ func (g *GitCarrierHub) writeLoop(ctx context.Context, op string, apply func() e
 		// through the same refetch-and-reapply cycle.
 		err = g.runner.PushBranch(ctx, g.dir, "origin", g.branch)
 		if err == nil {
+			headSHA, rerr := g.runner.Run(ctx, g.dir, "rev-parse", "HEAD")
+			if rerr != nil {
+				return fmt.Errorf("resolve pushed git hub head: %w", rerr)
+			}
+			if rerr := g.saveHeadStateLocked(ctx, headSHA); rerr != nil {
+				return rerr
+			}
 			return nil
 		}
 		if !errors.Is(err, git.ErrNonFastForward) && !errors.Is(err, git.ErrNetwork) {
@@ -628,6 +880,10 @@ func (g *GitCarrierHub) CompactEventsBelow(ctx context.Context, floors dssync.Cu
 			if _, rerr := g.runner.Run(ctx, g.dir, "reset", "--hard", "--quiet", newSHA); rerr != nil {
 				return deleted, fmt.Errorf("align git hub clone after compaction: %w", rerr)
 			}
+			if rerr := g.saveHeadStateLocked(ctx, newSHA); rerr != nil {
+				return deleted, rerr
+			}
+			g.fetchedSHA = newSHA
 			return deleted, nil
 		}
 		if !errors.Is(err, git.ErrNonFastForward) && !errors.Is(err, git.ErrNetwork) {

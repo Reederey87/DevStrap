@@ -36,6 +36,20 @@ func gitCarrierManifestBytes(t *testing.T, floors map[string]int64) []byte {
 	return raw
 }
 
+func gitCarrierAdvancedManifestBytes(t *testing.T, producedAt int64, floors map[string]int64) []byte {
+	t.Helper()
+	raw, err := json.Marshal(dssync.RetentionManifest{
+		V:           1,
+		WorkspaceID: "ws_test",
+		ProducedAt:  producedAt,
+		Floors:      floors,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
 func assertGitCarrierAckPlane(t *testing.T, ctx context.Context, h dssync.Hub) {
 	t.Helper()
 	if acks, err := h.ListAcks(ctx); err != nil || len(acks) != 0 {
@@ -303,6 +317,12 @@ func TestGitCarrierCompactSquashesHistory(t *testing.T) {
 	if _, err := stale.Pull(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
+	// Production compaction publishes an advanced retention manifest before
+	// rewriting history; that manifest is the continuity proof for stale
+	// devices whose old commit is no longer an ancestor of the squash.
+	if err := hubA.PutRetention(ctx, gitCarrierAdvancedManifestBytes(t, 100, map[string]int64{"dev_a": 3}), ""); err != nil {
+		t.Fatal(err)
+	}
 	deleted, err := hubA.CompactEventsBelow(ctx, dssync.Cursor{"dev_a": 3})
 	if err != nil {
 		t.Fatal(err)
@@ -310,7 +330,7 @@ func TestGitCarrierCompactSquashesHistory(t *testing.T) {
 	if deleted != 2 {
 		t.Fatalf("deleted = %d, want 2", deleted)
 	}
-	got, err := newGitCarrierTestHub(t, remote, "fresh").Pull(ctx, nil)
+	got, err := newGitCarrierTestHub(t, remote, "fresh").Pull(ctx, dssync.Cursor{"dev_a": 2})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +343,7 @@ func TestGitCarrierCompactSquashesHistory(t *testing.T) {
 	if err := stale.Push(ctx, []state.Event{makeEvent("stale_new", "dev_stale", 40, 1, "project.added", "{}")}); err != nil {
 		t.Fatalf("stale Push after compaction: %v", err)
 	}
-	got, err = newGitCarrierTestHub(t, remote, "post-stale").Pull(ctx, nil)
+	got, err = newGitCarrierTestHub(t, remote, "post-stale").Pull(ctx, dssync.Cursor{"dev_a": 2})
 	if err != nil {
 		t.Fatal(err)
 	}

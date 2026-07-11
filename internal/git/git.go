@@ -66,6 +66,7 @@ type CommandError struct {
 	Kind    error
 	Args    string
 	Message string
+	Code    int
 }
 
 func (e CommandError) Error() string {
@@ -77,6 +78,17 @@ func (e CommandError) Error() string {
 
 func (e CommandError) Unwrap() error {
 	return e.Kind
+}
+
+// ExitCode returns the git subprocess exit status, or -1 when the process did
+// not report one (for example when it could not be started). Callers that rely
+// on git's documented tri-state commands must distinguish an expected status
+// such as merge-base's 1 from operational failures.
+func (e CommandError) ExitCode() int {
+	if e.Code == 0 {
+		return -1
+	}
+	return e.Code
 }
 
 func (r Runner) Run(ctx context.Context, dir string, args ...string) (string, error) {
@@ -123,6 +135,11 @@ func (r Runner) Run(ctx context.Context, dir string, args ...string) (string, er
 	cmd.Stderr = &stderr
 	cmd.Stdin = nil
 	if err := cmd.Run(); err != nil {
+		exitCode := -1
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			msg = strings.TrimSpace(stdout.String())
@@ -143,9 +160,9 @@ func (r Runner) Run(ctx context.Context, dir string, args ...string) (string, er
 				// on a 2m rev-parse/push-metadata timeout would misdirect.
 				msg += " (raise materialization.clone_timeout for large repos)"
 			}
-			return "", CommandError{Kind: ErrTimeout, Args: argText, Message: msg}
+			return "", CommandError{Kind: ErrTimeout, Args: argText, Message: msg, Code: exitCode}
 		}
-		return "", CommandError{Kind: kind, Args: argText, Message: msg}
+		return "", CommandError{Kind: kind, Args: argText, Message: msg, Code: exitCode}
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }
