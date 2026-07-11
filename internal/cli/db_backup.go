@@ -149,7 +149,13 @@ func snapshotAndEnumerate(ctx context.Context, store *state.Store, tmpDB string,
 		if err != nil {
 			return nil, err
 		}
-		missing := missingBlobRefs(blobDir, refs)
+		missing, err := missingBlobRefs(blobDir, refs)
+		if err != nil {
+			// Not an absence: permission/I-O failures are immediately fatal
+			// with their real cause — retrying cannot help and reporting them
+			// as "missing on disk" would misdirect the operator (CodeRabbit).
+			return nil, appError{code: exitInvalidConfig, err: fmt.Errorf("full backup: inspect referenced ciphertext: %w", err)}
+		}
 		if len(missing) == 0 {
 			return refs, nil
 		}
@@ -164,9 +170,12 @@ func snapshotAndEnumerate(ctx context.Context, store *state.Store, tmpDB string,
 	}
 }
 
-// missingBlobRefs returns the refs whose ciphertext files are absent (or whose
-// ref is malformed). Same ref→filename mapping as writeBackupTar.
-func missingBlobRefs(blobDir string, refs []string) []string {
+// missingBlobRefs returns the refs whose ciphertext files are ABSENT (or whose
+// ref is malformed). A stat failure that is not absence — permission denial,
+// transient I/O — is returned as an error instead of being folded into
+// "missing", so the operator sees the real cause. Same ref→filename mapping
+// as writeBackupTar.
+func missingBlobRefs(blobDir string, refs []string) ([]string, error) {
 	var missing []string
 	for _, ref := range refs {
 		hash, err := envBlobHash(ref)
@@ -175,10 +184,13 @@ func missingBlobRefs(blobDir string, refs []string) []string {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(blobDir, hash+".age")); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("stat ciphertext for %s: %w", ref, err)
+			}
 			missing = append(missing, ref)
 		}
 	}
-	return missing
+	return missing, nil
 }
 
 // stageBackupKeys resolves this device's key material into a directory tree that
