@@ -311,6 +311,25 @@ func (s *Store) Down() error {
 	if err := goose.SetDialect("sqlite3"); err != nil {
 		return fmt.Errorf("set migration dialect: %w", err)
 	}
+	version, err := goose.GetDBVersion(s.db)
+	if err != nil {
+		return fmt.Errorf("read migration version before rollback: %w", err)
+	}
+	if version == 23 {
+		var populated int64
+		if err := s.db.QueryRow(`
+SELECT COUNT(*)
+FROM env_profiles
+WHERE source_event_hlc IS NOT NULL
+   OR source_event_device_id IS NOT NULL
+   OR source_event_id IS NOT NULL;
+`).Scan(&populated); err != nil {
+			return fmt.Errorf("check migration 00023 rollback safety: %w", err)
+		}
+		if populated > 0 {
+			return fmt.Errorf("refusing to roll back migration 00023: %d env profile(s) carry cross-device LWW source-event coordinates that would be destroyed; take a `devstrap db backup --full` and clear the coordinates explicitly before rolling back", populated)
+		}
+	}
 	if err := goose.Down(s.db, "migrations"); err != nil {
 		return fmt.Errorf("roll back migration: %w", err)
 	}

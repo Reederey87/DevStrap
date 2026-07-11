@@ -230,6 +230,9 @@ conflict.created
 conflict.resolved
 ```
 
+The source-event coordinates that order `env.profile.updated` LWW application
+are rollback-protected: migration 00023 refuses to drop them while populated.
+
 **Planned (no constructor or apply handler yet):**
 
 ```text

@@ -225,6 +225,9 @@ Migration `00023_env_profile_source_events.sql` adds the nullable
 `source_event_hlc`, `source_event_device_id`, and `source_event_id` columns.
 They stamp the `env.profile.updated` event that last wrote the active profile so
 cross-device replay is idempotent and LWW by `(HLC, device_id, event_id)`.
+Rolling migration 00023 back fails closed while any env profile carries one or
+more of these coordinates, because dropping them would discard its incumbent
+cross-device LWW winner.
 
 ### secret_bindings
 

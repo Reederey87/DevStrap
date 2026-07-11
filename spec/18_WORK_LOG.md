@@ -31,6 +31,19 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-11 — fix(state): migration 00023 rollback fails closed on populated env LWW coordinates (P7-DATA-07)
+
+Changed:
+- `internal/state/store.go` `Store.Down`: before rolling back FROM schema version 23, counts `env_profiles` rows with any non-NULL `source_event_hlc`/`source_event_device_id`/`source_event_id` and refuses the rollback when populated — dropping those columns would erase the cross-device env LWW incumbent (`envCoordLess` treats absent coordinates as "no winner", so a delayed older event would overwrite a newer value after down→up). The error tells the operator to `devstrap db backup --full` and clear the coordinates explicitly first. Guard placement in `Store.Down` (not a Go migration) keeps the embedded SQL-only goose setup intact and covers both `devstrap db down` and direct state-layer callers; the up path and every other down step (incl. 24→23) are unaffected. Migration 00023's SQL is unchanged.
+- `internal/state/store_test.go`: `TestMigration00023DownRefusesPopulatedCoordinates` (populated → refused, version stays 23, columns and values intact) and `TestMigration00023DownEmptyCoordinatesSucceeds` (all-NULL → down to 22, columns dropped, re-migrate restores them), plus an `envProfilesHasColumn` PRAGMA helper. Schema-version constants stay at 24.
+- `spec/12_DATA_MODEL_SQLITE.md` (migrations) + `spec/07_NAMESPACE_AND_SYNC_MODEL.md` (env LWW): rollback-protection documented.
+- `docs/audits/README.md`: `P7-DATA-07` moved open → *Recently shipped*; Pass-7 counts re-derived from the table at merge time (serial wave).
+
+Validated:
+- `gofmt -w cmd internal`
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/state/ ./internal/cli/ -count=1`
+- Implementer: Codex (gpt-5.6) from a written line-level spec, after two grok-4.5 attempts died mid-run without writing (model-picker escalation); coordinator line-by-line review.
+
 ## 2026-07-11 — fix(sync): deterministic draft-snapshot latest/prune tiebreak (P7-SYNC-03)
 
 Changed:
