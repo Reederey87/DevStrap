@@ -42,6 +42,10 @@ Changed:
 Validated:
 - `gofmt -w cmd internal`; `GOCACHE=/tmp/devstrap-gocache go test ./internal/hub/ -count=1 -race`; `GOCACHE=/tmp/devstrap-gocache go test ./cmd/devstrap -run 'TestScript/sync_folder_hub|TestScript/sync_git_hub|TestScript/hub_' -count=1`.
 - Implementer: Codex (gpt-5.6) from a written spec (fix chosen per exa research: Go 1.24+ `os.Root` per-component O_NOFOLLOW; repo is on 1.26.5); coordinator line-by-line review.
+- Post-review (opus, dual-review): MERGE-READY; one consistency hardening applied — `writeMarkerLocked` now writes through the same `os.Root` handle (Lstat + O_EXCL create) instead of path-based `os.Stat`/`os.WriteFile`, so the marker write's confinement is structural rather than dependent on `validateMarkerLocked` having run first.
+
+Follow-ups:
+- None.
 
 ## 2026-07-11 — fix(state): migration 00023 rollback fails closed on populated env LWW coordinates (P7-DATA-07)
 
