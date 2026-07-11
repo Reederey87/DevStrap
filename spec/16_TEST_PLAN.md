@@ -286,6 +286,7 @@ This is the most important test.
 5. `TestSnapshotRoundTripsEnvProfile` proves BuildSnapshot -> ImportSnapshot carries the env pointer into a fresh store idempotently; `TestImportSnapshotEnvLWW` proves the pointer merges by its own coordinate (an older pointer never regresses, a newer pointer wins even on a losing entry row)
 6. sync trust propagation (TRUST-01): `TestApplyDeviceRevokedFlipsTrustAndFlagsRotation`, sticky replay (`...ReplayDoesNotReflagRotation`), unknown-target placeholder revoke, untrusted-signer quarantine, local-target no-op, single-batch mutual-revocation determinism (both orders), post-revoke same-batch quarantine isolation (`internal/sync/trust_apply_test.go`); `TestApplyRemoteDeviceTrustTxMatrix` (state); `TestDeviceRevokeEmitsTrustEvent` (cli, same-tx emission)
 7. txtar: sync_trust_propagation.txtar — three devices, full mutual pinning; A revokes B; C learns via sync (devices list shows revoked, doctor flags rotation), B's subsequent push quarantines on C
+8. revoke containment (P7-SEC-02): `internal/cli/wck_rotation_test.go` pins same-transaction marking, the `CurrentEpoch` failure window, happy-path clearing, sync resume with a real hub, doctor device/timestamp output, malformed-record fail-closed behavior, and merging two revokes before resume
 ```
 
 ### Draft sync

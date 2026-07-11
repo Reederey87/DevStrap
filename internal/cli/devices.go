@@ -325,8 +325,10 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 					if err := tx.SetDeviceTrustStateTx(cmd.Context(), args[0], trustState); err != nil {
 						return err
 					}
-					_, err := store.InsertLocalEventTx(cmd.Context(), tx, dssync.NewDeviceTrustEvent(eventType, string(payloadJSON)))
-					return err
+					if _, err := store.InsertLocalEventTx(cmd.Context(), tx, dssync.NewDeviceTrustEvent(eventType, string(payloadJSON))); err != nil {
+						return err
+					}
+					return markRevokeContainmentPendingTx(cmd.Context(), tx, args[0])
 				}); err != nil {
 					return err
 				}
@@ -357,7 +359,7 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 				// trust_state was just changed), so Rotate grants the new epoch
 				// only to remaining approved devices. Skip silently if no epoch
 				// was ever bootstrapped (pre-envelope workspace).
-				rotateWorkspaceKeyOnRevoke(cmd.Context(), stderr, opts, store)
+				rotationAccounted := rotateWorkspaceKeyOnRevoke(cmd.Context(), stderr, opts, store)
 				flagged, err := store.MarkEncryptedBindingsNeedingRotation(cmd.Context())
 				if err != nil {
 					return err
@@ -399,6 +401,11 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 					// and deleted on the next hub-enabled sync — state that plainly
 					// instead of promising a cleanup that never ran.
 					_, _ = fmt.Fprintf(stderr, "note: no hub configured; old synced ciphertext is queued and removed on the next 'devstrap sync --hub-file'. Rotate the affected secrets at their source regardless.\n")
+				}
+				if rotationAccounted && err == nil {
+					if cerr := clearRevokeContainmentPending(cmd.Context(), store, args[0]); cerr != nil {
+						return cerr
+					}
 				}
 			}
 			return nil
@@ -804,15 +811,19 @@ func grantWorkspaceKeyToApprovedDevice(ctx context.Context, stderr io.Writer, op
 // remaining approved devices for go-forward forward secrecy (P4-SEC-07). The
 // revoked device is excluded because its trust_state was just changed. Skipped
 // silently if no epoch was ever bootstrapped. Warnings go to stderr.
-func rotateWorkspaceKeyOnRevoke(ctx context.Context, stderr io.Writer, opts *options, store *state.Store) {
+var currentWorkspaceKeyEpochOnRevoke = func(ctx context.Context, opts *options, store *state.Store) (int64, error) {
+	return buildKeyring(ctx, opts, store).CurrentEpoch(ctx)
+}
+
+func rotateWorkspaceKeyOnRevoke(ctx context.Context, stderr io.Writer, opts *options, store *state.Store) bool {
 	kr := buildKeyring(ctx, opts, store)
-	epoch, err := kr.CurrentEpoch(ctx)
+	epoch, err := currentWorkspaceKeyEpochOnRevoke(ctx, opts, store)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "warning: workspace key rotation skipped: %v\n", err)
-		return
+		return false
 	}
 	if epoch == 0 {
-		return // pre-envelope workspace; nothing to rotate
+		return true // pre-envelope workspace; nothing to rotate
 	}
 	newEpoch, grants, rerr := kr.Rotate(ctx)
 	if rerr != nil {
@@ -827,10 +838,10 @@ func rotateWorkspaceKeyOnRevoke(ctx context.Context, stderr io.Writer, opts *opt
 		_, _ = fmt.Fprintf(stderr, "warning: workspace key rotation FAILED: %v\n", rerr)
 		if merr := markWCKRotationPending(ctx, store, epoch); merr != nil {
 			_, _ = fmt.Fprintf(stderr, "warning: could not record the owed rotation (%v); sync will NOT auto-retry — run 'devstrap keys rotate' until it succeeds, then 'devstrap sync'\n", merr)
-			return
+			return false
 		}
 		_, _ = fmt.Fprintf(stderr, "warning: events pushed before a successful rotation remain readable by the revoked device (it holds the current epoch key). The next 'devstrap sync' retries the rotation automatically; run 'devstrap keys rotate' to close the gap now.\n")
-		return
+		return true
 	}
 	// A successful Rotate excludes every locally-revoked device, so it also
 	// satisfies any rotation still owed from an earlier failed revoke.
@@ -840,6 +851,7 @@ func rotateWorkspaceKeyOnRevoke(ctx context.Context, stderr io.Writer, opts *opt
 	if len(grants) > 0 {
 		_, _ = fmt.Fprintf(stderr, "Rotated workspace key to epoch %d; granted to %d remaining device(s); run 'devstrap sync' to publish\n", newEpoch, len(grants))
 	}
+	return true
 }
 
 // warnMalformedRemainingRecipients preflights the post-revoke rotation (issue

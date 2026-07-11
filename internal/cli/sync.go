@@ -141,15 +141,32 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 	// suppresses fleet-wide rotation storms (whichever device syncs first past
 	// the deadline rotates; everyone else pulls the new epoch and stands down)
 	// — and BEFORE the push, so the mint's grant events ride THIS cycle.
-	if rotated, rerr := maybeRotateWorkspaceKey(ctx, stdout, opts, store); rerr != nil {
+	rotated, rerr := maybeRotateWorkspaceKey(ctx, stdout, opts, store)
+	if rerr != nil {
 		return rerr
-	} else if rotated {
+	}
+	if rotated {
 		// The localEvents snapshot above predates the mint; re-read so the
 		// just-minted grant events are pushed in this same cycle.
 		localEvents, err = store.LocalPendingEventsBySeq(ctx, pushCursor)
 		if err != nil {
 			return err
 		}
+	}
+	rotationAccounted := rotated
+	if !rotationAccounted {
+		if _, owed, oerr := wckRotationPendingSince(ctx, store); oerr != nil {
+			return oerr
+		} else if owed {
+			rotationAccounted = true
+		} else if epoch, _, eerr := store.ActiveKeyEpochAge(ctx); eerr != nil {
+			return eerr
+		} else if epoch == 0 {
+			rotationAccounted = true
+		}
+	}
+	if err := resumeRevokeContainment(ctx, stdout, opts, store, hub, rotationAccounted); err != nil {
+		return err
 	}
 
 	// P6-SEC-02 founder/join gate. After the pull (which ingested any grant for
@@ -333,6 +350,17 @@ func maybeRotateWorkspaceKey(ctx context.Context, stdout io.Writer, opts *option
 	if err != nil {
 		return false, err
 	}
+	containmentDevices, containmentPending, _, err := revokeContainmentPending(ctx, store)
+	if err != nil {
+		return false, err
+	}
+	if !pending {
+		for _, since := range containmentDevices {
+			if !since.IsZero() && (pendingSince.IsZero() || since.Before(pendingSince)) {
+				pendingSince = since
+			}
+		}
+	}
 	epoch, created, err := store.ActiveKeyEpochAge(ctx)
 	if err != nil {
 		return false, err
@@ -342,7 +370,7 @@ func maybeRotateWorkspaceKey(ctx context.Context, stdout io.Writer, opts *option
 	}
 	maxAge := keyRotateMaxAge(opts)
 	aged := maxAge > 0 && time.Since(created) >= maxAge
-	if !pending && !aged {
+	if !pending && !containmentPending && !aged {
 		return false, nil
 	}
 	kr := buildKeyring(ctx, opts, store)
@@ -356,7 +384,13 @@ func maybeRotateWorkspaceKey(ctx context.Context, stdout io.Writer, opts *option
 		if after, aerr := store.CurrentKeyEpoch(ctx); aerr != nil || after != epoch {
 			return false, fmt.Errorf("workspace key rotation failed mid-commit (epoch advanced %d→%d; grants may not have published): %w", epoch, after, rerr)
 		}
-		if pending {
+		if pending || containmentPending {
+			if !pending {
+				if merr := markWCKRotationPending(ctx, store, epoch); merr != nil {
+					return false, fmt.Errorf("record workspace key rotation owed by pending revoke containment: %w", merr)
+				}
+				pendingSince = time.Now().UTC()
+			}
 			// Early failure (nothing recorded — the malformed-recipient
 			// class). Do NOT fail the cycle: aborting here would also block
 			// pushing the device.revoked event itself, so the fleet never
@@ -374,16 +408,23 @@ func maybeRotateWorkspaceKey(ctx context.Context, stdout io.Writer, opts *option
 		// queued revoke event whose propagation the abort would block.
 		return false, fmt.Errorf("periodic workspace key rotation failed (fix the cause or disable via keys.rotate_max_age=0 / --key-max-age 0): %w", rerr)
 	}
-	if pending {
+	if pending || containmentPending {
 		// The ONLY resolution path for the owed marker (see wck_rotation.go:
 		// a newer epoch alone is not proof the revoked device was excluded; a
 		// local Rotate is). A delete failure surfaces as a cycle error so the
 		// marker cannot silently outlive its rotation.
-		if cerr := clearWCKRotationPending(ctx, store); cerr != nil {
-			return true, cerr
+		if pending {
+			if cerr := clearWCKRotationPending(ctx, store); cerr != nil {
+				return true, cerr
+			}
 		}
-		opts.progressf(stdout, "Rotated workspace key to epoch %d (rotation owed since %s after a device revoke); %d grant event(s) ride this push\n",
-			newEpoch, pendingSince.Format(time.RFC3339), len(grants))
+		if pendingSince.IsZero() {
+			opts.progressf(stdout, "Rotated workspace key to epoch %d (rotation owed after a device revoke); %d grant event(s) ride this push\n",
+				newEpoch, len(grants))
+		} else {
+			opts.progressf(stdout, "Rotated workspace key to epoch %d (rotation owed since %s after a device revoke); %d grant event(s) ride this push\n",
+				newEpoch, pendingSince.Format(time.RFC3339), len(grants))
+		}
 		return true, nil
 	}
 	opts.progressf(stdout, "Rotated workspace key to epoch %d (epoch %d exceeded keys.rotate_max_age %s); %d grant event(s) ride this push\n",

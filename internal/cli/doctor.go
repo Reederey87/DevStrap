@@ -230,6 +230,7 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 			results = append(results, checkSkippedEvents(ctx, store)...)
 			results = append(results, checkWorkspaceKeyAge(ctx, opts, store)...)
 			results = append(results, checkWCKRotationPending(ctx, store)...)
+			results = append(results, checkRevokeContainmentPending(ctx, store)...)
 			results = append(results, checkForgeCLIs(ctx, opts, store)...)
 			results = append(results, checkAgentRunSweep(ctx, opts, store)...)
 			results = append(results, checkSandboxViolations(ctx, store)...)
@@ -523,6 +524,27 @@ func checkWCKRotationPending(ctx context.Context, store *state.Store) []checkRes
 		Status: checkWarn,
 		Detail: detail,
 		Remedy: "run 'devstrap sync' (retries the rotation automatically) or 'devstrap keys rotate'",
+	}}
+}
+
+func checkRevokeContainmentPending(ctx context.Context, store *state.Store) []checkResult {
+	devices, pending, malformed, err := revokeContainmentPending(ctx, store)
+	if err != nil || !pending {
+		return nil
+	}
+	detail := "pending record is malformed (kept pending fail-closed)"
+	if !malformed {
+		parts := make([]string, 0, len(devices))
+		for _, id := range sortedPendingRevokeIDs(devices) {
+			parts = append(parts, fmt.Sprintf("%s since %s", id, devices[id].Format(time.RFC3339)))
+		}
+		detail = strings.Join(parts, ", ")
+	}
+	return []checkResult{{
+		Name:   "revoke containment",
+		Status: checkWarn,
+		Detail: detail,
+		Remedy: "run devstrap sync to resume containment",
 	}}
 }
 

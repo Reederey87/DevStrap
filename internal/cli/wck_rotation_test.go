@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -109,6 +111,216 @@ func TestDeviceRevokeRotationFailureMarksPendingAndSyncRetries(t *testing.T) {
 	}
 	if _, ok, err := st.GetLocalMeta(ctx, wckRotationPendingMetaKey); err != nil || ok {
 		t.Fatalf("pending marker still present (%v, %v); want cleared on success", ok, err)
+	}
+}
+
+func TestRevokeContainmentMarkerCommitsWithTrustFlip(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	ctx := context.Background()
+	home, _ := rotateTestHome(t)
+	st := openTestStore(t, home)
+	if err := st.WithTx(ctx, func(tx *state.Tx) error {
+		if err := tx.SetDeviceTrustStateTx(ctx, "dev_rotate_peer", "revoked"); err != nil {
+			return err
+		}
+		return markRevokeContainmentPendingTx(ctx, tx, "dev_rotate_peer")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := trustStateOf(t, home, "dev_rotate_peer"); got != "revoked" {
+		t.Fatalf("trust state = %q, want revoked", got)
+	}
+	devices, pending, malformed, err := revokeContainmentPending(ctx, st)
+	if err != nil || !pending || malformed || devices["dev_rotate_peer"].IsZero() {
+		t.Fatalf("revoke containment = %v, %v, %v, %v; want target committed with trust flip", devices, pending, malformed, err)
+	}
+}
+
+// TestRevokeContainmentCorruptMarkerNeverBlocksRevoke pins the post-review
+// fail-direction fix: a corrupt pending record must not abort the trust-flip
+// transaction (refusing a revoke over retry bookkeeping would keep a
+// compromised device approved). The mark path overwrites with a fresh record
+// carrying the new target.
+func TestRevokeContainmentCorruptMarkerNeverBlocksRevoke(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	ctx := context.Background()
+	home, _ := rotateTestHome(t)
+	st := openTestStore(t, home)
+	if err := st.SetLocalMeta(ctx, revokeContainmentPendingMetaKey, "{corrupt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WithTx(ctx, func(tx *state.Tx) error {
+		if err := tx.SetDeviceTrustStateTx(ctx, "dev_rotate_peer", "revoked"); err != nil {
+			return err
+		}
+		return markRevokeContainmentPendingTx(ctx, tx, "dev_rotate_peer")
+	}); err != nil {
+		t.Fatalf("revoke tx with corrupt marker: %v (must never block the trust flip)", err)
+	}
+	devices, pending, malformed, err := revokeContainmentPending(ctx, st)
+	if err != nil || !pending || malformed {
+		t.Fatalf("containment after corrupt-marker revoke = %v/%v/%v/%v; want fresh valid record", devices, pending, malformed, err)
+	}
+	if devices["dev_rotate_peer"].IsZero() {
+		t.Fatalf("fresh record misses the new target: %v", devices)
+	}
+}
+
+func TestDeviceRevokeCurrentEpochFailureLeavesContainmentPending(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	ctx := context.Background()
+	home, root := rotateTestHome(t)
+	previous := currentWorkspaceKeyEpochOnRevoke
+	currentWorkspaceKeyEpochOnRevoke = func(context.Context, *options, *state.Store) (int64, error) {
+		return 0, errors.New("injected current epoch failure")
+	}
+	t.Cleanup(func() { currentWorkspaceKeyEpochOnRevoke = previous })
+
+	_, stderr, err := executeForTest("--home", home, "--root", root, "devices", "revoke", "dev_rotate_peer")
+	if err != nil {
+		t.Fatalf("revoke: %v (%s)", err, stderr)
+	}
+	st := openTestStore(t, home)
+	if got := trustStateOf(t, home, "dev_rotate_peer"); got != "revoked" {
+		t.Fatalf("trust state = %q, want revoked", got)
+	}
+	devices, pending, malformed, err := revokeContainmentPending(ctx, st)
+	if err != nil || !pending || malformed || devices["dev_rotate_peer"].IsZero() {
+		t.Fatalf("revoke containment = %v, %v, %v, %v; want target pending", devices, pending, malformed, err)
+	}
+	if _, owed, err := wckRotationPendingSince(ctx, st); err != nil || owed {
+		t.Fatalf("wck rotation marker = %v, %v; CurrentEpoch failure must rely on containment marker", owed, err)
+	}
+}
+
+func TestDeviceRevokeHappyPathClearsContainment(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	home, root := rotateTestHome(t)
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "devices", "revoke", "dev_rotate_peer"); err != nil {
+		t.Fatalf("revoke: %v (%s)", err, stderr)
+	}
+	st := openTestStore(t, home)
+	if _, pending, _, err := revokeContainmentPending(context.Background(), st); err != nil || pending {
+		t.Fatalf("containment pending = %v, %v; want cleared after happy path", pending, err)
+	}
+}
+
+func TestSyncResumesPendingRevokeContainment(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	ctx := context.Background()
+	home, root := rotateTestHome(t)
+	previous := currentWorkspaceKeyEpochOnRevoke
+	currentWorkspaceKeyEpochOnRevoke = func(context.Context, *options, *state.Store) (int64, error) {
+		return 0, errors.New("injected current epoch failure")
+	}
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "devices", "revoke", "dev_rotate_peer"); err != nil {
+		currentWorkspaceKeyEpochOnRevoke = previous
+		t.Fatalf("revoke: %v (%s)", err, stderr)
+	}
+	currentWorkspaceKeyEpochOnRevoke = previous
+
+	hubFile := filepath.Join(t.TempDir(), "hub.json")
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "sync", "--hub-file", hubFile, "--namespace-only")
+	if err != nil {
+		t.Fatalf("sync: %v (stdout=%s stderr=%s)", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Resumed revoke containment for 1 device(s)") {
+		t.Fatalf("sync output = %q, want containment resume", stdout)
+	}
+	if !strings.Contains(stdout, "rotation owed since") || strings.Contains(stdout, "0001-01-01") {
+		t.Fatalf("sync output = %q, want the transactional containment timestamp", stdout)
+	}
+	st := openTestStore(t, home)
+	if _, pending, _, err := revokeContainmentPending(ctx, st); err != nil || pending {
+		t.Fatalf("containment pending = %v, %v; want cleared by sync", pending, err)
+	}
+}
+
+func TestTwoRevokesMergeContainmentPending(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	ctx := context.Background()
+	home, root := rotateTestHome(t)
+	st := openTestStore(t, home)
+	peer, err := deviceByID(ctx, st, "dev_rotate_peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertDevice(ctx, state.Device{ID: "dev_second_peer", Name: "second", OS: "linux", Arch: "arm64", PublicKey: peer.PublicKey, SigningPublicKey: peer.SigningPublicKey, TrustState: "approved"}); err != nil {
+		t.Fatal(err)
+	}
+	previous := currentWorkspaceKeyEpochOnRevoke
+	currentWorkspaceKeyEpochOnRevoke = func(context.Context, *options, *state.Store) (int64, error) {
+		return 0, errors.New("injected current epoch failure")
+	}
+	t.Cleanup(func() { currentWorkspaceKeyEpochOnRevoke = previous })
+	for _, id := range []string{"dev_rotate_peer", "dev_second_peer"} {
+		if _, stderr, err := executeForTest("--home", home, "--root", root, "devices", "revoke", id); err != nil {
+			t.Fatalf("revoke %s: %v (%s)", id, err, stderr)
+		}
+	}
+	devices, pending, malformed, err := revokeContainmentPending(ctx, st)
+	if err != nil || !pending || malformed || len(devices) != 2 || devices["dev_rotate_peer"].IsZero() || devices["dev_second_peer"].IsZero() {
+		t.Fatalf("merged containment = %v, %v, %v, %v; want both devices", devices, pending, malformed, err)
+	}
+}
+
+func TestRevokeContainmentMalformedRecordStaysPending(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	ctx := context.Background()
+	home, _ := rotateTestHome(t)
+	st := openTestStore(t, home)
+	if err := st.SetLocalMeta(ctx, revokeContainmentPendingMetaKey, "{garbage"); err != nil {
+		t.Fatal(err)
+	}
+	devices, pending, malformed, err := revokeContainmentPending(ctx, st)
+	if err != nil || !pending || !malformed || devices != nil {
+		t.Fatalf("malformed containment = %v, %v, %v, %v; want fail-closed pending", devices, pending, malformed, err)
+	}
+	if err := clearRevokeContainmentPending(ctx, st, "dev_any"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := st.GetLocalMeta(ctx, revokeContainmentPendingMetaKey); err != nil || !ok {
+		t.Fatalf("malformed marker was cleared by a by-device clear: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestSyncClearsMalformedContainmentMarker pins the CodeRabbit fix: a malformed
+// marker previously opened the rotation gate on every sync (a Rotate storm)
+// because resume only warned and never cleared it. Now a sync runs the
+// device-independent containment (rotation + bindings flag + rewrap) and
+// DELETES the whole malformed row, so the gate stops firing; per-device ack
+// cleanup defers to hub compact.
+func TestSyncClearsMalformedContainmentMarker(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	ctx := context.Background()
+	home, root := rotateTestHome(t)
+	// Establish a real revoke (full home + a valid, then corrupted, marker).
+	previous := currentWorkspaceKeyEpochOnRevoke
+	currentWorkspaceKeyEpochOnRevoke = func(context.Context, *options, *state.Store) (int64, error) {
+		return 0, errors.New("injected current epoch failure")
+	}
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "devices", "revoke", "dev_rotate_peer"); err != nil {
+		currentWorkspaceKeyEpochOnRevoke = previous
+		t.Fatalf("revoke: %v (%s)", err, stderr)
+	}
+	currentWorkspaceKeyEpochOnRevoke = previous
+
+	st := openTestStore(t, home)
+	if err := st.SetLocalMeta(ctx, revokeContainmentPendingMetaKey, "{garbage"); err != nil {
+		t.Fatal(err)
+	}
+
+	hubFile := filepath.Join(t.TempDir(), "hub.json")
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "sync", "--hub-file", hubFile, "--namespace-only")
+	if err != nil {
+		t.Fatalf("sync: %v (stdout=%s stderr=%s)", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Recovered a malformed revoke-containment marker") {
+		t.Fatalf("sync output = %q, want malformed-marker recovery", stdout)
+	}
+	st2 := openTestStore(t, home)
+	if _, pending, _, err := revokeContainmentPending(ctx, st2); err != nil || pending {
+		t.Fatalf("malformed containment still pending after sync = %v, %v; want cleared", pending, err)
 	}
 }
 
@@ -227,6 +439,25 @@ func TestDoctorWarnsWCKRotationPending(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "retries the rotation automatically") {
 		t.Fatalf("doctor output missing auto-retry remedy:\n%s", stdout)
+	}
+}
+
+func TestDoctorWarnsRevokeContainmentPending(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	ctx := context.Background()
+	home, root := rotateTestHome(t)
+	st := openTestStore(t, home)
+	if err := st.WithTx(ctx, func(tx *state.Tx) error {
+		return markRevokeContainmentPendingTx(ctx, tx, "dev_doctor_target")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stdout, _, _ := executeForTest("--home", home, "--root", root, "doctor")
+	if !strings.Contains(stdout, "revoke containment") || !strings.Contains(stdout, "dev_doctor_target since") {
+		t.Fatalf("doctor output missing pending device and since-time:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "run devstrap sync to resume containment") {
+		t.Fatalf("doctor output missing containment remedy:\n%s", stdout)
 	}
 }
 

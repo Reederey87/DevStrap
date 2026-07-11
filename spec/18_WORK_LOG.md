@@ -58,6 +58,15 @@ Changed:
 - `internal/hub/folder_test.go`: success/no-residue, rename-failure cleanup, `PutObject`/`PutObjectIfMatch` full-body reads, and listKeys ignore of planted `.tmp-` orphans.
 - `spec/15_SECURITY_THREAT_MODEL.md`: folder-carrier residual notes atomic write + documented cloud-drive mid-replication window (`P7-HUB-05`).
 - `docs/audits/README.md`: `P7-HUB-05` moved open → Recently shipped; Pass 7 open count decremented.
+## 2026-07-10 — fix(devices): transactional revoke-containment marker + sync resume (P7-SEC-02)
+
+Changed:
+- `internal/state/store.go` adds transaction-level `local_meta` read/write/delete helpers with SQL matching the existing store-level operations. `devices revoke`/`lost` now merges the target into the machine-local JSON `revoke_containment_pending` set in the same transaction as the trust flip and synced trust event.
+- The post-revoke path clears only that target after rotation either succeeds or is durably handed to `wck_rotation_pending`, secret bindings are flagged, and blob rewrap completes. `sync` resumes every pending target after pull, rotates at most once per cycle, performs the remaining containment work, best-effort deletes stale acks, and clears only successfully-contained devices. Malformed marker JSON stays pending fail-closed.
+- `doctor` reports pending device IDs and since-times with the sync remedy. Regression coverage pins transactional marking, the former `CurrentEpoch` zero-record window, happy-path clearing, sync resume, doctor output, and two-revoke merge preservation. `spec/15` and the Pass-7 ledger record the shipped mitigation.
+- Post-review (fable-5 line-by-line, two applied): (1) a CORRUPT existing pending record no longer aborts the trust-flip transaction — refusing a revoke over retry bookkeeping would keep a compromised device approved, the exact wrong fail direction; the mark path overwrites with a fresh record (the resume actions are device-independent global scans, so the only loss is the best-effort per-device ack deletion, which `hub compact` reclaims anyway), pinned by `TestRevokeContainmentCorruptMarkerNeverBlocksRevoke`; (2) the resume path's bindings-flag failure now warns instead of returning silently (marker stays pending either way).
+- Post-review (CodeRabbit Major, applied): a MALFORMED containment marker previously kept `containmentPending=true` forever, so the rotation gate fired `Rotate()` on every sync (a storm) while `resumeRevokeContainment` only warned; now, once rotation is accounted, resume runs the device-independent containment (bindings flag + rewrap) and DELETES the whole malformed row (per-device ack cleanup, which needs the device set, defers to `hub compact`). Read side stays fail-closed (a corrupt marker never reads as "nothing pending"); the clear happens only after containment is proven done. Pinned by `TestSyncClearsMalformedContainmentMarker`.
+- Post-review (independent Codex): fixed the sole P3 finding — a containment-only sync resume now derives its rotation message from the earliest transactional device timestamp instead of printing the zero year when no `wck_rotation_pending` row exists; the sync regression test rejects year-0001 output. Narrow re-review found no remaining issue.
 
 Validated:
 - `gofmt -w cmd internal`
@@ -69,6 +78,11 @@ Validated:
 
 Follow-ups:
 - None for this finding; residual cloud-drive mid-replication window stays accepted (spec/15).
+- `DEVSTRAP_NO_KEYCHAIN=1 go test ./internal/cli/... ./internal/state/...`
+- `DEVSTRAP_NO_KEYCHAIN=1 go test -race ./...`
+
+Follow-ups:
+- None.
 
 ## 2026-07-10 — chore(deps): bump golang.org/x/crypto v0.52.0, golang.org/x/net v0.55.0
 

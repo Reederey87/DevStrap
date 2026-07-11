@@ -2904,6 +2904,19 @@ func (s *Store) GetLocalMeta(ctx context.Context, key string) (string, bool, err
 	return v, true, nil
 }
 
+// GetLocalMetaTx is the transactional form of GetLocalMeta.
+func (tx *Tx) GetLocalMetaTx(ctx context.Context, key string) (string, bool, error) {
+	var v string
+	err := tx.tx.QueryRowContext(ctx, `SELECT value FROM local_meta WHERE key = ?;`, key).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read local meta %q: %w", key, err)
+	}
+	return v, true, nil
+}
+
 // SetLocalMeta upserts a local, never-synced key/value metadata row. Unlike
 // RecordKeyCustody's write-once semantics, this overwrites so the cached
 // retention floor can advance (P4-SYNC-02).
@@ -2920,11 +2933,33 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.upd
 	return nil
 }
 
+// SetLocalMetaTx is the transactional form of SetLocalMeta.
+func (tx *Tx) SetLocalMetaTx(ctx context.Context, key, value string) error {
+	now := timestampNow()
+	_, err := tx.tx.ExecContext(ctx, `
+INSERT INTO local_meta (key, value, updated_at)
+VALUES (?, ?, ?)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;
+`, key, value, now)
+	if err != nil {
+		return fmt.Errorf("set local meta %q: %w", key, err)
+	}
+	return nil
+}
+
 // DeleteLocalMeta removes a local, never-synced key/value metadata row.
 // Deleting an absent key is a no-op. Used to clear self-resolved flags such as
 // the owed-WCK-rotation marker (issue #134).
 func (s *Store) DeleteLocalMeta(ctx context.Context, key string) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM local_meta WHERE key = ?;`, key); err != nil {
+		return fmt.Errorf("delete local meta %q: %w", key, err)
+	}
+	return nil
+}
+
+// DeleteLocalMetaTx is the transactional form of DeleteLocalMeta.
+func (tx *Tx) DeleteLocalMetaTx(ctx context.Context, key string) error {
+	if _, err := tx.tx.ExecContext(ctx, `DELETE FROM local_meta WHERE key = ?;`, key); err != nil {
 		return fmt.Errorf("delete local meta %q: %w", key, err)
 	}
 	return nil
