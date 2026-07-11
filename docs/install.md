@@ -31,8 +31,8 @@ curl -fsSL https://raw.githubusercontent.com/Reederey87/DevStrap/main/scripts/in
 
 The script detects your OS/arch, resolves the latest release, verifies the downloaded tarball
 by first checking the identity-pinned cosign signature over `checksums.txt`, then always checking
-the tarball's sha256 **before** extracting. If `slsa-verifier` is present, it also verifies the
-tarball's SLSA provenance automatically. The installer fails closed when cosign is unavailable and
+the tarball's sha256 **before** extracting. It also verifies the tarball's SLSA provenance. The installer fails closed when cosign or
+`slsa-verifier` is unavailable (each with its own explicit escape hatch) and
 installs into `/usr/local/bin` (or `~/.local/bin` if that isn't writable). It never uses sudo.
 Overrides:
 
@@ -40,17 +40,19 @@ Overrides:
 - `DEVSTRAP_INSTALL_DIR=~/bin` picks the destination directory.
 - `DEVSTRAP_INSTALL_CHECKSUM_ONLY=1` explicitly accepts weakened verification when cosign is
   unavailable or an older release has no signature bundle. With cosign missing but the bundle
-  present, sha256 still runs and SLSA provenance is still verified if `slsa-verifier` is installed;
+  present, sha256 still runs and SLSA provenance is verified opportunistically (only if
+  `slsa-verifier` happens to be installed);
   for a pre-bundle release (bundle 404) SLSA is skipped too and TLS + sha256 is all that remains.
   Intended only as a deliberate compatibility escape hatch.
-- `DEVSTRAP_INSTALL_NO_SLSA=1` skips the optional SLSA provenance check even when
-  `slsa-verifier` is installed; cosign and sha256 verification still run.
+- `DEVSTRAP_INSTALL_NO_SLSA=1` skips ONLY the SLSA provenance layer (the explicit escape hatch
+  for a missing `slsa-verifier`); cosign and sha256 verification still run.
 
 The `main` URL above is mutable even when `DEVSTRAP_VERSION` pins the binary release. For a
 high-assurance install, fetch the installer itself from the same immutable release tag:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Reederey87/DevStrap/<vX.Y.Z>/scripts/install.sh | sh
+tag=v0.1.1   # pick the release you are installing
+curl -fsSL "https://raw.githubusercontent.com/Reederey87/DevStrap/${tag}/scripts/install.sh" | DEVSTRAP_VERSION="$tag" sh
 ```
 
 ## Download a release binary
@@ -86,8 +88,9 @@ shasum -a 256 --ignore-missing -c checksums.txt   # Linux: sha256sum --ignore-mi
 
 The signature ties `checksums.txt` — and transitively every archive it lists — to a run of this
 repo's release workflow, not to a possibly-compromised uploader. The one-line installer performs
-this cosign check automatically and, when `slsa-verifier` is available, also verifies the matching
-`multiple.intoto.jsonl` provenance before trusting the always-on sha256 check.
+this cosign check automatically and also verifies the matching `multiple.intoto.jsonl` provenance
+(fail-closed; `DEVSTRAP_INSTALL_NO_SLSA=1` is the explicit waiver) before trusting the always-on
+sha256 check.
 
 ## Bleeding edge: `go install`
 

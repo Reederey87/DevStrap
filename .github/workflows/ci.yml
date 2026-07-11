@@ -66,6 +66,14 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # v3
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install slsa-verifier
+        # SLSA verification is fail-closed in the installer (P7-QUAL-02), so the
+        # positive smoke needs the verifier present; pinned via the module proxy.
+        run: go install github.com/slsa-framework/slsa-verifier/v2/cli/slsa-verifier@v2.7.1
       - name: Resolve latest release
         id: release
         run: |
@@ -78,7 +86,7 @@ jobs:
           DEVSTRAP_VERSION: ${{ steps.release.outputs.version }}
           DEVSTRAP_INSTALL_DIR: ${{ runner.temp }}/bin
         run: |
-          bash scripts/install.sh
+          sh scripts/install.sh
           "$RUNNER_TEMP/bin/devstrap" version
       - name: Refuse installation without cosign
         if: matrix.os == 'ubuntu-latest'
@@ -88,7 +96,7 @@ jobs:
         run: |
           # Assert the refusal happens for the RIGHT reason — an unrelated
           # earlier failure (bad version, download error) must not pass this.
-          if out=$(PATH=/usr/bin:/bin bash scripts/install.sh 2>&1); then
+          if out=$(PATH=/usr/bin:/bin sh scripts/install.sh 2>&1); then
             echo "installer unexpectedly succeeded without cosign" >&2
             exit 1
           fi
