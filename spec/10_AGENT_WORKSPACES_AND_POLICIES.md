@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-10
+last_reviewed: 2026-07-11
 tracks_code: [internal/cli/agent.go, internal/cli/forge.go, internal/cli/worktree.go, internal/childenv/**, internal/git/**]
 ---
 # Agent Workspaces and Policies
@@ -256,7 +256,8 @@ Safety:
 - never remove dirty worktree without explicit force;
 - missing manually deleted worktrees require explicit force and run `git worktree prune`;
 - if branch unpushed, warn;
-- quarantine before destructive delete.
+- quarantine before destructive delete;
+- `worktree cleanup --merged` coordinates with `agent_runs` so a live agent worktree is never reaped while a run is still marked running (P7-GIT-01).
 
 ## Agent status view
 

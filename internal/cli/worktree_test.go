@@ -109,6 +109,100 @@ func TestCreateFreshWorktreeCleansUpAfterInsertWorktreeFailure(t *testing.T) {
 	assertNoAgentBranches(t, localPath)
 }
 
+// P7-GIT-01 dirty TOCTOU re-check: cleanupOneWorktree calls DirtyState a second
+// time immediately before WorktreeRemove under the held project repo lock.
+// There is no injectable DirtyState seam in the CLI tests; the re-check is
+// covered by lock scoping (P7-GIT-02) so concurrent mutators cannot interleave
+// between the merge checks and remove without contending for the same lock.
+
+func TestWorktreeCleanupSkipsRunningAgentRunThenReapsAfterFinish(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	_ = setupFreshWorktreeRepo(t, home, root, "auto", false)
+
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "worktree", "new", "work/acme/repo", "--fresh-upstream", "--name", "live agent")
+	if err != nil {
+		t.Fatalf("worktree new stdout = %q stderr = %q err = %v", stdout, stderr, err)
+	}
+	worktrees := listWorktreesForTest(t, home, root)
+	if len(worktrees) != 1 {
+		t.Fatalf("worktree count = %d, want 1: %+v", len(worktrees), worktrees)
+	}
+	wt := worktrees[0]
+
+	store, err := state.Open(context.Background(), filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	dbWT, err := store.WorktreeByID(ctx, wt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Live run with the current test PID so processAlive stays true and
+	// sweepStaleAgentRuns will not reconcile it away.
+	run, err := store.InsertAgentRun(ctx, state.AgentRun{
+		ID:          "arun_live_cleanup",
+		NamespaceID: dbWT.NamespaceID,
+		WorktreeID:  wt.ID,
+		Engine:      "generic",
+		Task:        "still running",
+		Status:      "running",
+		RunnerPID:   os.Getpid(),
+	})
+	if err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	_ = store.Close()
+
+	stdout, stderr, err = executeForTest("--home", home, "--root", root, "worktree", "cleanup", "--merged")
+	if err != nil {
+		t.Fatalf("cleanup while running stdout = %q stderr = %q err = %v", stdout, stderr, err)
+	}
+	if !strings.Contains(stdout, "Cleaned up 0 worktrees (1 skipped)") {
+		t.Fatalf("cleanup while running stdout = %q, want 0 removed / 1 skipped", stdout)
+	}
+	if got := worktreeStatusForTest(t, filepath.Join(home, "state.db"), wt.ID); got != "active" {
+		t.Fatalf("worktree status while running = %q, want active", got)
+	}
+
+	store, err = state.Open(context.Background(), filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateAgentRunStatus(ctx, run.ID, "succeeded"); err != nil {
+		_ = store.Close()
+		t.Fatal(err)
+	}
+	_ = store.Close()
+
+	stdout, stderr, err = executeForTest("--home", home, "--root", root, "worktree", "cleanup", "--merged")
+	if err != nil {
+		t.Fatalf("cleanup after finish stdout = %q stderr = %q err = %v", stdout, stderr, err)
+	}
+	if !strings.Contains(stdout, "Cleaned up 1 worktrees (0 skipped)") {
+		t.Fatalf("cleanup after finish stdout = %q, want 1 removed", stdout)
+	}
+	if got := worktreeStatusForTest(t, filepath.Join(home, "state.db"), wt.ID); got != "removed" {
+		t.Fatalf("worktree status after finish = %q, want removed", got)
+	}
+}
+
+func TestWorktreeCleanupRejectsPositionalArgs(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+	// P7-CLI-02: stray positionals must not be silently discarded on a fleet-wide sweep.
+	_, _, err := executeForTest("--home", home, "--root", root, "worktree", "cleanup", "extra", "--merged")
+	if err == nil {
+		t.Fatal("expected usage error for stray positional on worktree cleanup")
+	}
+	assertAppErrorCode(t, err, exitUsage)
+}
+
 func TestWorktreeCleanupReapsSquashMergedWorktree(t *testing.T) {
 	home := filepath.Join(t.TempDir(), ".devstrap")
 	root := filepath.Join(t.TempDir(), "Code")

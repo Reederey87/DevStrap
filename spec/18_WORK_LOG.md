@@ -31,6 +31,23 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-11 — fix(git): make `worktree cleanup` safe (P7-GIT-01, P7-GIT-02, P7-CLI-02)
+
+Changed:
+- `internal/cli/worktree.go`: `worktree cleanup` gains `Args: usageArgs(cobra.NoArgs)` so a stray positional cannot silently discard into a fleet-wide sweep (P7-CLI-02). Before the loop, `sweepStaleAgentRuns` reconciles dead-PID running rows. Path-present reaps move into `cleanupOneWorktree`, which refuses any still-running `agent_runs` row for the worktree (including no PID), holds `acquireRepoLock` across dirty-check → base-refresh → merge checks → dirty TOCTOU re-check → `WorktreeRemove` → `branch -D` → `MarkWorktreeRemoved`, and skips (warn) on repo lock conflict rather than failing the whole sweep. Path-missing prune stays outside the lock. the lock-taking `refreshWorktreeBase` wrapper had no remaining callers and was removed; cleanup uses the new `refreshWorktreeBaseLocked` (fetch only) under its held lock.
+- `internal/state/store.go`: `RunningAgentRunsByWorktree` — same SELECT/scan shape as `RunningAgentRunsWithPID`, filter `status='running' AND worktree_id=?` (no PID requirement).
+- Tests: store `TestRunningAgentRunsByWorktree`; CLI `TestWorktreeCleanupSkipsRunningAgentRunThenReapsAfterFinish` (live PID blocks, succeeded status reaps), `TestWorktreeCleanupRejectsPositionalArgs`; dirty re-check documented as lock-scoped (no DirtyState seam).
+- Specs: `spec/08`, `spec/10`, `spec/13` document NoArgs + agent-run skip + lock + dirty re-check; ledger moves the three P2s to *Recently shipped* (Pass-7 open 40→37, P2 21→18).
+- Review pass (Codex, 2 Majors fixed): the running-run check moved UNDER cleanup's repo lock, and `agent run` now holds the same lock from worktree creation through `InsertAgentRun` (new `createFreshWorktreeLocked`; orphan cleanup on policy/id/insert failure) — closing the startup window where a fresh agent worktree existed without its running row; the path-missing prune + `MarkWorktreeRemoved` also moved under the lock (metadata prune raced `worktree new` on `.git/worktrees`).
+
+Validated:
+- `gofmt -w cmd internal`
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/cli/ ./internal/state/`
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
+
+Follow-ups:
+- None for these three findings. `P7-GIT-03` (PID-reuse guard on `processAlive`) remains open and is adjacent but distinct.
+
 ## 2026-07-11 — fix(cli): `db backup --full --json` / `db restore --json` emit a single clean JSON document (P7-CLI-01)
 
 Changed:

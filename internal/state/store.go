@@ -4188,6 +4188,33 @@ ORDER BY created_at DESC, id DESC;
 	return runs, rows.Err()
 }
 
+// RunningAgentRunsByWorktree returns agent runs still marked running that are
+// bound to the given worktree (P7-GIT-01: cleanup must not reap a live run).
+func (s *Store) RunningAgentRunsByWorktree(ctx context.Context, worktreeID string) ([]AgentRun, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, namespace_id, COALESCE(worktree_id, ''), engine, task, COALESCE(policy_id, ''), status,
+       COALESCE(base_ref, ''), COALESCE(base_sha, ''), COALESCE(branch, ''), COALESCE(log_path, ''),
+       COALESCE(diff_summary, ''), COALESCE(test_summary, ''), COALESCE(runner_pid, 0),
+       COALESCE(sandbox_backend, ''), COALESCE(sandbox_mode, ''), COALESCE(sandbox_limitations, '')
+FROM agent_runs
+WHERE status = 'running' AND worktree_id = ?
+ORDER BY created_at DESC, id DESC;
+`, worktreeID)
+	if err != nil {
+		return nil, fmt.Errorf("list running agent runs by worktree: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var runs []AgentRun
+	for rows.Next() {
+		var run AgentRun
+		if err := rows.Scan(&run.ID, &run.NamespaceID, &run.WorktreeID, &run.Engine, &run.Task, &run.PolicyID, &run.Status, &run.BaseRef, &run.BaseSHA, &run.Branch, &run.LogPath, &run.DiffSummary, &run.TestSummary, &run.RunnerPID, &run.SandboxBackend, &run.SandboxMode, &run.SandboxLimitations); err != nil {
+			return nil, fmt.Errorf("scan running agent run by worktree: %w", err)
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
 func (s *Store) CountAgentRunsByStatus(ctx context.Context, status string) (int, error) {
 	var count int
 	if err := s.db.QueryRowContext(ctx, `
