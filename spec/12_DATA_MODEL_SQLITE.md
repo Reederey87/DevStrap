@@ -722,7 +722,7 @@ devstrap db backup ~/.devstrap/backups/state-20260623.db
 
 Backups use SQLite `VACUUM INTO`, not file copy, so WAL/SHM state is captured consistently. `db backup` (no `--full`) captures `state.db` **only**. This is a database snapshot, **not a recoverable workspace backup**: a workspace's captured secrets live outside the DB as `age`-encrypted blobs, and the DB holds only `age_blob:<sha256>` string refs. Restoring a lone `state.db` therefore leaves every `age_blob:` ref dangling — `env hydrate` fails and, on the file-custody path, the device identity and WCK epochs needed to decrypt even hub-synced draft blobs are gone. Use `--full` for disaster recovery.
 
-### Full backup / restore (disaster recovery, `P6-DATA-04` + `P7-DATA-03/04` — shipped)
+### Full backup / restore (disaster recovery, `P6-DATA-04` + `P7-DATA-03/04/05` — shipped)
 
 ```bash
 devstrap db backup --full ~/.devstrap/backups/workspace-20260704.tar   # state.db + blobs + keys
@@ -745,7 +745,9 @@ The `VACUUM INTO` file is authoritative: `state.OpenSnapshot` opens it read-only
 
 `db restore` extracts the archive into a sibling stage and, before touching live targets, verifies manifest format/version, every listed entry's size and SHA-256, required-set membership, and absence of unlisted files. It then validates the staged DB with read-only `quick_check` + `foreign_key_check` and cross-checks recovery dependencies against that DB: every blob ref must have a hash-matching `blobs/<sha>.age`, the current device age/signing keys must PARSE and their derived public halves must match the archived database's device row, and every held WCK must decode to 32 bytes whose SHA-256 matches its recorded kid. Pre-manifest archives fail closed unless `--allow-legacy` is explicit; legacy mode emits a warning, skips only manifest integrity, and still runs DB validation and completeness checks.
 
-After all verification succeeds, restore replaces `state.db`, `config.yaml`, `blobs/`, and `keys/` **in place** using the existing sequential per-target `.bak` sibling swap with rollback. It is not a wipe: un-captured state-dir contents (for example `quarantine/` and `logs/`) remain untouched, and existing captured targets require `--force`.
+After verification, promotion is all-or-nothing across `state.db`, `config.yaml`, `blobs/`, and `keys/`. `<home>/.restore-journal.json` is atomically written before the first rename and rewritten after each target promotion; it records the fixed target set, one unique shared `.bak` suffix, whether each target was staged/existed, and whether its promotion is durably done. Every old target is moved aside before any staged target is promoted, and all asides remain until every target is done. Recovery rolls forward by sweeping asides only when all targets are done; otherwise it rolls back in reverse target order to the exact pre-restore state. The journal is removed last.
+
+`devstrap db restore --recover` takes no archive and explicitly completes or reverses an interrupted promotion. A plain `db restore <archive>` auto-recovers first, then validates and restores the supplied archive. Normal state opens fail closed while a journal is pending, and `doctor` reports the journal with the `--recover` remedy. Full backup, restore, `db down`, and each run-loop tick share the state-home maintenance lock. The restore remains an in-place replacement, not a wipe: un-captured siblings such as `quarantine/` and `logs/` remain untouched, and existing captured targets require `--force`.
 
 **Restore runbook (recovering a workspace on a fresh or wiped machine):**
 

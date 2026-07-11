@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand/v2"
@@ -49,7 +50,7 @@ func newRunLoopCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return appError{code: exitInvalidConfig, err: err}
 			}
 			if once {
-				return runLoopTick(cmd.Context(), stdout, stderr, opts, hubFile, namespaceOnly)
+				return runLoopTick(cmd.Context(), stdout, stderr, opts, hubFile, namespaceOnly, true)
 			}
 			// XP-02: foreground loop with jittered backoff. Graceful shutdown
 			// on context cancellation (Ctrl-C / scheduler stop).
@@ -74,7 +75,19 @@ func runLoopJitterBound(interval time.Duration) int64 {
 	return bound
 }
 
-func runLoopTick(ctx context.Context, stdout, stderr io.Writer, opts *options, hubFile string, namespaceOnly bool) error {
+func runLoopTick(ctx context.Context, stdout, stderr io.Writer, opts *options, hubFile string, namespaceOnly, once bool) error {
+	unlock, err := acquireMaintenanceLock(opts.paths().Home)
+	if err != nil {
+		if !once {
+			var appErr appError
+			if errors.As(err, &appErr) && appErr.code == exitConflict {
+				_, _ = fmt.Fprintln(stderr, "maintenance in progress; skipping this cycle")
+				return nil
+			}
+		}
+		return err
+	}
+	defer unlock()
 	// P5-CLI-05: the tick header is progress, not a result — route it to stderr.
 	opts.progressf(stderr, "[%s] run-loop tick: scan + sync + materialize\n", time.Now().UTC().Format(time.RFC3339))
 	// P6-XP-03: scan + adopt at the START of each tick. Without a daemon or
@@ -161,7 +174,7 @@ func runLoopForever(ctx context.Context, stdout, stderr io.Writer, opts *options
 	// tick runs one cycle, tracks consecutive failures, and returns a terminal
 	// error once the loop has failed too many times in a row (P5-CLI-05).
 	tick := func() error {
-		if err := runLoopTick(ctx, stdout, stderr, opts, hubFile, namespaceOnly); err != nil {
+		if err := runLoopTick(ctx, stdout, stderr, opts, hubFile, namespaceOnly, false); err != nil {
 			consecutiveFailures++
 			_, _ = fmt.Fprintf(stderr, "run-loop tick error (%d consecutive): %v\n", consecutiveFailures, err)
 			if consecutiveFailures >= runLoopMaxConsecutiveFailures {

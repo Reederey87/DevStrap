@@ -1,12 +1,19 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
 )
+
+type restoreRecoveryResult struct {
+	Recovered  bool `json:"recovered"`
+	RolledBack bool `json:"rolled_back"`
+}
 
 func newDBCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
@@ -78,6 +85,13 @@ func newDBCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("resolve backup path: %w", err)}
 			}
+			if fullBackup {
+				unlock, err := acquireMaintenanceLock(opts.paths().Home)
+				if err != nil {
+					return err
+				}
+				defer unlock()
+			}
 			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
@@ -96,15 +110,57 @@ func newDBCommand(stdout io.Writer, opts *options) *cobra.Command {
 	backupCmd.Flags().BoolVar(&fullBackup, "full", false, "write a tar archive with the database, encrypted blobs, and key material")
 	cmd.AddCommand(backupCmd)
 
-	var restoreForce, restoreAllowLegacy bool
+	var restoreForce, restoreAllowLegacy, restoreRecover bool
 	restoreCmd := &cobra.Command{
 		Use:   "restore [archive.tar]",
 		Short: "Restore a full backup archive into the state directory",
 		Long: "Restore a `devstrap db backup --full` archive: extract the database,\n" +
 			"encrypted blobs, and key material back into the state directory. Refuses\n" +
 			"to overwrite a non-empty state directory unless --force is given.",
-		Args: usageArgs(cobra.ExactArgs(1)),
+		Args: func(cmd *cobra.Command, args []string) error {
+			if restoreRecover {
+				if len(args) != 0 {
+					return appError{code: exitUsage, err: fmt.Errorf("--recover does not accept an archive path")}
+				}
+				return nil
+			}
+			return usageArgs(cobra.ExactArgs(1))(cmd, args)
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			unlock, err := acquireMaintenanceLock(opts.paths().Home)
+			if err != nil {
+				return err
+			}
+			defer unlock()
+			if restoreRecover {
+				if _, err := os.Stat(restoreJournalPath(opts.paths().Home)); errors.Is(err, os.ErrNotExist) {
+					result := restoreRecoveryResult{}
+					return opts.render(stdout, func(w io.Writer) error {
+						_, err := fmt.Fprintln(w, "no interrupted restore journal found; nothing to recover")
+						return err
+					}, result)
+				} else if err != nil {
+					return fmt.Errorf("inspect restore journal: %w", err)
+				}
+				rolledBack, err := recoverRestoreJournal(opts.paths().Home)
+				if err != nil {
+					return err
+				}
+				result := restoreRecoveryResult{Recovered: true, RolledBack: rolledBack}
+				return opts.render(stdout, func(w io.Writer) error {
+					if rolledBack {
+						_, err = fmt.Fprintln(w, "interrupted restore rolled back; previous state intact; re-run devstrap db restore")
+					} else {
+						_, err = fmt.Fprintln(w, "interrupted restore completed")
+					}
+					return err
+				}, result)
+			}
+			// A plain restore auto-recovers a prior interrupted promotion before
+			// validating and promoting the newly supplied archive.
+			if _, err := recoverRestoreJournal(opts.paths().Home); err != nil {
+				return err
+			}
 			in, err := filepath.Abs(filepath.Clean(args[0]))
 			if err != nil {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("resolve archive path: %w", err)}
@@ -114,12 +170,18 @@ func newDBCommand(stdout io.Writer, opts *options) *cobra.Command {
 	}
 	restoreCmd.Flags().BoolVar(&restoreForce, "force", false, "overwrite a non-empty state directory")
 	restoreCmd.Flags().BoolVar(&restoreAllowLegacy, "allow-legacy", false, "restore a pre-P7 archive without manifest integrity verification")
+	restoreCmd.Flags().BoolVar(&restoreRecover, "recover", false, "recover an interrupted journaled restore (takes no archive path)")
 	cmd.AddCommand(restoreCmd)
 
 	cmd.AddCommand(&cobra.Command{
 		Use:   "down",
 		Short: "Roll back one state database migration",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			unlock, err := acquireMaintenanceLock(opts.paths().Home)
+			if err != nil {
+				return err
+			}
+			defer unlock()
 			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err

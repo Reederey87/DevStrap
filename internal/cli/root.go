@@ -210,7 +210,30 @@ func (o *options) openState(ctx context.Context) (*state.Store, error) {
 		Home: o.v.GetString("home"),
 		Root: o.v.GetString("root"),
 	}
-	return state.Open(ctx, paths.StateDB())
+	checkJournal := func() error {
+		if _, err := os.Stat(restoreJournalPath(paths.Home)); err == nil {
+			return appError{code: exitConflict, err: fmt.Errorf("an interrupted 'db restore' left the state dir mid-swap; run 'devstrap db restore --recover'")}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("inspect restore journal: %w", err)
+		}
+		return nil
+	}
+	if err := checkJournal(); err != nil {
+		return nil, err
+	}
+	store, err := state.Open(ctx, paths.StateDB())
+	if err != nil {
+		return nil, err
+	}
+	// Re-check after opening: a restore that began between the first stat and
+	// state.Open would otherwise hand back a handle onto a mid-swap database.
+	// The journal is durable before the first rename, so the two checks narrow
+	// this TOCTOU to the sub-rename residual documented in the threat model.
+	if err := checkJournal(); err != nil {
+		closeStore(store)
+		return nil, err
+	}
+	return store, nil
 }
 
 func closeStore(store *state.Store) {

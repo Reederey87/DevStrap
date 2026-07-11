@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-10
+last_reviewed: 2026-07-11
 tracks_code: [cmd/**, internal/**, internal/specdrift/**, .github/**, go.mod, go.sum]
 ---
 # Test Plan
@@ -532,7 +532,9 @@ DIRECTION: make "one bad object never wedges or silently skips a device" a first
 
 ### Durability / disaster-recovery drill (AD-7)
 
-DIRECTION: add a plain-text workspace manifest export/import (`workspace.yaml`) as an escape hatch and interop format, document recovering the namespace without DevStrap, and ship `db backup --full` (state.db + blobs + key material) with a `db restore` path (`P6-DATA-04`). Add a recovery drill to the plan:
+Automated P7 backup/restore coverage pins read-only snapshot enumeration during live rotation, fatal missing blobs/no partial output, last-entry manifest hash/size round trips, tampered/truncated/extra-file refusal before swap, archive-to-DB blob and WCK completeness, and legacy `--allow-legacy`. Journal tests inject promotion and rollback failures, prove reverse rollback versus all-done roll-forward, verify fail-closed state opens plus doctor guidance, preserve single-document JSON recovery output, and exercise maintenance-lock conflict/periodic-skip behavior including `db down`. `db_restore_journal_recovery.txtar` drives the real interrupted-restore recovery path.
+
+DIRECTION: add a plain-text workspace manifest export/import (`workspace.yaml`) as an escape hatch and interop format, and document recovering the namespace without DevStrap — the remaining future scope. `db backup --full` (state.db + blobs + key material) and the `db restore` path are SHIPPED (`P6-DATA-04`, hardened by `P7-DATA-03/04/05`: snapshot-authority enumeration, hash manifest + fail-closed verification, journaled all-or-nothing promotion with resumable recovery). The recovery drill:
 
 ```text
 - total hub loss: rebuild the hub from local state + git remotes; prove every device reconverges

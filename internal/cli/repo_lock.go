@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -100,6 +101,20 @@ func acquireRepoLock(home, projectID string) (func(), error) {
 			return nil, appError{code: exitConflict, err: fmt.Errorf("repo operation already in progress: %s", projectID)}
 		}
 		return nil, fmt.Errorf("create repo lock: %w", err)
+	}
+	return unlock, nil
+}
+
+// acquireMaintenanceLock reserves a generated-ID-impossible lock name for
+// operations that must not overlap a restore promotion or a run-loop tick.
+func acquireMaintenanceLock(home string) (func(), error) {
+	unlock, err := acquireRepoLock(home, "maintenance")
+	if err != nil {
+		var appErr appError
+		if errors.As(err, &appErr) && appErr.code == exitConflict {
+			return nil, appError{code: exitConflict, err: fmt.Errorf("another devstrap maintenance operation (restore, full backup, db down, or run-loop cycle) is in progress")}
+		}
+		return nil, err
 	}
 	return unlock, nil
 }
