@@ -8,20 +8,16 @@ import (
 	"github.com/Reederey87/DevStrap/internal/state"
 )
 
-// wckRotationPendingMetaKey is the local_meta row recording that a WCK
-// rotation is OWED: a `devices revoke`/`lost` could not rotate the epoch, so
-// events keep sealing under a key the revoked device still holds until a
-// rotation lands (issue #134). Machine-local retry bookkeeping only — it never
-// rides the event log.
-const wckRotationPendingMetaKey = "wck_rotation_pending"
+// wckRotationPendingMetaKey / wckRotationPendingRecord alias the canonical
+// marker format, which now lives in internal/state so the sync apply path can
+// arm the owed-rotation marker transactionally with a synced/snapshot-imported
+// trust flip (P7-SYNC-04) without importing this package. The marker records
+// that a WCK rotation is OWED: a device revoke could not (or a revoke it only
+// learned of remotely did not) rotate the epoch, so events keep sealing under a
+// key the revoked device still holds until a local Rotate lands (issue #134).
+const wckRotationPendingMetaKey = state.WCKRotationPendingMetaKey
 
-// wckRotationPendingRecord is the JSON value of the pending row. Epoch records
-// the epoch that was ACTIVE when the rotation failed (diagnostic only — see
-// wckRotationPendingSince for why it must NOT drive resolution).
-type wckRotationPendingRecord struct {
-	Epoch int64     `json:"epoch"`
-	Since time.Time `json:"since"`
-}
+type wckRotationPendingRecord = state.WCKRotationPendingRecord
 
 // markWCKRotationPending persists the owed-rotation marker after a failed
 // revoke-path rotation so sync's rotation gate retries it on every cycle.

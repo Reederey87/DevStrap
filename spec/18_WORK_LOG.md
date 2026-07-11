@@ -31,6 +31,24 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-10 — fix(sync): every device that learns of a revoke owes the WCK rotation (P7-SYNC-04)
+
+Changed:
+- `internal/state/wck_rotation.go` (new): the `wck_rotation_pending` marker format (`WCKRotationPendingMetaKey` / `WCKRotationPendingRecord`) moves here from `internal/cli` so `internal/sync` can arm it transactionally without importing `internal/cli` (layering). New Tx helpers: `CurrentKeyEpochTx` (transactional form of `CurrentKeyEpoch`) and `SetWCKRotationPendingTx(epoch)` — arms the owed-rotation marker, `epoch<=0` is a no-op (keyless device holds no key to protect and its rotation gate skips epoch 0, which would strand the marker), and an existing marker is left untouched (storm-guard: preserves the original "owed since" so a later flip cannot reset the clock and replays/re-imports are inert; a malformed existing marker stays pending, matching the cli reader's fail-closed treatment).
+- `internal/cli/wck_rotation.go`: `wckRotationPendingMetaKey`/`wckRotationPendingRecord` become aliases of the `internal/state` exports (single source of truth); the revoke-path `markWCKRotationPending`/`wckRotationPendingSince`/`clearWCKRotationPending` helpers and the `sync` rotation gate / `doctor` are unchanged, so a marker armed by the sync apply path is consumed by the existing gate.
+- `internal/sync/events.go`: the `EventDeviceRevoked`/`EventDeviceLost` apply, on an actual flip, reads `CurrentKeyEpochTx` and calls `SetWCKRotationPendingTx` in the same transaction as the flip. A device that only LEARNS of a revoke — not just the revoker — now owes the forward-secrecy rotation, so the fleet stops sealing under an epoch the revoked device holds even if the revoker's own rotation failed and it went offline.
+- `internal/sync/snapshot_import.go`: `importTrustTx` does the same on `changedAny`, so a device that learns of a revocation via snapshot bootstrap (the `P7-SYNC-01` recovery path) also owes the rotation; the stale "not set here — tracked as P7-SYNC-04" comment is replaced.
+- Tests: `internal/state/wck_rotation_test.go` (helper unit tests: arms at epoch>0, epoch-0 no-op, storm-guard preserves the original record, `CurrentKeyEpochTx` matches `CurrentKeyEpoch`); `internal/sync/wck_rotation_owed_test.go` (remote `device.revoked`/`device.lost` apply arms the marker at the active epoch; snapshot-import flip arms it; keyless epoch-0 device flips trust but never arms; storm-guard — replay never touches the marker and a later distinct flip preserves the original Since); `cmd/devstrap/testdata/script/sync_never_granted_epoch_wedge.txtar` updated — B now rotates to epoch 3 on learning of D's revoke, so it grants 3 (not 2) held epochs on re-approving C (the P7-SYNC-04 fix observed end-to-end).
+- Docs: `spec/07` TRUST-01 apply + revoke/lost rotation bullet gain the P7-SYNC-04 fleet extension and the accepted "each learner rotates once" residual; `spec/15` §"revoked device keeps pushing" threat gains the same; ledger row moved to *Recently shipped* (Pass-7 open 42→41, P3 20→19).
+
+Validated:
+- `gofmt -l cmd internal` (clean); `golangci-lint run` (0 issues)
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `DEVSTRAP_NO_KEYCHAIN=1 go test -race ./...` (all green, incl. the updated txtar)
+
+Follow-ups:
+- None. Accepted residual (documented spec/07/15): each device that learns of a revoke rotates once — a newer epoch is not proof of exclusion (a peer that has not pulled the revoke can regrant it), so the containment is intentionally per-learner; bounded (grants never arm the marker), terminating, forward-secure.
+
 ## 2026-07-10 — fix(sync): carry terminal device-trust in snapshot.v2 (P7-SYNC-01, the Pass-7 P1)
 
 Changed:

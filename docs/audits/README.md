@@ -40,6 +40,7 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 
 | ID | Sev | Shipped | Note |
 |---|---|---|---|
+| P7-SYNC-04 | P3 | `fix/p7-sync-04` (2026-07-10) | Self-healing WCK rotation is now owed by every device that LEARNS of a revocation, not only the local revoker. The trust-apply path (`internal/sync/events.go` `device.revoked`/`lost`) and the snapshot importer (`importTrustTx`) arm the `wck_rotation_pending` marker transactionally with the flip, guarded on epoch>0, so the receiver's next `sync` rotation gate mints epoch+1 excluding the revoked device. The marker format moved to `internal/state` (`SetWCKRotationPendingTx`/`CurrentKeyEpochTx`, storm-guarded to preserve the original "owed since") so `internal/sync` writes it without importing `internal/cli`. Accepted residual (spec/07/15): a newer epoch is not proof of exclusion (a peer that hasn't pulled the revoke can regrant it), so each learner rotates once — bounded, terminating, forward-secure. |
 | P7-SEC-02 | P2 | `fix/p7-sec-02` (2026-07-10) | `devices revoke`/`lost` writes a merged, machine-local `revoke_containment_pending` record in the same transaction as the trust flip and synced event. The direct path clears its device only after rotation is complete or separately owed, secret bindings are flagged, and blob rewrap succeeds; `sync` resumes crash-interrupted containment after pull, rotates at most once per cycle, and `doctor` names pending devices/timestamps. |
 | P4-SEC-02 | P1 | PR #25 (`8c739b8`) | Namespace-map event log is envelope-encrypted at rest on the hub (`internal/sync/eventcrypt.go`, `encryptedhub.go`). Fully shipped — no longer open. |
 | P4-SEC-07 | P2 | PR #25 (`8c739b8`), foundation | WCK epoch keyring (`internal/workspacekeys`) + age-wrapped grants + `Rotate` on revoke. Foundation only; **open remainder** tracked below. |
@@ -105,9 +106,9 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P7-SEC-01 | P2 | `fix/p7-sec-01` (2026-07-10) | Sandbox credential deny-list gains `~/.config/gcloud` (GCP refresh tokens), `~/.azure` (Azure CLI tokens), and `~/.git-credentials` (git's plaintext `credential.helper store` — the `.gitconfig` that WAS masked merely points at it). Added to the single `sensitiveHomeDirs`/`sensitiveHomeFiles` source in `internal/platform/sandbox_profile.go`, so the Seatbelt profile, bubblewrap masks, `credentialAnchors`, and `readConfineRoots` all inherit them; the wrapper-level `denyParts` in `agent.go` gains the same three for parity. Regression-pinned by `TestBwrapSensitivePathsCoversCloudAndGitCredentials` and `TestCredentialAnchorsCoverCloudAndGitCredentials`. spec/05/10/15 enumerations updated. |
 | P7-QUAL-03 | P2 | `fix/p7-qual-03` (2026-07-10) | The Ubuntu release job now rejects partial macOS notarization configuration before GoReleaser with a 0-or-5 gate over all five `MACOS_*` secrets, reporting only set/missing names. GoReleaser's dormant `isEnvSet "MACOS_SIGN_P12"` activation is unchanged. Because Ubuntu cannot run `spctl`, `RELEASING.md` requires a manual post-release Gatekeeper assessment of the extracted darwin binary on a Mac before rc promotion or cask update. |
 
-### Pass 7 (2026-07-10) — 42 open of 47
+### Pass 7 (2026-07-10) — 41 open of 47
 
-Full detail and `file:line` evidence in [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md`](AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md). The header count equals the rows below (P1=0, P2=22, P3=20 = 42; `P7-SYNC-01` (the P1), `P7-SEC-01`, `P7-SEC-02`, `P7-QUAL-03`, and `P7-HUB-05` shipped 2026-07-10 — see *Recently shipped*). Two candidate findings were merged and are not counted twice: the revocation-compaction finding into `P7-SYNC-01`, and the post-revoke rotation-flag finding into `P7-SEC-02`.
+Full detail and `file:line` evidence in [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md`](AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md). The header count equals the rows below (P1=0, P2=22, P3=19 = 41; `P7-SYNC-01` (the P1), `P7-SEC-01`, `P7-SEC-02`, `P7-QUAL-03`, `P7-HUB-05`, and `P7-SYNC-04` shipped 2026-07-10 — see *Recently shipped*). Two candidate findings were merged and are not counted twice: the revocation-compaction finding into `P7-SYNC-01`, and the post-revoke rotation-flag finding into `P7-SEC-02`.
 
 | ID | Sev | Finding | Effort |
 |---|---|---|---|
@@ -138,7 +139,6 @@ Full detail and `file:line` evidence in [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7
 | P7-SEC-05 | P3 | `TRUST-01` gives one compromised approved device a fleet-wide revocation + rotation-lockout DoS (threat-model doc gap) | S |
 | P7-SYNC-02 | P3 | `TRUST-01` makes convergence delivery-order-dependent for a revoked device's pre-revocation events | M |
 | P7-SYNC-03 | P3 | Draft-snapshot "latest" selection uses non-deterministic local tiebreakers (`created_at`/`id`) | S |
-| P7-SYNC-04 | P3 | Self-healing WCK rotation is owed only by the local revoker; a fleet learning via synced trust never closes the epoch | M |
 | P7-HUB-01 | P3 | Git carrier does one fetch+commit+push per hub object, not per sync cycle (history bloat + push churn) | M |
 | P7-HUB-03 | P3 | Carrier local caches grow unbounded — clone never `git gc`'d, `observed.json` never prunes compacted keys (folds in host-GC-lag) | M |
 | P7-DATA-06 | P3 | Env-sync/rewrap reference scans lack blob-reference indexes (toward quadratic on large fleets) | S |
