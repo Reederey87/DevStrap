@@ -107,7 +107,7 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 
 ### Pass 7 (2026-07-10) — 42 open of 47
 
-Full detail and `file:line` evidence in [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md`](AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md). The header count equals the rows below (P1=0, P2=22, P3=20 = 42; `P7-SYNC-01` (the P1), `P7-SEC-01`, `P7-SEC-02`, `P7-QUAL-03`, and `P7-HUB-05` shipped 2026-07-10 — see *Recently shipped*), `P7-SEC-01`, `P7-SEC-02`, and `P7-HUB-05` shipped 2026-07-10 — see *Recently shipped*). Two candidate findings were merged and are not counted twice: the revocation-compaction finding into `P7-SYNC-01`, and the post-revoke rotation-flag finding into `P7-SEC-02`.
+Full detail and `file:line` evidence in [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md`](AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md). The header count equals the rows below (P1=0, P2=22, P3=20 = 42; `P7-SYNC-01` (the P1), `P7-SEC-01`, `P7-SEC-02`, `P7-QUAL-03`, and `P7-HUB-05` shipped 2026-07-10 — see *Recently shipped*). Two candidate findings were merged and are not counted twice: the revocation-compaction finding into `P7-SYNC-01`, and the post-revoke rotation-flag finding into `P7-SEC-02`.
 
 | ID | Sev | Finding | Effort |
 |---|---|---|---|
