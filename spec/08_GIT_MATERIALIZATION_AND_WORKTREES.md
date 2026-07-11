@@ -369,8 +369,8 @@ Current implementation uses this lock for `hydrate` and `worktree new`. `worktre
 Lock timeout behavior:
 
 - lock files are created atomically with `O_CREATE|O_EXCL`;
-- lock files include PID, hostname, and acquisition time;
-- an active same-host owner blocks the operation;
+- lock files include PID, opaque process start-time identity (when the platform exposes it), hostname, and acquisition time;
+- an active same-host owner blocks the operation while its PID is alive and, when a start-time identity was recorded, that identity still matches; a live PID with a mismatched identity is a recycled PID and therefore stale, while a missing identity or a failed lookup conservatively keeps the lock (`P7-GIT-03`);
 - a dead same-host owner or an over-age lock is reclaimed;
 - stale removal double-reads the file before deleting so a refreshed lock is not removed accidentally.
 

@@ -31,6 +31,19 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-11 — fix(git): guard repo locks and agent-run sweeps against PID reuse (P7-GIT-03)
+
+Changed:
+- Added build-tagged `platform.ProcessStartTime`: raw `/proc/<pid>/stat` field 22 on Linux (robust to spaces/parentheses in `comm`), `kern.proc.pid` start time in microseconds on macOS, and `errors.ErrUnsupported` elsewhere. Values remain opaque same-host/same-boot equality identities.
+- Repo locks now record `started_at`; same-host stale detection requires both PID liveness and matching process identity, while missing identities and lookup errors retain the conservative legacy behavior. Agent runs record the same identity through migration `00024`, and the crash sweep interrupts a run when its live PID belongs to a different process.
+- Threaded `runner_started_at` through every `agent_runs` insert/select/scan, bumped schema expectations to 24, and added matching/mismatching/lookup-error lock coverage plus matching/mismatching live-PID sweep coverage and platform round-trip tests.
+- Updated specs 08/10/12/13/15 and the audit ledger; Pass 7 open arithmetic moves 41→40 and P2 22→21.
+
+Validated:
+- `gofmt -w cmd internal`; `GOCACHE=/tmp/devstrap-gocache go test ./internal/state/ ./internal/cli/ ./internal/platform/`; `GOCACHE=/tmp/devstrap-gocache go test -race ./...`.
+- `GOLANGCI_LINT_CACHE=/tmp/devstrap-golangci-cache-pr5 go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` (0 issues).
+- Cross-compiled `internal/platform` tests for Darwin (`GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go test -c`) to verify the sysctl adapter shape.
+
 ## 2026-07-11 — fix(git): make `worktree cleanup` safe (P7-GIT-01, P7-GIT-02, P7-CLI-02)
 
 Changed:

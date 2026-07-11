@@ -40,6 +40,7 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 
 | ID | Sev | Shipped | Note |
 |---|---|---|---|
+| P7-GIT-03 | P2 | `fix/p7-git-03-pid-reuse` (2026-07-11) | Repo locks and agent-run crash sweeps now pair a PID with an opaque platform start-time identity. Linux records raw `/proc/<pid>/stat` field 22 and macOS records `kern.proc.pid` start time in microseconds; a live PID with a different identity is treated as recycled, while a missing identity or failed lookup preserves conservative legacy behavior. Migration 00024 adds `agent_runs.runner_started_at`. Pass-7 arithmetic: open 41→40; P2 22→21. |
 | P7-SYNC-04 | P3 | `fix/p7-sync-04` (2026-07-10) | Self-healing WCK rotation is now owed by every device that LEARNS of a revocation, not only the local revoker. The trust-apply path (`internal/sync/events.go` `device.revoked`/`lost`) and the snapshot importer (`importTrustTx`) arm the `wck_rotation_pending` marker transactionally with the flip, guarded on epoch>0, so the receiver's next `sync` rotation gate mints epoch+1 excluding the revoked device. The marker format moved to `internal/state` (`SetWCKRotationPendingTx`/`CurrentKeyEpochTx`, storm-guarded to preserve the original "owed since") so `internal/sync` writes it without importing `internal/cli`. Accepted residual (spec/07/15): a newer epoch is not proof of exclusion (a peer that hasn't pulled the revoke can regrant it), so each learner rotates once — bounded, terminating, forward-secure. |
 | P7-SEC-02 | P2 | `fix/p7-sec-02` (2026-07-10) | `devices revoke`/`lost` writes a merged, machine-local `revoke_containment_pending` record in the same transaction as the trust flip and synced event. The direct path clears its device only after rotation is complete or separately owed, secret bindings are flagged, and blob rewrap succeeds; `sync` resumes crash-interrupted containment after pull, rotates at most once per cycle, and `doctor` names pending devices/timestamps. |
 | P4-SEC-02 | P1 | PR #25 (`8c739b8`) | Namespace-map event log is envelope-encrypted at rest on the hub (`internal/sync/eventcrypt.go`, `encryptedhub.go`). Fully shipped — no longer open. |
@@ -110,9 +111,9 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P7-GIT-02 | P2 | `fix/p7-git-01-cleanup-safety` (2026-07-11) | Cleanup path-present mutations now hold `acquireRepoLock` for the whole sequence (was only the base fetch inside `refreshWorktreeBase`). Split `refreshWorktreeBaseLocked` avoids nested-lock deadlock. |
 | P7-CLI-02 | P2 | `fix/p7-git-01-cleanup-safety` (2026-07-11) | `worktree cleanup` sets `Args: usageArgs(cobra.NoArgs)` so a stray positional cannot be silently discarded on a fleet-wide destructive sweep. |
 
-### Pass 7 (2026-07-10) — 37 open of 47
+### Pass 7 (2026-07-10) — 36 open of 47
 
-Full detail and `file:line` evidence in [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md`](AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md). The header count equals the rows below (P1=0, P2=18, P3=19 = 37; `P7-SYNC-01` (the P1), `P7-SEC-01`, `P7-SEC-02`, `P7-QUAL-03`, `P7-HUB-05`, and `P7-SYNC-04` shipped 2026-07-10, and `P7-CLI-01`, `P7-GIT-01`, `P7-GIT-02`, and `P7-CLI-02` shipped 2026-07-11 — see *Recently shipped*). Two candidate findings were merged and are not counted twice: the revocation-compaction finding into `P7-SYNC-01`, and the post-revoke rotation-flag finding into `P7-SEC-02`.
+Full detail and `file:line` evidence in [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md`](AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md). The header count equals the rows below (P1=0, P2=17, P3=19 = 36; `P7-SYNC-01` (the P1), `P7-SEC-01`, `P7-SEC-02`, `P7-QUAL-03`, `P7-HUB-05`, and `P7-SYNC-04` shipped 2026-07-10, and `P7-CLI-01`, `P7-GIT-01`, `P7-GIT-02`, `P7-CLI-02`, and `P7-GIT-03` shipped 2026-07-11 — see *Recently shipped*). Two candidate findings were merged and are not counted twice: the revocation-compaction finding into `P7-SYNC-01`, and the post-revoke rotation-flag finding into `P7-SEC-02`.
 
 | ID | Sev | Finding | Effort |
 |---|---|---|---|
@@ -124,7 +125,6 @@ Full detail and `file:line` evidence in [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7
 | P7-QUAL-01 | P2 | Stable promotion rebuilds and publishes artifacts that were never smoke-tested as release candidates | L |
 | P7-QUAL-04 | P2 | Shipped `devstrap service` install has no live launchd/systemd end-to-end gate in CI | M |
 | P7-QUAL-07 | P2 | Folder-carrier advisory lock stale-break has no owner/PID check; a suspend-mid-write lets two writers hold it | M |
-| P7-GIT-03 | P2 | `processAlive` has no PID-reuse guard; repo-lock staleness + agent-run sweep can wedge after PID recycling | M |
 | P7-XP-01 | P2 | `service install` pins the Homebrew Cellar path; `brew upgrade` silently bricks the unit | M |
 | P7-XP-02 | P2 | `service install` never checks key custody; a keychain-custody store strands the headless run-loop | M |
 | P7-XP-03 | P2 | systemd `service uninstall` requires a live `--user` manager; headless/SSH cannot remove a unit `status` still reports | S |

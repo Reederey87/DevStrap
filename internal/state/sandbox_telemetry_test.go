@@ -38,6 +38,8 @@ func TestAgentRunSandboxColumnsRoundTrip(t *testing.T) {
 		Engine:             "generic",
 		Task:               "sandbox columns",
 		Status:             "running",
+		RunnerPID:          1234,
+		RunnerStartedAt:    5678,
 		SandboxBackend:     "seatbelt",
 		SandboxMode:        "require",
 		SandboxLimitations: `["lim-a","lim-b"]`,
@@ -51,6 +53,9 @@ func TestAgentRunSandboxColumnsRoundTrip(t *testing.T) {
 	}
 	if got.SandboxBackend != "seatbelt" || got.SandboxMode != "require" || got.SandboxLimitations != `["lim-a","lim-b"]` {
 		t.Fatalf("sandbox columns = backend %q mode %q limitations %q", got.SandboxBackend, got.SandboxMode, got.SandboxLimitations)
+	}
+	if got.RunnerPID != 1234 || got.RunnerStartedAt != 5678 {
+		t.Fatalf("runner identity = pid %d started_at %d, want 1234/5678", got.RunnerPID, got.RunnerStartedAt)
 	}
 }
 

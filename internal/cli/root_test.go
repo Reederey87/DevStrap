@@ -286,7 +286,7 @@ func TestInitStatusAndDBCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stdout = %q stderr = %q err = %v", stdout, stderr, err)
 	}
-	if !strings.Contains(stdout, "schema version: 23") || !strings.Contains(stdout, "sqlite quick_check: ok") || !strings.Contains(stdout, "sqlite foreign_key_check: ok") {
+	if !strings.Contains(stdout, "schema version: 24") || !strings.Contains(stdout, "sqlite quick_check: ok") || !strings.Contains(stdout, "sqlite foreign_key_check: ok") {
 		t.Fatalf("stdout = %q, want db status", stdout)
 	}
 	syncHubPath := filepath.Join(t.TempDir(), "hub.json")
@@ -957,19 +957,59 @@ func TestRepoLockRejectsActiveAndReclaimsStaleOwner(t *testing.T) {
 
 	oldAlive := repoLockProcessAlive
 	oldStaleAfter := repoLockStaleAfter
-	repoLockProcessAlive = func(pid int) bool { return false }
+	oldProcessStartTime := processStartTime
+	repoLockProcessAlive = func(pid int) bool { return true }
 	repoLockStaleAfter = time.Hour
 	t.Cleanup(func() {
 		repoLockProcessAlive = oldAlive
 		repoLockStaleAfter = oldStaleAfter
+		processStartTime = oldProcessStartTime
 	})
 
 	lockDir := filepath.Join(home, "locks")
 	if err := os.MkdirAll(lockDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	lockPath := filepath.Join(lockDir, "prj_test.lock")
+	writeLock := func(startedAt int64) {
+		t.Helper()
+		raw, err := json.Marshal(repoLockInfo{
+			PID:        os.Getpid(),
+			StartedAt:  startedAt,
+			Hostname:   hostname(),
+			AcquiredAt: time.Now().UTC().Format(time.RFC3339Nano),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(lockPath, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	processStartTime = func(int) (int64, error) { return 222, nil }
+	writeLock(222)
+	if stale, err := repoLockIsStale(lockPath); err != nil || stale {
+		t.Fatalf("matching live process identity: stale=%v err=%v, want false, nil", stale, err)
+	}
+
+	processStartTime = func(int) (int64, error) { return 0, errors.New("lookup failed") }
+	writeLock(222)
+	if stale, err := repoLockIsStale(lockPath); err != nil || stale {
+		t.Fatalf("indeterminate live process identity: stale=%v err=%v, want false, nil", stale, err)
+	}
+
+	processStartTime = func(int) (int64, error) { return 222, nil }
+	writeLock(111)
+	unlock, err = acquireRepoLock(home, "prj_test")
+	if err != nil {
+		t.Fatalf("PID-reused lock was not reclaimed: %v", err)
+	}
+	unlock()
+
+	repoLockProcessAlive = func(pid int) bool { return false }
 	staleInfo := `{"pid":999999,"hostname":"` + hostname() + `","acquired_at":"` + time.Now().UTC().Format(time.RFC3339Nano) + `"}`
-	if err := os.WriteFile(filepath.Join(lockDir, "prj_test.lock"), []byte(staleInfo), 0o600); err != nil {
+	if err := os.WriteFile(lockPath, []byte(staleInfo), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	unlock, err = acquireRepoLock(home, "prj_test")
@@ -1326,6 +1366,9 @@ func TestAgentRunSweepReconcilesDeadRunnerPID(t *testing.T) {
 
 	store, projectID := seedAgentSweepRuns(t, home)
 	closeStore(store)
+	oldProcessStartTime := processStartTime
+	processStartTime = func(int) (int64, error) { return 222, nil }
+	t.Cleanup(func() { processStartTime = oldProcessStartTime })
 
 	stdout, stderr, err := executeForTest("--home", home, "agent", "list", "--json")
 	if err != nil {
@@ -1344,6 +1387,12 @@ func TestAgentRunSweepReconcilesDeadRunnerPID(t *testing.T) {
 	}
 	if got := statusByID["arun_null"]; got != "running" {
 		t.Fatalf("arun_null status after list = %q, want running", got)
+	}
+	if got := statusByID["arun_reused"]; got != "interrupted" {
+		t.Fatalf("arun_reused status after list = %q, want interrupted", got)
+	}
+	if got := statusByID["arun_identity_live"]; got != "running" {
+		t.Fatalf("arun_identity_live status after list = %q, want running", got)
 	}
 
 	stdout, stderr, err = executeForTest("--home", home, "agent", "show", "arun_dead")
@@ -1411,6 +1460,8 @@ func seedAgentSweepRuns(t *testing.T, home string) (*state.Store, string) {
 		{ID: "arun_dead", NamespaceID: project.ID, Engine: "generic", Task: "dead", Status: "running", RunnerPID: deadProcessPID(t)},
 		{ID: "arun_live", NamespaceID: project.ID, Engine: "generic", Task: "live", Status: "running", RunnerPID: os.Getpid()},
 		{ID: "arun_null", NamespaceID: project.ID, Engine: "generic", Task: "null", Status: "running"},
+		{ID: "arun_reused", NamespaceID: project.ID, Engine: "generic", Task: "reused", Status: "running", RunnerPID: os.Getpid(), RunnerStartedAt: 111},
+		{ID: "arun_identity_live", NamespaceID: project.ID, Engine: "generic", Task: "identity live", Status: "running", RunnerPID: os.Getpid(), RunnerStartedAt: 222},
 	} {
 		if _, err := store.InsertAgentRun(ctx, run); err != nil {
 			closeStore(store)
