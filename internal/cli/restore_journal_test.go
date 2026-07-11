@@ -146,6 +146,73 @@ func TestRecoverRestoreJournalRollsBackUntilEveryTargetDone(t *testing.T) {
 	}
 }
 
+// TestRecoverRestoreJournalResumesInterruptedRollback (Codex review P2): a
+// rollback that reverses some targets and then fails must record its progress
+// durably, so a second recovery run resumes at the un-reversed targets instead
+// of failing the already-reversed target's now-satisfied invariants.
+func TestRecoverRestoreJournalResumesInterruptedRollback(t *testing.T) {
+	home := t.TempDir()
+	const suffix = ".bak-42-123"
+	// Two existed+staged targets mid-promotion: state.db (Done) and
+	// config.yaml (not Done) — both promoted copies present with asides.
+	writeTarget(t, home, backupEntryDB, "new-db")
+	writeTarget(t, home, backupEntryDB+suffix, "old-db")
+	writeTarget(t, home, backupEntryConfig, "new-cfg")
+	writeTarget(t, home, backupEntryConfig+suffix, "old-cfg")
+	targets := make([]restoreJournalTarget, 0, len(backupTargets))
+	for _, name := range backupTargets {
+		staged := name == backupEntryDB || name == backupEntryConfig
+		targets = append(targets, restoreJournalTarget{
+			Name: name, Staged: staged, Existed: staged, Done: !staged || name == backupEntryDB,
+		})
+	}
+	j := restoreJournal{Version: 1, PID: 42, AsideSuffix: suffix, Targets: targets}
+	if err := writeRestoreJournal(restoreJournalPath(home), j); err != nil {
+		t.Fatal(err)
+	}
+
+	// First recovery: rollback runs in reverse target order, so config.yaml
+	// reverses first; fail the aside-restoring rename for state.db only.
+	realRename := renameBackupTarget
+	renameBackupTarget = func(oldPath, newPath string) error {
+		if strings.HasSuffix(oldPath, backupEntryDB+suffix) {
+			return errors.New("injected rename failure")
+		}
+		return os.Rename(oldPath, newPath)
+	}
+	t.Cleanup(func() { renameBackupTarget = realRename })
+	if _, err := recoverRestoreJournal(home); err == nil {
+		t.Fatal("first recovery unexpectedly succeeded")
+	}
+	// config.yaml's reversal must be durably recorded in the retained journal.
+	raw, err := os.ReadFile(restoreJournalPath(home))
+	if err != nil {
+		t.Fatalf("journal must be retained: %v", err)
+	}
+	if !strings.Contains(string(raw), `"rolled_back": true`) {
+		t.Fatalf("journal did not record rollback progress: %s", raw)
+	}
+
+	// Second recovery with the failure cleared resumes and completes.
+	renameBackupTarget = realRename
+	rolledBack, err := recoverRestoreJournal(home)
+	if err != nil {
+		t.Fatalf("resumed recovery: %v", err)
+	}
+	if !rolledBack {
+		t.Fatal("resumed recovery did not report rollback")
+	}
+	for name, want := range map[string]string{backupEntryDB: "old-db", backupEntryConfig: "old-cfg"} {
+		got, err := os.ReadFile(filepath.Join(home, name))
+		if err != nil || string(got) != want {
+			t.Fatalf("%s=%q err=%v want %q", name, got, err, want)
+		}
+	}
+	if _, err := os.Stat(restoreJournalPath(home)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("journal remains after resumed recovery: %v", err)
+	}
+}
+
 func TestRecoverRestoreJournalRetainsJournalOnInvariantDamage(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

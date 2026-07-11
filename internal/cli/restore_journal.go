@@ -32,6 +32,12 @@ type restoreJournalTarget struct {
 	Staged  bool   `json:"staged"`
 	Existed bool   `json:"existed"`
 	Done    bool   `json:"done"`
+	// RolledBack records durable rollback progress per target so an
+	// interrupted rollback is RESUMABLE: a re-run skips already-reversed
+	// targets instead of failing their now-satisfied invariants (Codex
+	// review — a crash between an aside-restoring rename and journal
+	// removal previously wedged recovery behind manual repair).
+	RolledBack bool `json:"rolled_back,omitempty"`
 }
 
 func restoreJournalPath(home string) string { return filepath.Join(home, restoreJournalName) }
@@ -193,6 +199,9 @@ func recoverRestoreJournal(home string) (rolledBack bool, err error) {
 	// staged destination. Damage or manual deletion retains the journal and
 	// fails closed instead of certifying a mixed/incomplete generation.
 	for _, target := range j.Targets {
+		if target.RolledBack {
+			continue // this target's reversal is durably recorded; its aside is legitimately gone
+		}
 		dst := filepath.Join(home, target.Name)
 		aside := dst + j.AsideSuffix
 		if allDone && target.Staged {
@@ -219,8 +228,12 @@ func recoverRestoreJournal(home string) (rolledBack bool, err error) {
 		var recoveryErr error
 		for i := len(j.Targets) - 1; i >= 0; i-- {
 			target := j.Targets[i]
+			if target.RolledBack {
+				continue
+			}
 			dst := filepath.Join(home, target.Name)
 			aside := dst + j.AsideSuffix
+			reversed := false
 			if target.Existed && target.Staged {
 				if _, statErr := os.Lstat(aside); statErr == nil {
 					if removeErr := os.RemoveAll(dst); removeErr != nil {
@@ -229,15 +242,32 @@ func recoverRestoreJournal(home string) (rolledBack bool, err error) {
 					}
 					if renameErr := renameBackupTarget(aside, dst); renameErr != nil {
 						recoveryErr = errors.Join(recoveryErr, fmt.Errorf("restore aside %s: %w", target.Name, renameErr))
+					} else {
+						reversed = true
 					}
 				} else if !errors.Is(statErr, os.ErrNotExist) {
 					recoveryErr = errors.Join(recoveryErr, fmt.Errorf("inspect aside %s: %w", target.Name, statErr))
+				} else {
+					reversed = true // never moved aside: nothing to reverse
 				}
 			} else if target.Staged && !target.Existed {
 				// The rename may have succeeded just before a crash/journal-write
 				// failure, even when Done is still false.
 				if removeErr := os.RemoveAll(dst); removeErr != nil {
 					recoveryErr = errors.Join(recoveryErr, fmt.Errorf("remove promoted %s: %w", target.Name, removeErr))
+				} else {
+					reversed = true
+				}
+			} else {
+				reversed = true // unstaged target: never touched
+			}
+			// Persist rollback progress durably BEFORE moving on, so a crash
+			// here resumes at the next target instead of failing the already-
+			// reversed target's invariants.
+			if reversed {
+				j.Targets[i].RolledBack = true
+				if writeErr := writeRestoreJournal(journalPath, j); writeErr != nil {
+					recoveryErr = errors.Join(recoveryErr, fmt.Errorf("record rollback of %s: %w", target.Name, writeErr))
 				}
 			}
 		}

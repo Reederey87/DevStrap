@@ -44,6 +44,7 @@ Changed:
 Validated:
 - `gofmt -w cmd internal`; `GOCACHE=/tmp/devstrap-gocache go test ./internal/state/ ./internal/cli/ -count=1`; `GOCACHE=/tmp/devstrap-gocache go test ./cmd/devstrap -run 'TestScript/db_' -count=1`.
 - Provenance: ported from the interrupted prior session's `fix/p7-data-backup-hardening` (DATA-05 slice) by Codex (gpt-5.6); coordinator (fable-5) deep review walked the crash matrix (mid-aside, promote-without-record, all-Done-unswept, damaged journal, journal-write-failure-after-commit) — no findings.
+- Post-review (Codex, dual-review): (P2 fixed) the ROLLBACK path is now itself crash-resumable — each reversed target is durably recorded (`rolled_back`) before the loop continues, so a crash or partial failure mid-rollback no longer leaves a journal whose satisfied invariants read as damage (which previously wedged recovery behind manual repair); resumed recovery skips reversed targets. Pinned by `TestRecoverRestoreJournalResumesInterruptedRollback` (injected rename failure on the second target; second run resumes and completes to the exact pre-state).
 
 Follow-ups:
 - None.
