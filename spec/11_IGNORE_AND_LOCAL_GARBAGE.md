@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-11
+last_reviewed: 2026-07-12
 tracks_code: [internal/ignore/**, internal/draftbundle/**, internal/scan/**, .gitignore]
 ---
 # Ignore Rules and Local Garbage
@@ -289,9 +289,12 @@ Action: capture encrypted env, ignore file, or leave unmanaged.
 
 Ignore matching is **NFC-normalized and case-sensitive**, deliberately:
 
-- **NFC (shipped, `P7-XP-04`).** APFS readdir returns decomposed (NFD) names while
-  `.devstrapignore` files are almost always composed (NFC), so a byte-exact matcher silently
-  failed to prune `café/` on macOS while pruning it on a Linux NFC tree — the same policy then
+- **NFC (shipped, `P7-XP-04`).** A macOS tree routinely carries decomposed (NFD) names — APFS
+  is normalization-preserving (unlike HFS+, it does not force NFD), so whatever an HFS+-migrated
+  volume, an extracted archive, a network filesystem, or an NFD-writing app put on disk is what
+  readdir returns — while `.devstrapignore` files are almost always composed (NFC). A byte-exact
+  matcher therefore silently failed to prune an NFD `café/` on macOS while pruning it on a Linux
+  NFC tree — the same policy then
   diverges across a fleet, and a draft bundle can ship content the pattern was written to
   exclude. The compiler now applies `norm.NFC.String` to every pattern line at compile time and
   to every match target in `Match` (and therefore `ShouldPruneDir`), the same normalization
