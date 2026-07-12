@@ -8,6 +8,13 @@ on:
 permissions:
   contents: write # create the GitHub Release and upload binaries
 
+# One run per tag at a time: the delete-and-re-cut procedure otherwise lets an
+# older run's publish job promote a NEWER run's un-smoked draft (tag-name
+# TOCTOU). Never cancel a release run mid-flight.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   verify:
     name: Verify tagged commit
@@ -179,9 +186,12 @@ jobs:
       upload-assets: true
       # The generator's tagged reusable workflow supports attaching assets to
       # an existing draft. Preserve the stable draft until native smoke passes.
-      # The reusable workflow declares this input `type: boolean`; a raw job
-      # output is a string and fails call-site validation — compare to coerce.
-      draft-release: ${{ needs.goreleaser.outputs.stable == 'true' }}
+      # The reusable workflow declares this input `type: string` with tri-state
+      # semantics: 'true' marks the release draft, any other NON-EMPTY value
+      # un-drafts it, and EMPTY leaves an existing release's draft flag alone —
+      # so stable passes 'true' and rc passes empty (its release is already
+      # published by the rc step above and must not be touched).
+      draft-release: ${{ needs.goreleaser.outputs.stable == 'true' && 'true' || '' }}
 
   stable-smoke:
     name: Smoke staged stable artifacts (${{ matrix.os }})
@@ -276,27 +286,52 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+    # Serialize tap pushes across ALL release runs (two different stable tags
+    # would otherwise race the shared tap branch).
+    concurrency:
+      group: homebrew-tap-publish
+      cancel-in-progress: false
     steps:
-      - name: Publish GitHub release
+      # Every fallible preparation happens BEFORE the user-visible draft flip:
+      # a failure here leaves a consistent, still-draft release instead of a
+      # published version whose tap never updated.
+      - name: Verify the draft is the run that was smoked
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
-        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+        run: |
+          set -Eeuo pipefail
+          target=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json targetCommitish,isDraft \
+            --jq '"\(.targetCommitish) \(.isDraft)"')
+          if [[ "$target" != "$GITHUB_SHA true" ]]; then
+            echo "::error::release for $TAG is '$target', expected draft at $GITHUB_SHA — a re-cut tag or concurrent run replaced the smoked draft; refusing to publish"
+            exit 1
+          fi
       - name: Download staged cask
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: stable-release-metadata
           path: staged
-      - name: Push staged cask to Homebrew tap
+      - name: Prepare tap checkout
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
         run: |
           set -Eeuo pipefail
           cask=$(find staged -type f -path '*/Casks/devstrap.rb' -print -quit)
           test -n "$cask"
           gh auth setup-git
           gh repo clone Reederey87/homebrew-devstrap tap
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+      - name: Push staged cask to Homebrew tap
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -Eeuo pipefail
+          cask=$(find staged -type f -path '*/Casks/devstrap.rb' -print -quit)
           if cmp -s "$cask" tap/Casks/devstrap.rb; then
             echo "Homebrew cask is already current; skipping commit"
             exit 0

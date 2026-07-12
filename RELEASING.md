@@ -68,6 +68,16 @@ git push --delete origin v0.1.0
 # fix through the normal PR flow, then create and push v0.1.0 again
 ```
 
+Promotion ordering and recovery: release runs are serialized per tag (a `concurrency` group), the publish job
+refuses to promote a draft whose commit is not the one it smoked (a re-cut tag mid-run fails loudly instead of
+publishing un-smoked bytes), and every fallible step — artifact download, tap clone, tap auth — runs **before** the
+draft flips public, so a failure there leaves a consistent still-draft release. The one residual window is a tap push
+that fails **after** the release published (network blip, non-fast-forward): the release is then live while brew still
+serves the previous version. Recovery: re-run the `stable-publish` job (the staged-cask artifact is retained with the
+run), or push the cask by hand from that artifact — never regenerate it. Tap pushes are additionally serialized
+across runs (`homebrew-tap-publish` group); still, promote stable tags in version order — the tap tracks whatever
+published last.
+
 The workflow's macOS notarization-secret gate is unchanged: zero or all five `MACOS_*` secrets must be set. It remains
 dormant while none are configured.
 
