@@ -205,6 +205,7 @@ func isRemoteHubID(hubID string) bool {
 func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 	paths := opts.paths()
 	var results []checkResult
+	var serviceStore *state.Store
 	if info, ok := debug.ReadBuildInfo(); ok {
 		results = append(results, checkResult{Name: "go runtime", Status: checkOK, Detail: info.GoVersion})
 	}
@@ -222,6 +223,7 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 			results = append(results, checkResult{Name: "state database", Status: checkError, Detail: err.Error()})
 		} else {
 			defer closeStore(store)
+			serviceStore = store
 			results = append(results, checkDB(ctx, store)...)
 			results = append(results, checkDanglingBlobRefs(ctx, paths, store)...)
 			results = append(results, checkSecretsRotation(ctx, store)...)
@@ -243,7 +245,7 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 		results = append(results, checkResult{Name: "state database", Status: checkError, Detail: err.Error()})
 	}
 	results = append(results, checkRepoLocks(paths.Home)...)
-	results = append(results, checkService(ctx, opts)...)
+	results = append(results, checkService(ctx, opts, serviceStore)...)
 	return results
 }
 
@@ -262,7 +264,7 @@ func checkRestoreJournal(home string) []checkResult {
 // not-installed service reports ok (with the install hint), a running service
 // reports ok, and an installed-but-stopped service warns with an inspection
 // remedy.
-func checkService(ctx context.Context, opts *options) []checkResult {
+func checkService(ctx context.Context, opts *options, store *state.Store) []checkResult {
 	mgr := serviceBackend()
 	label := mgr.DefaultLabel()
 	status, err := mgr.Status(ctx, label)
@@ -275,23 +277,38 @@ func checkService(ctx context.Context, opts *options) []checkResult {
 	if !status.Installed {
 		return []checkResult{{Name: "run-loop service", Status: checkOK, Detail: "not installed (optional; `devstrap service install` for unattended sync)"}}
 	}
+	var custodyResult []checkResult
+	if store != nil {
+		recorded, custodyErr := store.KeyCustody(ctx)
+		if custodyErr != nil {
+			custodyResult = append(custodyResult, checkResult{Name: "run-loop service custody", Status: checkWarn, Detail: custodyErr.Error()})
+		} else if state.EffectiveKeyCustody(recorded) == devicekeys.CustodyKeychain {
+			detail := "keychain-custody store under an unattended service; a locked keychain makes ticks fail closed"
+			remedy := fmt.Sprintf("re-initialize with %s=1 and migrate the key files to file custody", platform.NoKeychainEnv)
+			if mgr.Name() == "systemd-user" {
+				detail = "keychain-custody store under an unattended service; the systemd user unit has no session D-Bus and fails closed every tick"
+				remedy += ", or reinstall with --allow-keychain-custody if a user-session D-Bus is available at service runtime"
+			}
+			custodyResult = append(custodyResult, checkResult{Name: "run-loop service custody", Status: checkWarn, Detail: detail, Remedy: remedy})
+		}
+	}
 	if status.ExecPathMissing {
-		return []checkResult{{
+		return append([]checkResult{{
 			Name:   "run-loop service",
 			Status: checkWarn,
 			Detail: fmt.Sprintf("installed service ExecPath is missing: %s", status.ExecPath),
 			Remedy: "re-run devstrap service install (the installed unit points at a binary that no longer exists — e.g. after a brew upgrade)",
-		}}
+		}}, custodyResult...)
 	}
 	if status.Running {
-		return []checkResult{{Name: "run-loop service", Status: checkOK, Detail: fmt.Sprintf("installed and running (%s)", status.Detail)}}
+		return append([]checkResult{{Name: "run-loop service", Status: checkOK, Detail: fmt.Sprintf("installed and running (%s)", status.Detail)}}, custodyResult...)
 	}
-	return []checkResult{{
+	return append([]checkResult{{
 		Name:   "run-loop service",
 		Status: checkWarn,
 		Detail: fmt.Sprintf("installed but not running (%s)", status.Detail),
 		Remedy: fmt.Sprintf("inspect launchctl print / journalctl --user -u %s; reinstall with devstrap service install", label),
-	}}
+	}}, custodyResult...)
 }
 
 func checkAgentRunSweep(ctx context.Context, opts *options, store *state.Store) []checkResult {

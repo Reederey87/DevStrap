@@ -250,6 +250,25 @@ exit 0`)
 	}
 }
 
+func TestSystemdUninstallDaemonReloadFailureKeepsRemovalContext(t *testing.T) {
+	stubExec(t, "systemctl", `if [ "$2" = "daemon-reload" ]; then echo reload-broke >&2; exit 1; fi
+exit 0`)
+	unitDir := t.TempDir()
+	label := "devstrap-run-loop"
+	unitPath := systemdUnitPath(unitDir, label)
+	if err := os.WriteFile(unitPath, []byte("[Unit]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := (SystemdUserManager{UnitDir: unitDir}).Uninstall(t.Context(), label)
+	if err == nil || !strings.Contains(err.Error(), "unit file removed, but systemctl daemon-reload failed") || !strings.Contains(err.Error(), "reload-broke") {
+		t.Fatalf("Uninstall error = %v, want removal context and daemon-reload stderr", err)
+	}
+	if _, statErr := os.Stat(unitPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("unit file still present after uninstall: %v", statErr)
+	}
+}
+
 func TestServiceStatusReportsMissingExecPath(t *testing.T) {
 	stubExec(t, "systemctl", `if [ "$2" = "is-active" ]; then echo inactive; exit 3; fi
 exit 0`)
