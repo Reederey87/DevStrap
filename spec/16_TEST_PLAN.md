@@ -471,7 +471,7 @@ CI runs this as a fixed-budget smoke step after the race tests; a longer local r
 
 ## Mac-specific tests
 
-- LaunchAgent install/uninstall — shipped: `TestLaunchdManagerInstallBootsOutThenBootstraps` / `…UninstallIdempotent` / `…StatusParsesPrint` drive `LaunchdManager` against a PATH-shimmed `launchctl` (`//go:build darwin`); a live end-to-end `bootstrap` against a real `gui/<uid>` domain remains manual (CI has no launchd session);
+- LaunchAgent install/uninstall — shipped: `TestLaunchdManagerInstallBootsOutThenBootstraps` / `…UninstallIdempotent` / `…StatusParsesPrint` drive `LaunchdManager` against a PATH-shimmed `launchctl` (`//go:build darwin`); a live end-to-end `bootstrap` against a real `gui/<uid>` domain runs in CI's `service-e2e` macOS leg (`P7-QUAL-04`);
 - daemon starts after login/reload;
 - FSEvents watcher notices create/rename/delete;
 - case-insensitive path conflict detection;
@@ -481,7 +481,7 @@ CI runs this as a fixed-budget smoke step after the race tests; a longer local r
 
 ## Linux-specific tests
 
-- systemd user service install/uninstall — shipped: `TestSystemdManagerUnavailableIsErrUnsupported`, `TestSystemdManagerInstallSequenceAndLingerNote` (asserts the `show-environment → daemon-reload → enable → restart` order and the linger advisory), and `TestSystemdManagerStatusIsActive` drive `SystemdUserManager` against PATH-shimmed `systemctl`/`loginctl` (`//go:build linux`); a live end-to-end run against a real `--user` manager remains manual/container-gated;
+- systemd user service install/uninstall — shipped: `TestSystemdManagerUnavailableIsErrUnsupported`, `TestSystemdManagerInstallSequenceAndLingerNote` (asserts the `show-environment → daemon-reload → enable → restart` order and the linger advisory), and `TestSystemdManagerStatusIsActive` drive `SystemdUserManager` against PATH-shimmed `systemctl`/`loginctl` (`//go:build linux`); a live end-to-end run against a real `--user` manager runs in CI's `service-e2e` Ubuntu leg, including the headless-uninstall regression (`P7-QUAL-04`);
 - inotify watcher detects changes;
 - watcher limit warning;
 - headless secret unlock path;

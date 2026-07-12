@@ -311,6 +311,31 @@ jobs:
             launchctl print "gui/$(id -u)/$LABEL" >/dev/null || exit 1
           fi
 
+          # A live supervisor is not a working loop: run-loop swallows the
+          # first four tick failures, so "running" can mean "failing quietly
+          # for 30 minutes". Require an observed first tick with NO tick error
+          # — checked BEFORE the doctor twin exists, while this service is the
+          # only writer to the shared stderr log (and the only maintenance-
+          # lock contender).
+          tick_seen=false
+          for _ in $(seq 1 30); do
+            if [[ -f "$STDERR_LOG" ]] && grep -q "run-loop tick: scan + sync + materialize" "$STDERR_LOG"; then
+              tick_seen=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$tick_seen" != true ]]; then
+            echo "no run-loop tick observed within 30 seconds" >&2
+            exit 1
+          fi
+          sleep 2
+          if grep -q "run-loop tick error" "$STDERR_LOG"; then
+            echo "run-loop tick reported an error:" >&2
+            grep "run-loop tick error" "$STDERR_LOG" >&2
+            exit 1
+          fi
+
           # doctor currently inspects only the OS-default label. Install an
           # isolated twin briefly so the live doctor integration is still
           # asserted while the lifecycle under test keeps its CI-only label.
