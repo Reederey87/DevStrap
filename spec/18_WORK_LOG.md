@@ -31,6 +31,18 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-11 — fix(ignore): NFC-normalized matching + documented case sensitivity (P7-XP-04, P7-XP-06)
+
+Changed:
+- `internal/ignore/ignore.go`: `parseLine` NFC-normalizes every pattern line at compile (after gitignore trailing-whitespace stripping; `!`/`/`/`#` and all ASCII metacharacters are NFC-invariant, and `p.text` — which feeds `GitignoreFragment` — becomes the normalized form, so compile → fragment → recompile is a fixed point), and `Match` NFC-normalizes the target after `filepath.ToSlash` (`ShouldPruneDir` flows through `Match`, including the empty-relSlash name fallback). `norm.NFC.String` returns already-NFC input unchanged without allocating, so the ASCII path is free. Same normalization `internal/pathkey` has always applied to namespace keys; `golang.org/x/text` was already a dependency.
+- Tests (explicit `\u00e9` vs `e\u0301` literals so nothing depends on source normalization): `TestMatchNFCPatternMatchesNFDPath` (+ dirOnly descendant), `TestMatchNFDPatternMatchesNFCPath`, `TestShouldPruneDirNFDName` (+ name fallback), `TestGitignoreFragmentEmitsNFC` (round-trip), `TestNegationWinsAfterNormalization`.
+- `spec/11`: new "Unicode normalization and case sensitivity" section — the NFC guarantee (P7-XP-04) and the DELIBERATE fleet-portable case-sensitivity (P7-XP-06, resolved as documentation per the audit's preferred fix): git's `core.ignorecase=true` divergence on macOS is acknowledged, per-OS folding rejected as reintroducing exactly the divergence NFC removes, and the contrast with case-folding `path_key` (namespace identity vs content matching) drawn.
+- `docs/audits/README.md`: `P7-XP-04` + `P7-XP-06` moved open → *Recently shipped*; Pass-7 counts re-derived from the table at merge (serial wave).
+
+Validated:
+- `gofmt -w cmd internal`; `GOCACHE=/tmp/devstrap-gocache go test ./internal/ignore/ ./internal/scan/ ./internal/sync/ -count=1`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; full `go test -race ./... -count=1`.
+- Provenance: implemented by Grok (grok-4.5) from a line-level coordinator spec; coordinator (fable-5) line-by-line review + the spec/11 section; Codex review pre-merge.
+
 ## 2026-07-11 — fix(installer): authenticate shipped checksums and provenance (P7-QUAL-02)
 
 Changed:
