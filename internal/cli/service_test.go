@@ -460,6 +460,10 @@ func TestServiceInstallPrintsAdapterNotes(t *testing.T) {
 }
 
 func TestServiceInstallEnvContainsNoSecrets(t *testing.T) {
+	// Pin the override off: CI exports DEVSTRAP_NO_KEYCHAIN=1 job-wide, and an
+	// explicitly-set override is DELIBERATELY baked (the one non-secret env the
+	// CLI supplies); this test asserts the no-override default of nil env.
+	t.Setenv(platform.NoKeychainEnv, "")
 	f := &fakeServiceManager{}
 	withFakeService(t, f)
 	_, _, err := executeForTest("--home", t.TempDir(), "service", "install", "--hub-file", filepath.Join(t.TempDir(), "hub.json"), "--exec-path", "/usr/local/bin/devstrap")
@@ -467,7 +471,7 @@ func TestServiceInstallEnvContainsNoSecrets(t *testing.T) {
 		t.Fatalf("install: %v", err)
 	}
 	if f.installedSpec.Env != nil {
-		t.Errorf("spec.Env = %v, want nil (the CLI bakes no env; adapters add only PATH)", f.installedSpec.Env)
+		t.Errorf("spec.Env = %v, want nil (without the explicit override the CLI bakes no env; adapters add only PATH)", f.installedSpec.Env)
 	}
 }
 
