@@ -121,12 +121,17 @@ func newServiceInstallCommand(stdout io.Writer, opts *options) *cobra.Command {
 }
 
 func checkServiceInstallCustody(ctx context.Context, stderr io.Writer, opts *options, mgr platform.ServiceManager, allowKeychainCustody bool) (bool, error) {
+	// The explicit session override must survive into the unit REGARDLESS of
+	// store state — a pre-init install with the override set would otherwise
+	// bake a unit whose runtime custody differs from the installing session
+	// once init later records keychain custody (Codex review).
+	overrideSet := os.Getenv(platform.NoKeychainEnv) == "1"
 	paths := opts.paths()
 	if _, err := os.Stat(paths.StateDB()); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			// Preserve the pre-init install behavior; hub/exec validation remains
 			// authoritative when no state store exists yet.
-			return false, nil
+			return overrideSet, nil
 		}
 		return false, err
 	}
@@ -137,7 +142,7 @@ func checkServiceInstallCustody(ctx context.Context, stderr io.Writer, opts *opt
 	defer closeStore(store)
 	if _, err := store.WorkspaceID(ctx); err != nil {
 		if errors.Is(err, state.ErrNotInitialized) {
-			return false, nil
+			return overrideSet, nil
 		}
 		return false, err
 	}
@@ -145,13 +150,23 @@ func checkServiceInstallCustody(ctx context.Context, stderr io.Writer, opts *opt
 	if err != nil {
 		return false, err
 	}
+	// An unknown recorded value is corrupt state, not a shrug: HybridStore
+	// would treat it as keychain-preferred-but-not-required, silently
+	// re-enabling the file fallback the custody model forbids (Codex review).
+	switch recorded {
+	case devicekeys.CustodyUnset, devicekeys.CustodyFile, devicekeys.CustodyKeychain:
+	default:
+		return false, appError{code: exitInvalidConfig, err: fmt.Errorf(
+			"recorded key custody %q is not a known value (file/keychain); the store looks corrupt — re-run `devstrap init` to re-record custody before installing the service", recorded)}
+	}
+	// Warn on an unrecorded store BEFORE the effective-file early return, so
+	// the pre-P6-XP-04 remedy is not silenced by DEVSTRAP_NO_KEYCHAIN=1.
+	if recorded == devicekeys.CustodyUnset {
+		_, _ = fmt.Fprintln(stderr, "key custody is not recorded (pre-P6-XP-04 store); run `devstrap init` to record it before relying on the unattended service")
+	}
 	effective := state.EffectiveKeyCustody(recorded)
 	if effective == devicekeys.CustodyFile {
 		return recorded != devicekeys.CustodyFile, nil
-	}
-	if recorded == devicekeys.CustodyUnset {
-		_, _ = fmt.Fprintln(stderr, "key custody is not recorded (pre-P6-XP-04 store); run `devstrap init` to record it before relying on the unattended service")
-		return false, nil
 	}
 	if effective != devicekeys.CustodyKeychain {
 		return false, nil

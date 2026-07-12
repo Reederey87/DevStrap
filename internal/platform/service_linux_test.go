@@ -269,6 +269,20 @@ exit 0`)
 	}
 }
 
+func TestSystemdUninstallDaemonReloadFailureNoUnitSaysSo(t *testing.T) {
+	// The reload can fail on an uninstall that removed nothing (unit already
+	// absent); the error must not claim a removal that never happened.
+	stubExec(t, "systemctl", `if [ "$2" = "daemon-reload" ]; then echo reload-broke >&2; exit 1; fi
+exit 0`)
+	_, err := (SystemdUserManager{UnitDir: t.TempDir()}).Uninstall(t.Context(), "devstrap-run-loop")
+	if err == nil || !strings.Contains(err.Error(), "no unit file was present to remove") {
+		t.Fatalf("Uninstall error = %v, want the no-unit-present phrasing", err)
+	}
+	if strings.Contains(err.Error(), "unit file removed,") {
+		t.Errorf("error claims a removal that never happened: %v", err)
+	}
+}
+
 func TestServiceStatusReportsMissingExecPath(t *testing.T) {
 	stubExec(t, "systemctl", `if [ "$2" = "is-active" ]; then echo inactive; exit 3; fi
 exit 0`)
