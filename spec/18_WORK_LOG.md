@@ -48,6 +48,7 @@ Validated:
 
 Follow-ups:
 - The `service-e2e` job is not yet in the branch-protection required-check set — maintainer decision after it proves stable.
+- Observed while wiring the tick gate: on Linux the CLI's install confirmation prints the `run-loop.*.log` paths, but the rendered systemd unit has no `StandardOutput=`/`StandardError=` — output goes to journald (the status hint already says `journalctl`), so those files never exist under systemd. Candidate small fix: either render `StandardError=append:` targets or drop the misleading log-path line on Linux.
 
 ## 2026-07-12 — fix(cli): key-custody gate at service install (P7-XP-02)
 

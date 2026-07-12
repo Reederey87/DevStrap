@@ -315,11 +315,18 @@ jobs:
           # first four tick failures, so "running" can mean "failing quietly
           # for 30 minutes". Require an observed first tick with NO tick error
           # — checked BEFORE the doctor twin exists, while this service is the
-          # only writer to the shared stderr log (and the only maintenance-
-          # lock contender).
+          # only tick writer (and the only maintenance-lock contender). The
+          # systemd unit routes stderr to journald (no StandardError= in the
+          # rendered unit — the status hint says journalctl for this reason);
+          # launchd writes the StandardErrorPath file.
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            tick_log() { journalctl --user -u "$LABEL.service" --no-pager 2>/dev/null || true; }
+          else
+            tick_log() { if [[ -f "$STDERR_LOG" ]]; then cat "$STDERR_LOG"; fi; }
+          fi
           tick_seen=false
           for _ in $(seq 1 30); do
-            if [[ -f "$STDERR_LOG" ]] && grep -q "run-loop tick: scan + sync + materialize" "$STDERR_LOG"; then
+            if tick_log | grep -q "run-loop tick: scan + sync + materialize"; then
               tick_seen=true
               break
             fi
@@ -330,9 +337,9 @@ jobs:
             exit 1
           fi
           sleep 2
-          if grep -q "run-loop tick error" "$STDERR_LOG"; then
+          if tick_log | grep -q "run-loop tick error"; then
             echo "run-loop tick reported an error:" >&2
-            grep "run-loop tick error" "$STDERR_LOG" >&2
+            tick_log | grep "run-loop tick error" >&2
             exit 1
           fi
 
