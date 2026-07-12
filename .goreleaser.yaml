@@ -94,9 +94,10 @@ homebrew_casks:
       fish: completions/devstrap.fish
     homepage: https://github.com/Reederey87/DevStrap
     description: "Workspace Passport: one identical, managed ~/Code namespace on every machine and AI agent"
-    # Pre-release tags (v0.1.0-rc.1) publish a GitHub prerelease but never
-    # touch the tap; only stable tags update the cask.
-    skip_upload: auto
+    # Pre-release tags (v0.1.0-rc.1) already skip the tap via `auto`. Stable
+    # tags are staged without a tap push; stable-publish commits this exact
+    # rendered cask only after the staged archives pass native smoke tests.
+    skip_upload: '{{ if index .Env "DEVSTRAP_STAGE_ONLY" }}true{{ else }}auto{{ end }}'
     # The binaries are not Apple-signed/notarized (tracked with cosign/SLSA
     # under P4-SEC-05/P4-QUAL-05). Homebrew quarantines cask artifacts, so
     # Gatekeeper would refuse the unsigned binary; stripping the quarantine
@@ -127,7 +128,10 @@ changelog:
 release:
   # Tags like v1.2.0-rc.1 / -beta.N / -alpha.N are published as GitHub pre-releases.
   prerelease: auto
-  draft: false
+  # `draft` is a bool (not templateable) in GoReleaser v2. Stable tags remain
+  # staged until stable-smoke passes; release.yml immediately publishes rc
+  # drafts in the GoReleaser job to preserve their single-phase behavior.
+  draft: true
   name_template: "{{ .Tag }}"
   footer: |
     ---

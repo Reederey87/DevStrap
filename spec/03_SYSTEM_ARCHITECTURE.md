@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-11
+last_reviewed: 2026-07-12
 tracks_code: [cmd/**, internal/**, internal/config/**, .github/**, .goreleaser.yaml, scripts/**]
 ---
 # System Architecture
@@ -406,21 +406,30 @@ verify job; see `RELEASING.md`). The workflow pins `GORELEASER_CURRENT_TAG` to t
 triggering tag: the documented rc → stable flow puts two tags on one commit, and without
 the pin GoReleaser resolves the current tag by version sort — which ranks `v0.1.0-rc.1`
 above `v0.1.0`, making the stable run rebuild rc artifacts (observed live on the first
-`v0.1.0` attempt). The distribution surface, in the order users should reach for it:
+`v0.1.0` attempt). Rc tags retain the single-phase prerelease flow. A stable tag is built
+exactly once into a draft release with tap upload disabled; SLSA provenance is attached to
+that draft, and native Linux/macOS jobs verify checksums, SBOM coverage, the cosign bundle,
+provenance, completions, and the staged executable's version metadata. Only after both
+native jobs pass does the workflow publish the same draft bytes and commit GoReleaser's
+staged cask to the tap. A failed smoke leaves the draft and tag for diagnosis and manual
+delete-and-re-cut; it never rebuilds between smoke and publish. The distribution surface,
+in the order users should reach for it:
 
-1. **Homebrew tap** — `brew install Reederey87/devstrap/devstrap`. GoReleaser publishes a
+1. **Homebrew tap** — `brew install Reederey87/devstrap/devstrap`. GoReleaser renders a
    **cask** (not a formula: `brews:` is deprecated since GoReleaser v2.16, and casks now
-   cover Linux) into `Reederey87/homebrew-devstrap` on stable tags only (`skip_upload:
-   auto`). The binary is not Apple-notarized yet (tracked under `P4-SEC-05`), so the
-   cask strips the quarantine bit in a documented post-install hook. Shell completions
-   install with the cask.
+   cover Linux) but skips its own upload for stable staging; after native smoke passes,
+   `stable-publish` commits that exact rendered cask into `Reederey87/homebrew-devstrap`.
+   Prereleases still skip the tap via `auto`. The binary is not Apple-notarized yet
+   (tracked under `P4-SEC-05`), so the cask strips the quarantine bit in a documented
+   post-install hook. Shell completions install with the cask.
 2. **Supply-chain verification (P4-SEC-05 / P4-QUAL-05)** — the `goreleaser` job signs
    `checksums.txt` with cosign in keyless mode (job `id-token: write` mints a GitHub OIDC
    token; cosign exchanges it for a short-lived Fulcio cert and logs the signature to the
    public Rekor transparency log, so no signing key is stored) and generates an SPDX SBOM
    per archive via syft. The signature transitively covers every artifact listed in
    `checksums.txt`. README documents the `cosign verify-blob` + `sha256sum -c` verification
-   flow, and the `provenance` job attaches a SLSA v1 attestation (shipped PR #117). A dormant
+   flow, and the `provenance` job attaches a SLSA v1 attestation to the release (including
+   while a stable release is still a draft; shipped PR #117). A dormant
    `notarize:` block (Developer ID + notarization, the P4-SEC-05 remainder) keeps its existing
    `isEnvSet "MACOS_SIGN_P12"` activation, while the release workflow enforces that exactly
    zero or all five `MACOS_*` secrets are set before GoReleaser runs. Because the publisher

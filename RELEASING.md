@@ -6,7 +6,9 @@ release candidate.
 
 Releases are automated by **GoReleaser** via `.github/workflows/release.yml`, triggered on `v*` tags. It
 cross-compiles macOS and Linux binaries (amd64 + arm64), packages shell completions into each tarball, generates
-`checksums.txt`, publishes a GitHub Release, and — on **stable** tags only (`skip_upload: auto`) — pushes an updated
+`checksums.txt`, and publishes a GitHub Release. Release candidates keep the existing single-phase prerelease flow.
+For a **stable** tag, the workflow first stages one build as a draft with no tap push, attaches provenance, and runs
+the staged archives on native macOS and Linux runners; only then does it publish the draft and push the exact rendered
 Homebrew **cask** to `Reederey87/homebrew-devstrap`. The `version`, `commit`, and build `date` are injected into the
 binary (check with `devstrap version`).
 
@@ -48,11 +50,36 @@ binary (check with `devstrap version`).
    git tag -a v0.1.0 -m "v0.1.0"
    git push origin v0.1.0
    ```
-   The workflow publishes the full (non-pre-release) GitHub Release **and** pushes the updated cask to the tap.
+   The workflow stages the full release as a **draft** without touching the tap, attaches SLSA provenance, and smoke-
+   tests the staged bytes on native macOS and Linux runners. Only after every gate passes does it publish that same
+   draft and push GoReleaser's staged cask to the tap. There is no rebuild between smoke and publish: the artifacts
+   users receive are the artifacts the workflow executed and verified.
    The stable tag may point at the **same commit** as the rc — the workflow pins `GORELEASER_CURRENT_TAG` to the
    triggering tag, so GoReleaser cannot mistake the co-located rc tag for the current one (git's version sort ranks
    `v0.1.0-rc.1` above `v0.1.0`, which made the first `v0.1.0` run rebuild rc artifacts and fail on upload).
 5. **If it's not**, fix it on `main` via the normal PR flow, then cut `v0.1.0-rc.2` and repeat.
+
+If the stable smoke fails, the tag and a **draft** release remain for diagnosis. Delete both before fixing and re-cutting
+the same version; do not rerun GoReleaser against the existing tag or draft:
+
+```bash
+gh release delete v0.1.0 --yes
+git push --delete origin v0.1.0
+# fix through the normal PR flow, then create and push v0.1.0 again
+```
+
+Promotion ordering and recovery: release runs are serialized per tag (a `concurrency` group), the publish job
+refuses to promote a draft whose commit is not the one it smoked (a re-cut tag mid-run fails loudly instead of
+publishing un-smoked bytes), and every fallible step — artifact download, tap clone, tap auth — runs **before** the
+draft flips public, so a failure there leaves a consistent still-draft release. The one residual window is a tap push
+that fails **after** the release published (network blip, non-fast-forward): the release is then live while brew still
+serves the previous version. Recovery: re-run the `stable-publish` job (the staged-cask artifact is retained with the
+run), or push the cask by hand from that artifact — never regenerate it. Tap pushes are additionally serialized
+across runs (`homebrew-tap-publish` group); still, promote stable tags in version order — the tap tracks whatever
+published last.
+
+The workflow's macOS notarization-secret gate is unchanged: zero or all five `MACOS_*` secrets must be set. It remains
+dormant while none are configured.
 
 ## Post-release smoke checklist (stable tags)
 
