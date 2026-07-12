@@ -67,6 +67,21 @@ curl -fsSL https://raw.githubusercontent.com/Reederey87/DevStrap/main/scripts/in
 DEVSTRAP_VERSION=v0.1.0-rc.1 sh scripts/install.sh
 ```
 
+For every freshly published tag, smoke the tag's own installer with cosign installed, then remove
+cosign from `PATH` and confirm the same installer refuses to proceed when the checksum-only hatch is
+unset:
+
+```bash
+tag=vX.Y.Z
+curl -fsSL "https://raw.githubusercontent.com/Reederey87/DevStrap/${tag}/scripts/install.sh" -o /tmp/devstrap-install.sh
+DEVSTRAP_VERSION="$tag" DEVSTRAP_INSTALL_DIR="$(mktemp -d)" sh /tmp/devstrap-install.sh
+
+# Negative: /usr/bin:/bin excludes Homebrew and cosign-installer locations.
+# This command MUST exit non-zero with "cosign not found"; do not set
+# DEVSTRAP_INSTALL_CHECKSUM_ONLY.
+DEVSTRAP_VERSION="$tag" DEVSTRAP_INSTALL_DIR="$(mktemp -d)" PATH=/usr/bin:/bin sh /tmp/devstrap-install.sh
+```
+
 Confirm the tap repo got exactly one new commit (`Casks/devstrap.rb`) and that rc tags produced **no** tap commit.
 
 Also verify the release's cosign signature and SBOMs are present:

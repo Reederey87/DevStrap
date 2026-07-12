@@ -31,6 +31,24 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-11 — fix(installer): authenticate shipped checksums and provenance (P7-QUAL-02)
+
+Changed:
+- `scripts/install.sh` now downloads `checksums.txt.sigstore.json` and verifies the checksum file with cosign pinned to the exact DevStrap release-workflow identity before any archive hash is trusted. Missing cosign and missing bundles fail closed by default; `DEVSTRAP_INSTALL_CHECKSUM_ONLY=1` is an explicit loud-warning escape hatch (bundle absence is accepted only on a confirmed 404). The existing sha256 verification remains always on and unchanged after the new signature stage.
+- The installer downloads `multiple.intoto.jsonl` and verifies the selected archive against `github.com/Reederey87/DevStrap` at the selected tag, FAIL-CLOSED like cosign: a missing `slsa-verifier` refuses the install with an install hint, `DEVSTRAP_INSTALL_NO_SLSA=1` is the explicit provenance-only waiver, and under `CHECKSUM_ONLY` the provenance layer degrades to opportunistic.
+- `.github/workflows/ci.yml` adds installer ShellCheck coverage and a push-to-main Ubuntu/macOS latest-release installer smoke with cosign, including an Ubuntu fail-closed negative run with cosign removed from `PATH`.
+- `docs/install.md` documents automatic verification, both environment controls, fail-closed behavior, and the tag-pinned installer URL for high-assurance use. `RELEASING.md` adds positive and no-cosign-negative tag-installer release smokes. Specs 03/16 record the distribution contract and CI coverage; the audit ledger moves `P7-QUAL-02` to *Recently shipped* (counts re-derived from the table at merge — serial wave).
+
+Validated:
+- `shellcheck scripts/install.sh`; `bash -n scripts/install.sh`; `gofmt -w cmd internal`.
+- Live end-to-end against the real `v0.1.1` release (2026-07-11, this session, cosign 3.x + slsa-verifier via brew): positive run prints `Signature verified (cosign, release workflow identity).` + `SLSA provenance verified.` + `Checksum verified.` and the installed binary reports `devstrap 0.1.1`; negative run with `PATH=/usr/bin:/bin` refuses with the exact `cosign not found` message; `DEVSTRAP_INSTALL_CHECKSUM_ONLY=1` under the same stripped PATH proceeds with the loud WARNING.
+- Review pass (Grok, Minors fixed): the CI no-cosign negative test now asserts the refusal REASON (greps `cosign not found`) instead of any non-zero exit; cosign/slsa-verifier stderr is surfaced on failure instead of discarded; the checksum-only-hatch wording and docs now state precisely which layers remain (SLSA still runs when the bundle exists and slsa-verifier is present; a pre-bundle 404 skips SLSA too); redundant `continue-on-error: false` dropped; `sigstore/cosign-installer` SHA-pinned.
+- Provenance: ported from the interrupted prior session's `fix/p7-qual-02-installer-verify` branch; coordinator (fable-5) re-reviewed the full diff line-by-line, rebased over the P7-DATA/P7-XP-03 waves, and re-derived the ledger.
+- Post-review (Codex, dual-review): (P2 fixed) SLSA verification is now fail-closed like cosign — the audit's contract said "cosign + SLSA" and a silent skip on a missing verifier made `DEVSTRAP_INSTALL_NO_SLSA=1` meaningless; the smoke job installs slsa-verifier (pinned `go install …@v2.7.1`). (P3 fixed) the bundle 404-probe is now ONE request (status + body from the same transfer), so a transient 5xx can no longer be misclassified as "no bundle" and silently skip both layers under the hatch. (P3 fixed) the CI smokes execute the documented `sh` path (dash on Ubuntu) instead of `bash`. (P3 fixed) the high-assurance docs recipe now binds one `tag` variable to both the raw-script URL and `DEVSTRAP_VERSION` (the previous literal `<vX.Y.Z>` block neither ran as written nor pinned the binary release).
+
+Follow-ups:
+- None.
+
 ## 2026-07-11 — fix(cli,platform): stable service ExecPath + missing-ExecPath detection (P7-XP-01, P7-XP-05)
 
 Changed:

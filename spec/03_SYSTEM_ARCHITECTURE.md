@@ -427,10 +427,16 @@ above `v0.1.0`, making the stable run rebuild rc artifacts (observed live on the
    runs on Ubuntu and cannot execute `spctl`, Gatekeeper assessment of the published darwin
    binary on a Mac is a required manual post-release smoke step — see `RELEASING.md`
    "Enabling notarization".
-3. **`curl | sh` installer** — `scripts/install.sh`, served raw from `main`. POSIX sh; picks
-   os/arch, resolves the latest tag (or `DEVSTRAP_VERSION`), verifies the tarball against
-   `checksums.txt` **before** extraction, installs into `/usr/local/bin` or `~/.local/bin`
-   (`DEVSTRAP_INSTALL_DIR` overrides), and never invokes sudo.
+3. **`curl | sh` installer (P7-QUAL-02)** — `scripts/install.sh`, served raw from `main`
+   (with a tag-pinned script URL documented for high-assurance installs). POSIX sh; picks
+   os/arch, resolves the latest tag (or `DEVSTRAP_VERSION`), downloads the cosign bundle and
+   verifies `checksums.txt` against the exact release-workflow identity before trusting any hash,
+   verifies the archive's SLSA provenance (fail-closed like cosign; `DEVSTRAP_INSTALL_NO_SLSA=1` is the explicit provenance-only waiver), and then
+   performs the always-on sha256 check before extraction. It fails closed when cosign, `slsa-verifier`, or
+   the bundle is unavailable; `DEVSTRAP_INSTALL_CHECKSUM_ONLY=1` is the explicit, loud-warning
+   escape hatch for a legacy bundle-less release or a checksum-only install, and
+   `DEVSTRAP_INSTALL_NO_SLSA=1` waives only the provenance layer. It installs into
+   `/usr/local/bin` or `~/.local/bin` (`DEVSTRAP_INSTALL_DIR` overrides) and never invokes sudo.
 4. **Release tarballs** — binary + LICENSE + README + pre-generated bash/zsh/fish
    completions (a `before` hook runs `devstrap completion <shell>`; generation is stateless).
 5. **Build from source / `go install …@main`** for the bleeding edge.
