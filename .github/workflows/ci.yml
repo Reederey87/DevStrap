@@ -207,6 +207,10 @@ jobs:
       DEVSTRAP_NO_KEYCHAIN: "1"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # This job builds and RUNS PR code as a live service; the persisted
+          # token in .git/config must not be readable by it.
+          persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
@@ -354,7 +358,9 @@ jobs:
             --interval 30m --label "$DEFAULT_LABEL"
           doctor_out=""
           for _ in $(seq 1 30); do
-            doctor_out=$("$RUNNER_TEMP/devstrap" --home "$HOME_DIR" --root "$ROOT_DIR" doctor)
+            # ||-guarded so a transient non-zero doctor exit retries instead of
+            # aborting the step under set -e.
+            doctor_out=$("$RUNNER_TEMP/devstrap" --home "$HOME_DIR" --root "$ROOT_DIR" doctor 2>&1) || { sleep 1; continue; }
             if grep -q "run-loop service" <<<"$doctor_out" && grep -q "installed and running" <<<"$doctor_out"; then
               break
             fi
