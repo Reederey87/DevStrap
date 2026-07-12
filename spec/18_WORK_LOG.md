@@ -31,6 +31,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-12 — ci(release): stage-then-promote stable releases (P7-QUAL-01)
+
+Changed:
+- `.github/workflows/release.yml` + `.goreleaser.yaml`: stable tags are built ONCE and staged as a DRAFT (GoReleaser `release.draft: true` — the field is a non-templateable bool, so rc tags keep their single-phase behavior via an immediate publish step in the goreleaser job), the Homebrew cask renders but does not push (`skip_upload` templated on `DEVSTRAP_STAGE_ONLY`), SLSA provenance attaches to the draft (the generator's `draft-release` input — a STRING with tri-state semantics: 'true'/non-empty/empty — receives 'true' for stable and EMPTY for rc so an already-published rc release is left untouched), a native ubuntu+macos `stable-smoke` matrix verifies the exact staged bytes (version/commit/date output, completions, checksums via sha256sum-or-shasum, per-archive SBOMs, cosign identity pin, slsa-verifier with `--source-tag`), and only then does `stable-publish` flip the draft public and push the ALREADY-RENDERED cask (workflow-artifact-passed) to the tap with an identical-content guard. No rebuild between smoke and publish — the artifacts users get are the artifacts CI executed and verified.
+- Promotion safety: release runs are serialized per tag (`concurrency: release-${{ github.ref }}`, never cancelled), the publish job refuses a draft whose `targetCommitish` is not the smoked commit (the delete-and-re-cut tag TOCTOU fails loudly instead of publishing un-smoked bytes), every fallible prep step (artifact download, tap clone/auth) runs BEFORE the user-visible draft flip, and tap pushes serialize across all runs (`homebrew-tap-publish` group). GoReleaser exact-pinned to v2.17.0; new upload/download-artifact actions SHA-pinned and verified against upstream.
+- `RELEASING.md`: staged-promotion flow, the failed-smoke draft+tag delete/re-cut procedure, the residual published-but-tap-failed window and its recovery (re-run `stable-publish` or hand-push the retained artifact cask — never regenerate), the version-order note; `GORELEASER_CURRENT_TAG` and the 0-or-5 `MACOS_*` gate notes preserved. `spec/03`: the distribution pipeline items updated to the staged flow.
+- `docs/audits/README.md`: `P7-QUAL-01` moved open → *Recently shipped*; Pass-7 19→18 open (P2 6→5).
+
+Validated:
+- `goreleaser check` (v2.17.0) clean; stable-snapshot AND unset-env snapshot builds (skip_upload renders "true" vs "auto"; cask path confirmed `dist/homebrew/Casks/devstrap.rb`); actionlint v1.7.12 clean; YAML parse; checksums verified with both sha256sum and shasum locally; extracted native binary reports version/commit/date.
+- NOT yet live-proven: the staged pipeline needs one rc + one stable tag dry-run (`v0.1.2-rc.1` → `v0.1.2`) — a maintainer decision (user-visible artifacts); until then the finding is shipped-code, pending-live-verification, mirroring how cosign/SLSA shipped (P4-SEC-05) before their `v0.1.1` live proof.
+- Provenance: implemented by Codex (gpt-5.6) from a line-level coordinator spec (it empirically resolved the three flagged design unknowns: draft non-templateability, the SLSA generator's draft-release support, GoReleaser v2.17.0 as actual latest); coordinator (fable-5) line-by-line review; adversarial Codex review found 4 (P1 string-typed draft-release input — the coordinator's own boolean coercion, from a mis-grepped neighboring input, would have failed call-site validation; P1 tag TOCTOU; P2 publish-before-tap ordering; P2 cross-tag tap race) — all fixed pre-PR.
+
+Follow-ups:
+- Live dry-run of the staged pipeline on the next real release (`v0.1.2-rc.1` → `v0.1.2`).
+
 ## 2026-07-12 — ci: live service e2e gate + fuzz-smoke coverage (P7-QUAL-04, P7-QUAL-06)
 
 Changed:
