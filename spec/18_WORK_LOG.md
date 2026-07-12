@@ -31,6 +31,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-12 — fix(cli): key-custody gate at service install (P7-XP-02)
+
+Changed:
+- `internal/cli/service.go` `checkServiceInstallCustody` (new, called before exec-path resolution): a pre-init store preserves today's behavior; file custody proceeds silently; unrecorded custody warns (`devstrap init` remedy, printed even under `--quiet`); recorded keychain custody is REFUSED on systemd (`exitInvalidConfig`, no-session-D-Bus/restart-loop rationale, migrate-to-file remedy) unless the new `--allow-keychain-custody` is passed, and warns on launchd (locked-keychain-until-first-GUI-login risk). A live `Probe` under the installing session only sharpens the text ("unreachable even in this session") — behavior classes key off the RECORDED custody, and the probe is skipped entirely on an explicit systemd opt-in. When `DEVSTRAP_NO_KEYCHAIN=1` is what makes custody effectively file-backed, that explicit non-secret override is baked into the unit's env so the service behaves like the installing session instead of stranding — the no-silent-downgrade rule holds (the installer never invents the override).
+- `internal/cli/doctor.go`: `checkService` (now store-threaded) appends a `run-loop service custody` warning in every installed-service branch when effective custody is keychain, with systemd-specific D-Bus detail and the migrate/`--allow-keychain-custody` remedies.
+- `internal/platform/service_linux.go`: carry-along from #166's CodeRabbit review — the reachable-manager `daemon-reload` failure now preserves the "unit file removed" context in its error.
+- Tests: eight `TestServiceInstall*` custody cases (refusal, explicit-flag allow, launchd warn, unreachable-now sharpening, file-silent, effective-file bake into the unit env, unset warn, pre-init preservation) + doctor custody warn coverage + the daemon-reload message test updates.
+- `spec/05` + `spec/06` + `spec/13`: the install-time gate, the launchd warn, the doctor fold, and the explicit-override bake documented (spec/06's "installer does not auto-bake" paragraph rewritten — the rule it protected, no SILENT downgrade, is preserved).
+- `docs/audits/README.md`: `P7-XP-02` moved open → *Recently shipped*; Pass-7 22→21 open (P2 8→7).
+
+Validated:
+- `gofmt`; `golangci-lint run` (0 issues); `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOOS=linux go build ./...`; `GOCACHE=/tmp/devstrap-gocache go test ./internal/cli/ ./internal/platform/ -count=1`; full `go test -race ./... -count=1`.
+- Provenance: implemented by Codex (gpt-5.6) from a line-level coordinator spec (clean run; its own dual self-review moved the probe behind the opt-in early-return and added the bake — both kept); coordinator (fable-5) line-by-line review; Codex review pre-merge.
+
 ## 2026-07-11 — fix(ignore): NFC-normalized matching + documented case sensitivity (P7-XP-04, P7-XP-06)
 
 Changed:

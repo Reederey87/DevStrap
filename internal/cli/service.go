@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,7 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/platform"
+	"github.com/Reederey87/DevStrap/internal/state"
 	"github.com/spf13/cobra"
 )
 
@@ -39,6 +42,7 @@ func newServiceInstallCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var hubFile string
 	var label string
 	var execPath string
+	var allowKeychainCustody bool
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install and start the run-loop background service",
@@ -50,6 +54,11 @@ func newServiceInstallCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := hubConfigured(opts, hubFile); err != nil {
 				return appError{code: exitInvalidConfig, err: err}
 			}
+			mgr := serviceBackend()
+			forceFileCustody, err := checkServiceInstallCustody(cmd.Context(), stderr, opts, mgr, allowKeychainCustody)
+			if err != nil {
+				return err
+			}
 			resolvedExec, err := resolveServiceExecPath(execPath)
 			if err != nil {
 				return err
@@ -58,10 +67,13 @@ func newServiceInstallCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			mgr := serviceBackend()
 			resolvedLabel := label
 			if resolvedLabel == "" {
 				resolvedLabel = mgr.DefaultLabel()
+			}
+			var serviceEnv map[string]string
+			if forceFileCustody {
+				serviceEnv = map[string]string{platform.NoKeychainEnv: "1"}
 			}
 			logDir := opts.paths().LogDir()
 			spec := platform.ServiceSpec{
@@ -72,8 +84,10 @@ func newServiceInstallCommand(stdout io.Writer, opts *options) *cobra.Command {
 				StdoutPath:  filepath.Join(logDir, "run-loop.out.log"),
 				StderrPath:  filepath.Join(logDir, "run-loop.err.log"),
 				// Coupled to run-loop's own consecutive-failure ceiling — see the
-				// note by runLoopMaxConsecutiveFailures. Env stays nil: the
-				// adapters add only PATH, and no secret ever enters a service file.
+				// note by runLoopMaxConsecutiveFailures. Env stays nil unless the
+				// explicit non-secret file-custody override must survive into the
+				// service; adapters add PATH, and no secret enters a service file.
+				Env:                 serviceEnv,
 				RestartOnFailure:    true,
 				RestartDelaySeconds: 30,
 			}
@@ -102,7 +116,70 @@ func newServiceInstallCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&hubFile, "hub-file", "", "file-backed test hub path")
 	cmd.Flags().StringVar(&label, "label", "", "service label (defaults to the OS-idiomatic label)")
 	cmd.Flags().StringVar(&execPath, "exec-path", "", "absolute path to the devstrap binary the service runs (defaults to this binary)")
+	cmd.Flags().BoolVar(&allowKeychainCustody, "allow-keychain-custody", false, "allow a systemd user service to use recorded keychain custody")
 	return cmd
+}
+
+func checkServiceInstallCustody(ctx context.Context, stderr io.Writer, opts *options, mgr platform.ServiceManager, allowKeychainCustody bool) (bool, error) {
+	paths := opts.paths()
+	if _, err := os.Stat(paths.StateDB()); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			// Preserve the pre-init install behavior; hub/exec validation remains
+			// authoritative when no state store exists yet.
+			return false, nil
+		}
+		return false, err
+	}
+	store, err := opts.openState(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer closeStore(store)
+	if _, err := store.WorkspaceID(ctx); err != nil {
+		if errors.Is(err, state.ErrNotInitialized) {
+			return false, nil
+		}
+		return false, err
+	}
+	recorded, err := store.KeyCustody(ctx)
+	if err != nil {
+		return false, err
+	}
+	effective := state.EffectiveKeyCustody(recorded)
+	if effective == devicekeys.CustodyFile {
+		return recorded != devicekeys.CustodyFile, nil
+	}
+	if recorded == devicekeys.CustodyUnset {
+		_, _ = fmt.Fprintln(stderr, "key custody is not recorded (pre-P6-XP-04 store); run `devstrap init` to record it before relying on the unattended service")
+		return false, nil
+	}
+	if effective != devicekeys.CustodyKeychain {
+		return false, nil
+	}
+	if mgr.Name() == "systemd-user" && allowKeychainCustody {
+		return false, nil
+	}
+
+	keychainUnreachable := devicekeys.NewHybridStore(paths.KeyDir(), keychainBackend()).
+		WithCustody(effective).
+		Probe(ctx) == devicekeys.CustodyFile
+	unreachableNow := ""
+	if keychainUnreachable {
+		unreachableNow = " The keychain is unreachable even in this session."
+	}
+
+	// Service manager identity, not the build OS, describes the unit's actual
+	// runtime environment and keeps the platform risk deterministic in tests.
+	switch mgr.Name() {
+	case "systemd-user":
+		return false, appError{code: exitInvalidConfig, err: fmt.Errorf(
+			"the systemd user unit runs with no session D-Bus; recorded keychain custody fails closed every tick, and the run-loop will exit into a restart loop.%s Re-initialize with %s=1 and migrate the key files to file custody, or pass --allow-keychain-custody if this box really has a user-session D-Bus at service runtime (for example, desktop Linux with linger)",
+			unreachableNow, platform.NoKeychainEnv,
+		)}
+	case "launchd":
+		_, _ = fmt.Fprintf(stderr, "recorded keychain custody under launchd: a locked keychain before the first GUI login after reboot makes ticks fail closed until unlock; `devstrap doctor` will name it.%s\n", unreachableNow)
+	}
+	return false, nil
 }
 
 func newServiceUninstallCommand(stdout io.Writer, opts *options) *cobra.Command {

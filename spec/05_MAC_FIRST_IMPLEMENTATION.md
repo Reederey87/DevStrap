@@ -94,6 +94,7 @@ The adapter renders the plist with Go `text/template` (every value XML-escaped t
 Troubleshooting (`launchctl print` surfaces `last exit code = N`):
 
 - **exit 78** (`EX_CONFIG`) — the plist is malformed or references a missing path. Re-run `devstrap service install`; it rewrites and re-bootstraps the plist atomically.
+- **keychain-custody warning at install (`P7-XP-02`)** — a store with recorded keychain custody installs with a warning: a locked keychain (before the first GUI login after a reboot) makes run-loop ticks fail closed until unlock, and `doctor` names it while the service is installed.
 - **exit 127** — the service could not find the `devstrap` binary or a sibling tool (`git`) on the seeded `PATH`. Install `devstrap` to a stable directory and re-run `devstrap service install` so `ExecPath`/`PATH` point at it. `service status` and `doctor` now name this case directly (`ExecPath missing: <path>`, `P7-XP-05`).
 
 The deferred native daemon (`devstrapd serve`) would install its own `com.devstrap.devstrapd` LaunchAgent later and run in the foreground under launchd; `devstrap service` targets the shipped `run-loop` today.

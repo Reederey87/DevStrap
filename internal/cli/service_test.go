@@ -11,7 +11,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/platform"
+	"github.com/Reederey87/DevStrap/internal/state"
 )
 
 // fakeServiceManager is an in-memory platform.ServiceManager injected via the
@@ -65,6 +67,36 @@ func withFakeService(t *testing.T, f *fakeServiceManager) {
 	prev := serviceBackend
 	serviceBackend = func() platform.ServiceManager { return f }
 	t.Cleanup(func() { serviceBackend = prev })
+}
+
+func serviceTestHomeWithCustody(t *testing.T, custody devicekeys.Custody) string {
+	t.Helper()
+	home := t.TempDir()
+	store, err := state.Open(t.Context(), filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(store)
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureWorkspace(t.Context(), "service-test", filepath.Join(home, "root")); err != nil {
+		t.Fatal(err)
+	}
+	if custody != devicekeys.CustodyUnset {
+		if err := store.RecordKeyCustody(t.Context(), custody); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return home
+}
+
+func useServiceTestKeychain(t *testing.T, unreachable bool) {
+	t.Helper()
+	fake := &fakeKeychain{}
+	fake.setUnreachable(unreachable)
+	restore := swapKeychainBackend(func() devicekeys.SecretBackend { return fake })
+	t.Cleanup(restore)
 }
 
 func TestServiceInstallBuildsRunLoopArgs(t *testing.T) {
@@ -208,6 +240,142 @@ func TestServiceInstallRequiresHubConfig(t *testing.T) {
 	}
 	if f.installedSpec != nil {
 		t.Error("Install must not run without a configured hub")
+	}
+}
+
+func TestServiceInstallRefusesKeychainCustodyOnSystemd(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "")
+	useServiceTestKeychain(t, false)
+	f := &fakeServiceManager{nameVal: "systemd-user"}
+	withFakeService(t, f)
+	home := serviceTestHomeWithCustody(t, devicekeys.CustodyKeychain)
+	_, stderr, err := executeForTest("--home", home, "service", "install", "--hub-file", filepath.Join(t.TempDir(), "hub.json"), "--exec-path", "/usr/local/bin/devstrap")
+	if err == nil {
+		t.Fatal("expected keychain-custody refusal")
+	}
+	if got := ExitCodeWithWriter(err, io.Discard); got != exitInvalidConfig {
+		t.Errorf("exit code = %d, want %d", got, exitInvalidConfig)
+	}
+	if !strings.Contains(stderr, platform.NoKeychainEnv) || !strings.Contains(stderr, "--allow-keychain-custody") {
+		t.Errorf("stderr = %q, want file-custody and explicit-override remedies", stderr)
+	}
+	if f.installedSpec != nil {
+		t.Error("Install must not run for systemd keychain custody without opt-in")
+	}
+}
+
+func TestServiceInstallAllowsKeychainCustodyWithExplicitFlag(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "")
+	restore := swapKeychainBackend(func() devicekeys.SecretBackend {
+		panic("explicit systemd opt-in must not probe the keychain")
+	})
+	defer restore()
+	f := &fakeServiceManager{nameVal: "systemd-user"}
+	withFakeService(t, f)
+	home := serviceTestHomeWithCustody(t, devicekeys.CustodyKeychain)
+	_, _, err := executeForTest("--home", home, "service", "install", "--hub-file", filepath.Join(t.TempDir(), "hub.json"), "--exec-path", "/usr/local/bin/devstrap", "--allow-keychain-custody")
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if f.installedSpec == nil {
+		t.Fatal("Install was not called")
+	}
+}
+
+func TestServiceInstallWarnsKeychainCustodyOnLaunchd(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "")
+	useServiceTestKeychain(t, false)
+	f := &fakeServiceManager{nameVal: "launchd"}
+	withFakeService(t, f)
+	home := serviceTestHomeWithCustody(t, devicekeys.CustodyKeychain)
+	_, stderr, err := executeForTest("--home", home, "--quiet", "service", "install", "--hub-file", filepath.Join(t.TempDir(), "hub.json"), "--exec-path", "/usr/local/bin/devstrap")
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if !strings.Contains(stderr, "locked keychain") {
+		t.Errorf("stderr = %q, want locked-keychain warning even under --quiet", stderr)
+	}
+	if f.installedSpec == nil {
+		t.Fatal("Install was not called")
+	}
+}
+
+func TestServiceInstallReportsCurrentlyUnreachableKeychain(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "")
+	useServiceTestKeychain(t, true)
+	f := &fakeServiceManager{nameVal: "launchd"}
+	withFakeService(t, f)
+	home := serviceTestHomeWithCustody(t, devicekeys.CustodyKeychain)
+	_, stderr, err := executeForTest("--home", home, "service", "install", "--hub-file", filepath.Join(t.TempDir(), "hub.json"), "--exec-path", "/usr/local/bin/devstrap")
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if !strings.Contains(stderr, "keychain is unreachable even in this session") {
+		t.Errorf("stderr = %q, want current-session probe detail", stderr)
+	}
+}
+
+func TestServiceInstallFileCustodySilent(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "")
+	f := &fakeServiceManager{nameVal: "systemd-user"}
+	withFakeService(t, f)
+	home := serviceTestHomeWithCustody(t, devicekeys.CustodyFile)
+	_, stderr, err := executeForTest("--home", home, "--quiet", "service", "install", "--hub-file", filepath.Join(t.TempDir(), "hub.json"), "--exec-path", "/usr/local/bin/devstrap")
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if strings.Contains(stderr, "custody") || strings.Contains(stderr, "keychain") {
+		t.Errorf("stderr = %q, want no custody output", stderr)
+	}
+}
+
+func TestServiceInstallCarriesEffectiveFileCustodyIntoUnit(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	f := &fakeServiceManager{nameVal: "systemd-user"}
+	withFakeService(t, f)
+	home := serviceTestHomeWithCustody(t, devicekeys.CustodyKeychain)
+	_, stderr, err := executeForTest("--home", home, "service", "install", "--hub-file", filepath.Join(t.TempDir(), "hub.json"), "--exec-path", "/usr/local/bin/devstrap")
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if f.installedSpec == nil || f.installedSpec.Env[platform.NoKeychainEnv] != "1" {
+		t.Fatalf("installed spec = %+v, want %s=1 carried into the service", f.installedSpec, platform.NoKeychainEnv)
+	}
+	if strings.Contains(stderr, "custody") || strings.Contains(stderr, "keychain") {
+		t.Errorf("stderr = %q, want effective file custody to proceed silently", stderr)
+	}
+}
+
+func TestServiceInstallUnsetCustodyWarns(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "")
+	f := &fakeServiceManager{nameVal: "systemd-user"}
+	withFakeService(t, f)
+	home := serviceTestHomeWithCustody(t, devicekeys.CustodyUnset)
+	_, stderr, err := executeForTest("--home", home, "--quiet", "service", "install", "--hub-file", filepath.Join(t.TempDir(), "hub.json"), "--exec-path", "/usr/local/bin/devstrap")
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if !strings.Contains(stderr, "devstrap init") {
+		t.Errorf("stderr = %q, want init warning even under --quiet", stderr)
+	}
+}
+
+func TestServiceInstallPreservesBehaviorBeforeInit(t *testing.T) {
+	f := &fakeServiceManager{nameVal: "systemd-user"}
+	withFakeService(t, f)
+	home := t.TempDir()
+	store, err := state.Open(t.Context(), filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeStore(store)
+
+	_, _, err = executeForTest("--home", home, "service", "install", "--hub-file", filepath.Join(t.TempDir(), "hub.json"), "--exec-path", "/usr/local/bin/devstrap")
+	if err != nil {
+		t.Fatalf("install before init: %v", err)
+	}
+	if f.installedSpec == nil {
+		t.Fatal("Install was not called")
 	}
 }
 

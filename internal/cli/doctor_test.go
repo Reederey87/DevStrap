@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/state"
 	"github.com/spf13/viper"
@@ -173,7 +174,7 @@ func TestDoctorWarnsWhenServiceInstalledButStopped(t *testing.T) {
 	v.Set("home", t.TempDir())
 	opts := &options{v: v}
 
-	results := checkService(context.Background(), opts)
+	results := checkService(context.Background(), opts, nil)
 	if len(results) != 1 {
 		t.Fatalf("checkService results = %+v, want exactly one", results)
 	}
@@ -197,7 +198,7 @@ func TestDoctorWarnsWhenServiceExecPathMissing(t *testing.T) {
 
 	v := viper.New()
 	v.Set("home", t.TempDir())
-	results := checkService(context.Background(), &options{v: v})
+	results := checkService(context.Background(), &options{v: v}, nil)
 	if len(results) != 1 || results[0].Status != checkWarn {
 		t.Fatalf("checkService results = %+v, want one warning", results)
 	}
@@ -208,4 +209,64 @@ func TestDoctorWarnsWhenServiceExecPathMissing(t *testing.T) {
 	if results[0].Remedy != wantRemedy {
 		t.Errorf("remedy = %q, want %q", results[0].Remedy, wantRemedy)
 	}
+}
+
+func TestDoctorWarnsForInstalledServiceWithKeychainCustody(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "")
+	f := &fakeServiceManager{nameVal: "systemd-user", statusVal: platform.ServiceStatus{Installed: true, Running: true}}
+	withFakeService(t, f)
+	home := serviceTestHomeWithCustody(t, devicekeys.CustodyKeychain)
+	store, err := state.Open(t.Context(), filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(store)
+
+	results := checkService(t.Context(), &options{v: viper.New()}, store)
+	for _, result := range results {
+		if result.Name == "run-loop service custody" {
+			if result.Status != checkWarn || !strings.Contains(result.Detail, "no session D-Bus") || !strings.Contains(result.Remedy, platform.NoKeychainEnv) {
+				t.Fatalf("custody result = %+v, want systemd keychain warning and remedy", result)
+			}
+			return
+		}
+	}
+	t.Fatalf("results = %+v, want run-loop service custody warning", results)
+}
+
+func TestDoctorDoesNotWarnForInstalledServiceWithFileCustody(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "")
+	f := &fakeServiceManager{nameVal: "systemd-user", statusVal: platform.ServiceStatus{Installed: true, Running: true}}
+	withFakeService(t, f)
+	home := serviceTestHomeWithCustody(t, devicekeys.CustodyFile)
+	store, err := state.Open(t.Context(), filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(store)
+
+	results := checkService(t.Context(), &options{v: viper.New()}, store)
+	for _, result := range results {
+		if result.Name == "run-loop service custody" {
+			t.Fatalf("results = %+v, want no custody warning for file custody", results)
+		}
+	}
+}
+
+func TestDoctorThreadsCustodyStoreIntoServiceCheck(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "")
+	f := &fakeServiceManager{nameVal: "systemd-user", statusVal: platform.ServiceStatus{Installed: true, Running: true}}
+	withFakeService(t, f)
+	home := serviceTestHomeWithCustody(t, devicekeys.CustodyKeychain)
+	v := viper.New()
+	v.Set("home", home)
+	v.Set("root", filepath.Join(home, "root"))
+
+	results := runDoctorChecks(t.Context(), &options{v: v})
+	for _, result := range results {
+		if result.Name == "run-loop service custody" {
+			return
+		}
+	}
+	t.Fatalf("results = %+v, want custody warning from the command-level doctor checks", results)
 }
