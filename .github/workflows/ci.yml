@@ -177,6 +177,12 @@ jobs:
         # on the macOS runner).
         if: matrix.os == 'ubuntu-latest'
         run: go test -run=^$ -fuzz=FuzzDecideConvergence -fuzztime=30s ./internal/sync/
+      - name: Fuzz smoke (env-file parser)
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -run '^$' -fuzz '^FuzzParseBytes$' -fuzztime=30s ./internal/envfile/
+      - name: Fuzz smoke (ignore compiler)
+        if: matrix.os == 'ubuntu-latest'
+        run: go test -run '^$' -fuzz '^FuzzCompile$' -fuzztime=30s ./internal/ignore/
       - name: Coverage floor
         # P5-QUAL-04: consume the coverage profile instead of writing and
         # discarding it. Gate at a conservative floor so under-tested new code
@@ -189,6 +195,177 @@ jobs:
         run: |
           go mod tidy
           git diff --exit-code go.mod go.sum
+
+  service-e2e:
+    name: Service E2E (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      DEVSTRAP_NO_KEYCHAIN: "1"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        run: go build -o "$RUNNER_TEMP/devstrap" ./cmd/devstrap
+      - name: Install, inspect, and uninstall against the live service manager
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          HOME_DIR="$RUNNER_TEMP/ds-home"
+          ROOT_DIR="$RUNNER_TEMP/code"
+          HUB_FILE="$RUNNER_TEMP/hub.json"
+          STDERR_LOG="$HOME_DIR/logs/run-loop.err.log"
+          INSTALL_LOG="$RUNNER_TEMP/service-install.log"
+          DEFAULT_CREATED=false
+
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            LABEL="devstrap-ci-e2e"
+            DEFAULT_LABEL="devstrap-run-loop"
+            UNIT_FILE="$HOME/.config/systemd/user/$LABEL.service"
+            DEFAULT_UNIT_FILE="$HOME/.config/systemd/user/$DEFAULT_LABEL.service"
+          else
+            LABEL="com.devstrap.ci-e2e"
+            DEFAULT_LABEL="com.devstrap.run-loop"
+            UNIT_FILE="$HOME/Library/LaunchAgents/$LABEL.plist"
+            DEFAULT_UNIT_FILE="$HOME/Library/LaunchAgents/$DEFAULT_LABEL.plist"
+          fi
+
+          dump_diagnostics() {
+            echo "--- rendered service unit ---" >&2
+            if [[ -f "$UNIT_FILE" ]]; then cat "$UNIT_FILE" >&2; else echo "missing: $UNIT_FILE" >&2; fi
+            echo "--- service install output ---" >&2
+            if [[ -f "$INSTALL_LOG" ]]; then cat "$INSTALL_LOG" >&2; else echo "missing: $INSTALL_LOG" >&2; fi
+            echo "--- run-loop stderr ---" >&2
+            if [[ -f "$STDERR_LOG" ]]; then tail -50 "$STDERR_LOG" >&2; else echo "missing: $STDERR_LOG" >&2; fi
+            if [[ "$RUNNER_OS" == "Linux" ]]; then
+              echo "--- systemctl status ---" >&2
+              systemctl --user status "$LABEL.service" --no-pager >&2 || true
+              echo "--- journalctl ---" >&2
+              journalctl --user -u "$LABEL.service" --no-pager | tail -50 >&2 || true
+            else
+              echo "--- launchctl print ---" >&2
+              launchctl print "gui/$(id -u)/$LABEL" >&2 || true
+            fi
+          }
+
+          cleanup() {
+            if [[ "$DEFAULT_CREATED" == true ]]; then
+              "$RUNNER_TEMP/devstrap" --home "$HOME_DIR" --root "$ROOT_DIR" service uninstall --label "$DEFAULT_LABEL" >/dev/null 2>&1 || true
+            fi
+            "$RUNNER_TEMP/devstrap" --home "$HOME_DIR" --root "$ROOT_DIR" service uninstall --label "$LABEL" >/dev/null 2>&1 || true
+            if [[ "$RUNNER_OS" == "Linux" ]]; then
+              if [[ "$DEFAULT_CREATED" == true ]]; then systemctl --user disable --now "$DEFAULT_LABEL.service" >/dev/null 2>&1 || true; fi
+              systemctl --user disable --now "$LABEL.service" >/dev/null 2>&1 || true
+              systemctl --user daemon-reload >/dev/null 2>&1 || true
+            else
+              if [[ "$DEFAULT_CREATED" == true ]]; then launchctl bootout "gui/$(id -u)/$DEFAULT_LABEL" >/dev/null 2>&1 || true; fi
+              launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+            fi
+            if [[ "$DEFAULT_CREATED" == true ]]; then rm -f "$DEFAULT_UNIT_FILE"; fi
+            rm -f "$UNIT_FILE"
+          }
+          finish() {
+            rc=$?
+            trap - EXIT
+            if (( rc != 0 )); then dump_diagnostics; fi
+            cleanup
+            exit "$rc"
+          }
+          trap finish EXIT
+
+          "$RUNNER_TEMP/devstrap" --home "$HOME_DIR" init "$ROOT_DIR"
+          if ! "$RUNNER_TEMP/devstrap" --home "$HOME_DIR" --root "$ROOT_DIR" service install \
+            --hub-file "$HUB_FILE" --exec-path "$RUNNER_TEMP/devstrap" \
+            --interval 30m --label "$LABEL" 2>"$INSTALL_LOG"; then
+            exit 1
+          fi
+          cat "$INSTALL_LOG" >&2
+
+          status_json=$("$RUNNER_TEMP/devstrap" --home "$HOME_DIR" --root "$ROOT_DIR" service status --label "$LABEL" --json)
+          jq -e '.installed == true' <<<"$status_json"
+
+          running=false
+          for _ in $(seq 1 30); do
+            status_json=$("$RUNNER_TEMP/devstrap" --home "$HOME_DIR" --root "$ROOT_DIR" service status --label "$LABEL" --json)
+            if jq -e '.running == true' <<<"$status_json" >/dev/null; then
+              running=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$running" != true ]]; then
+            echo "service did not report running within 30 seconds: $status_json" >&2
+            exit 1
+          fi
+
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            systemctl --user is-active "$LABEL.service" || exit 1
+          else
+            launchctl print "gui/$(id -u)/$LABEL" >/dev/null || exit 1
+          fi
+
+          # doctor currently inspects only the OS-default label. Install an
+          # isolated twin briefly so the live doctor integration is still
+          # asserted while the lifecycle under test keeps its CI-only label.
+          default_status=$("$RUNNER_TEMP/devstrap" --home "$HOME_DIR" --root "$ROOT_DIR" service status --label "$DEFAULT_LABEL" --json)
+          jq -e '.installed == false' <<<"$default_status"
+          DEFAULT_CREATED=true
+          "$RUNNER_TEMP/devstrap" --home "$HOME_DIR" --root "$ROOT_DIR" service install \
+            --hub-file "$HUB_FILE" --exec-path "$RUNNER_TEMP/devstrap" \
+            --interval 30m --label "$DEFAULT_LABEL"
+          doctor_out=""
+          for _ in $(seq 1 30); do
+            doctor_out=$("$RUNNER_TEMP/devstrap" --home "$HOME_DIR" --root "$ROOT_DIR" doctor)
+            if grep -q "run-loop service" <<<"$doctor_out" && grep -q "installed and running" <<<"$doctor_out"; then
+              break
+            fi
+            sleep 1
+          done
+          grep -q "run-loop service" <<<"$doctor_out"
+          grep -q "installed and running" <<<"$doctor_out"
+          "$RUNNER_TEMP/devstrap" --home "$HOME_DIR" --root "$ROOT_DIR" service uninstall --label "$DEFAULT_LABEL"
+
+          "$RUNNER_TEMP/devstrap" --home "$HOME_DIR" --root "$ROOT_DIR" service uninstall --label "$LABEL"
+          status_json=$("$RUNNER_TEMP/devstrap" --home "$HOME_DIR" --root "$ROOT_DIR" service status --label "$LABEL" --json)
+          jq -e '.installed == false' <<<"$status_json"
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            if systemctl --user is-active "$LABEL.service"; then
+              echo "service is still active after uninstall" >&2
+              dump_diagnostics
+              exit 1
+            fi
+          else
+            unloaded=false
+            for _ in $(seq 1 30); do
+              if ! launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+                unloaded=true
+                break
+              fi
+              sleep 1
+            done
+            [[ "$unloaded" == true ]] || exit 1
+          fi
+
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            "$RUNNER_TEMP/devstrap" --home "$HOME_DIR" --root "$ROOT_DIR" service install \
+              --hub-file "$HUB_FILE" --exec-path "$RUNNER_TEMP/devstrap" \
+              --interval 30m --label "$LABEL"
+            headless_out=$(env -u DBUS_SESSION_BUS_ADDRESS -u XDG_RUNTIME_DIR \
+              "$RUNNER_TEMP/devstrap" --home "$HOME_DIR" --root "$ROOT_DIR" \
+              service uninstall --label "$LABEL" 2>&1)
+            echo "$headless_out"
+            [[ ! -e "$UNIT_FILE" ]]
+            grep -q "removed the unit file only" <<<"$headless_out"
+            systemctl --user disable --now "$LABEL.service" || true
+            systemctl --user daemon-reload
+          fi
 
   vuln:
     name: Vulnerability check
@@ -221,7 +398,7 @@ jobs:
         run: docker run -d --name minio -p 9000:9000 minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e server /data # RELEASE.2025-09-07T16-13-09Z
       - name: Wait for MinIO
         run: |
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if curl -sf http://localhost:9000/minio/health/live >/dev/null; then exit 0; fi
             sleep 2
           done
