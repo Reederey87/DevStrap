@@ -55,7 +55,19 @@ jobs:
     # generator signs (base64-encoded).
     outputs:
       hashes: ${{ steps.hash.outputs.hashes }}
+      stable: ${{ steps.release-mode.outputs.stable }}
     steps:
+      - name: Detect stable release
+        id: release-mode
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          stable=false
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            stable=true
+            echo "DEVSTRAP_STAGE_ONLY=true" >> "$GITHUB_ENV"
+          fi
+          echo "stable=$stable" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0 # full history + tags for the changelog
@@ -104,7 +116,7 @@ jobs:
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
-          version: "~> v2"
+          version: "v2.17.0"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -128,6 +140,21 @@ jobs:
           MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
           MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
           MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+      - name: Publish release candidate
+        if: steps.release-mode.outputs.stable != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+      - name: Upload staged release metadata
+        if: steps.release-mode.outputs.stable == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: stable-release-metadata
+          path: |
+            dist/homebrew/*
+            dist/checksums.txt
+          if-no-files-found: error
       - name: Compute provenance subjects
         id: hash
         # checksums.txt is already in sha256sum format — exactly the subjects
@@ -150,3 +177,133 @@ jobs:
     with:
       base64-subjects: ${{ needs.goreleaser.outputs.hashes }}
       upload-assets: true
+      # The generator's tagged reusable workflow supports attaching assets to
+      # an existing draft. Preserve the stable draft until native smoke passes.
+      # The reusable workflow declares this input `type: boolean`; a raw job
+      # output is a string and fails call-site validation — compare to coerce.
+      draft-release: ${{ needs.goreleaser.outputs.stable == 'true' }}
+
+  stable-smoke:
+    name: Smoke staged stable artifacts (${{ matrix.os }})
+    needs: [goreleaser, provenance]
+    if: needs.goreleaser.outputs.stable == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # v3
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Install slsa-verifier
+        env:
+          GOBIN: ${{ runner.temp }}/bin
+        run: |
+          go install github.com/slsa-framework/slsa-verifier/v2/cli/slsa-verifier@v2.7.1
+          echo "$GOBIN" >> "$GITHUB_PATH"
+      - name: Download and verify staged release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -Eeuo pipefail
+          trap 'rc=$?; failed_command=$BASH_COMMAND; echo "::error::command failed at line $LINENO (exit $rc): $failed_command"; echo "::group::downloaded assets"; find . -maxdepth 2 -type f -print | sort; echo "::endgroup::"; exit "$rc"' ERR
+
+          # Authenticated tag lookup can see repository drafts, so gh downloads
+          # the staged assets without publishing the release first.
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*'
+
+          version=${TAG#v}
+          case "$(uname -s)" in
+            Linux) artifact_os=linux ;;
+            Darwin) artifact_os=darwin ;;
+            *) echo "unsupported smoke OS: $(uname -s)" >&2; exit 1 ;;
+          esac
+          case "$(uname -m)" in
+            x86_64|amd64) artifact_arch=amd64 ;;
+            arm64|aarch64) artifact_arch=arm64 ;;
+            *) echo "unsupported smoke architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          archive="devstrap_${version}_${artifact_os}_${artifact_arch}.tar.gz"
+          test -f "$archive"
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum --ignore-missing -c checksums.txt
+          else
+            # macOS provides shasum rather than GNU coreutils by default. All
+            # release assets are present, so no ignore-missing mode is needed.
+            shasum -a 256 -c checksums.txt
+          fi
+          for candidate in devstrap_*.tar.gz; do
+            test -f "${candidate}.sbom.json"
+          done
+          archive_contents=$(tar -tzf "$archive")
+          grep -Eq '(^|/)completions/devstrap\.bash$' <<<"$archive_contents"
+          grep -Eq '(^|/)completions/_devstrap$' <<<"$archive_contents"
+          grep -Eq '(^|/)completions/devstrap\.fish$' <<<"$archive_contents"
+
+          mkdir native
+          tar -xzf "$archive" -C native
+          version_output=$(./native/devstrap version)
+          printf '%s\n' "$version_output"
+          grep -F "$version" <<<"$version_output"
+          grep -F "$GITHUB_SHA" <<<"$version_output"
+          grep -Eq '[0-9]{4}-[0-9]{2}-[0-9]{2}' <<<"$version_output"
+
+          cosign verify-blob checksums.txt \
+            --bundle checksums.txt.sigstore.json \
+            --certificate-identity "https://github.com/Reederey87/DevStrap/.github/workflows/release.yml@refs/tags/$TAG" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          slsa-verifier verify-artifact "$archive" \
+            --provenance-path multiple.intoto.jsonl \
+            --source-uri github.com/Reederey87/DevStrap \
+            --source-tag "$TAG"
+
+  stable-publish:
+    name: Publish smoked stable release
+    needs: [goreleaser, stable-smoke]
+    if: needs.goreleaser.outputs.stable == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+      - name: Download staged cask
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: stable-release-metadata
+          path: staged
+      - name: Push staged cask to Homebrew tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -Eeuo pipefail
+          cask=$(find staged -type f -path '*/Casks/devstrap.rb' -print -quit)
+          test -n "$cask"
+          gh auth setup-git
+          gh repo clone Reederey87/homebrew-devstrap tap
+          if cmp -s "$cask" tap/Casks/devstrap.rb; then
+            echo "Homebrew cask is already current; skipping commit"
+            exit 0
+          fi
+          cp "$cask" tap/Casks/devstrap.rb
+          git -C tap config user.name github-actions[bot]
+          git -C tap config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git -C tap add Casks/devstrap.rb
+          git -C tap commit -m "devstrap $TAG"
+          git -C tap push origin HEAD:main
