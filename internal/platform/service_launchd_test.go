@@ -51,6 +51,32 @@ func TestRenderLaunchdPlistGolden(t *testing.T) {
 	checkGolden(t, "run_loop.plist.golden", got)
 }
 
+func TestExtractLaunchdExecPathGolden(t *testing.T) {
+	plist, err := os.ReadFile(filepath.Join("testdata", "run_loop.plist.golden"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := extractLaunchdExecPath(plist); got != "/usr/local/bin/devstrap" {
+		t.Errorf("extractLaunchdExecPath = %q, want /usr/local/bin/devstrap", got)
+	}
+}
+
+func TestExtractLaunchdExecPathRejectsForeignShapes(t *testing.T) {
+	// Well-formed XML that is NOT our rendered shape must degrade to "",
+	// never return a string from the wrong nested value (Codex review).
+	cases := map[string]string{
+		"value wrapped in dict":   `<plist><dict><key>ProgramArguments</key><dict><array><string>/wrong</string></array></dict></dict></plist>`,
+		"nested array first":      `<plist><dict><key>ProgramArguments</key><array><array><string>/wrong</string></array><string>/real</string></array></dict></plist>`,
+		"empty array":             `<plist><dict><key>ProgramArguments</key><array></array></dict></plist>`,
+		"no ProgramArguments key": `<plist><dict><key>Label</key><string>x</string></dict></plist>`,
+	}
+	for name, doc := range cases {
+		if got := extractLaunchdExecPath([]byte(doc)); got != "" {
+			t.Errorf("%s: extractLaunchdExecPath = %q, want empty", name, got)
+		}
+	}
+}
+
 func TestRenderLaunchdPlistEscapesXML(t *testing.T) {
 	spec := ServiceSpec{
 		Label:    "com.devstrap.run-loop",

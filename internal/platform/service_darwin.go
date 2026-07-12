@@ -150,15 +150,26 @@ func (m LaunchdManager) Status(ctx context.Context, label string) (ServiceStatus
 		return status, fmt.Errorf("stat plist: %w", err)
 	}
 	status.Installed = true
+	//nolint:gosec // plistPath is our own agents-dir plist for a validated label (validateServiceLabel), not user input.
+	if plist, err := os.ReadFile(plistPath); err == nil {
+		status.ExecPath = extractLaunchdExecPath(plist)
+		if status.ExecPath != "" {
+			if _, err := os.Stat(status.ExecPath); os.IsNotExist(err) {
+				status.ExecPathMissing = true
+			}
+		}
+	}
 	out, err := runLaunchctlOut(ctx, launchdPrintArgs(m.uid(), label))
 	if err != nil {
 		// A non-zero print exit means the service is not loaded in the domain
 		// (installed on disk but not bootstrapped).
 		status.Running = false
 		status.Detail = "not loaded"
+		prependMissingExecPathDetail(&status)
 		return status, nil
 	}
 	status.Running, status.Detail = parseLaunchctlPrint(out)
+	prependMissingExecPathDetail(&status)
 	return status, nil
 }
 

@@ -136,6 +136,59 @@ func renderLaunchdPlist(spec ServiceSpec) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// extractLaunchdExecPath best-effort parses the first ProgramArguments string
+// from the plist shape rendered above. XML tokenization bounds the search to
+// the key's IMMEDIATE array value and that array's DIRECT first child (a
+// nested wrong-shaped value must degrade to "", never return an unrelated
+// string — Codex review), and decodes the standard XML entities xmlEscape uses.
+func extractLaunchdExecPath(plist []byte) string {
+	decoder := xml.NewDecoder(bytes.NewReader(plist))
+	seenProgramArguments := false
+	inProgramArguments := false
+	for {
+		tok, err := decoder.Token()
+		if err != nil {
+			return ""
+		}
+		switch token := tok.(type) {
+		case xml.StartElement:
+			switch {
+			case inProgramArguments:
+				// Our rendered shape has ONLY <string> direct children; the
+				// very first element inside the array is either the exec path
+				// or proof this is a foreign plist — degrade, never guess.
+				if token.Name.Local != "string" {
+					return ""
+				}
+				var execPath string
+				if err := decoder.DecodeElement(&execPath, &token); err != nil {
+					return ""
+				}
+				return execPath
+			case seenProgramArguments:
+				// The key's IMMEDIATE value must be the array; anything else
+				// (e.g. a wrapping <dict>) is a foreign shape.
+				if token.Name.Local != "array" {
+					return ""
+				}
+				inProgramArguments = true
+				seenProgramArguments = false
+			case token.Name.Local == "key":
+				var key string
+				if err := decoder.DecodeElement(&key, &token); err != nil {
+					return ""
+				}
+				seenProgramArguments = key == "ProgramArguments"
+			}
+		case xml.EndElement:
+			if inProgramArguments {
+				// The ProgramArguments array closed empty.
+				return ""
+			}
+		}
+	}
+}
+
 // serviceLabelPattern constrains service labels to filename- and argv-safe
 // characters. A label reaches filepath.Join (the plist/unit path), a launchctl
 // domain target, and a systemd unit name — a "/", "..", or whitespace in any
