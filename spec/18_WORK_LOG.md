@@ -31,6 +31,25 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-12 — ci: live service e2e gate + fuzz-smoke coverage (P7-QUAL-04, P7-QUAL-06)
+
+Changed:
+- `.github/workflows/ci.yml`: new `service-e2e` matrix (ubuntu-latest + macos-latest, PR + push like the test job) exercising the REAL launchd/systemd user manager end to end: build the binary, init an isolated home (file custody via `DEVSTRAP_NO_KEYCHAIN=1`), `service install` with a collision-resistant CI-only label and `--hub-file`, poll `service status --json` to running, cross-check the OS truth (`systemctl --user is-active` / `launchctl print gui/<uid>/…`), assert `doctor` (via a briefly-installed default-label twin — doctor inspects only the OS default label — with pre-assertion that the default label is absent, ownership tracking, and owned-only cleanup), uninstall + OS-truth absence, and the Linux HEADLESS-uninstall regression (`env -u DBUS_SESSION_BUS_ADDRESS -u XDG_RUNTIME_DIR`, asserting exit 0, unit file gone, and the P7-XP-03 advisory text). Trap-based cleanup preserves the failing exit code and dumps unit/manager/journal/run-loop-log diagnostics only on failure.
+- P7-QUAL-06: `FuzzParseBytes` (`internal/envfile`) and `FuzzCompile` (`internal/ignore`) join the CI fuzz smoke, mirroring the existing 30s `FuzzDecideConvergence` step.
+- Drive-by (actionlint cleanliness): the MinIO wait loop's unused index variable.
+- `spec/16`: the live service/fuzz gate documented in the Phase 0 suite list.
+- `docs/audits/README.md`: `P7-QUAL-04` + `P7-QUAL-06` moved open → *Recently shipped*; Pass-7 21→19 open (P2 7→6, P3 14→13).
+
+Validated:
+- `actionlint` v1.7.12 clean; YAML parse; both fuzz targets executed locally (10s each: 1.2M execs / 126 new corpus entries for ParseBytes, 570K / 260 for Compile).
+- The full macOS leg executed LIVE locally against real launchd pre-push: install → running (JSON + `launchctl print`) → doctor "installed and running" → uninstall → unloaded, with both plists confirmed absent afterwards and the run-loop log showing real ticks then a clean stop.
+- Provenance: implemented by Codex (gpt-5.6) from a line-level coordinator spec. Two spec errors were caught by execution and reported as deviations: the spec's init argv double-passed the root (real syntax verified against the binary) and `doctor` inspects only the default label (solved with the ownership-tracked twin). Coordinator (fable-5) line-by-line review; Codex review pre-merge; the linux leg runs first in this PR's own CI.
+- Post-review (Codex, dual-review): (P2 fixed) a live supervisor is not a working loop — run-loop swallows the first four tick failures, so every prior assertion passed with a service failing quietly for 30 minutes; the job now requires an OBSERVED first tick (the tick-header progress line) with no `run-loop tick error` in the service stderr log, checked before the doctor twin exists so the shared maintenance lock cannot false-fail it (re-validated live on real launchd). (P3 fixed) spec/16's Mac/Linux sections no longer claim the live launchd/systemd e2e "remains manual" — both point at the `service-e2e` legs.
+
+Follow-ups:
+- The `service-e2e` job is not yet in the branch-protection required-check set — maintainer decision after it proves stable.
+- Observed while wiring the tick gate: on Linux the CLI's install confirmation prints the `run-loop.*.log` paths, but the rendered systemd unit has no `StandardOutput=`/`StandardError=` — output goes to journald (the status hint already says `journalctl`), so those files never exist under systemd. Candidate small fix: either render `StandardError=append:` targets or drop the misleading log-path line on Linux.
+
 ## 2026-07-12 — fix(cli): key-custody gate at service install (P7-XP-02)
 
 Changed:

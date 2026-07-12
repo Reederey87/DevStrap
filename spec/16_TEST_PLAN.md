@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-11
+last_reviewed: 2026-07-12
 tracks_code: [cmd/**, internal/**, internal/specdrift/**, .github/**, go.mod, go.sum]
 ---
 # Test Plan
@@ -24,6 +24,7 @@ The Phase 0 suite must cover:
 
 - CI lint/security gate: `.golangci.yml` enables `errcheck`, `gosec`, `govet`, `ineffassign`, `staticcheck`, and `unconvert`; the workflow runs it as a separate Ubuntu job using the official pinned `golangci-lint-action`;
 - installer verification gate (`P7-QUAL-02`): the Ubuntu lint job runs `shellcheck scripts/install.sh`, and a push-to-`main`-only `installer-smoke` matrix on Ubuntu/macOS resolves the latest published release, installs cosign + slsa-verifier, runs the installer with a pinned `DEVSTRAP_VERSION` into `$RUNNER_TEMP/bin`, and executes `devstrap version`; the Ubuntu leg additionally strips cosign from `PATH` with no `DEVSTRAP_INSTALL_CHECKSUM_ONLY` hatch and requires the installer to refuse;
+- live service/fuzz gate (`P7-QUAL-04`/`P7-QUAL-06`): the `service-e2e` CI job runs install→status→doctor→uninstall against the real launchd/systemd user manager on both OSes, plus the Linux headless-uninstall regression, and CI mutation-fuzzes `FuzzParseBytes` and `FuzzCompile` alongside the existing convergence target;
 - CI spec-drift gate: every `spec/*.md` file has `last_reviewed` and `tracks_code` frontmatter; `cmd/spec-drift` fails when changed code/config paths do not touch mapped specs or when code/spec/doc changes omit `spec/18_WORK_LOG.md`. Mapped-spec satisfaction is two-tiered: `tracks_code: [**]` is a work-log catch-all and never satisfies a file owner; when any specific owner exists (for example `internal/cli/**`), one of those specific specs must change; broad package globs (`cmd/**`, `internal/**`) satisfy only files with no more specific owner. The release/distribution tier (`.goreleaser.yaml`, `scripts/**`) is work-log-gated too (`TestReleaseTierFilesRequireWorkLog`). The gate is **advisory on fork PRs** (AD-8, 2026-07-05): `cmd/spec-drift --advisory` and the library entry point `specdrift.PrintReport` downgrade findings to GitHub Actions `::warning::` annotations and exit 0 instead of 1; strict mode (the default, used for same-repo PRs and pushes to `main`) is unchanged, and annotation text is escaped per the actions/toolkit `escapeData` rules so a finding can never forge a workflow command (`TestStrictModeUnchanged`, `TestAdvisoryModeExitsCleanWithWarnings`, `TestPrintReportPassingSummaryBothModes`, `TestAdvisoryAnnotationsEscapeWorkflowCommandBytes`). `.github/workflows/ci.yml` flips `--advisory` on only when `github.event.pull_request.head.repo.full_name != github.repository`.
 - SQLite open path: foreign keys enabled and asserted, startup `PRAGMA foreign_key_check`, non-zero busy timeout, single-writer pool, `state.db` mode `0600`;
 - migrations: idempotent `Migrate`, schema version, required tables, generated `ws_` workspace id persistence, singleton workspace enforcement, `PRAGMA quick_check`, `PRAGMA foreign_key_check`, fixed-width UTC nanosecond timestamp formatting, deterministic same-timestamp worktree listing, and an EQP assertion that `ListProjects` uses `idx_namespace_active`;
@@ -470,7 +471,7 @@ CI runs this as a fixed-budget smoke step after the race tests; a longer local r
 
 ## Mac-specific tests
 
-- LaunchAgent install/uninstall — shipped: `TestLaunchdManagerInstallBootsOutThenBootstraps` / `…UninstallIdempotent` / `…StatusParsesPrint` drive `LaunchdManager` against a PATH-shimmed `launchctl` (`//go:build darwin`); a live end-to-end `bootstrap` against a real `gui/<uid>` domain remains manual (CI has no launchd session);
+- LaunchAgent install/uninstall — shipped: `TestLaunchdManagerInstallBootsOutThenBootstraps` / `…UninstallIdempotent` / `…StatusParsesPrint` drive `LaunchdManager` against a PATH-shimmed `launchctl` (`//go:build darwin`); a live end-to-end `bootstrap` against a real `gui/<uid>` domain runs in CI's `service-e2e` macOS leg (`P7-QUAL-04`);
 - daemon starts after login/reload;
 - FSEvents watcher notices create/rename/delete;
 - case-insensitive path conflict detection;
@@ -480,7 +481,7 @@ CI runs this as a fixed-budget smoke step after the race tests; a longer local r
 
 ## Linux-specific tests
 
-- systemd user service install/uninstall — shipped: `TestSystemdManagerUnavailableIsErrUnsupported`, `TestSystemdManagerInstallSequenceAndLingerNote` (asserts the `show-environment → daemon-reload → enable → restart` order and the linger advisory), and `TestSystemdManagerStatusIsActive` drive `SystemdUserManager` against PATH-shimmed `systemctl`/`loginctl` (`//go:build linux`); a live end-to-end run against a real `--user` manager remains manual/container-gated;
+- systemd user service install/uninstall — shipped: `TestSystemdManagerUnavailableIsErrUnsupported`, `TestSystemdManagerInstallSequenceAndLingerNote` (asserts the `show-environment → daemon-reload → enable → restart` order and the linger advisory), and `TestSystemdManagerStatusIsActive` drive `SystemdUserManager` against PATH-shimmed `systemctl`/`loginctl` (`//go:build linux`); a live end-to-end run against a real `--user` manager runs in CI's `service-e2e` Ubuntu leg, including the headless-uninstall regression (`P7-QUAL-04`);
 - inotify watcher detects changes;
 - watcher limit warning;
 - headless secret unlock path;
