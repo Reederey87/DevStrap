@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // Pattern is a single compiled .devstrapignore pattern.
@@ -48,6 +50,8 @@ func (m *Matcher) Match(relPath string, isDir bool) bool {
 		return false
 	}
 	relPath = filepath.ToSlash(relPath)
+	// NFC so APFS NFD readdir paths match NFC patterns (P7-XP-04; mirrors pathkey).
+	relPath = norm.NFC.String(relPath)
 	ignored := false
 	for _, p := range m.patterns {
 		if !p.matches(relPath, isDir) {
@@ -170,6 +174,9 @@ func parseLines(r *strings.Reader) ([]Pattern, error) {
 func parseLine(line string) (Pattern, bool, error) {
 	// Strip trailing whitespace (gitignore ignores it) but not leading.
 	line = strings.TrimRight(line, " \t")
+	// NFC-normalize once at compile so patterns match APFS NFD paths and pathkey
+	// namespace keys (P7-XP-04). !, /, #, and ASCII metacharacters are NFC-invariant.
+	line = norm.NFC.String(line)
 	if line == "" || strings.HasPrefix(line, "#") {
 		return Pattern{}, false, nil
 	}

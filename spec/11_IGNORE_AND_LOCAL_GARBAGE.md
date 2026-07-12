@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-01
+last_reviewed: 2026-07-11
 tracks_code: [internal/ignore/**, internal/draftbundle/**, internal/scan/**, .gitignore]
 ---
 # Ignore Rules and Local Garbage
@@ -284,6 +284,27 @@ Output:
 ⚠ Secret-looking file found: work/acme/api/.env
 Action: capture encrypted env, ignore file, or leave unmanaged.
 ```
+
+## Unicode normalization and case sensitivity (P7-XP-04 / P7-XP-06)
+
+Ignore matching is **NFC-normalized and case-sensitive**, deliberately:
+
+- **NFC (shipped, `P7-XP-04`).** APFS readdir returns decomposed (NFD) names while
+  `.devstrapignore` files are almost always composed (NFC), so a byte-exact matcher silently
+  failed to prune `café/` on macOS while pruning it on a Linux NFC tree — the same policy then
+  diverges across a fleet, and a draft bundle can ship content the pattern was written to
+  exclude. The compiler now applies `norm.NFC.String` to every pattern line at compile time and
+  to every match target in `Match` (and therefore `ShouldPruneDir`), the same normalization
+  `internal/pathkey` has always applied to namespace keys. `GitignoreFragment` emits the
+  normalized (NFC) pattern text, so compile → fragment → recompile is a fixed point.
+- **Case-sensitive (documented, `P7-XP-06`).** git on default macOS (`core.ignorecase=true`)
+  matches ignores case-insensitively, so a mixed-case gitignore ported into `.devstrapignore`
+  can prune differently under git than under DevStrap on the same machine. DevStrap keeps
+  matching case-sensitive anyway: the compiled policy must mean the same thing on every device
+  in the fleet (macOS, Linux, agents), and per-OS case folding would reintroduce exactly the
+  divergence the NFC fix removes. Note the contrast with `path_key`, which case-folds — that is
+  namespace *identity* (two projects may not differ only by case), not content *matching*.
+  Write patterns in the on-disk case; add both spellings if a tree genuinely mixes them.
 
 ## Policy levels
 
