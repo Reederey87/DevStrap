@@ -165,7 +165,12 @@ func (m SystemdUserManager) Uninstall(ctx context.Context, label string) ([]stri
 	}
 	if managerErr == nil {
 		if _, stderr, err := runSystemctl(ctx, systemdReloadArgs()); err != nil {
-			return nil, fmt.Errorf("unit file removed, but systemctl daemon-reload failed: %w: %s", err, stderr)
+			// Say precisely what happened before the reload failed: claiming
+			// "removed" on an ENOENT no-op reports an action that never occurred.
+			if removeErr == nil {
+				return nil, fmt.Errorf("unit file removed, but systemctl daemon-reload failed: %w: %s", err, stderr)
+			}
+			return nil, fmt.Errorf("systemctl daemon-reload failed (no unit file was present to remove): %w: %s", err, stderr)
 		}
 		if teardownNote != "" {
 			return []string{teardownNote}, nil

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -379,6 +380,70 @@ func TestServiceInstallPreservesBehaviorBeforeInit(t *testing.T) {
 	}
 }
 
+func TestServiceInstallPreInitStillBakesExplicitOverride(t *testing.T) {
+	// A pre-init install with DEVSTRAP_NO_KEYCHAIN=1 set must carry the
+	// override into the unit: init may later record keychain custody, and the
+	// service must keep behaving like the session that installed it.
+	t.Setenv(platform.NoKeychainEnv, "1")
+	f := &fakeServiceManager{nameVal: "systemd-user"}
+	withFakeService(t, f)
+	_, _, err := executeForTest("--home", t.TempDir(), "service", "install", "--hub-file", filepath.Join(t.TempDir(), "hub.json"), "--exec-path", "/usr/local/bin/devstrap")
+	if err != nil {
+		t.Fatalf("install before init: %v", err)
+	}
+	if f.installedSpec == nil || f.installedSpec.Env[platform.NoKeychainEnv] != "1" {
+		t.Fatalf("installed spec = %+v, want %s=1 baked pre-init", f.installedSpec, platform.NoKeychainEnv)
+	}
+}
+
+func TestServiceInstallUnsetCustodyWarnsEvenWithOverride(t *testing.T) {
+	// DEVSTRAP_NO_KEYCHAIN=1 makes an unset store effectively file-backed, but
+	// the pre-P6-XP-04 warning (and the bake) must both still happen.
+	t.Setenv(platform.NoKeychainEnv, "1")
+	f := &fakeServiceManager{nameVal: "systemd-user"}
+	withFakeService(t, f)
+	home := serviceTestHomeWithCustody(t, devicekeys.CustodyUnset)
+	_, stderr, err := executeForTest("--home", home, "--quiet", "service", "install", "--hub-file", filepath.Join(t.TempDir(), "hub.json"), "--exec-path", "/usr/local/bin/devstrap")
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if !strings.Contains(stderr, "devstrap init") {
+		t.Errorf("stderr = %q, want the init warning to survive the override", stderr)
+	}
+	if f.installedSpec == nil || f.installedSpec.Env[platform.NoKeychainEnv] != "1" {
+		t.Fatalf("installed spec = %+v, want the override baked alongside the warning", f.installedSpec)
+	}
+}
+
+func TestServiceInstallRefusesCorruptRecordedCustody(t *testing.T) {
+	// A recorded custody value outside file/keychain is corrupt state:
+	// HybridStore would treat it as keychain-preferred-but-not-required and
+	// silently re-enable the file fallback the custody model forbids.
+	t.Setenv(platform.NoKeychainEnv, "")
+	f := &fakeServiceManager{nameVal: "systemd-user"}
+	withFakeService(t, f)
+	home := serviceTestHomeWithCustody(t, devicekeys.CustodyKeychain)
+	db, err := sql.Open("sqlite", filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE local_meta SET value = 'sideways' WHERE key = 'key_custody'`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	_, _, err = executeForTest("--home", home, "service", "install", "--hub-file", filepath.Join(t.TempDir(), "hub.json"), "--exec-path", "/usr/local/bin/devstrap")
+	if err == nil || !strings.Contains(err.Error(), "corrupt") {
+		t.Fatalf("install err = %v, want corrupt-custody refusal", err)
+	}
+	var appErr appError
+	if !errors.As(err, &appErr) || appErr.code != exitInvalidConfig {
+		t.Fatalf("error = %#v, want exitInvalidConfig", err)
+	}
+	if f.installedSpec != nil {
+		t.Fatal("Install must not run with corrupt recorded custody")
+	}
+}
+
 func TestServiceInstallPrintsAdapterNotes(t *testing.T) {
 	f := &fakeServiceManager{installNotes: []string{"systemd lingering is off; run: loginctl enable-linger $USER"}}
 	withFakeService(t, f)
@@ -395,6 +460,10 @@ func TestServiceInstallPrintsAdapterNotes(t *testing.T) {
 }
 
 func TestServiceInstallEnvContainsNoSecrets(t *testing.T) {
+	// Pin the override off: CI exports DEVSTRAP_NO_KEYCHAIN=1 job-wide, and an
+	// explicitly-set override is DELIBERATELY baked (the one non-secret env the
+	// CLI supplies); this test asserts the no-override default of nil env.
+	t.Setenv(platform.NoKeychainEnv, "")
 	f := &fakeServiceManager{}
 	withFakeService(t, f)
 	_, _, err := executeForTest("--home", t.TempDir(), "service", "install", "--hub-file", filepath.Join(t.TempDir(), "hub.json"), "--exec-path", "/usr/local/bin/devstrap")
@@ -402,7 +471,7 @@ func TestServiceInstallEnvContainsNoSecrets(t *testing.T) {
 		t.Fatalf("install: %v", err)
 	}
 	if f.installedSpec.Env != nil {
-		t.Errorf("spec.Env = %v, want nil (the CLI bakes no env; adapters add only PATH)", f.installedSpec.Env)
+		t.Errorf("spec.Env = %v, want nil (without the explicit override the CLI bakes no env; adapters add only PATH)", f.installedSpec.Env)
 	}
 }
 
