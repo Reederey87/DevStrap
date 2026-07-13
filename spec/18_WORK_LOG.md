@@ -31,6 +31,23 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-13 — fix(platform): real Seatbelt launch probe instead of stat-only check (P7-XP-07)
+
+Changed:
+- `internal/platform/sandbox_darwin.go`: macOS Seatbelt `Available()` was stat-only — it `os.Stat`'d `/usr/bin/sandbox-exec` and checked the executable bit but never launched it, so a present-but-broken `sandbox-exec` (a future Apple removal, or a policy block) was reported "available" until first agent use failed. Replaced with `probeSeatbelt`, a package-level `sync.OnceValues`-cached probe mirroring the Linux `probeBwrap`/`probeLandlock` pattern exactly: it stats the binary, then runs a real minimal launch — `sandbox-exec -p '(version 1)(allow default)' /usr/bin/true` under a 3s `context.WithTimeout`, capturing stderr and checking `ctx.Err()` — and wraps every failure in the shared `ErrUnsupported` sentinel (no new error type). `Available()` now just returns the cached probe's error, so `--sandbox auto` degrades to a loud warning at resolve time instead of breaking the run. The `(allow default)` profile is trivially-successful, so the probe tests that `sandbox-exec` itself can launch, not that a deny fires.
+- `internal/platform/sandbox_darwin_test.go`: added darwin-tagged `TestSeatbeltAvailableLaunchProbes` exercising the cached probe path; it `t.Skipf`s when `sandbox-exec` is unavailable (matching the other darwin real-exec tests) rather than asserting nil unconditionally, since the host's `sandbox-exec` state is not guaranteed.
+- `spec/10_AGENT_WORKSPACES_AND_POLICIES.md`: the "availability is probe-based, not stat-based" sentence now covers macOS Seatbelt as well as the Linux backends (`P7-XP-07`).
+- `docs/audits/README.md`: `P7-XP-07` moved to *Recently shipped*; Pass 7 open count 16→15 (P3 12→11).
+
+Validated (native darwin host):
+- `gofmt -w cmd internal` (clean)
+- `GOCACHE=/tmp/p7-xp-07-gocache go build ./...` + `go vet ./internal/platform/` (both pass natively; darwin build tag exercised on the host)
+- `GOCACHE=/tmp/p7-xp-07-gocache go test -race ./internal/platform/` (pass; `TestSeatbeltAvailableLaunchProbes` runs live against the host `sandbox-exec`, not skipped)
+- `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`
+
+Follow-ups:
+- None. Remaining sandbox direction (containerization, tighter read confinement) tracked elsewhere.
+
 ## 2026-07-13 — docs(threat-model): document TRUST-01 fleet-wide revocation DoS (P7-SEC-05)
 
 Changed:

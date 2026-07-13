@@ -174,6 +174,16 @@ func TestSeatbeltResolvesCredentialLeafSymlinks(t *testing.T) {
 	}
 }
 
+// TestSeatbeltAvailableLaunchProbes exercises the cached real launch probe
+// in Available() (P7-XP-07). Skips when sandbox-exec is unavailable so CI
+// without a healthy binary still passes; the value is that the probe path
+// runs without panicking when the binary is present.
+func TestSeatbeltAvailableLaunchProbes(t *testing.T) {
+	if err := (SeatbeltSandbox{}).Available(); err != nil {
+		t.Skipf("sandbox-exec unavailable: %v", err)
+	}
+}
+
 func TestSeatbeltCommandWrapsArgvAndCleansUpProfile(t *testing.T) {
 	sb := SeatbeltSandbox{}
 	if err := sb.Available(); err != nil {

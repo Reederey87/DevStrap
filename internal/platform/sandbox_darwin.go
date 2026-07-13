@@ -3,10 +3,15 @@
 package platform
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
+	"time"
 )
 
 const sandboxExecPath = "/usr/bin/sandbox-exec"
@@ -14,9 +19,9 @@ const sandboxExecPath = "/usr/bin/sandbox-exec"
 // SeatbeltSandbox confines agent children with macOS Seatbelt via
 // /usr/bin/sandbox-exec (AGEN-03 first slice). sandbox-exec is deprecated by
 // Apple but ships on every macOS release and is what current agent harnesses
-// (Claude Code, Codex CLI, VT Code) use; if Apple ever removes it,
-// Available() starts failing and `auto` mode degrades to a loud warning
-// instead of breaking agent runs.
+// (Claude Code, Codex CLI, VT Code) use; if Apple ever removes it (or policy
+// blocks launch), Available() launch-probes and starts failing so `auto` mode
+// degrades to a loud warning instead of breaking agent runs.
 type SeatbeltSandbox struct{}
 
 func (s SeatbeltSandbox) Name() string { return "seatbelt" }
@@ -28,15 +33,43 @@ func (s SeatbeltSandbox) ReadConfineEnforcement() ReadConfineEnforcement {
 	return ReadConfineEnforced
 }
 
-func (s SeatbeltSandbox) Available() error {
+// probeSeatbelt caches a real minimal sandbox-exec launch (stat + exec of
+// /usr/bin/true under a trivial allow-default profile), matching the Linux
+// bwrap/landlock probe pattern so a present-but-broken binary fails Available
+// instead of first agent use.
+var probeSeatbelt = sync.OnceValues(func() (string, error) {
 	info, err := os.Stat(sandboxExecPath)
 	if err != nil {
-		return fmt.Errorf("%w: %s not found: %w", ErrUnsupported, sandboxExecPath, err)
+		return "", fmt.Errorf("%w: %s not found: %w", ErrUnsupported, sandboxExecPath, err)
 	}
 	if info.IsDir() || info.Mode()&0o111 == 0 {
-		return fmt.Errorf("%w: %s is not executable", ErrUnsupported, sandboxExecPath)
+		return "", fmt.Errorf("%w: %s is not executable", ErrUnsupported, sandboxExecPath)
 	}
-	return nil
+	// Real minimal launch probe: a trivially-successful profile + command.
+	// sandbox-exec is deprecated but present on every macOS; a present-but-broken
+	// binary (future removal, policy block) fails here instead of at first agent use.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, sandboxExecPath, "-p", "(version 1)(allow default)", "/usr/bin/true") //nolint:gosec // fixed executable probe
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return "", fmt.Errorf("%w: sandbox-exec probe failed: %s", ErrUnsupported, msg)
+	}
+	return sandboxExecPath, nil
+})
+
+func (s SeatbeltSandbox) Available() error {
+	_, err := probeSeatbelt()
+	return err
 }
 
 func (s SeatbeltSandbox) Command(_ context.Context, spec SandboxSpec, argv []string) (SandboxCommand, error) {
