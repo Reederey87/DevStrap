@@ -239,8 +239,8 @@ func TestMigrateEnsureSummaryAndVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 24 {
-		t.Fatalf("schema version = %d, want 24", version)
+	if version != 26 {
+		t.Fatalf("schema version = %d, want 26", version)
 	}
 
 	var tableCount int
@@ -363,6 +363,88 @@ ORDER BY n.path_key;
 	}
 }
 
+// TestBlobRefRewrapUsesCompositeIndexes pins that the exact-match (BINARY `= ?`)
+// revoke/rewrap lookups and updates use the 00026 composite indexes rather than
+// full-scanning. This is the P7-DATA-06 quadratic-scaling fix proper: the 00025
+// NOCASE indexes only serve `col LIKE 'age_blob:%'` enumeration, and SQLite will
+// not use a NOCASE index for a BINARY-collation equality comparison, so without
+// the composite indexes each per-ref lookup in blob_gc.go's loop full-scans.
+func TestBlobRefRewrapUsesCompositeIndexes(t *testing.T) {
+	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	explain := func(query string, args ...any) string {
+		rows, err := st.db.Query("EXPLAIN QUERY PLAN "+query, args...)
+		if err != nil {
+			t.Fatalf("explain %q: %v", query, err)
+		}
+		defer rows.Close()
+		var details []string
+		for rows.Next() {
+			var id, parent, notUsed int
+			var detail string
+			if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+				t.Fatal(err)
+			}
+			details = append(details, detail)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(details, "\n")
+	}
+
+	cases := []struct {
+		name  string
+		query string
+		args  []any
+		index string
+	}{
+		{
+			name:  "DraftSnapshotsForBlobRef",
+			query: "SELECT ds.namespace_id, n.path, ds.byte_size, ds.file_count FROM draft_snapshots ds JOIN namespace_entries n ON n.id = ds.namespace_id WHERE ds.blob_ref = ?;",
+			args:  []any{"age_blob:deadbeef"},
+			index: "idx_draft_snapshots_namespace_ref",
+		},
+		{
+			name:  "UpdateBlobRef secret_bindings",
+			query: "UPDATE secret_bindings SET encrypted_value_ref = ?, updated_at = ? WHERE encrypted_value_ref = ?;",
+			args:  []any{"age_blob:new", "t", "age_blob:old"},
+			index: "idx_secret_bindings_env_profile_ref",
+		},
+		{
+			name:  "UpdateBlobRef draft_snapshots",
+			query: "UPDATE draft_snapshots SET blob_ref = ? WHERE blob_ref = ?;",
+			args:  []any{"age_blob:new", "age_blob:old"},
+			index: "idx_draft_snapshots_namespace_ref",
+		},
+		{
+			name:  "EnvProfilesForBlobRef",
+			query: "SELECT DISTINCT n.id, n.path, e.name, e.provider, e.mode, e.id FROM namespace_entries n JOIN env_profiles e ON e.id = n.env_profile_id JOIN secret_bindings b ON b.env_profile_id = e.id WHERE n.status = 'active' AND b.encrypted_value_ref = ? ORDER BY n.path, e.name;",
+			args:  []any{"age_blob:deadbeef"},
+			index: "idx_secret_bindings_env_profile_ref",
+		},
+	}
+	for _, tc := range cases {
+		plan := explain(tc.query, tc.args...)
+		if !strings.Contains(plan, tc.index) {
+			t.Errorf("%s query plan = %q, want index %s", tc.name, plan, tc.index)
+		}
+		if strings.Contains(plan, "SCAN secret_bindings") && tc.index == "idx_secret_bindings_env_profile_ref" {
+			t.Errorf("%s full-scans secret_bindings; plan = %q", tc.name, plan)
+		}
+		if strings.Contains(plan, "SCAN draft_snapshots") && tc.index == "idx_draft_snapshots_namespace_ref" {
+			t.Errorf("%s full-scans draft_snapshots; plan = %q", tc.name, plan)
+		}
+	}
+}
+
 func TestMigrationDownAndUp(t *testing.T) {
 	st, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
@@ -380,8 +462,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 23 {
-		t.Fatalf("schema version after down = %d, want 23", version)
+	if version != 25 {
+		t.Fatalf("schema version after down = %d, want 25", version)
 	}
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
@@ -390,8 +472,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 24 {
-		t.Fatalf("schema version after re-migrate = %d, want 24", version)
+	if version != 26 {
+		t.Fatalf("schema version after re-migrate = %d, want 26", version)
 	}
 }
 
@@ -422,11 +504,17 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
-	// First step from 24 to 23 is unrelated and must remain unaffected.
-	if err := st.Down(); err != nil {
+	// Steps from 26 down to 23 are unrelated and must remain unaffected.
+	if err := st.Down(); err != nil { // 26 -> 25
 		t.Fatal(err)
 	}
-	err = st.Down()
+	if err := st.Down(); err != nil { // 25 -> 24
+		t.Fatal(err)
+	}
+	if err := st.Down(); err != nil { // 24 -> 23
+		t.Fatal(err)
+	}
+	err = st.Down() // 23 -> 22 attempt, must refuse
 	if err == nil {
 		t.Fatal("migration 00023 down succeeded with populated source-event coordinates")
 	}
@@ -482,10 +570,16 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
-	if err := st.Down(); err != nil {
+	if err := st.Down(); err != nil { // 26 -> 25
 		t.Fatal(err)
 	}
-	if err := st.Down(); err != nil {
+	if err := st.Down(); err != nil { // 25 -> 24
+		t.Fatal(err)
+	}
+	if err := st.Down(); err != nil { // 24 -> 23
+		t.Fatal(err)
+	}
+	if err := st.Down(); err != nil { // 23 -> 22
 		t.Fatalf("migration 00023 down with empty coordinates: %v", err)
 	}
 	version, err := st.Version()
