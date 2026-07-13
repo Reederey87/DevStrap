@@ -16,11 +16,20 @@ import (
 
 	"github.com/Reederey87/DevStrap/internal/config"
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
+	"github.com/Reederey87/DevStrap/internal/hub"
 	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
 	"github.com/spf13/cobra"
 )
+
+// hubMetricsCapable is the optional capability a hub backend implements to
+// expose its accumulated op/byte counters for `doctor --remote` (P4-HUB-14).
+// Declared at package scope so it can name hub.MetricsSnapshot without the
+// local `hub` variable inside checkHubHealth shadowing the package.
+type hubMetricsCapable interface {
+	HubMetrics() (hub.MetricsSnapshot, bool)
+}
 
 // checkStatus is the severity grade for a doctor check (PROD-02).
 type checkStatus string
@@ -182,6 +191,20 @@ func checkHubHealth(ctx context.Context, opts *options, hubFile string) []checkR
 			}
 		}
 		out = append(out, checkResult{Name: "device trust", Status: checkOK, Detail: fmt.Sprintf("%d approved, %d revoked/lost, %d pending", approved, revoked, other)})
+	}
+	// P4-HUB-14: report the op/byte counters this probe accumulated on the hub
+	// backend. The counters are per-process, so this reflects the doctor probe's
+	// own I/O — a small, honest observability surface that also makes the hub's
+	// I/O instrumentation visible in the health report. The metered backend sits
+	// under the EncryptedHub decorator, so unwrap it first.
+	raw := hub
+	if enc, ok := hub.(dssync.EncryptedHub); ok {
+		raw = enc.Hub
+	}
+	if mc, ok := raw.(hubMetricsCapable); ok {
+		if snap, has := mc.HubMetrics(); has {
+			out = append(out, checkResult{Name: "hub metrics", Status: checkOK, Detail: snap.String()})
+		}
 	}
 	return out
 }

@@ -133,6 +133,29 @@ type R2Hub struct {
 	// (including the in-memory conformance double) and is exercised via fault
 	// injection before the SDK is wired.
 	Retry R2Retry
+	// metrics accumulates op/byte counters (P4-HUB-14) when the S3 client is a
+	// meteredS3. nil for a bare struct literal (tests, legacy call sites), in
+	// which case HubMetrics reports unavailable and no counting happens.
+	metrics *Metrics
+}
+
+// NewR2Hub wires op/byte metering (P4-HUB-14) around s3 and returns an R2Hub
+// whose HubMetrics() reports the accumulated counters. Every real backend
+// (r2/s3, git carrier, folder) routes object I/O through R2Hub.S3, so this one
+// wrap instruments them all. Construction via a bare `R2Hub{S3: ...}` literal
+// stays valid and simply carries no metrics.
+func NewR2Hub(s3 S3Client, workspaceID string) R2Hub {
+	m := NewMetrics()
+	return R2Hub{S3: newMeteredS3(s3, m), WorkspaceID: workspaceID, metrics: m}
+}
+
+// HubMetrics returns the accumulated op/byte snapshot and whether metering is
+// wired (P4-HUB-14). doctor --remote surfaces it.
+func (h R2Hub) HubMetrics() (MetricsSnapshot, bool) {
+	if h.metrics == nil {
+		return MetricsSnapshot{}, false
+	}
+	return h.metrics.Snapshot(), true
 }
 
 // retry returns the effective retry policy, defaulting a zero-value R2Retry
