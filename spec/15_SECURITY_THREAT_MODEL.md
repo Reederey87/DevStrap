@@ -131,6 +131,7 @@ Mitigation:
 - device revocation;
 - event signatures from day one for trust-affecting events;
 - HLC ordering and content hashes detect replay/reorder/drop classes when paired with cursors;
+- **HLC plausibility floors** (`P4-SYNC-03`) quarantine events whose physical timestamp is implausible in either direction — skew-ahead events (beyond the *relative* `now + maxSkew` window) held transiently, sub-epoch or non-positive events (below the *fixed* `2024-01-01T00:00:00Z` launch epoch) permanently quarantined as `untrustworthy_remote_time` — as defense-in-depth against a peer with a broken clock poisoning ordering. This is plausibility hygiene, **not** the namespace-seizure fix: permanent same-path seizure is prevented independently by HLC-monotonic (highest-`(HLC, deviceID, eventID)`-wins) same-path reconciliation, under which a sub-epoch event's tiny HLC already loses every same-path contest against a rightful owner's current-time event, floor or no floor (see `07_NAMESPACE_AND_SYNC_MODEL.md`);
 - out-of-band fingerprint confirmation before device approval;
 - no raw secrets;
 - no raw Git mirror by default.

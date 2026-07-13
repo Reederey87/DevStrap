@@ -31,6 +31,25 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-13 — fix(sync): enforce past-direction epoch quarantine (P4-SYNC-03)
+
+Changed:
+- `internal/sync/events.go`: `epochFloorMS` was a `const 0`, which made the already-wired past-direction HLC-plausibility check (`physical < epochFloorMS` in the apply loop) permanently dead — the future/skew-ahead half of the quarantine already worked; the past half did not, so a sub-epoch or non-positive remote event was applied instead of quarantined. Raised the floor to the DevStrap launch epoch `2024-01-01T00:00:00Z` (`1704067200000` ms, named `devstrapEpochFloorMS`) and made `epochFloorMS` a package `var` so it activates in production while staying overridable by synthetic-clock tests. No same-path/skew-ahead/signing logic changed; only the floor value/type. Sub-epoch (and non-positive) events are quarantined as `untrustworthy_remote_time` and treated as permanently invalid — *consumed* (the per-device cursor advances past them), never held — mirroring the existing consumed-quarantine classes. **Scope of the fix (corrected per independent review — opus-4.8, Codex/gpt-5.6, fable-5):** this is defense-in-depth / HLC-plausibility hygiene that closes the literal Pass-4 checklist item ("raise `epochFloorMS` above 0"), **not** a namespace-path-seizure fix. Permanent same-path seizure was *already* prevented, independently, by the HLC-monotonic (highest-`(HLC, deviceID, eventID)`-wins) `reconcileSamePath` shipped 2026-07-04 (`P5-ARCH-01` / PR #95): under highest-wins reconciliation a sub-epoch event's tiny HLC loses every same-path contest against a rightful owner's current-time event, floor or no floor. The floor's real value is rejecting implausible timestamps generally (keeping HLC-merge-on-receive sane, avoiding a spurious "first claim" row on a never-before-seen path), not blocking a seizure that was never possible under the current reconciliation rule. The two floors are also **not symmetric in mechanism**: the future/skew-ahead bound is *relative and moving* (`now + maxSkew`), while the past floor is a *fixed absolute point* (`2024-01-01`) that never moves — both are plausibility floors, but not two sides of one symmetric window.
+- `internal/sync/main_test.go`: `TestMain` now lowers `epochFloorMS = 0` before `m.Run()` so the deterministic sync tests that build tiny synthetic HLCs purely for ordering keep passing.
+- `internal/sync/apply_test.go`: added `TestApplyEventsQuarantinesImplausiblyOldRemoteEventAndConsumesCursor` (restores the real floor locally, feeds a signed positive-but-sub-epoch event, and asserts it is not applied, records one open `untrustworthy_remote_time` conflict with the exact `skewConflictDetails` fingerprint, and the cursor advances past its consumed seq). Strengthened the existing far-future regression test to assert the skew-ahead event is quarantined AND *holds* its device's cursor (transient), proving both directions.
+- `internal/cli/{devices_test.go,devices_grant_replay_test.go,conflicts_test.go}`: the CLI-level replay/conflict fixtures call `ApplyEvents` without the sync-package `TestMain` floor override, so they exercise the real production floor; bumped their synthetic event timestamps above the epoch via a shared `realisticTestPhysicalMS` constant (timestamp-only, no logic change) — this incidentally proves the floor is live on the production apply path. Added `TestApplyEventsRejectsSubEpochEventUnderProductionFloor` (conflicts_test.go) that feeds a signed sub-epoch event through the real CLI apply path and asserts it lands no namespace row and one open `untrustworthy_remote_time` conflict — a direct guard so a silent regression of `epochFloorMS` back to 0 fails outside `internal/sync`.
+- `spec/07_NAMESPACE_AND_SYNC_MODEL.md` (two-sided, asymmetric-mechanism HLC plausibility floor) and `spec/15_SECURITY_THREAT_MODEL.md` (corrected mitigation attribution) document the raised floor and past-direction quarantine.
+
+Validated:
+- `gofmt -l cmd internal` clean; `go build ./...` clean.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` passes.
+- `golangci-lint run` clean.
+- `go test -race ./...` passes (focused `internal/sync` past/future quarantine tests plus the full race suite; the CLI timestamp bumps were required to keep `internal/cli` green under the now-active floor).
+- Core implementation delegated to gpt-5.6 (Codex); orchestrator verified the diff from `git diff`, ran all gates independently, and authored the spec/work-log/ledger updates.
+
+Follow-ups:
+- None.
+
 ## 2026-07-13 — fix(state): index blob-reference columns for revoke/rewrap scans (P7-DATA-06)
 
 Changed:
