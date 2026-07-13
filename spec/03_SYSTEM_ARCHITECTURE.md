@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-12
+last_reviewed: 2026-07-13
 tracks_code: [cmd/**, internal/**, internal/config/**, .github/**, .goreleaser.yaml, scripts/**]
 ---
 # System Architecture
@@ -412,8 +412,12 @@ that draft, and native Linux/macOS jobs verify checksums, SBOM coverage, the cos
 provenance, completions, and the staged executable's version metadata. Only after both
 native jobs pass does the workflow publish the same draft bytes and commit GoReleaser's
 staged cask to the tap. A failed smoke leaves the draft and tag for diagnosis and manual
-delete-and-re-cut; it never rebuilds between smoke and publish. The distribution surface,
-in the order users should reach for it:
+delete-and-re-cut; it never rebuilds between smoke and publish. The smoke job runs with
+`contents: write` — found live on the first production dry-run of this pipeline
+(`v0.1.2`): GitHub's draft-release visibility model requires push access to view a draft
+via the API at all, so a read-only token 404s on `gh release download` even though the
+draft exists; there is no narrower read-scoped path (the list-releases endpoint has the
+same restriction). The distribution surface, in the order users should reach for it:
 
 1. **Homebrew tap** — `brew install Reederey87/devstrap/devstrap`. GoReleaser renders a
    **cask** (not a formula: `brews:` is deprecated since GoReleaser v2.16, and casks now
