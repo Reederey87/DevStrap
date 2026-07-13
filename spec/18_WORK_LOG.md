@@ -31,6 +31,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-13 — fix(release): scope HOMEBREW_TAP_GITHUB_TOKEN to the tap-push step
+
+Changed:
+- Third bug found live on the same `v0.1.2` stable dry-run: after the `stable-smoke` and `stable-publish` commit-verify fixes let the release actually publish for the first time (`v0.1.2` went live, isDraft=false, isPrerelease=false), the job's final "Push staged cask to Homebrew tap" step failed with `fatal: could not read Username for 'https://github.com': No such device or address`. Root cause: GitHub Actions step-level `env:` is scoped to that step's own process, not inherited from earlier steps in the same job. The earlier "Prepare tap checkout" step sets `GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}` and runs `gh auth setup-git` (wiring git's credential helper to shell out to `gh auth git-credential`), but the later push step's own `env:` only had `TAG` — so when git invoked the credential helper during `git -C tap push`, that `gh` subprocess had no token available and produced no credential at all.
+- `.github/workflows/release.yml`: added `GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}` to the "Push staged cask to Homebrew tap" step's own `env:` block, matching the pattern already used correctly by "Prepare tap checkout" a few steps earlier in the same job. Checked the rest of the file for the same missing-token class of bug — no other instance found (every other `git`/`gh` push/clone/auth step already scopes its own token correctly).
+- Recovery: `v0.1.2`'s GitHub release was already correctly published (this bug only affects the tap sync, not the release itself) — the tap was updated by hand from the retained `stable-release-metadata` workflow artifact (hashes verified byte-for-byte against the run's own `checksums.txt` before pushing), per `RELEASING.md`'s documented recovery for exactly this residual window ("push the cask by hand from that artifact — never regenerate it").
+
+Validated:
+- Live reproduction: the exact failure message above, traced to the step-scoped-env mechanic.
+- `actionlint .github/workflows/release.yml` clean (re-run independently); YAML parses.
+- Dual review: Grok-4.5 (implementation + validation, confirmed no other missing-token occurrences in the file), Codex review (one-line fix, confirmed correct and no broader security concern beyond the token's existing scoped use a few steps earlier).
+- Manual tap push verified: `Reederey87/homebrew-devstrap`'s `Casks/devstrap.rb` now reads `version "0.1.2"` with hashes matching the release's `checksums.txt`.
+
+Follow-ups:
+- None — `v0.1.2` is now fully live (GitHub release + Homebrew tap), completing the wave's live release dry-run across all three bugs found and fixed today.
+
 ## 2026-07-13 — fix(release): resolve tag to commit via API instead of trusting targetCommitish
 
 Changed:

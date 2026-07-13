@@ -424,7 +424,11 @@ The publish job's own gate — refusing to promote a draft that a re-cut tag or 
 run replaced — resolves the tag to its current commit via `gh api .../commits/<tag>`
 rather than the release object's `targetCommitish` field, which was found live to report
 the default branch name ("main"), not the tagged commit, for a release tied to an
-already-existing tag. The distribution surface, in the order users should reach for it:
+already-existing tag. The tap-push step carries its own `HOMEBREW_TAP_GITHUB_TOKEN`
+in its `env:` block rather than relying on an earlier step's credential setup — a
+step's `env:` is not inherited by later steps in the same job, so the token has to
+be re-declared everywhere it's actually used, not just where the credential helper
+was configured. The distribution surface, in the order users should reach for it:
 
 1. **Homebrew tap** — `brew install Reederey87/devstrap/devstrap`. GoReleaser renders a
    **cask** (not a formula: `brews:` is deprecated since GoReleaser v2.16, and casks now
