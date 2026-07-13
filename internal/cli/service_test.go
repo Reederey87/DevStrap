@@ -563,6 +563,29 @@ func TestServiceUninstallIdempotent(t *testing.T) {
 	}
 }
 
+// TestServiceUninstallStatusErrorDoesNotClaimNotInstalled is the CodeRabbit
+// review guard (PR #184): a failed pre-check Status call must not be treated
+// as proof the service was not installed. Before the fix, a Status error left
+// status.Installed at its false zero value, so a real removal (Uninstall
+// succeeds with no error) was misreported as "not installed; nothing to do".
+func TestServiceUninstallStatusErrorDoesNotClaimNotInstalled(t *testing.T) {
+	f := &fakeServiceManager{statusErr: errors.New("transient launchctl print failure")}
+	withFakeService(t, f)
+	_, stderr, err := executeForTest("--home", t.TempDir(), "service", "uninstall")
+	if err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if !f.uninstalled {
+		t.Error("Uninstall was not called")
+	}
+	if strings.Contains(stderr, "not installed; nothing to do") {
+		t.Errorf("stderr = %q, must not claim not-installed on an unknown prior state", stderr)
+	}
+	if !strings.Contains(stderr, "uninstalled fake service") || !strings.Contains(stderr, "prior state unknown") {
+		t.Errorf("stderr = %q, want an uninstalled confirmation noting the unknown prior state", stderr)
+	}
+}
+
 func TestServiceStatusJSON(t *testing.T) {
 	f := &fakeServiceManager{statusVal: platform.ServiceStatus{Installed: true, Running: false, Detail: "not loaded", UnitPath: "/x/fake.plist", ExecPath: "/x/devstrap", ExecPathMissing: true}}
 	withFakeService(t, f)

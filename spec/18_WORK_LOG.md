@@ -46,6 +46,18 @@ Validated:
 Follow-ups:
 - Candidate new P3 finding: un-gate (or explicitly document as deferred) the terminal confirmations on `hub login`/`hub logout`.
 
+### 2026-07-13 — review fixup (P7-CLI-03): don't infer "not installed" from a failed status pre-check
+
+CodeRabbit review (PR #184) caught that `service uninstall`'s best-effort `Status` pre-check discarded its error (`status, _ := mgr.Status(...)`), leaving `status.Installed` at its zero-value `false`. If `Status` failed (a transient `launchctl print`/D-Bus query failure) but `Uninstall` itself succeeded on a genuinely-installed service, the confirmation wrongly printed "not installed; nothing to do" instead of "uninstalled ... service" — misreporting a real removal as a no-op.
+
+- `internal/cli/service.go` (`newServiceUninstallCommand`): now captures `statusErr` from the pre-check and branches on it first — a Status failure prints "uninstalled ... service ... (prior state unknown: ...)" instead of guessing, preserving the success confirmation (Uninstall itself returned no error) without asserting a prior state the pre-check couldn't verify.
+- `internal/cli/service_test.go`: new `TestServiceUninstallStatusErrorDoesNotClaimNotInstalled` proves the fix — a `fakeServiceManager` with `statusErr` set asserts the output is NOT "not installed; nothing to do" and IS an uninstalled confirmation noting the unknown prior state.
+
+Validated (this fixup):
+- `go build ./...`; `go test ./internal/cli/... -run TestServiceUninstall -v` — all 4 uninstall tests pass, including the new one.
+- `gofmt -w cmd internal`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `go test -race ./...`.
+- Credit: CodeRabbit automated review on PR #184.
+
 ## 2026-07-13 — fix(hub): batch git-carrier writes into one commit per sync cycle (P7-HUB-01)
 
 Changed:
