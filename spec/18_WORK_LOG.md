@@ -31,6 +31,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-13 — fix(release): resolve tag to commit via API instead of trusting targetCommitish
+
+Changed:
+- Second bug found live on the same `v0.1.2` stable dry-run, after the `stable-smoke` draft-permission fix let smoke pass on both OSes for the first time: `stable-publish`'s "Verify the draft is the run that was smoked" step failed with `release for v0.1.2 is 'main true', expected draft at 20a7aadd...`. Root cause: the step compared `gh release view $TAG --json targetCommitish` against `$GITHUB_SHA`, but GitHub's Releases API reports `targetCommitish` as the repository's default branch name ("main") for a release tied to an already-existing tag, never the resolved commit — confirmed live with zero race involved. This is not a rare false positive; it blocks every stable release unconditionally, since a stable tag is always cut at (and stays at) a real commit, never "main" literally.
+- `.github/workflows/release.yml`: the step now resolves the tag to its actual current commit via `gh api repos/$GITHUB_REPOSITORY/commits/$TAG --jq '.sha'` (confirmed live: correctly peels an annotated tag to its commit, matching `$GITHUB_SHA` exactly) and checks `isDraft` separately, refusing to publish if either the commit or draft state doesn't match what smoke verified. Codex review confirmed this restores the intended race protection (a concurrent re-tag mid-run is still caught) and flagged one accepted, non-blocking residual: the SHA and draft-state reads are now two separate API calls instead of one atomic call, opening a millisecond-scale TOCTOU gap that the old (broken) atomic version didn't have — judged not worth blocking on, since no atomic endpoint returns both fields.
+- Recovery: the second stuck `v0.1.2` draft and tag were deleted per the same documented procedure; before that, a stray Release workflow run — triggered by a transient earlier mistake where the tag briefly pointed at the wrong (pre-`stable-smoke`-fix) commit before being corrected — was caught still `in_progress` at the wrong commit and cancelled via `gh run cancel` before it could create a competing draft for the same tag name.
+- `spec/03_SYSTEM_ARCHITECTURE.md`: Distribution section now notes the execute-after-verify ordering (from the prior entry) and this commit-resolution fix; `last_reviewed` unchanged (already bumped today by the prior entry).
+
+Validated:
+- Live reproduction: `gh release view v0.1.2 --json targetCommitish` returned `"main"` on a real, non-racing release; `gh api repos/.../commits/v0.1.2 --jq '.sha'` correctly resolved to the tagged commit.
+- `actionlint .github/workflows/release.yml` clean (re-run independently by both Grok and Codex); YAML parses.
+- Dual review: Grok-4.5 (mechanical fix + validation, confirmed no other `targetCommitish` occurrences in release.yml/.goreleaser.yaml), Codex adversarial review (confirmed the fix restores race protection, verified `gh api`'s ref-resolution semantics, flagged the accepted TOCTOU nit above).
+
+Follow-ups:
+- Re-cut `v0.1.2` a third time once this fix merges, and re-run the staged pipeline end-to-end to complete the wave's live release dry-run.
+
 ## 2026-07-13 — fix(release): stable-smoke needs write access to see a still-draft release
 
 Changed:

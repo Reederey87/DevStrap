@@ -417,7 +417,14 @@ delete-and-re-cut; it never rebuilds between smoke and publish. The smoke job ru
 (`v0.1.2`): GitHub's draft-release visibility model requires push access to view a draft
 via the API at all, so a read-only token 404s on `gh release download` even though the
 draft exists; there is no narrower read-scoped path (the list-releases endpoint has the
-same restriction). The distribution surface, in the order users should reach for it:
+same restriction). Nothing downloaded executes before it is verified: the smoke step
+downloads under a token scoped only to that step, then checks checksums/SBOM/completions
+and the cosign signature/SLSA provenance, and only then extracts and runs the binary.
+The publish job's own gate — refusing to promote a draft that a re-cut tag or concurrent
+run replaced — resolves the tag to its current commit via `gh api .../commits/<tag>`
+rather than the release object's `targetCommitish` field, which was found live to report
+the default branch name ("main"), not the tagged commit, for a release tied to an
+already-existing tag. The distribution surface, in the order users should reach for it:
 
 1. **Homebrew tap** — `brew install Reederey87/devstrap/devstrap`. GoReleaser renders a
    **cask** (not a formula: `brews:` is deprecated since GoReleaser v2.16, and casks now
