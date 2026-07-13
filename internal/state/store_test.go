@@ -462,8 +462,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 26 {
-		t.Fatalf("schema version after down = %d, want 26", version)
+	if version != 27 {
+		t.Fatalf("schema version after down = %d, want 27", version)
 	}
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
@@ -504,12 +504,11 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
-	// Steps from 28 down to 23 are unrelated and must remain unaffected. Migration
-	// 00027 doesn't exist in this branch (renumbered to 00028 to avoid a
-	// collision), so goose's version sequence has no rung there: the first Down()
-	// rolls 00028 straight back to 26, matching the applied-versions set actually
-	// on disk.
-	if err := st.Down(); err != nil { // 28 -> 26 (00027 doesn't exist)
+	// Steps from 28 down to 23 are unrelated and must remain unaffected.
+	if err := st.Down(); err != nil { // 28 -> 27
+		t.Fatal(err)
+	}
+	if err := st.Down(); err != nil { // 27 -> 26
 		t.Fatal(err)
 	}
 	if err := st.Down(); err != nil { // 26 -> 25
@@ -577,7 +576,10 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
-	if err := st.Down(); err != nil { // 28 -> 26 (00027 doesn't exist in this branch)
+	if err := st.Down(); err != nil { // 28 -> 27
+		t.Fatal(err)
+	}
+	if err := st.Down(); err != nil { // 27 -> 26
 		t.Fatal(err)
 	}
 	if err := st.Down(); err != nil { // 26 -> 25
