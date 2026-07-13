@@ -2045,7 +2045,7 @@ func TestApplyRemoteDeviceTrustTxMatrix(t *testing.T) {
 		var changed bool
 		if err := st.WithTx(ctx, func(tx *Tx) error {
 			var err error
-			changed, err = tx.ApplyRemoteDeviceTrustTx(ctx, tc.target, tc.to)
+			changed, err = tx.ApplyRemoteDeviceTrustTx(ctx, tc.target, tc.to, 0)
 			return err
 		}); err != nil {
 			t.Fatalf("%s -> %s: %v", tc.target, tc.to, err)
@@ -2065,7 +2065,7 @@ func TestApplyRemoteDeviceTrustTxMatrix(t *testing.T) {
 	}
 	// approved is not a valid remote transition target.
 	if err := st.WithTx(ctx, func(tx *Tx) error {
-		_, err := tx.ApplyRemoteDeviceTrustTx(ctx, "dev-pending", "approved")
+		_, err := tx.ApplyRemoteDeviceTrustTx(ctx, "dev-pending", "approved", 0)
 		return err
 	}); err == nil {
 		t.Fatal("remote approve must be rejected — approval is the local ceremony only")

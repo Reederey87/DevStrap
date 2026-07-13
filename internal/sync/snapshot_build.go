@@ -114,8 +114,9 @@ func BuildSnapshot(ctx context.Context, st *state.Store, producedBy string, hlc 
 	// device ever learns the revocation.
 	for _, tr := range trust {
 		snap.Trust = append(snap.Trust, SnapshotTrust{
-			DeviceID: tr.DeviceID,
-			State:    tr.TrustState,
+			DeviceID:     tr.DeviceID,
+			State:        tr.TrustState,
+			RevokedAtHLC: tr.RevokedAtHLC,
 		})
 	}
 	return snap, nil

@@ -840,9 +840,23 @@ func (tx *Tx) SetDeviceTrustStateTx(ctx context.Context, deviceID, trustState st
 		return fmt.Errorf("refusing to change local device trust state")
 	}
 	now := timestampNow()
+	// P7-SYNC-02 Finding 2: clear the revocation boundary on LOCAL re-approval.
+	// `devices approve` is the prescribed recovery path (also the mutual-revocation
+	// remedy), so a revoke -> re-approve -> revoke-again sequence must record a
+	// FRESH boundary the second time. Without clearing, revoked_at_hlc keeps the
+	// MINIMUM across BOTH revocation generations (first cut B1), so a legitimate
+	// event from the device's SECOND approved window (B1 < HLC < R2) would be
+	// rejected on later delivery — reintroducing exactly the delivery-order
+	// divergence this finding closes. NULL == "unknown boundary", the same
+	// fail-closed semantics used for legacy/never-revoked rows; the next
+	// revocation's recordDeviceRevocationHLC then MIN(NULL, R2) = R2.
 	result, err := tx.tx.ExecContext(ctx, `
-UPDATE devices SET trust_state = ?, updated_at = ? WHERE id = ?;
-`, trustState, now, deviceID)
+UPDATE devices
+SET trust_state = ?,
+    revoked_at_hlc = CASE WHEN ? = 'approved' THEN NULL ELSE revoked_at_hlc END,
+    updated_at = ?
+WHERE id = ?;
+`, trustState, trustState, now, deviceID)
 	if err != nil {
 		return fmt.Errorf("set device trust state: %w", err)
 	}
@@ -866,7 +880,15 @@ UPDATE devices SET trust_state = ?, updated_at = ? WHERE id = ?;
 // distrusting itself; the operator sees the fleet's decision via peers
 // quarantining its events instead. Returns whether a row actually changed so
 // the caller can gate side effects (needs_rotation flagging) off replays.
-func (tx *Tx) ApplyRemoteDeviceTrustTx(ctx context.Context, deviceID, trustState string) (bool, error) {
+//
+// revokedAtHLC is the HLC of the revocation event (P7-SYNC-02). It is recorded
+// as the device's revocation boundary independently of whether the sticky flip
+// changed a row: the boundary is the MINIMUM revocation HLC ever seen for the
+// device, so concurrent revocations converge on the same (earliest, most
+// fail-closed) cut regardless of delivery order. Pass 0 when the HLC is unknown
+// (e.g. a legacy caller); the boundary then stays NULL and the apply path
+// fails closed for that device's pre-revocation events.
+func (tx *Tx) ApplyRemoteDeviceTrustTx(ctx context.Context, deviceID, trustState string, revokedAtHLC int64) (bool, error) {
 	if deviceID == "" {
 		return false, fmt.Errorf("device id is required")
 	}
@@ -893,7 +915,49 @@ WHERE id = ? AND trust_state IN ('pending', 'approved');
 	if err != nil {
 		return false, fmt.Errorf("read remote trust update count: %w", err)
 	}
+	if err := tx.recordDeviceRevocationHLC(ctx, deviceID, revokedAtHLC); err != nil {
+		return false, err
+	}
 	return affected > 0, nil
+}
+
+// recordDeviceRevocationHLC records the earliest revocation HLC seen for a
+// non-local device (P7-SYNC-02). It takes the MINIMUM so the boundary is
+// delivery-order independent and deterministic across the fleet even when two
+// approved devices revoke the same target concurrently; the earliest cut is
+// also the most fail-closed (it admits the fewest pre-revocation events). hlc
+// <= 0 is a no-op so a legacy/unknown boundary leaves the column NULL and the
+// apply path stays fail-closed for that device. The local device is never
+// touched (it cannot be revoked from a remote event).
+func (tx *Tx) recordDeviceRevocationHLC(ctx context.Context, deviceID string, hlc int64) error {
+	if hlc <= 0 {
+		return nil
+	}
+	_, err := tx.tx.ExecContext(ctx, `
+UPDATE devices
+SET revoked_at_hlc = CASE
+        WHEN revoked_at_hlc IS NULL OR ? < revoked_at_hlc THEN ?
+        ELSE revoked_at_hlc
+    END,
+    updated_at = ?
+WHERE id = ? AND trust_state != 'local';
+`, hlc, hlc, timestampNow(), deviceID)
+	if err != nil {
+		return fmt.Errorf("record device revocation hlc: %w", err)
+	}
+	return nil
+}
+
+// RecordDeviceRevocationHLCTx records the revocation boundary for the LOCAL
+// revoke path (P7-SYNC-02). `devices revoke`/`lost` flips the trust state and
+// inserts the synced trust event in one transaction; the event's HLC is stamped
+// during insert, so the boundary is recorded here once the event is known. It
+// is the same MINIMUM/idempotent write ApplyRemoteDeviceTrustTx performs.
+func (tx *Tx) RecordDeviceRevocationHLCTx(ctx context.Context, deviceID string, hlc int64) error {
+	if deviceID == "" {
+		return fmt.Errorf("device id is required")
+	}
+	return tx.recordDeviceRevocationHLC(ctx, deviceID, hlc)
 }
 
 func (s *Store) SetDevicePublicKey(ctx context.Context, deviceID, publicKey string) error {
@@ -3385,11 +3449,12 @@ func (s *Store) VerifyRemoteEvent(ctx context.Context, event Event) error {
 func verifyEventSignature(ctx context.Context, exec sqlExecutor, event Event) error {
 	var signingPublicKey string
 	var trustState string
+	var revokedAtHLC sql.NullInt64
 	err := exec.QueryRowContext(ctx, `
-SELECT COALESCE(signing_public_key, ''), trust_state
+SELECT COALESCE(signing_public_key, ''), trust_state, revoked_at_hlc
 FROM devices
 WHERE id = ?;
-`, event.DeviceID).Scan(&signingPublicKey, &trustState)
+`, event.DeviceID).Scan(&signingPublicKey, &trustState, &revokedAtHLC)
 	// HUB-03: once the workspace has any enrolled (approved, non-local) device,
 	// event verification fails CLOSED for ALL event types from non-local
 	// devices. Before enrollment, only destructive event types require
@@ -3430,7 +3495,58 @@ WHERE id = ?;
 	// HUB-03: for must-verify events, require the device to be approved (the
 	// local device is exempt). For non-must-verify events once enrolled,
 	// require non-local devices to be approved too (fail-closed).
-	if !isLocal && trustState != "approved" && (mustVerifyEvent(event.Type) || enrolled) {
+	//
+	// P7-SYNC-02: the trust check is TIME-SCOPED, not "is this device currently
+	// approved". A device in a terminal trust state (revoked/lost) was approved
+	// up to its revocation boundary; a non-trust event whose signed HLC is
+	// strictly before that boundary was emitted while the device was trusted and
+	// is admitted regardless of delivery order (a bystander that applied the
+	// revocation event first must NOT permanently reject a legitimate
+	// pre-revocation namespace/env/draft event — the divergence class this
+	// fixes). The decision uses only two signed, immutable quantities — the
+	// event's own HLC (bound in its signature) and the revocation boundary (the
+	// minimum HLC across approved-signed revocation events, which the revoked
+	// device cannot raise) — never the mutable local trust_state or delivery
+	// order, so a hostile hub or reordering cannot trick a receiver. A revoked
+	// device backdating a forged event below the boundary is authoring strictly
+	// BEFORE its revocation in the only ordering the system has, i.e. within the
+	// window it was already trusted; it can never admit an event at or after the
+	// boundary, which is exactly the forward-secrecy guarantee revocation
+	// provides. When the boundary is unknown (NULL — a legacy row, or a snapshot
+	// that predates the boundary projection) the exemption does not apply and the
+	// device fails closed, exactly as before this fix.
+	//
+	// Trust events (device.revoked/device.lost) are DELIBERATELY excluded from
+	// the exemption and always require CURRENT approval: a revoked device's
+	// authority to revoke OTHERS is precisely what revocation removes, and
+	// retroactively honoring a now-revoked device's trust decisions would
+	// destabilize the mutual-revocation residual (see the trust_apply tests).
+	//
+	// Key-grant events (device.key.granted) are ALSO excluded (P7-SYNC-02
+	// Finding 1, fable-5 review). Unlike ordinary content edits — which are
+	// purely historical: applying a stale-but-real one only re-states what the
+	// device recorded while trusted — a grant has FORWARD-LOOKING side effects.
+	// It changes the WCK epoch every peer seals FUTURE events under (this
+	// verifier is the EncryptedHub grant-ingestion seam, VerifyRemoteEvent, so
+	// admitting a grant here writes its WCK into the keyring). A revoked device
+	// retaining its signing key could otherwise mint a fresh higher-epoch WCK,
+	// age-wrap it to every current approved recipient, and emit a grant carrier
+	// backdated just below its boundary with a valid v2 self-signature — the
+	// grant rides the hub as PLAINTEXT (never enc.v2-wrapped), so it needs no
+	// current WCK to author — and every victim would ingest it and start sealing
+	// under the attacker-known key, bypassing the P7-SYNC-04 owed-rotation
+	// containment. So a grant is honored only from a device approved at CURRENT
+	// time; a legitimate pre-revocation grant lost to this exclusion is cheaply
+	// re-issued by any approved device (devices approve), so there is no
+	// availability cost. Only the device's own content edits are time-scoped,
+	// which is the scope of the finding (namespace convergence).
+	approvedAtEmit := trustState == "approved"
+	if !approvedAtEmit && !isTrustEvent(event.Type) && !isKeyGrantEvent(event.Type) &&
+		(trustState == "revoked" || trustState == "lost") &&
+		revokedAtHLC.Valid && revokedAtHLC.Int64 > 0 && event.HLC < revokedAtHLC.Int64 {
+		approvedAtEmit = true
+	}
+	if !isLocal && !approvedAtEmit && (mustVerifyEvent(event.Type) || enrolled) {
 		return fmt.Errorf("event %s of type %s requires a signature from an approved device (current: %s): %w", event.ID, event.Type, trustState, ErrEventVerification)
 	}
 	if err := devicekeys.Verify(signingPublicKey, event.DeviceSig, eventSignatureDomainV2, EventSignaturePayloadV2(event)); err != nil {
@@ -3489,6 +3605,25 @@ func mustVerifyEvent(eventType string) bool {
 	default:
 		return false
 	}
+}
+
+// isTrustEvent reports whether an event carries a device-trust decision
+// (device.revoked/device.lost). These are excluded from the P7-SYNC-02
+// time-scoped exemption: a revoked device's authority to distrust OTHERS ends
+// at its revocation, so its trust events always require CURRENT approval.
+func isTrustEvent(eventType string) bool {
+	return eventType == "device.revoked" || eventType == "device.lost"
+}
+
+// isKeyGrantEvent reports whether an event is a workspace-content-key grant
+// (device.key.granted, sync.EventDeviceKeyGranted — spelled as a literal here to
+// avoid an import cycle with internal/sync). Like trust events, grants are
+// excluded from the P7-SYNC-02 time-scoped exemption (Finding 1): a grant has
+// forward-looking side effects — admitting one writes an attacker-chosen WCK
+// into the keyring that every peer then seals future events under — so a
+// revoked device's grant always requires CURRENT approval.
+func isKeyGrantEvent(eventType string) bool {
+	return eventType == "device.key.granted"
 }
 
 func ContentHash(payloadJSON string) string {

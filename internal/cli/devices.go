@@ -325,7 +325,14 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 					if err := tx.SetDeviceTrustStateTx(cmd.Context(), args[0], trustState); err != nil {
 						return err
 					}
-					if _, err := store.InsertLocalEventTx(cmd.Context(), tx, dssync.NewDeviceTrustEvent(eventType, string(payloadJSON))); err != nil {
+					ev, err := store.InsertLocalEventTx(cmd.Context(), tx, dssync.NewDeviceTrustEvent(eventType, string(payloadJSON)))
+					if err != nil {
+						return err
+					}
+					// P7-SYNC-02: record the revocation boundary from the just-stamped
+					// event's HLC so this device (and any snapshot it later produces)
+					// time-scopes the target's pre-revocation events.
+					if err := tx.RecordDeviceRevocationHLCTx(cmd.Context(), args[0], ev.HLC); err != nil {
 						return err
 					}
 					return markRevokeContainmentPendingTx(cmd.Context(), tx, args[0])
