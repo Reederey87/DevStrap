@@ -31,6 +31,19 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-13 — docs(threat-model): document TRUST-01 fleet-wide revocation DoS (P7-SEC-05)
+
+Changed:
+- `spec/15_SECURITY_THREAT_MODEL.md`: added one `### Threat:` entry (after the `P6-SYNC-01` entry, before the advisory sweep lock paragraph) documenting that a single compromised-but-approved device can, via TRUST-01's synced trust plane, emit `device.revoked`/`device.lost` for every other approved device — a fleet-wide sticky/monotonic trust flip plus (since `P7-SYNC-04`) a fleet-wide owed WCK rotation, with no quorum/rate-limit/confirmation gate. Framed as an ACCEPTED TRADEOFF of the zero-knowledge, no-central-authority model (a quorum check would require a trusted third party the design rejects); noted the intentional asymmetry (`device.approved` is never propagated, so the blast radius is denial, not attacker onboarding), the after-the-fact-only mitigations (`doctor` device-trust count + workspace-key-rotation warning, `devices list` trust_state, `conflicts list` quarantine of a still-pushing revoked device — none PREVENT the DoS), and the local re-approval recovery path. Docs-only, no code change; mitigation claims verified against `internal/cli/doctor.go`.
+- Bumped `spec/15` `last_reviewed` to 2026-07-13.
+- `docs/audits/README.md`: moved `P7-SEC-05` to Recently shipped and decremented Pass 7's open count.
+
+Validated:
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+
+Follow-ups:
+- None. The DoS is an accepted architectural tradeoff; no prevention mechanism is planned (would require a central authority).
+
 ## 2026-07-13 — fix(release): scope HOMEBREW_TAP_GITHUB_TOKEN to the tap-push step
 
 Changed:
