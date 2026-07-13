@@ -31,6 +31,19 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-13 — fix(state): index blob-reference columns for revoke/rewrap scans (P7-DATA-06)
+
+Changed:
+- New migration `internal/state/migrations/00025_blob_ref_indexes.sql` adds `COLLATE NOCASE` indexes `idx_secret_bindings_encrypted_value_ref` and `idx_draft_snapshots_blob_ref`. The four revoke/rewrap reference scans in `internal/state/store.go` (`AllBlobRefs`, `EnvBlobRefs`, `DraftBlobRefs`, `RetainedBlobRefs`) filter `... LIKE 'age_blob:%'` and previously full-scanned. No query change was needed: `NOCASE` matches SQLite's default case-insensitive `LIKE`, so the planner converts the prefix pattern into a range scan over the index.
+- Schema version 24→25: bumped the hardcoded constants in `internal/state/store_test.go` (`TestMigrateEnsureSummaryAndVersion` 24→25; `TestMigrationDownAndUp` after-down 23→24, after-remigrate 24→25) and the `db status` literal in `internal/cli/root_test.go` (`schema version: 24`→`25`). `spec/12_DATA_MODEL_SQLITE.md` (migration list, current-version line, migration-description paragraph) and `spec/13_CLI_DAEMON_API.md` (`db status` schema-version note) updated.
+
+Validated:
+- `EXPLAIN QUERY PLAN` on a real migrated `state.db` (schema v25) — WITH indexes: `SEARCH secret_bindings USING COVERING INDEX idx_secret_bindings_encrypted_value_ref (encrypted_value_ref>? AND encrypted_value_ref<?)` and the analogous `draft_snapshots` plan; WITHOUT (indexes dropped): `SCAN secret_bindings` / `SCAN draft_snapshots`. Confirms the index is actually used.
+- `gofmt -w cmd internal`; `go build ./...`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOCACHE=/tmp/p7-data-06-gocache go test -race ./...`.
+
+Follow-ups:
+- None.
+
 ## 2026-07-13 — fix(platform): real Seatbelt launch probe instead of stat-only check (P7-XP-07)
 
 Changed:

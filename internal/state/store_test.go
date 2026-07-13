@@ -239,8 +239,8 @@ func TestMigrateEnsureSummaryAndVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 24 {
-		t.Fatalf("schema version = %d, want 24", version)
+	if version != 25 {
+		t.Fatalf("schema version = %d, want 25", version)
 	}
 
 	var tableCount int
@@ -380,8 +380,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 23 {
-		t.Fatalf("schema version after down = %d, want 23", version)
+	if version != 24 {
+		t.Fatalf("schema version after down = %d, want 24", version)
 	}
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
@@ -390,8 +390,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 24 {
-		t.Fatalf("schema version after re-migrate = %d, want 24", version)
+	if version != 25 {
+		t.Fatalf("schema version after re-migrate = %d, want 25", version)
 	}
 }
 
@@ -422,11 +422,14 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
-	// First step from 24 to 23 is unrelated and must remain unaffected.
-	if err := st.Down(); err != nil {
+	// Steps from 25 down to 23 are unrelated and must remain unaffected.
+	if err := st.Down(); err != nil { // 25 -> 24
 		t.Fatal(err)
 	}
-	err = st.Down()
+	if err := st.Down(); err != nil { // 24 -> 23
+		t.Fatal(err)
+	}
+	err = st.Down() // 23 -> 22 attempt, must refuse
 	if err == nil {
 		t.Fatal("migration 00023 down succeeded with populated source-event coordinates")
 	}
@@ -482,10 +485,13 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
-	if err := st.Down(); err != nil {
+	if err := st.Down(); err != nil { // 25 -> 24
 		t.Fatal(err)
 	}
-	if err := st.Down(); err != nil {
+	if err := st.Down(); err != nil { // 24 -> 23
+		t.Fatal(err)
+	}
+	if err := st.Down(); err != nil { // 23 -> 22
 		t.Fatalf("migration 00023 down with empty coordinates: %v", err)
 	}
 	version, err := st.Version()
