@@ -31,6 +31,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-13 — docs(agents): require last_reviewed bump on substantive spec edits (P7-DOC-03)
+
+Changed:
+- `AGENTS.md` PR-cycle step 1 now states the staleness rule explicitly: a PR that changes the **substance** of a `spec/*.md` file (a status claim, inventory, or architecture/decision statement) must bump that file's `last_reviewed` frontmatter date to the PR date in the same PR; a cross-reference fix, typo, or link/rename touch is not substantive and must not bump the date (that would fake freshness); `spec/18_WORK_LOG.md` is append-only and exempt. This closes the reliability gap: the drift gate (`P5-DX-02`) proves only that a mapped spec was *touched*, never that its `last_reviewed` reflects the change.
+- `spec/00_START_HERE.md`: the spec-drift gate bullet now records the `last_reviewed`-bump obligation and points at `AGENTS.md`; its own `last_reviewed` bumped 2026-07-11→2026-07-13 (dogfooding the rule — this is a substantive edit to that bullet).
+- `docs/audits/README.md`: P7-DOC-03 moved to *Recently shipped*; Pass 7 open count 17→16 (open-table row count re-verified = 16).
+
+Decision — kept doc-only, did NOT extend `cmd/spec-drift`:
+- `internal/specdrift` already parses `last_reviewed`, so a `last_reviewed` vs `git log -1 --format=%ad -- <file>` comparison is mechanically cheap — but it would flag **every** spec file touched by even a reference-only edit, and per this repo's own PR convention nearly every PR touches spec files trivially. That produces false positives that train the maintainer to ignore the signal, which is worse than the current state. Distinguishing substantive from trivial change is a genuine feature the drift tool has no machinery for; per the finding's own guidance, stopped at the process fix rather than scope-creep into a half-built check.
+
+Validated:
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` (docs-only change; work log + AGENTS.md touched → gate satisfied).
+
+Follow-ups:
+- None. (If a future pass wants automation, it needs a real substance-vs-trivial classifier, not a bare mtime compare.)
+
 ## 2026-07-13 — feat(hub): op/byte counters + git-carrier cache GC (P4-HUB-14, P7-HUB-03)
 
 Changed:

@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-11
+last_reviewed: 2026-07-13
 tracks_code: [cmd/**, internal/**, .github/**, AGENTS.md, README.md, go.mod, go.sum, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # DevStrap — Start Here
@@ -150,7 +150,7 @@ Implemented in this repository:
 - Sync apply-path clock-skew quarantine, local-clock advance on receive, `project.renamed` handling, delete-vs-dirty conflicts, event verification-failure conflicts with full replay payloads, and tombstone GC; plus `secret_bindings.needs_rotation` flagging on device revoke/lost surfaced in `doctor`.
 - A `DEVSTRAP_NO_KEYCHAIN` gate forcing the file-backed key store for headless/CI runs.
 - Focused tests for every internal package (including `internal/id`, whose canonical-shape validator backs `--workspace-id`), plus a `rogpeppe/go-internal` testscript end-to-end harness exercising `cmd/devstrap` through the real binary.
-- Spec frontmatter and a Go-based `cmd/spec-drift` CI gate that maps changed code/config paths to tracked spec files and requires the work log on code/spec/doc changes, plus a command-doc drift test that keeps the spec command list in sync with the binary, and a product-naming ADR at `spec/adr/0001-product-naming.md`.
+- Spec frontmatter and a Go-based `cmd/spec-drift` CI gate that maps changed code/config paths to tracked spec files and requires the work log on code/spec/doc changes, plus a command-doc drift test that keeps the spec command list in sync with the binary, and a product-naming ADR at `spec/adr/0001-product-naming.md`. The gate proves only that a mapped spec was *touched*, not that its `last_reviewed` frontmatter reflects the change; `AGENTS.md` (PR-cycle step 1) makes bumping `last_reviewed` on a substantive spec edit — and deliberately *not* on a cross-reference/typo touch — the author's obligation (`P7-DOC-03`).
 - README, MIT license, `.gitignore`, GitHub Actions CI with separate spec-drift, test, and golangci-lint jobs, `CONTRIBUTING.md`, `SECURITY.md`, `CODEOWNERS`, Dependabot, issue/PR templates, and concise `AGENTS.md`. The README's Install section now includes a "Verify a download" subsection documenting the release pipeline's cosign keyless signature + per-archive SBOM (`P4-SEC-05`/`P4-QUAL-05`; see `03_SYSTEM_ARCHITECTURE.md` Distribution).
 
 Not implemented yet (genuinely unbuilt — features that are partly shipped are listed under "now built" below, never here):
