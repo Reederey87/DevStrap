@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-11
+last_reviewed: 2026-07-13
 tracks_code: [internal/platform/**, internal/devicekeys/**, .github/**]
 ---
 # Linux Compatibility Plan
@@ -190,6 +190,10 @@ Rules:
 - socket mode restricted to user.
 
 When the deferred daemon ships, its Unix socket must be created under a `umask(077)` path, checked for stale instances by dialing before unlink, and removed on SIGTERM/SIGINT; CLI commands that require the daemon will exit with the reserved code 3 (`exitDaemonUnavailable`, currently reserved and never returned — see `internal/cli/root.go`). No daemon, socket, or socket-requiring command exists today.
+
+## Linux agent sandbox — credential reads fail closed on the Landlock fallback (`P7-SEC-03`)
+
+`devstrap agent run` sandboxes the child on Linux by lazily choosing bubblewrap, then the Landlock fallback (used on Ubuntu 23.10+/kernel ≥ 6.5, where AppArmor's user-namespace restrictions break bubblewrap). Both back a kernel write-confinement boundary; the full contract lives in `spec/10` and `spec/15`. One Linux-specific behavior belongs here: because Landlock is additive-allow with no subtraction operator, the fallback originally granted `RODirs("/")` wholesale and left credential reads open, so `--sandbox require` did not actually fail closed for `~/.ssh`/`~/.aws`/`~/.git-credentials`-class reads. It now follows the Landlock kernel docs' leaf-hierarchy "good practice": under the default (non-`--read-confine`) policy the fallback grants read+execute on filesystem leaves that omit the credential anchors (`sensitiveHomeDirs`/`sensitiveHomeFiles` + `~/.devstrap/keys`, the same deny-list bubblewrap masks and Seatbelt denies), walking down only through anchor ancestors and granting their siblings wholesale — directories via `RODirs`, regular files via `ROFiles` (Landlock rejects directory rights on a regular file), and skipping a sibling symlink whose target aliases an anchor. Unlike bubblewrap's tmpfs/`/dev/null` masks (which show empty), an omitted Landlock path returns `EACCES`. A directory that cannot be enumerated receives no grant (fail closed). This makes credential-read denial hold on the Landlock fallback in both `--sandbox auto` and `--sandbox require`, not only when `--read-confine` is engaged.
 
 ## Secret handling on Linux
 

@@ -51,11 +51,11 @@ func TestLandlockLimitationsPerABI(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.wantNetSub, func(t *testing.T) {
 			lims := landlockLimitations(tc.abi)
-			if len(lims) != 3 {
-				t.Fatalf("landlockLimitations(%d) len = %d, want 3: %v", tc.abi, len(lims), lims)
+			if len(lims) != 2 {
+				t.Fatalf("landlockLimitations(%d) len = %d, want 2: %v", tc.abi, len(lims), lims)
 			}
 			joined := strings.Join(lims, "\n")
-			for _, want := range []string{tc.wantNetSub, "credential reads", "namespace"} {
+			for _, want := range []string{tc.wantNetSub, "namespace"} {
 				if !strings.Contains(joined, want) {
 					t.Fatalf("landlockLimitations(%d) = %q, want substring %q", tc.abi, joined, want)
 				}
@@ -70,9 +70,6 @@ func TestLandlockLimitationsPerABI(t *testing.T) {
 func TestLandlockLimitationsMirrorBwrapOnlyGuarantees(t *testing.T) {
 	for _, abi := range []int{3, 4} {
 		joined := strings.Join(landlockLimitations(abi), "\n")
-		if !strings.Contains(joined, "credential") {
-			t.Fatalf("ABI %d limitations = %q, want credential-read degrade named", abi, joined)
-		}
 		if !strings.Contains(joined, "network") && !strings.Contains(joined, "TCP") {
 			t.Fatalf("ABI %d limitations = %q, want network degrade named", abi, joined)
 		}

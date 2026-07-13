@@ -426,6 +426,23 @@ Validated:
 Follow-ups:
 - None.
 
+## 2026-07-13 — fix(platform): Landlock fallback denies credential reads under `--sandbox require` (P7-SEC-03)
+
+Changed:
+- `internal/platform/sandbox_landlock.go`: the Linux Landlock fallback no longer grants `RODirs("/")` wholesale on the default (non-`--read-confine`) path. New `credentialExcludingReadRules` builds leaf-hierarchy read grants that OMIT the credential anchors (`credentialAnchors` = `sensitiveHomeDirs`/`sensitiveHomeFiles` + `~/.devstrap/keys`, the exact set bubblewrap masks and Seatbelt denies), walking from `/` down only through anchor ancestors and granting each sibling wholesale. Applied whenever `spec.DenySensitiveReads` and NOT `spec.ReadConfine`, so credential reads (`~/.ssh`/`~/.aws`/`~/.git-credentials`-class) return `EACCES` in BOTH `--sandbox auto` and `require`, no longer only when `--read-confine` is engaged. Directories use `RODirs`, regular files use `ROFiles` (Landlock rejects directory access rights on a regular file with EINVAL, which `IgnoreIfMissing` does NOT suppress), a sibling symlink whose resolved target overlaps an anchor is skipped (no alias re-exposure), and a dir that cannot be enumerated receives no grant (fail closed). `spec.ReadConfine == true` is unchanged.
+- `internal/platform/sandbox_landlock_args.go`: dropped the now-false `"credential reads are NOT denied"` limitation from `landlockLimitations` (2 base entries).
+- `spec/06` (Linux agent-sandbox subsection, new), `spec/10`, `spec/15`: removed the "Landlock deliberately does not deny credential reads / bubblewrap-only" framing; describe the leaf-hierarchy fail-closed default and its residual (anchor-path-based, so a credential aliased by a symlink from outside the anchor set is not covered). `last_reviewed` bumped to 2026-07-13 on 06/10/15.
+
+- Note on residual: the deny is an explicit set of RODirs/ROFiles leaves omitting the anchor paths, not a kernel subtraction — a credential reachable ONLY via a non-anchor path is not covered, matching the by-path deny model of the Seatbelt/bubblewrap deny-lists.
+
+Validated:
+- **Live Landlock kernel proof (the finding's mandatory requirement):** `docker run --rm --security-opt seccomp=unconfined -e DEVSTRAP_SANDBOX_E2E=1 golang:1.26 (GOTOOLCHAIN auto → go1.26.5) ... go test -run 'TestLandlockSandboxEnforcement|TestLandlockLimitations' -v` on Docker Desktop's linuxkit 6.12 kernel — `TestLandlockSandboxEnforcement` PASS with `credential read denied under default landlock policy: exit status 1` (the `~/.ssh/id_ed25519` read is kernel-DENIED under the default spec) and the new `notes.txt` positive control readable (non-credential home files stay readable — proves the `ROFiles` path). Write-confinement, V3 truncate, log-dir deny, exit-code fidelity, seccomp keyctl-EPERM, read-confine credential deny, and network sub-assertions all still pass.
+- `internal/platform/sandbox_landlock_e2e_test.go`: flipped the credential-read sub-assertion from allow→deny, added the `notes.txt` over-block control; `sandbox_landlock_args_test.go`: limitations count 3→2.
+- `gofmt -l cmd internal` clean; `GOOS=linux go vet ./internal/platform/` clean; `go run ./cmd/spec-drift --base origin/main --head HEAD` (after this entry); host `go test -race ./...` (Landlock e2e tags out on macOS — the Docker run above is the real proof).
+
+Follow-ups:
+- None. OS-enforced-sandbox residuals (containerization, symlink-alias subtraction) remain tracked separately.
+
 ## 2026-07-11 — fix(cli): journaled all-or-nothing restore promotion + maintenance lock (P7-DATA-05)
 
 Changed:
