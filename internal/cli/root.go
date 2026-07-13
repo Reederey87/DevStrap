@@ -57,7 +57,7 @@ func (o *options) progressf(w io.Writer, format string, a ...any) {
 }
 
 func Execute(ctx context.Context) error {
-	root := NewRootCommand(os.Stdout, os.Stderr)
+	root := NewRootCommand(os.Stdout, os.Stderr) //nolint:contextcheck // cobra FP: ctx flows via SetContext/cmd.Context(), which contextcheck can't trace
 	root.SetContext(ctx)
 	return root.Execute()
 }

@@ -30,16 +30,12 @@ linters:
           # Test helpers legitimately create fresh root contexts
           # (context.Background()); there is no caller context to inherit.
           - contextcheck
-      # P4-QUAL-07 false positive, NOT a blanket suppression. Context IS
-      # correctly propagated per-command: Execute(ctx) calls root.SetContext(ctx),
-      # and every RunE sources its context from cmd.Context() (verified in
-      # init.go). contextcheck cannot trace inheritance through cobra's
-      # SetContext/cmd.Context() indirection, so it flags NewRootCommand (built
-      # without a ctx param) as failing to pass the context. Scoped to this one
-      # known linter/framework interaction at the command-tree root.
-      - path: internal/cli/root\.go
-        linters:
-          - contextcheck
+      # P4-QUAL-07: the one known cobra false positive (Execute(ctx) ->
+      # SetContext(ctx) -> cmd.Context() inheritance that contextcheck cannot
+      # trace) is suppressed with a line-scoped //nolint:contextcheck on the
+      # NewRootCommand call in root.go's Execute, NOT a file-wide exclude-rule —
+      # a path rule here would also mask genuine context-misuse anywhere else in
+      # root.go (e.g. openState's state.Open(ctx, ...)).
 
 issues:
   max-same-issues: 0
