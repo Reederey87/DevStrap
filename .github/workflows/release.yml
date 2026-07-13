@@ -220,7 +220,12 @@ jobs:
         run: |
           go install github.com/slsa-framework/slsa-verifier/v2/cli/slsa-verifier@v2.7.1
           echo "$GOBIN" >> "$GITHUB_PATH"
-      - name: Download and verify staged release
+      # The write-capable GH_TOKEN (needed only to see a still-draft release,
+      # see the job permissions comment above) is scoped to this download step
+      # alone. Every later step is token-free, and nothing downloaded executes
+      # until the cosign + SLSA verification steps below have both passed.
+      - name: Download staged release
+        id: download
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
@@ -245,6 +250,15 @@ jobs:
           esac
           archive="devstrap_${version}_${artifact_os}_${artifact_arch}.tar.gz"
           test -f "$archive"
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Verify checksums, SBOM, and completions
+        env:
+          ARCHIVE: ${{ steps.download.outputs.archive }}
+        run: |
+          set -Eeuo pipefail
+          trap 'rc=$?; failed_command=$BASH_COMMAND; echo "::error::command failed at line $LINENO (exit $rc): $failed_command"; echo "::group::downloaded assets"; find . -maxdepth 2 -type f -print | sort; echo "::endgroup::"; exit "$rc"' ERR
 
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum --ignore-missing -c checksums.txt
@@ -256,27 +270,46 @@ jobs:
           for candidate in devstrap_*.tar.gz; do
             test -f "${candidate}.sbom.json"
           done
-          archive_contents=$(tar -tzf "$archive")
+          archive_contents=$(tar -tzf "$ARCHIVE")
           grep -Eq '(^|/)completions/devstrap\.bash$' <<<"$archive_contents"
           grep -Eq '(^|/)completions/_devstrap$' <<<"$archive_contents"
           grep -Eq '(^|/)completions/devstrap\.fish$' <<<"$archive_contents"
 
-          mkdir native
-          tar -xzf "$archive" -C native
-          version_output=$(./native/devstrap version)
-          printf '%s\n' "$version_output"
-          grep -F "$version" <<<"$version_output"
-          grep -F "$GITHUB_SHA" <<<"$version_output"
-          grep -Eq '[0-9]{4}-[0-9]{2}-[0-9]{2}' <<<"$version_output"
+      - name: Verify cosign signature and SLSA provenance
+        env:
+          ARCHIVE: ${{ steps.download.outputs.archive }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -Eeuo pipefail
+          trap 'rc=$?; failed_command=$BASH_COMMAND; echo "::error::command failed at line $LINENO (exit $rc): $failed_command"' ERR
 
           cosign verify-blob checksums.txt \
             --bundle checksums.txt.sigstore.json \
             --certificate-identity "https://github.com/Reederey87/DevStrap/.github/workflows/release.yml@refs/tags/$TAG" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
-          slsa-verifier verify-artifact "$archive" \
+          slsa-verifier verify-artifact "$ARCHIVE" \
             --provenance-path multiple.intoto.jsonl \
             --source-uri github.com/Reederey87/DevStrap \
             --source-tag "$TAG"
+
+      # Only reached once checksums, SBOM presence, completions, the cosign
+      # signature, and SLSA provenance have all verified — nothing downloaded
+      # executes before it is fully verified.
+      - name: Extract and smoke-test the verified binary
+        env:
+          ARCHIVE: ${{ steps.download.outputs.archive }}
+          VERSION: ${{ steps.download.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          trap 'rc=$?; failed_command=$BASH_COMMAND; echo "::error::command failed at line $LINENO (exit $rc): $failed_command"' ERR
+
+          mkdir native
+          tar -xzf "$ARCHIVE" -C native
+          version_output=$(./native/devstrap version)
+          printf '%s\n' "$version_output"
+          grep -F "$VERSION" <<<"$version_output"
+          grep -F "$GITHUB_SHA" <<<"$version_output"
+          grep -Eq '[0-9]{4}-[0-9]{2}-[0-9]{2}' <<<"$version_output"
 
   stable-publish:
     name: Publish smoked stable release
