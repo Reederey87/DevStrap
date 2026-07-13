@@ -361,6 +361,7 @@ jobs:
         run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest
       - name: Push staged cask to Homebrew tap
         env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
           set -Eeuo pipefail
