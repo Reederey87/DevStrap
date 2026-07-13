@@ -21,7 +21,11 @@ type grantIndex struct {
 func indexGrants(t *testing.T, home string) grantIndex {
 	t.Helper()
 	idx := grantIndex{t: t, byPath: map[string]readGrant{}}
-	for _, g := range credentialExcludingReadGrants(home, "") {
+	grants, err := credentialExcludingReadGrants(home, "")
+	if err != nil {
+		t.Fatalf("credentialExcludingReadGrants(%q, \"\"): %v", home, err)
+	}
+	for _, g := range grants {
 		idx.byPath[g.path] = g
 	}
 	return idx
@@ -185,15 +189,16 @@ func TestCredentialExcludingReadGrantsSymlinkedAnchor(t *testing.T) {
 }
 
 // TestCredentialExcludingReadGrantsNoAnchors covers the degenerate case: with no
-// home and no devstrap home there are no anchors, so the whole filesystem root
-// is granted as a single wholesale RODirs("/").
+// home and no devstrap home there are no anchors, so DenySensitiveReads has
+// nothing to scope against. This must fail closed with an error, not fall
+// back to a wholesale RODirs("/") grant that would silently defeat the
+// caller's request.
 func TestCredentialExcludingReadGrantsNoAnchors(t *testing.T) {
-	grants := credentialExcludingReadGrants("", "")
-	if len(grants) != 1 {
-		t.Fatalf("expected exactly one root grant, got %d: %+v", len(grants), grants)
+	grants, err := credentialExcludingReadGrants("", "")
+	if err == nil {
+		t.Fatalf("expected an error with no anchors, got grants: %+v", grants)
 	}
-	g := grants[0]
-	if g.path != string(os.PathSeparator) || !g.dir || !g.grantRoot {
-		t.Fatalf("expected wholesale root grant {/, dir, grantRoot}, got %+v", g)
+	if grants != nil {
+		t.Fatalf("expected nil grants on error, got: %+v", grants)
 	}
 }

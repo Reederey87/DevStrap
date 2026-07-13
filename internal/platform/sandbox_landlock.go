@@ -91,12 +91,10 @@ func (s LandlockSandbox) Command(_ context.Context, spec SandboxSpec, argv []str
 
 // readGrant is one carved-out read-allow leaf computed by
 // credentialExcludingReadGrants: a path plus whether it is a directory (mapped
-// to RODirs) or a regular file (mapped to ROFiles). grantRoot marks the
-// no-anchor case, a wholesale grant of the filesystem root.
+// to RODirs) or a regular file (mapped to ROFiles).
 type readGrant struct {
-	path      string
-	dir       bool
-	grantRoot bool
+	path string
+	dir  bool
 }
 
 // credentialExcludingReadGrants computes the leaf read grants that cover every
@@ -109,10 +107,16 @@ type readGrant struct {
 // The walk descends only through anchor ancestors and grants their sibling
 // leaves wholesale (Landlock rules are additive). If an ancestor cannot be
 // enumerated, its subtree receives no grant (fail closed).
-func credentialExcludingReadGrants(userHome, devstrapHome string) []readGrant {
+//
+// If userHome and devstrapHome are both empty, credentialAnchors has nothing
+// to protect: the caller asked for DenySensitiveReads but supplied no home to
+// scope it against. This fails closed with an error rather than falling back
+// to a wholesale RODirs("/") grant, which would silently defeat the very
+// feature the caller requested.
+func credentialExcludingReadGrants(userHome, devstrapHome string) ([]readGrant, error) {
 	anchors := credentialAnchors(userHome, devstrapHome)
 	if len(anchors) == 0 {
-		return []readGrant{{path: string(os.PathSeparator), dir: true, grantRoot: true}}
+		return nil, fmt.Errorf("landlock: DenySensitiveReads requested but no credential anchors resolved (UserHome/DevstrapHome unset)")
 	}
 
 	denied := make(map[string]struct{}, len(anchors)*2)
@@ -195,28 +199,28 @@ func credentialExcludingReadGrants(userHome, devstrapHome string) []readGrant {
 		}
 		return grants
 	}
-	return walk(string(os.PathSeparator))
+	return walk(string(os.PathSeparator)), nil
 }
 
 // credentialExcludingReadRules maps credentialExcludingReadGrants onto the
 // landlock rule types: RODirs for directories, ROFiles for regular files. The
 // leaf grants carry IgnoreIfMissing so a path that vanishes between the walk
-// and RestrictPaths does not fail the whole ruleset; the no-anchor root grant
-// is the filesystem root, which always exists.
-func credentialExcludingReadRules(userHome, devstrapHome string) []landlock.Rule {
-	grants := credentialExcludingReadGrants(userHome, devstrapHome)
+// and RestrictPaths does not fail the whole ruleset.
+func credentialExcludingReadRules(userHome, devstrapHome string) ([]landlock.Rule, error) {
+	grants, err := credentialExcludingReadGrants(userHome, devstrapHome)
+	if err != nil {
+		return nil, err
+	}
 	rules := make([]landlock.Rule, 0, len(grants))
 	for _, g := range grants {
 		switch {
-		case g.grantRoot:
-			rules = append(rules, landlock.RODirs(g.path))
 		case g.dir:
 			rules = append(rules, landlock.RODirs(g.path).IgnoreIfMissing())
 		default:
 			rules = append(rules, landlock.ROFiles(g.path).IgnoreIfMissing())
 		}
 	}
-	return rules
+	return rules, nil
 }
 
 // applyLandlockPolicy maps a SandboxSpec onto stacked Landlock rulesets for
@@ -237,7 +241,10 @@ func applyLandlockPolicy(spec SandboxSpec) error {
 			rules = append(rules, landlock.RODirs(root).IgnoreIfMissing())
 		}
 	} else if spec.DenySensitiveReads {
-		rules = credentialExcludingReadRules(spec.UserHome, spec.DevstrapHome)
+		rules, err = credentialExcludingReadRules(spec.UserHome, spec.DevstrapHome)
+		if err != nil {
+			return err
+		}
 	} else {
 		rules = []landlock.Rule{landlock.RODirs("/")}
 	}

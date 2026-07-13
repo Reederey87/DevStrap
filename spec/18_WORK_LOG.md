@@ -463,6 +463,20 @@ Validated (this fixup):
 - `gofmt -w cmd internal`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `go test -race ./...` (Landlock-tagged tests skip on macOS host — the Docker run is the kernel proof).
 - Credit: both findings surfaced by the independent PR review.
 
+### 2026-07-13 — review fixup (P7-SEC-03): no-anchor case fails closed instead of granting `/`
+
+CodeRabbit review (PR #188) caught a fail-open contradiction: `credentialExcludingReadGrants` fell back to a wholesale `landlock.RODirs("/")` grant when `credentialAnchors(userHome, devstrapHome)` resolved zero anchors (both empty), even though the rest of the same function explicitly fails closed on enumeration errors. If `SandboxSpec.UserHome`/`DevstrapHome` end up empty due to an upstream resolution bug, this silently disabled the entire credential-deny feature the caller explicitly requested via `DenySensitiveReads` — the exact failure mode `--sandbox require` promises not to have.
+
+- `internal/platform/sandbox_landlock.go`: `credentialExcludingReadGrants` and `credentialExcludingReadRules` now return `(_, error)`; the no-anchor case returns an error (`"landlock: DenySensitiveReads requested but no credential anchors resolved"`) instead of a `grantRoot` sentinel grant. The `readGrant.grantRoot` field is removed — no code path grants `/` wholesale under `DenySensitiveReads` anymore. `applyLandlockPolicy` propagates the error instead of swallowing it into a rule set.
+- `internal/platform/sandbox_landlock_grants_test.go`: `TestCredentialExcludingReadGrantsNoAnchors` now asserts an error and nil grants, replacing the old wholesale-root-grant assertion.
+- No spec doc needed correction — `spec/06`/`spec/10`/`spec/15` already documented the leaf-hierarchy grant as the mechanism, not the (now-removed) fallback.
+
+Validated (this fixup):
+- `GOOS=linux go build ./...` and `GOOS=linux go vet ./internal/platform/...` clean (macOS host cannot execute the Linux-tagged file, only cross-compile/vet it).
+- **Live Linux proof:** `docker run --rm -v <repo>:/src -w /src -e GOTOOLCHAIN=auto golang:1.26 go test ./internal/platform/... -v` — full package suite PASS on Linux, including `TestCredentialExcludingReadGrantsNoAnchors` proving the fail-closed error path and the three anchor-recursion tests from the prior fixup still passing unchanged.
+- `gofmt -l cmd internal` clean; `go run ./cmd/spec-drift --base origin/main --head HEAD`; host `go test -race ./...` and `golangci-lint run` both clean.
+- Credit: CodeRabbit automated review on PR #188.
+
 ## 2026-07-11 — fix(cli): journaled all-or-nothing restore promotion + maintenance lock (P7-DATA-05)
 
 Changed:
