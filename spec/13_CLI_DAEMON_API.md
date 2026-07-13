@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-11
+last_reviewed: 2026-07-13
 tracks_code: [cmd/**, internal/cli/**, internal/platform/**]
 ---
 # CLI and Daemon API
@@ -649,6 +649,8 @@ cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
 ### P6-CLI-04 — `--quiet` only lowers slog verbosity; stdout chatter ignores it — RESOLVED (`fix/p6-cli-04`, 2026-07-04)
 
 **Resolution.** `options.progressf` is the quiet-aware progress seam (`internal/cli/root.go:52-57`), and the flag help now says `suppress progress output (results and errors still print)` (`internal/cli/root.go:87`). Progress and action-summary chatter now routes through that seam for sync snapshot-recovery/status/GC/key-rotation/drained-delete lines (`internal/cli/sync.go:105`, `169-172`, `184`, `186`, `339`, `434`), materialize's human renderer only (`internal/cli/materialize.go:86-88`; `--json` remains structured output), init success/adopt/next-step hints (`internal/cli/init.go:247-300`), run-loop tick and scan-adopt progress (`internal/cli/run_loop.go:72`, `141`), hub login/logout/gc summaries (`internal/cli/hub.go:435`, `461`, `541`), and the `scan --adopt` adopted-count summary (`internal/cli/scan.go:102`). The "awaiting workspace key grant" deferred-push notice (`internal/cli/sync.go:406`, sibling to the always-visible one in `snapshot_recovery.go`) is deliberately left ungated — it is the only explanation of a real actionable state, not chatter. Dry-run output, result rows, warnings, prompts, JSON output, and error/exit-code signals stay ungated. Pinned by `TestQuietSuppressesInitProgressButCreatesWorkspace` and `TestQuietSuppressesMaterializeHumanProgressOnly`.
+
+**P7-CLI-03 follow-up (`fix/p7-cli-03-quiet-routing`, 2026-07-13).** The general rule above suppresses *progress* under `--quiet`, but three commands routed their only confirmation of a **completed state change** through `progressf`, so `--quiet` produced zero output for a real mutation. The terminal confirmation lines are now written with `fmt.Fprintf` directly (never gated), mirroring the deferred-push exception: `installed … service`/`uninstalled … service`/`… not installed; nothing to do` (`internal/cli/service.go`), and `Configured hub:`/`hub already configured …` (`internal/cli/hub.go`, `hub init`). Auxiliary progress on the same commands stays gated — service install's `unit:`/`logs:` lines and `hub init`'s `Next:`/`Joiner:` hints. Pinned by `TestServiceInstallConfirmationSurvivesQuiet`, `TestServiceUninstallConfirmationSurvivesQuiet`, and `TestHubInitConfirmationSurvivesQuiet`.
 
 ```go
 func (o *options) progressf(w io.Writer, format string, a ...any) {

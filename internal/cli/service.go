@@ -98,7 +98,8 @@ func newServiceInstallCommand(stdout io.Writer, opts *options) *cobra.Command {
 				}
 				return err
 			}
-			opts.progressf(stderr, "installed %s service %q\n", mgr.Name(), resolvedLabel)
+			// Terminal confirmation of a completed state change, deliberately not gated by --quiet (P7-CLI-03).
+			_, _ = fmt.Fprintf(stderr, "installed %s service %q\n", mgr.Name(), resolvedLabel)
 			if status, serr := mgr.Status(cmd.Context(), resolvedLabel); serr == nil && status.UnitPath != "" {
 				opts.progressf(stderr, "unit: %s\n", status.UnitPath)
 			}
@@ -221,9 +222,11 @@ func newServiceUninstallCommand(stdout io.Writer, opts *options) *cobra.Command 
 				return err
 			}
 			if status.Installed {
-				opts.progressf(stderr, "uninstalled %s service %q\n", mgr.Name(), resolvedLabel)
+				// Terminal confirmation of a completed state change, deliberately not gated by --quiet (P7-CLI-03).
+				_, _ = fmt.Fprintf(stderr, "uninstalled %s service %q\n", mgr.Name(), resolvedLabel)
 			} else {
-				opts.progressf(stderr, "%s service %q not installed; nothing to do\n", mgr.Name(), resolvedLabel)
+				// Terminal confirmation of a completed state change, deliberately not gated by --quiet (P7-CLI-03).
+				_, _ = fmt.Fprintf(stderr, "%s service %q not installed; nothing to do\n", mgr.Name(), resolvedLabel)
 			}
 			// Notes are operator advisories (e.g. headless systemd unit-file-only
 			// removal), not mere progress — print them verbatim even under --quiet.

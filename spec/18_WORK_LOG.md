@@ -31,6 +31,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-13 — fix(cli): hub init / service install confirmations survive --quiet (P7-CLI-03)
+
+Changed:
+- P7-CLI-03: `hub init`, `service install`, and `service uninstall` routed their ONLY confirmation of a completed state change through `opts.progressf`, which `--quiet` suppresses (`internal/cli/root.go:52-57`). A `--quiet` invocation that actually started a background service or rewrote `config.yaml` therefore produced zero output — the user got no confirmation the mutation happened.
+- Un-gated the terminal confirmation lines by switching them from `opts.progressf(...)` to `fmt.Fprintf(...)`, copying the existing deferred-push precedent (`internal/cli/sync.go`, "Deliberately NOT gated by --quiet"): `internal/cli/service.go` (`installed … service`, `uninstalled … service`, `… not installed; nothing to do`) and `internal/cli/hub.go` (`Configured hub:`, `hub already configured …`). Auxiliary progress on the same commands stays gated (service install's `unit:`/`logs:` lines; `hub init`'s `Next:`/`Joiner:` hints).
+- Tests: `TestServiceInstallConfirmationSurvivesQuiet` / `TestServiceUninstallConfirmationSurvivesQuiet` (`internal/cli/service_test.go`) and `TestHubInitConfirmationSurvivesQuiet` (`internal/cli/hub_init_test.go`) assert the confirmation prints under `--quiet` while a gated line (`logs:` / `Next:`) stays suppressed.
+- Spec: extended the P6-CLI-04 resolution in `spec/13_CLI_DAEMON_API.md` with the P7-CLI-03 carve-out and bumped its `last_reviewed`.
+
+Validated:
+- `gofmt -l` clean; `go test -race ./internal/cli/` ok; `go run ./cmd/spec-drift --base origin/main --head HEAD` clean; `golangci-lint run` clean; `go test -race ./...` green.
+- Triple-reviewed (Codex + opus-4.8 + fable-5): all three independently found no code bugs and independently converged on the same non-blocking observation — `hub login`/`hub logout` have the same latent bug pattern (sole confirmation gated behind `progressf`, no alternate surface) but are out of this finding's scope.
+
+Follow-ups:
+- Candidate new P3 finding: un-gate (or explicitly document as deferred) the terminal confirmations on `hub login`/`hub logout`.
+
 ## 2026-07-13 — fix(hub): batch git-carrier writes into one commit per sync cycle (P7-HUB-01)
 
 Changed:
