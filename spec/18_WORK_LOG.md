@@ -31,6 +31,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-13 — chore(docs): reconcile Pass 7 shipped-list narrative against the table (wave-close review fixup)
+
+CodeRabbit review (PR #194) caught that the Pass 7 header narrative sentence — the prose enumerating which finding IDs shipped on which date — had drifted from the *Recently shipped* table it describes: `P7-QUAL-07`, `P7-SYNC-03`, `P7-SEC-04`, and `P7-DATA-07` (all shipped 2026-07-11) were missing from the narrative, and `P7-GIT-03` appeared as a genuine duplicate ROW in the table itself (not just the narrative), independent of the `P7-QUAL-07` duplicate already fixed in the wave-close entry below.
+
+Changed:
+- `docs/audits/README.md`: added the four missing IDs to the 2026-07-11 shipped list; removed the duplicate `P7-GIT-03` table row (kept the first occurrence).
+- Full cross-check performed: extracted every `P7-*` row ID from the *Recently shipped* table (lines 39-147) and every `P7-*` ID from the narrative sentence, diffed both sets in both directions — confirmed zero remaining gaps and zero duplicate row IDs after the fix (the header's own open-table row-count invariant, checked separately, was unaffected — this fixup only touches the shipped-table/narrative pair, not the open-table/header-count pair).
+
+Validated:
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` clean.
+- Manual set-diff re-verification (`comm -23`/`comm -13` between table-extracted and narrative-extracted ID lists) confirms zero remaining mismatches.
+
+Follow-ups:
+- None.
+
 ## 2026-07-13 — chore(docs): wave-close ledger reconciliation
 
 Changed:
@@ -45,18 +60,6 @@ Validated:
 
 Follow-ups:
 - None. The commercial-readiness cluster (control-plane identity, hub quotas, org trust, version-skew policy — 6 findings) remains deliberately deferred pending a business decision, per the original wave scope.
-
-### 2026-07-13 — review fixup (wave-close): reconcile the Pass 7 shipped-list narrative against the table
-
-CodeRabbit review (PR #194) caught that the Pass 7 header narrative sentence — the prose enumerating which finding IDs shipped on which date — had drifted from the *Recently shipped* table it describes: `P7-QUAL-07`, `P7-SYNC-03`, `P7-SEC-04`, and `P7-DATA-07` (all shipped 2026-07-11) were missing from the narrative, and `P7-GIT-03` appeared as a genuine duplicate ROW in the table itself (not just the narrative), independent of the `P7-QUAL-07` duplicate already fixed in the first commit.
-
-- `docs/audits/README.md`: added the four missing IDs to the 2026-07-11 shipped list; removed the duplicate `P7-GIT-03` table row (kept the first occurrence).
-- Full cross-check performed: extracted every `P7-*` row ID from the *Recently shipped* table (lines 39-147) and every `P7-*` ID from the narrative sentence, diffed both sets in both directions — confirmed zero remaining gaps and zero duplicate row IDs after the fix (the header's own open-table row-count invariant, checked separately, was unaffected — this fixup only touches the shipped-table/narrative pair, not the open-table/header-count pair).
-
-Validated (this fixup):
-- `go run ./cmd/spec-drift --base origin/main --head HEAD` clean.
-- Manual set-diff re-verification (`comm -23`/`comm -13` between table-extracted and narrative-extracted ID lists) confirms zero remaining mismatches.
-- Credit: CodeRabbit automated review on PR #194.
 
 ## 2026-07-13 — fix(cli): hub init / service install confirmations survive --quiet (P7-CLI-03)
 
