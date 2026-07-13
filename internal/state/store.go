@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -30,6 +31,7 @@ var migrationsFS embed.FS
 
 type Store struct {
 	db          *sql.DB
+	readDB      *sql.DB // optional read-only pool; nil for OpenSnapshot stores
 	keyDir      string
 	workspaceMu sync.RWMutex
 	workspaceID string
@@ -254,11 +256,35 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+
+	// P4-SYNC-07: separate read-only pool so status/doctor/list queries are not
+	// serialized behind the single writer connection.
+	readDB, err := sql.Open("sqlite", readerSQLiteDSN(path))
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("open sqlite reader: %w", err)
+	}
+	readerConns := runtime.GOMAXPROCS(0)
+	if readerConns < 2 {
+		readerConns = 2
+	}
+	if readerConns > 8 {
+		readerConns = 8
+	}
+	readDB.SetMaxOpenConns(readerConns)
+	readDB.SetMaxIdleConns(readerConns)
+	if err := readDB.PingContext(ctx); err != nil {
+		_ = readDB.Close()
+		_ = db.Close()
+		return nil, fmt.Errorf("configure sqlite reader: %w", err)
+	}
+
 	if err := os.Chmod(path, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+		_ = readDB.Close()
 		_ = db.Close()
 		return nil, fmt.Errorf("secure sqlite state: %w", err)
 	}
-	return &Store{db: db, keyDir: filepath.Join(filepath.Dir(path), "keys")}, nil
+	return &Store{db: db, readDB: readDB, keyDir: filepath.Join(filepath.Dir(path), "keys")}, nil
 }
 
 // OpenSnapshot opens a standalone SQLite database file read-only for
@@ -300,6 +326,23 @@ func sqliteDSN(path string) string {
 	return (&url.URL{Scheme: "file", Path: path, RawQuery: q.Encode()}).String()
 }
 
+// readerSQLiteDSN opens the same database file read-only (P4-SYNC-07).
+// Per-connection pragmas go through _pragma= so modernc applies them on every
+// pool connection; no _txlock (read-only).
+func readerSQLiteDSN(path string) string {
+	q := url.Values{}
+	q.Set("mode", "ro")
+	for _, pragma := range []string{
+		"busy_timeout(5000)",
+		"foreign_keys(1)",
+		"journal_mode(WAL)",
+		"query_only(1)",
+	} {
+		q.Add("_pragma", pragma)
+	}
+	return (&url.URL{Scheme: "file", Path: path, RawQuery: q.Encode()}).String()
+}
+
 func snapshotSQLiteDSN(path string) string {
 	q := url.Values{}
 	q.Set("mode", "ro")
@@ -315,7 +358,27 @@ func snapshotSQLiteDSN(path string) string {
 }
 
 func (s *Store) Close() error {
-	return s.db.Close()
+	var first error
+	if s.readDB != nil {
+		if err := s.readDB.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	if s.db != nil {
+		if err := s.db.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
+// reader returns the read-only pool when one is configured, else the writer.
+// OpenSnapshot-created stores have no readDB and fall back to db.
+func (s *Store) reader() *sql.DB {
+	if s.readDB != nil {
+		return s.readDB
+	}
+	return s.db
 }
 
 func (s *Store) Migrate() error {
@@ -486,7 +549,7 @@ func foreignKeyCheck(ctx context.Context, db *sql.DB) error {
 
 func (s *Store) missingTable(ctx context.Context, table string) (bool, error) {
 	var count int
-	if err := s.db.QueryRowContext(ctx, `
+	if err := s.reader().QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM sqlite_master
 WHERE type = 'table' AND name = ?;
@@ -523,7 +586,7 @@ func (s *Store) WorkspaceID(ctx context.Context) (string, error) {
 	if workspaceID != "" {
 		return workspaceID, nil
 	}
-	workspaceID, err := currentWorkspaceID(ctx, s.db)
+	workspaceID, err := currentWorkspaceID(ctx, s.reader())
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", ErrNotInitialized
@@ -705,7 +768,7 @@ LIMIT 1;
 }
 
 func (s *Store) CurrentDevice(ctx context.Context) (Device, error) {
-	d, err := currentDevice(ctx, s.db)
+	d, err := currentDevice(ctx, s.reader())
 	if err == nil {
 		return d, nil
 	}
@@ -734,7 +797,7 @@ LIMIT 1;
 }
 
 func (s *Store) ListDevices(ctx context.Context) ([]Device, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.reader().QueryContext(ctx, `
 SELECT id, name, os, arch, COALESCE(hostname, ''), COALESCE(public_key, ''), COALESCE(signing_public_key, ''), trust_state
 FROM devices
 ORDER BY trust_state = 'local' DESC, name, id;
@@ -1005,7 +1068,7 @@ func (s *Store) Summary(ctx context.Context) (Summary, error) {
 	}
 	var summary Summary
 	summary.WorkspaceID = workspaceID
-	row := s.db.QueryRowContext(ctx, `
+	row := s.reader().QueryRowContext(ctx, `
 SELECT w.name, w.root_path, COUNT(n.id)
 FROM workspaces w
 LEFT JOIN namespace_entries n ON n.workspace_id = w.id
@@ -1517,7 +1580,7 @@ func (s *Store) CountTombstonesBelowHLC(ctx context.Context, beforeHLC int64) (i
 		return 0, err
 	}
 	var n int
-	if err := s.db.QueryRowContext(ctx, `
+	if err := s.reader().QueryRowContext(ctx, `
 SELECT COUNT(*) FROM namespace_entries
 WHERE workspace_id = ? AND status = 'deleted' AND tombstone_hlc IS NOT NULL AND tombstone_hlc < ?;
 `, workspaceID, beforeHLC).Scan(&n); err != nil {
@@ -1594,7 +1657,7 @@ func (s *Store) ProjectByPath(ctx context.Context, path string) (ProjectStatus, 
 	if err != nil {
 		return ProjectStatus{}, err
 	}
-	return projectByPath(ctx, s.db, workspaceID, pk)
+	return projectByPath(ctx, s.reader(), workspaceID, pk)
 }
 
 func (s *Store) ProjectByID(ctx context.Context, id string) (ProjectStatus, error) {
@@ -1602,7 +1665,7 @@ func (s *Store) ProjectByID(ctx context.Context, id string) (ProjectStatus, erro
 	if err != nil {
 		return ProjectStatus{}, err
 	}
-	return projectByID(ctx, s.db, workspaceID, id)
+	return projectByID(ctx, s.reader(), workspaceID, id)
 }
 
 func (tx *Tx) ProjectByPath(ctx context.Context, path string) (ProjectStatus, error) {
@@ -1668,7 +1731,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]ProjectStatus, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.reader().QueryContext(ctx, `
 SELECT n.id, n.path, n.path_key, n.type, COALESCE(n.display_name, ''), n.materialization_policy, n.status,
        COALESCE(n.source_event_hlc, 0), COALESCE(n.source_event_device_id, ''), COALESCE(n.source_event_id, ''),
        COALESCE(g.remote_url, ''), COALESCE(g.remote_key, ''), COALESCE(g.default_branch, ''), COALESCE(g.lfs_policy, ''), COALESCE(g.forge_kind, ''),
@@ -2109,7 +2172,7 @@ func (s *Store) ClearAllBindingRotation(ctx context.Context) (int, error) {
 // for rotation (e.g. after a device revocation).
 func (s *Store) CountSecretBindingsNeedingRotation(ctx context.Context) (int, error) {
 	var count int
-	if err := s.db.QueryRowContext(ctx, `
+	if err := s.reader().QueryRowContext(ctx, `
 SELECT COUNT(*) FROM secret_bindings WHERE needs_rotation = 1;
 `).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count bindings needing rotation: %w", err)
@@ -2594,7 +2657,7 @@ func (s *Store) CountOpenConflicts(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	var count int
-	if err := s.db.QueryRowContext(ctx, `
+	if err := s.reader().QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM conflicts
 WHERE workspace_id = ? AND status = 'open';
@@ -3043,7 +3106,7 @@ var keychainBackend = func() devicekeys.SecretBackend { return platform.Detect()
 // to cache the highest verified per-device retention floor (P4-SYNC-02).
 func (s *Store) GetLocalMeta(ctx context.Context, key string) (string, bool, error) {
 	var v string
-	err := s.db.QueryRowContext(ctx, `SELECT value FROM local_meta WHERE key = ?;`, key).Scan(&v)
+	err := s.reader().QueryRowContext(ctx, `SELECT value FROM local_meta WHERE key = ?;`, key).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
@@ -3122,7 +3185,7 @@ func (tx *Tx) DeleteLocalMetaTx(ctx context.Context, key string) error {
 // same fail-closed posture VerifyRemoteEvent applies to must-verify events.
 func (s *Store) ApprovedDeviceSigningKey(ctx context.Context, deviceID string) (string, bool, error) {
 	var signingPublicKey, trustState string
-	err := s.db.QueryRowContext(ctx, `
+	err := s.reader().QueryRowContext(ctx, `
 SELECT COALESCE(signing_public_key, ''), trust_state
 FROM devices
 WHERE id = ?;
@@ -4254,7 +4317,7 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 }
 
 func (s *Store) ListWorktrees(ctx context.Context) ([]Worktree, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.reader().QueryContext(ctx, `
 SELECT id, namespace_id, device_id, path, branch, base_ref, base_sha, created_by, status, dirty_state
 FROM worktrees
 WHERE status = 'active'
@@ -4370,7 +4433,7 @@ WHERE id = ?;
 }
 
 func (s *Store) ListAgentRuns(ctx context.Context) ([]AgentRun, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.reader().QueryContext(ctx, `
 SELECT id, namespace_id, COALESCE(worktree_id, ''), engine, task, COALESCE(policy_id, ''), status,
        COALESCE(base_ref, ''), COALESCE(base_sha, ''), COALESCE(branch, ''), COALESCE(log_path, ''),
        COALESCE(diff_summary, ''), COALESCE(test_summary, ''), COALESCE(runner_pid, 0), COALESCE(runner_started_at, 0),
@@ -4447,7 +4510,7 @@ ORDER BY created_at DESC, id DESC;
 
 func (s *Store) CountAgentRunsByStatus(ctx context.Context, status string) (int, error) {
 	var count int
-	if err := s.db.QueryRowContext(ctx, `
+	if err := s.reader().QueryRowContext(ctx, `
 SELECT COUNT(*) FROM agent_runs WHERE status = ?;
 `, status).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count agent runs by status: %w", err)
@@ -4535,7 +4598,7 @@ FROM sandbox_violations WHERE run_id = ? ORDER BY observed_at ASC, rowid ASC;
 // CountRunsWithSandboxViolations returns how many distinct runs have >=1 row.
 func (s *Store) CountRunsWithSandboxViolations(ctx context.Context) (int, error) {
 	var n int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(DISTINCT run_id) FROM sandbox_violations;`).Scan(&n); err != nil {
+	if err := s.reader().QueryRowContext(ctx, `SELECT COUNT(DISTINCT run_id) FROM sandbox_violations;`).Scan(&n); err != nil {
 		return 0, fmt.Errorf("count sandbox violations: %w", err)
 	}
 	return n, nil
@@ -4596,7 +4659,7 @@ func (s *Store) OpenSkippedEvents(ctx context.Context) ([]SkippedEvent, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.reader().QueryContext(ctx, `
 SELECT event_id, device_id, seq, hlc, reason, first_seen_at
 FROM sync_skipped_events
 WHERE workspace_id = ?
