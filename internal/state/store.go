@@ -3516,32 +3516,41 @@ WHERE id = ?;
 	// that predates the boundary projection) the exemption does not apply and the
 	// device fails closed, exactly as before this fix.
 	//
-	// Trust events (device.revoked/device.lost) are DELIBERATELY excluded from
-	// the exemption and always require CURRENT approval: a revoked device's
-	// authority to revoke OTHERS is precisely what revocation removes, and
-	// retroactively honoring a now-revoked device's trust decisions would
-	// destabilize the mutual-revocation residual (see the trust_apply tests).
+	// The exemption uses a POSITIVE allowlist (isTimeScopedContentEvent), not a
+	// negative exclusion (independent review, P7-SYNC-02 review round 2): a
+	// negative list ("everything except trust events and key grants") silently
+	// admits any FUTURE event type added to the system until someone remembers
+	// to add it to the exclusion, and it already over-admitted conflict.created/
+	// conflict.resolved, which are not namespace content. Only the six
+	// documented project/env/draft content types are eligible; everything
+	// else — including trust events, key grants, conflict events, and any
+	// future type — always requires CURRENT approval by default.
 	//
-	// Key-grant events (device.key.granted) are ALSO excluded (P7-SYNC-02
-	// Finding 1, fable-5 review). Unlike ordinary content edits — which are
-	// purely historical: applying a stale-but-real one only re-states what the
-	// device recorded while trusted — a grant has FORWARD-LOOKING side effects.
-	// It changes the WCK epoch every peer seals FUTURE events under (this
-	// verifier is the EncryptedHub grant-ingestion seam, VerifyRemoteEvent, so
-	// admitting a grant here writes its WCK into the keyring). A revoked device
-	// retaining its signing key could otherwise mint a fresh higher-epoch WCK,
-	// age-wrap it to every current approved recipient, and emit a grant carrier
-	// backdated just below its boundary with a valid v2 self-signature — the
-	// grant rides the hub as PLAINTEXT (never enc.v2-wrapped), so it needs no
-	// current WCK to author — and every victim would ingest it and start sealing
-	// under the attacker-known key, bypassing the P7-SYNC-04 owed-rotation
-	// containment. So a grant is honored only from a device approved at CURRENT
-	// time; a legitimate pre-revocation grant lost to this exclusion is cheaply
-	// re-issued by any approved device (devices approve), so there is no
-	// availability cost. Only the device's own content edits are time-scoped,
-	// which is the scope of the finding (namespace convergence).
+	// Trust events (device.revoked/device.lost) always require CURRENT
+	// approval: a revoked device's authority to revoke OTHERS is precisely what
+	// revocation removes, and retroactively honoring a now-revoked device's
+	// trust decisions would destabilize the mutual-revocation residual (see the
+	// trust_apply tests).
+	//
+	// Key-grant events (device.key.granted) always require CURRENT approval
+	// (P7-SYNC-02 Finding 1, fable-5 review). Unlike ordinary content edits —
+	// which are purely historical: applying a stale-but-real one only re-states
+	// what the device recorded while trusted — a grant has FORWARD-LOOKING side
+	// effects. It changes the WCK epoch every peer seals FUTURE events under
+	// (this verifier is the EncryptedHub grant-ingestion seam, VerifyRemoteEvent,
+	// so admitting a grant here writes its WCK into the keyring). A revoked
+	// device retaining its signing key could otherwise mint a fresh higher-epoch
+	// WCK, age-wrap it to every current approved recipient, and emit a grant
+	// carrier backdated just below its boundary with a valid v2 self-signature —
+	// the grant rides the hub as PLAINTEXT (never enc.v2-wrapped), so it needs
+	// no current WCK to author — and every victim would ingest it and start
+	// sealing under the attacker-known key, bypassing the P7-SYNC-04
+	// owed-rotation containment. So a grant is honored only from a device
+	// approved at CURRENT time; a legitimate pre-revocation grant lost to this
+	// exclusion is cheaply re-issued by any approved device (devices approve),
+	// so there is no availability cost.
 	approvedAtEmit := trustState == "approved"
-	if !approvedAtEmit && !isTrustEvent(event.Type) && !isKeyGrantEvent(event.Type) &&
+	if !approvedAtEmit && isTimeScopedContentEvent(event.Type) &&
 		(trustState == "revoked" || trustState == "lost") &&
 		revokedAtHLC.Valid && revokedAtHLC.Int64 > 0 && event.HLC < revokedAtHLC.Int64 {
 		approvedAtEmit = true
@@ -3607,23 +3616,24 @@ func mustVerifyEvent(eventType string) bool {
 	}
 }
 
-// isTrustEvent reports whether an event carries a device-trust decision
-// (device.revoked/device.lost). These are excluded from the P7-SYNC-02
-// time-scoped exemption: a revoked device's authority to distrust OTHERS ends
-// at its revocation, so its trust events always require CURRENT approval.
-func isTrustEvent(eventType string) bool {
-	return eventType == "device.revoked" || eventType == "device.lost"
-}
-
-// isKeyGrantEvent reports whether an event is a workspace-content-key grant
-// (device.key.granted, sync.EventDeviceKeyGranted — spelled as a literal here to
-// avoid an import cycle with internal/sync). Like trust events, grants are
-// excluded from the P7-SYNC-02 time-scoped exemption (Finding 1): a grant has
-// forward-looking side effects — admitting one writes an attacker-chosen WCK
-// into the keyring that every peer then seals future events under — so a
-// revoked device's grant always requires CURRENT approval.
-func isKeyGrantEvent(eventType string) bool {
-	return eventType == "device.key.granted"
+// isTimeScopedContentEvent reports whether an event type is eligible for the
+// P7-SYNC-02 time-scoped trust exemption (event type strings are spelled as
+// literals here, matching sync.EventProjectAdded etc., to avoid an import
+// cycle with internal/sync). This is a POSITIVE allowlist, not a negative
+// exclusion (independent review, round 2): only these six documented
+// project/env/draft content types — purely historical namespace edits a
+// device recorded while trusted — are eligible. Trust events
+// (device.revoked/device.lost), key grants (device.key.granted), conflict
+// events, and any future event type default to requiring CURRENT approval
+// unless deliberately added here.
+func isTimeScopedContentEvent(eventType string) bool {
+	switch eventType {
+	case "project.added", "project.updated", "project.deleted", "project.renamed",
+		"env.profile.updated", "draft.snapshot.created":
+		return true
+	default:
+		return false
+	}
 }
 
 func ContentHash(payloadJSON string) string {

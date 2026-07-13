@@ -249,6 +249,77 @@ func TestRevokedDeviceCannotMintKeyGrantBelowBoundary(t *testing.T) {
 	}
 }
 
+// signedConflictCreatedEvent builds a validly-signed conflict.created event at
+// an (unshifted) HLC. The payload is a minimal placeholder — conflict.created
+// is not one of the six allowlisted content types, so these tests expect
+// rejection at the verification gate before payload semantics matter.
+func signedConflictCreatedEvent(t *testing.T, signing devicekeys.SigningIdentity, id, dev string, seq, hlc int64) state.Event {
+	t.Helper()
+	raw := []byte(`{}`)
+	ev := state.Event{
+		ID:          id,
+		DeviceID:    dev,
+		Seq:         seq,
+		HLC:         hlc << hlcLogicalBits,
+		Type:        EventConflictCreated,
+		PayloadJSON: string(raw),
+		ContentHash: state.ContentHash(string(raw)),
+	}
+	sig, err := devicekeys.Sign(signing.Private, "devstrap:event:v2", state.EventSignaturePayloadV2(ev))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev.DeviceSig = sig
+	return ev
+}
+
+// TestRevokedDeviceCannotBackdateConflictEventBelowBoundary is the round-2
+// independent-review guard (positive-allowlist finding): a negative exclusion
+// ("everything except trust events and key grants") would have silently
+// admitted a backdated conflict.created from a revoked device, since conflict
+// events are neither trust events nor key grants. The positive allowlist
+// (isTimeScopedContentEvent) only covers the six documented project/env/draft
+// content types, so conflict.created — like device.key.granted — always
+// requires CURRENT approval and must be rejected here exactly like the grant
+// case in TestRevokedDeviceCannotMintKeyGrantBelowBoundary.
+func TestRevokedDeviceCannotBackdateConflictEventBelowBoundary(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newSyncStore(t)
+	signingA := addRemoteDeviceForApplyTest(t, st, "device-a", "approved")
+	signingB := addRemoteDeviceForApplyTest(t, st, "device-b", "approved")
+	now := time.Now().UnixMilli()
+
+	// device-b revokes device-a with boundary HLC = now+10.
+	revoke := signedDeviceTrustEvent(t, signingB, "evt_revoke_a", "device-b", 1, now+10, EventDeviceRevoked, "device-a")
+	if _, err := ApplyEvents(ctx, st, []state.Event{revoke}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Control: a CONTENT event from the revoked device backdated below the
+	// boundary IS admitted (same control as the grant test).
+	content := signedProjEvent(t, signingA, "evt_a_content2", "device-a", 1, now+5, EventProjectAdded, "work/acme/content2", "github.com/acme/content2")
+	if _, err := ApplyEvents(ctx, st, []state.Event{content}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ProjectByPath(ctx, "work/acme/content2"); err != nil {
+		t.Fatalf("control: a backdated content event must be admitted: %v", err)
+	}
+
+	// The attack: a backdated conflict.created from the revoked device must be
+	// REJECTED — conflict events are not in the positive allowlist.
+	conflict := signedConflictCreatedEvent(t, signingA, "evt_a_conflict", "device-a", 2, now+5)
+	_, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{conflict}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Quarantined != 1 {
+		t.Fatalf("stats=%+v, want the backdated conflict event quarantined (conflict events are not in the positive allowlist)", stats)
+	}
+	if _, err := st.EventByID(ctx, "evt_a_conflict"); err == nil {
+		t.Fatal("conflict event was inserted; it must be rejected before insert")
+	}
+}
+
 // TestReapprovalClearsRevocationBoundary is the P7-SYNC-02 Finding 2 guard
 // (fable-5 review). The revocation boundary is the MINIMUM revocation HLC, so
 // without clearing it on re-approval it would span MULTIPLE revocation

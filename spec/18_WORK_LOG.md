@@ -51,6 +51,20 @@ Validated:
 Follow-ups:
 - None. The NEW-path content-forgery residual and the MIN-boundary manipulation angle are documented accepted residuals (spec/15), not open work.
 
+### 2026-07-13 — review fixup (P7-SYNC-02, round 2): positive allowlist replaces negative exclusion
+
+CodeRabbit review (PR #191) caught a design gap in the exemption's eligibility check: `!isTrustEvent(event.Type) && !isKeyGrantEvent(event.Type)` is a negative exclusion — it admits every event type EXCEPT the two named ones, including `conflict.created`/`conflict.resolved` (never intended to be time-scoped-exempt — they are not namespace content) and, more importantly, any future event type added to the system, which would silently inherit the historical-admission behavior until someone remembered to add it to the exclusion list.
+
+- `internal/state/store.go`: replaced `isTrustEvent`/`isKeyGrantEvent` with a single positive-allowlist function `isTimeScopedContentEvent(eventType string) bool` covering exactly the six documented content types (`project.added`, `project.updated`, `project.deleted`, `project.renamed`, `env.profile.updated`, `draft.snapshot.created`). The apply-path condition now reads `isTimeScopedContentEvent(event.Type)` instead of the two negated checks — trust events, key grants, conflict events, and any future type default to requiring CURRENT approval unless deliberately added to the allowlist.
+- `internal/sync/trust_time_scope_test.go`: new `TestRevokedDeviceCannotBackdateConflictEventBelowBoundary` proves the gap was real — under the OLD negative-exclusion logic this test would have failed (a backdated `conflict.created` from a revoked device would have been silently admitted); under the fix it is quarantined, mirroring the existing grant-exclusion test.
+- `spec/07`: noted the positive-allowlist framing and the conflict-event exclusion; added the new test to the pinning list.
+- No behavior change for the six allowlisted content types or for trust/grant events — this closes a latent extensibility gap and an actual conflict-event over-admission, not a regression in already-tested paths.
+
+Validated (this fixup):
+- `internal/sync -run 'TestApplyPreRevocationEventAdmittedRegardlessOfDeliveryOrder|TestRevokedDeviceCannotBackdatePostRevocationEvent|TestRevokedDeviceCannotMintKeyGrantBelowBoundary|TestReapprovalClearsRevocationBoundary|TestRecordDeviceRevocationHLCTakesMinimum|TestRevokedDeviceCannotBackdateConflictEventBelowBoundary'` — all PASS, including the new adversarial test.
+- `gofmt -w cmd internal`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `go test -race ./...`.
+- Credit: CodeRabbit automated review on PR #191.
+
 ## 2026-07-13 — docs(agents): require last_reviewed bump on substantive spec edits (P7-DOC-03)
 
 Changed:
