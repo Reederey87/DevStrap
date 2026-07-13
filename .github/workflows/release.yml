@@ -334,10 +334,10 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -Eeuo pipefail
-          target=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json targetCommitish,isDraft \
-            --jq '"\(.targetCommitish) \(.isDraft)"')
-          if [[ "$target" != "$GITHUB_SHA true" ]]; then
-            echo "::error::release for $TAG is '$target', expected draft at $GITHUB_SHA — a re-cut tag or concurrent run replaced the smoked draft; refusing to publish"
+          tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq '.sha')
+          is_draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')
+          if [[ "$tag_sha" != "$GITHUB_SHA" || "$is_draft" != "true" ]]; then
+            echo "::error::tag $TAG currently resolves to commit $tag_sha (release isDraft=$is_draft), expected commit $GITHUB_SHA with isDraft=true — a re-cut tag or concurrent run replaced the smoked draft; refusing to publish"
             exit 1
           fi
       - name: Download staged cask
