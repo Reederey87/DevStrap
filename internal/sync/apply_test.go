@@ -53,26 +53,39 @@ func renameEvent(t *testing.T, deviceID string, hlc int64, oldPath, newPath stri
 }
 
 // SYNC-3: a remote event whose physical timestamp is far beyond the trusted
-// skew is quarantined, not applied, and does not abort the batch.
+// skew is quarantined, not applied, holds its device's cursor for redelivery,
+// and does not abort the batch.
 func TestApplyEventsQuarantinesFarFutureRemoteEvent(t *testing.T) {
 	ctx := context.Background()
 	st, device := newSyncStore(t)
 
 	futurePhysical := time.Now().Add(time.Hour).UnixMilli()
-	poison, err := NewProjectEvent(device.ID, EventProjectAdded, futurePhysical<<hlcLogicalBits, ProjectPayload{
+	poison, err := NewProjectEvent("device-future", EventProjectAdded, futurePhysical<<hlcLogicalBits, ProjectPayload{
 		Path: "work/acme/poison", Type: "git_repo", RemoteKey: "github.com/acme/poison",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	poison.Seq = 1
 	good, err := NewProjectEvent(device.ID, EventProjectAdded, time.Now().UnixMilli()<<hlcLogicalBits, ProjectPayload{
 		Path: "work/acme/good", Type: "git_repo", RemoteKey: "github.com/acme/good",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ApplyEvents(ctx, st, []state.Event{poison, good}); err != nil {
+	good.Seq = 1
+	safe, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{poison, good}, nil)
+	if err != nil {
 		t.Fatalf("ApplyEvents should not abort on a quarantined event: %v", err)
+	}
+	if stats.Quarantined != 1 || !stats.CursorHeld {
+		t.Fatalf("stats = %+v, want Quarantined=1 CursorHeld=true", stats)
+	}
+	if safe.After(poison.DeviceID) != 0 {
+		t.Fatalf("safe = %v, want %s held at 0 below the future event", safe, poison.DeviceID)
+	}
+	if safe.After(good.DeviceID) != 1 {
+		t.Fatalf("safe = %v, want %s advanced to 1", safe, good.DeviceID)
 	}
 	projects, err := st.ListProjects(ctx)
 	if err != nil {
@@ -87,6 +100,56 @@ func TestApplyEventsQuarantinesFarFutureRemoteEvent(t *testing.T) {
 	}
 	if !hasConflictType(conflicts, "untrustworthy_remote_time") {
 		t.Fatalf("conflicts = %+v, want untrustworthy_remote_time", conflicts)
+	}
+}
+
+// P4-SYNC-03: an event whose physical HLC predates the DevStrap launch epoch is
+// permanently quarantined and consumed so it cannot claim a namespace path
+// with an implausibly old first-writer timestamp or wedge the transport cursor.
+func TestApplyEventsQuarantinesImplausiblyOldRemoteEventAndConsumesCursor(t *testing.T) {
+	saved := epochFloorMS
+	epochFloorMS = 1704067200000
+	defer func() { epochFloorMS = saved }()
+
+	ctx := context.Background()
+	st, _ := newSyncStore(t)
+	signing := addRemoteDeviceForApplyTest(t, st, "device-past", "approved")
+	event := signedProjectEvent(t, signing, "device-past", 1, 1000<<hlcLogicalBits,
+		"work/acme/past", "github.com/acme/past")
+
+	safe, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{event}, nil)
+	if err != nil {
+		t.Fatalf("ApplyEventsWithStats: %v", err)
+	}
+	if stats.Quarantined != 1 || stats.CursorHeld {
+		t.Fatalf("stats = %+v, want Quarantined=1 CursorHeld=false", stats)
+	}
+	if safe.After(event.DeviceID) != event.Seq {
+		t.Fatalf("safe = %v, want %s advanced past consumed seq %d", safe, event.DeviceID, event.Seq)
+	}
+
+	projects, err := st.ListProjects(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projects) != 0 {
+		t.Fatalf("projects = %+v, want implausibly old event not applied", projects)
+	}
+
+	wantDetails, err := json.Marshal(skewConflictDetails{
+		EventID: event.ID, DeviceID: event.DeviceID, HLC: event.HLC,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflicts, err := st.OpenConflicts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conflicts) != 1 || conflicts[0].Type != ConflictUntrustworthyTime ||
+		conflicts[0].DetailsJSON != string(wantDetails) {
+		t.Fatalf("conflicts = %+v, want one open %s conflict with details %s",
+			conflicts, ConflictUntrustworthyTime, wantDetails)
 	}
 }
 

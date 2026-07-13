@@ -31,13 +31,13 @@ func TestConflictResolveKeepRemoteSwitchesVariant(t *testing.T) {
 	// same_path_different_remote conflict. The deterministic winner is the higher
 	// coordinate (device-y @20).
 	const hlcShift = 16
-	ev1, err := dssync.NewProjectEvent("device-x", dssync.EventProjectAdded, 10<<hlcShift, dssync.ProjectPayload{
+	ev1, err := dssync.NewProjectEvent("device-x", dssync.EventProjectAdded, (realisticTestPhysicalMS+10)<<hlcShift, dssync.ProjectPayload{
 		Path: "work/acme/api", Type: "git_repo", RemoteKey: "github.com/acme/api", RemoteURL: "https://github.com/acme/api",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ev2, err := dssync.NewProjectEvent("device-y", dssync.EventProjectAdded, 20<<hlcShift, dssync.ProjectPayload{
+	ev2, err := dssync.NewProjectEvent("device-y", dssync.EventProjectAdded, (realisticTestPhysicalMS+20)<<hlcShift, dssync.ProjectPayload{
 		Path: "work/acme/api", Type: "git_repo", RemoteKey: "gitlab.com/acme/api", RemoteURL: "https://gitlab.com/acme/api",
 	})
 	if err != nil {

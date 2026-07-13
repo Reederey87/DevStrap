@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-11
+last_reviewed: 2026-07-13
 tracks_code: [internal/pathkey/**, internal/scan/**, internal/state/**, internal/sync/**, internal/workspacekeys/**, internal/devicekeys/**, internal/id/**, internal/pairing/**]
 ---
 # Namespace and Sync Model
@@ -211,6 +211,8 @@ receive:
   physical_ms = max(local_physical_ms, remote_physical_ms, physical_now_ms)
   counter follows the standard HLC max/tie rule, with the same overflow guard
 ```
+
+**Two-sided HLC plausibility floor (`P4-SYNC-03`, shipped).** The receive path quarantines an event whose physical HLC is untrustworthy in *either* direction, so no peer with a bad clock can hijack ordering. The future direction (physical beyond `now + maxSkew`) is a **transient** `untrustworthy_remote_time` quarantine that HOLDS the origin device's cursor until local time catches up and the event is re-delivered. The past direction is an **epoch floor**: any event whose physical component is below the DevStrap launch epoch (`2024-01-01T00:00:00Z`, i.e. `1704067200000` ms) — or non-positive — is quarantined as the same `untrustworthy_remote_time` conflict but treated as **permanently invalid**: it is *consumed* (the cursor advances past it) rather than held, because a redelivery would fail identically forever. This closes the past-direction hole that first-writer-wins same-path reconciliation otherwise exposed: a peer stuck near the epoch (or a crafted near-epoch event) could permanently claim any namespace path against its rightful owner, who could never reclaim it. The floor is a package variable in `internal/sync` so the deterministic synthetic-clock tests, which build events with tiny (sub-epoch) HLCs purely for ordering, can lower it to 0; production and the CLI-level sync tests run with the real floor active.
 
 The HLC implementation is mutex-protected for concurrent daemon/agent use. Local outgoing events are stamped through the state store, which persists `(last_hlc, next_seq)` per device in the same SQLite transaction that inserts the event. If the persisted clock row is missing, startup/event creation seeds from `MAX(hlc)` and `MAX(seq)` for the local device so restarts cannot regress or reuse local timestamps. The `(hlc, device_id)` pair is the deterministic tiebreaker. The device id and workspace id are stable generated identifiers, not hardcoded local rows: the device id is minted during `devstrap init` on every device, while the workspace id is minted on the **founder** and adopted by joiners via `devstrap init --join --workspace-id <id>` (P4-SEC-07 pairing — shipped; the id is carried in the same out-of-band exchange as the enrollment keys; runbook: `19_CLOUD_PROVISIONING_GUIDE.md` §E). Phase 0 enforces one local workspace row, and all workspace-scoped tables carry `workspace_id`, so the same logical `ws_...` id is provisioned across devices and every device reads the same r2/s3 hub prefix. A store already initialized under a different id is refused, never rewritten in place.
 

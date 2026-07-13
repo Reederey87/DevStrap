@@ -100,7 +100,7 @@ func TestReplayIngestsQuarantinedGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	event := state.Event{
-		ID: "evt_grant_quarantined", DeviceID: "dev_granter", Seq: 1, HLC: 10 << 16,
+		ID: "evt_grant_quarantined", DeviceID: "dev_granter", Seq: 1, HLC: realisticTestPhysicalMS << 16,
 		Type: dssync.EventDeviceKeyGranted, PayloadJSON: string(payload),
 		ContentHash: state.ContentHash(string(payload)),
 	}

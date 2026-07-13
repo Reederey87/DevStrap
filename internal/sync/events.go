@@ -62,14 +62,15 @@ var QuarantineConflictTypes = []string{
 // event's HLC may be before it is quarantined instead of applied.
 const defaultReceiveMaxSkew = 5 * time.Minute
 
-// epochFloorMS is the minimum plausible physical timestamp. HLC values whose
-// physical component is below this floor are quarantined as implausible so a
-// malicious/buggy peer cannot poison ordering from the "past" direction
-// (SYNC-03). Set to 0 so only truly non-positive HLC values (event.HLC <= 0)
-// are rejected; deterministic tests use small positive HLC values whose
-// physical component is 0. A production deployment should raise this to the
-// DevStrap launch epoch once test events use realistic timestamps.
-const epochFloorMS = 0
+// devstrapEpochFloorMS is 2024-01-01T00:00:00Z in Unix milliseconds.
+const devstrapEpochFloorMS int64 = 1704067200000
+
+// epochFloorMS is the minimum plausible physical HLC timestamp. Components
+// below this floor are quarantined as ConflictUntrustworthyTime to stop a peer
+// from poisoning ordering from the past direction. These events are
+// permanently invalid and consumed, so they do not hold the transport cursor.
+// It is a variable so tests using synthetic tiny HLC values can lower it.
+var epochFloorMS = devstrapEpochFloorMS
 
 type ProjectPayload struct {
 	Path          string `json:"path"`

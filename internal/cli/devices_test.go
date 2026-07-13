@@ -14,6 +14,9 @@ import (
 	"github.com/spf13/viper"
 )
 
+// realisticTestPhysicalMS keeps CLI sync fixtures above the production floor.
+const realisticTestPhysicalMS int64 = 1704067200000
+
 func TestReplayQuarantinedEventsAfterDeviceApproval(t *testing.T) {
 	ctx := context.Background()
 	home := filepath.Join(t.TempDir(), ".devstrap")
@@ -71,7 +74,7 @@ func TestReplayQuarantinedEventsAfterDeviceApproval(t *testing.T) {
 		ID:          "evt_pending_project",
 		DeviceID:    "dev_pending",
 		Seq:         1,
-		HLC:         10 << 16,
+		HLC:         realisticTestPhysicalMS << 16,
 		Type:        dssync.EventProjectAdded,
 		PayloadJSON: string(payload),
 		ContentHash: state.ContentHash(string(payload)),
@@ -165,7 +168,7 @@ func TestEnrollApproveReplaysQuarantinedEvents(t *testing.T) {
 		ID:          "evt_first_contact",
 		DeviceID:    "dev_unknown_yet",
 		Seq:         1,
-		HLC:         10 << 16,
+		HLC:         realisticTestPhysicalMS << 16,
 		Type:        dssync.EventProjectAdded,
 		PayloadJSON: string(payload),
 		ContentHash: state.ContentHash(string(payload)),
@@ -262,7 +265,7 @@ func TestReplaySkipsDivergentConflicts(t *testing.T) {
 		ID:          "evt_divergent",
 		DeviceID:    "dev_x",
 		Seq:         1,
-		HLC:         10 << 16,
+		HLC:         realisticTestPhysicalMS << 16,
 		Type:        dssync.EventProjectAdded,
 		PayloadJSON: string(payload),
 		ContentHash: state.ContentHash(string(payload)),

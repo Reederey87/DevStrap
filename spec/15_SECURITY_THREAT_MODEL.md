@@ -131,6 +131,7 @@ Mitigation:
 - device revocation;
 - event signatures from day one for trust-affecting events;
 - HLC ordering and content hashes detect replay/reorder/drop classes when paired with cursors;
+- a **two-sided HLC plausibility floor** (`P4-SYNC-03`) quarantines events whose physical timestamp is untrustworthy in either direction: skew-ahead events are held transiently, and events below the DevStrap launch epoch (`2024-01-01T00:00:00Z`) are permanently quarantined so a peer with a stuck-in-the-past clock (or a crafted near-epoch event) cannot use first-writer-wins same-path reconciliation to permanently seize a namespace path from its rightful owner (see `07_NAMESPACE_AND_SYNC_MODEL.md`);
 - out-of-band fingerprint confirmation before device approval;
 - no raw secrets;
 - no raw Git mirror by default.
