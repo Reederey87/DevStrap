@@ -469,7 +469,7 @@ func checkForgeCLIs(ctx context.Context, opts *options, store *state.Store) []ch
 		if p.Type != "git_repo" || p.RemoteURL == "" {
 			continue
 		}
-		kind := ResolveForge(p.RemoteURL, "", p.ForgeKind, hostMap)
+		kind := ResolveForge(ctx, p.RemoteURL, "", p.ForgeKind, hostMap)
 		cli := forgeCLI(kind)
 		if cli == "" {
 			if !seen["unknown"] {

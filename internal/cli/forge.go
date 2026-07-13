@@ -32,8 +32,8 @@ const (
 // ForgeUnknown is returned; the caller should prompt for --forge or degrade
 // gracefully. SSH host aliases (~/.ssh/config) are resolved first so
 // `git@work-gitlab:org/repo` maps to the real host (GIT-05).
-func DetectForge(remoteURL string) ForgeKind {
-	host := resolveForgeHost(remoteURL)
+func DetectForge(ctx context.Context, remoteURL string) ForgeKind {
+	host := resolveForgeHost(ctx, remoteURL)
 	switch {
 	case strings.Contains(host, "github."):
 		return ForgeGitHub
@@ -74,7 +74,7 @@ func parseForgeKind(s string) (ForgeKind, bool) {
 // consulted if the prior tier is unset/invalid, so a self-hosted GitLab at
 // git.acme.com can be taught once (host map or project column) and then route
 // to glab without per-call flags.
-func ResolveForge(remoteURL, flagForge, projectForge string, hostMap map[string]ForgeKind) ForgeKind {
+func ResolveForge(ctx context.Context, remoteURL, flagForge, projectForge string, hostMap map[string]ForgeKind) ForgeKind {
 	if k, ok := parseForgeKind(flagForge); ok {
 		return k
 	}
@@ -82,12 +82,12 @@ func ResolveForge(remoteURL, flagForge, projectForge string, hostMap map[string]
 		return k
 	}
 	if hostMap != nil {
-		host := resolveForgeHost(remoteURL)
+		host := resolveForgeHost(ctx, remoteURL)
 		if k, ok := hostMap[host]; ok {
 			return k
 		}
 	}
-	return DetectForge(remoteURL)
+	return DetectForge(ctx, remoteURL)
 }
 
 // forgeHostMap reads the `[forge]` host->kind map from config (GIT-05), e.g.:
@@ -119,12 +119,12 @@ func forgeHostMap(v *viper.Viper) map[string]ForgeKind {
 // SSH host alias (~/.ssh/config Host -> HostName) so a configured alias like
 // `work-gitlab` maps to the real self-hosted host before forge detection
 // (GIT-05). Parsing failures fall back to the literal extracted host.
-func resolveForgeHost(remoteURL string) string {
+func resolveForgeHost(ctx context.Context, remoteURL string) string {
 	host := forgeHost(remoteURL)
 	if host == "" {
 		return ""
 	}
-	if real := resolveSSHHostAlias(host); real != "" {
+	if real := resolveSSHHostAlias(ctx, host); real != "" {
 		return strings.ToLower(real)
 	}
 	return host
@@ -136,7 +136,7 @@ func resolveForgeHost(remoteURL string) string {
 // (P5-CLI-04) — and falls back to parsing ~/.ssh/config directly when ssh is
 // unavailable. Returns "" when there is no real HostName override (forge
 // detection then treats the literal alias as the host).
-func resolveSSHHostAlias(alias string) string {
+func resolveSSHHostAlias(ctx context.Context, alias string) string {
 	alias = strings.ToLower(strings.TrimSpace(alias))
 	// Reject empty, whitespace/path-bearing, and leading-dash aliases. The
 	// leading-dash check (P5 review) prevents an attacker-influenced remote host
@@ -151,7 +151,7 @@ func resolveSSHHostAlias(alias string) string {
 	// `ssh -G` echoes the alias as `hostname` when there is no override, so a
 	// result equal to the alias means "no override found" — fall back to the file
 	// parser (which honors negation, P5 review) rather than guessing.
-	if host, ok := sshDashGHostName(alias); ok && host != alias {
+	if host, ok := sshDashGHostName(ctx, alias); ok && host != alias {
 		return host
 	}
 	return resolveSSHHostAliasFromFile(alias)
@@ -163,12 +163,12 @@ func resolveSSHHostAlias(alias string) string {
 // unavailable or errors, signalling the caller to fall back to the file parser
 // (P5-CLI-04). It is bounded by a short timeout and a sanitized environment;
 // `ssh -G` only resolves config and does not connect.
-func sshDashGHostName(alias string) (string, bool) {
+func sshDashGHostName(ctx context.Context, alias string) (string, bool) {
 	sshPath, err := exec.LookPath("ssh")
 	if err != nil {
 		return "", false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	//nolint:gosec // alias is validated (no spaces/slashes/leading-dash) and ssh -G only resolves config.
 	cmd := exec.CommandContext(ctx, sshPath, "-G", alias)
@@ -358,12 +358,12 @@ func forgePRCommand(k ForgeKind, baseBranch, headBranch, title, body string) []s
 // resolution honors the GIT-05 precedence: --forge flag > project column >
 // [forge] host map > DetectForge heuristic.
 func createForgePR(ctx context.Context, dir, remoteURL, baseBranch, headBranch, title, body, forgeOverride, projectForge string, hostMap map[string]ForgeKind) (string, error) {
-	kind := ResolveForge(remoteURL, forgeOverride, projectForge, hostMap)
+	kind := ResolveForge(ctx, remoteURL, forgeOverride, projectForge, hostMap)
 
 	if kind == ForgeUnknown || forgeCLI(kind) == "" {
 		// Graceful degradation: the branch is already pushed; print a
 		// compare/MR URL so the user can create the PR manually (FORGE-01).
-		compareURL := forgeCompareURL(remoteURL, baseBranch, headBranch)
+		compareURL := forgeCompareURL(ctx, remoteURL, baseBranch, headBranch)
 		msg := fmt.Sprintf("branch %s pushed; forge not auto-detected from %s", headBranch, remoteURL)
 		if compareURL != "" {
 			msg += "\nOpen a merge request manually: " + compareURL
@@ -374,7 +374,7 @@ func createForgePR(ctx context.Context, dir, remoteURL, baseBranch, headBranch, 
 	// Preflight: check the CLI binary exists.
 	cli := forgeCLI(kind)
 	if _, err := exec.LookPath(cli); err != nil {
-		compareURL := forgeCompareURL(remoteURL, baseBranch, headBranch)
+		compareURL := forgeCompareURL(ctx, remoteURL, baseBranch, headBranch)
 		msg := fmt.Sprintf("branch %s pushed; %s CLI not found in PATH", headBranch, cli)
 		if compareURL != "" {
 			msg += "\nOpen a merge request manually: " + compareURL
@@ -408,7 +408,7 @@ func createForgePR(ctx context.Context, dir, remoteURL, baseBranch, headBranch, 
 // the URL so a configured alias like `work-gitlab` maps to the real,
 // browser-usable host; the raw host is still used to trim the canonical key
 // (CanonicalRemoteKey does not resolve aliases).
-func forgeCompareURL(remoteURL, baseBranch, headBranch string) string {
+func forgeCompareURL(ctx context.Context, remoteURL, baseBranch, headBranch string) string {
 	key, err := dsgit.CanonicalRemoteKey(remoteURL)
 	if err != nil {
 		return ""
@@ -417,7 +417,7 @@ func forgeCompareURL(remoteURL, baseBranch, headBranch string) string {
 	if rawHost == "" {
 		return ""
 	}
-	host := resolveForgeHost(remoteURL)
+	host := resolveForgeHost(ctx, remoteURL)
 	if host == "" {
 		host = rawHost
 	}
