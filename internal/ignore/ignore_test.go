@@ -156,7 +156,8 @@ func TestInvalidPattern(t *testing.T) {
 }
 
 // TestMatchNFCPatternMatchesNFDPath: NFC pattern café/ must ignore NFD café paths
-// (APFS readdir returns NFD; .devstrapignore often carries NFC) — P7-XP-04.
+// (NFD names arrive from HFS+ legacy volumes, archives, network filesystems, and
+// NFD-writing apps; .devstrapignore usually carries NFC) — P7-XP-04.
 func TestMatchNFCPatternMatchesNFDPath(t *testing.T) {
 	m, err := Compile(cafeNFC+"/\n", false)
 	if err != nil {

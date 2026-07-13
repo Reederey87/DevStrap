@@ -85,7 +85,7 @@ Mitigation:
 - env allowlist resolved only from the bound profile;
 - dangerous env names stripped last and unconditionally;
 - file denylist;
-- isolated worktree plus OS sandbox before public release;
+- isolated worktree plus OS sandbox (Seatbelt / bubblewrap+Landlock+seccomp, shipped 2026-07-05 `P4-GIT-03`);
 - separate process environment;
 - log redaction;
 - tainted-log handling when secrets are present.

@@ -31,6 +31,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-12 — docs: truth-up service-installer and OS-sandbox claims across six files (P7-DOC-01)
+
+Changed:
+- Six files described two shipped capabilities as unbuilt/future/advisory; corrected to match the code and each file's own already-shipped statements. Both capabilities: `devstrap service install|uninstall|status` (launchd LaunchAgent / systemd `--user` unit wrapping `run-loop`, `P4-PROD-04`, 2026-07-06) and the OS-enforced agent sandbox (macOS Seatbelt default, Linux bubblewrap → Landlock+seccomp fallback, `P4-GIT-03`, 2026-07-05).
+- `spec/00_START_HERE.md`: Phase-3 list parenthetical now states the OS-enforced sandbox shipped; the near-term-direction sentence moves `P4-GIT-03` out of "remaining candidates" (leaving only the later `AD-1` slices); the "Not implemented yet" list drops the sandbox clause (project-env allowlists + non-generic engine adapters stay).
+- `spec/06_LINUX_COMPATIBILITY.md`: the two "deferred `service install`" references in the `P6-XP-04` problem/steps now say it shipped (`P4-PROD-04`), consistent with the file's own §"systemd user service — shipped" heading.
+- Assembly additions (2026-07-12, same finding): `spec/03` §platform-adapters no longer claims "service installers are still design targets" (daemon + FSEvents watcher keep that status; the shipped managers are named); `spec/05`'s later-layers framing carves out the shipped LaunchAgent; and the `P7-XP-04` APFS wording correction that raced #169's auto-merge lands here — `spec/11`, the ignore.go/ignore_test.go comments, the ledger row, and the #169 work-log entry now say APFS is normalization-PRESERVING (the NFD sources being HFS+ legacy volumes, archives, network filesystems, and NFD-writing apps) instead of "APFS readdir returns NFD".
+- `spec/10_AGENT_WORKSPACES_AND_POLICIES.md`: the wrapper-policy heading and the two "later: sandbox/container" bullets now describe the wrapper as guardrails layered *beneath* the shipped OS sandbox, with containerization as the residual later slice (matching the file's own detailed shipped-sandbox paragraph).
+- `spec/15_SECURITY_THREAT_MODEL.md`: the agent-controls "OS sandbox before public release" item now cites the shipped sandbox, consistent with the file's own §"Security decisions" shipped note.
+- `ARCHITECTURE.md`: the Linux-confinement "next slice / advisory" paragraph now states both platforms are OS-sandboxed; the "deliberately not built" daemon item drops the installer clause (daemon/socket/FSEvents stay unbuilt).
+- `docs/quickstart.md`: the sandbox note now covers macOS Seatbelt AND Linux bubblewrap → Landlock+seccomp, with the wrapper policy framed as guardrails beneath.
+- `last_reviewed` bumped to 2026-07-11 on the four touched `spec/` files; the daemon/`devstrapd` (socket API, FSEvents watcher) references were left unchanged (genuinely unbuilt).
+
+Validated:
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` (docs-only; no Go tests).
+
 ## 2026-07-12 — ci(release): stage-then-promote stable releases (P7-QUAL-01)
 
 Changed:
@@ -86,7 +102,7 @@ Validated:
 Changed:
 - `internal/ignore/ignore.go`: `parseLine` NFC-normalizes every pattern line at compile (after gitignore trailing-whitespace stripping; `!`/`/`/`#` and all ASCII metacharacters are NFC-invariant, and `p.text` — which feeds `GitignoreFragment` — becomes the normalized form, so compile → fragment → recompile is a fixed point), and `Match` NFC-normalizes the target after `filepath.ToSlash` (`ShouldPruneDir` flows through `Match`, including the empty-relSlash name fallback). `norm.NFC.String` returns already-NFC input unchanged without allocating, so the ASCII path is free. Same normalization `internal/pathkey` has always applied to namespace keys; `golang.org/x/text` was already a dependency.
 - Tests (explicit `\u00e9` vs `e\u0301` literals so nothing depends on source normalization): `TestMatchNFCPatternMatchesNFDPath` (+ dirOnly descendant), `TestMatchNFDPatternMatchesNFCPath`, `TestShouldPruneDirNFDName` (+ name fallback), `TestGitignoreFragmentEmitsNFC` (round-trip), `TestNegationWinsAfterNormalization`.
-- `spec/11`: new "Unicode normalization and case sensitivity" section — the NFC guarantee (P7-XP-04) and the DELIBERATE fleet-portable case-sensitivity (P7-XP-06, resolved as documentation per the audit's preferred fix): git's `core.ignorecase=true` divergence on macOS is acknowledged, per-OS folding rejected as reintroducing exactly the divergence NFC removes, and the contrast with case-folding `path_key` (namespace identity vs content matching) drawn.
+- `spec/11`: new "Unicode normalization and case sensitivity" section — the NFC guarantee (P7-XP-04; wording corrected in the P7-DOC-01 truth-up: APFS is normalization-preserving, the NFD sources are HFS+ legacy/archives/network-fs/NFD-writing apps — the "APFS readdir returns NFD" over-claim, caught by the #169 Codex review, raced that PR's auto-merge) and the DELIBERATE fleet-portable case-sensitivity (P7-XP-06, resolved as documentation per the audit's preferred fix): git's `core.ignorecase=true` divergence on macOS is acknowledged, per-OS folding rejected as reintroducing exactly the divergence NFC removes, and the contrast with case-folding `path_key` (namespace identity vs content matching) drawn.
 - `docs/audits/README.md`: `P7-XP-04` + `P7-XP-06` moved open → *Recently shipped*; Pass-7 counts re-derived from the table at merge (serial wave).
 
 Validated:

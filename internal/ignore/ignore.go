@@ -50,7 +50,9 @@ func (m *Matcher) Match(relPath string, isDir bool) bool {
 		return false
 	}
 	relPath = filepath.ToSlash(relPath)
-	// NFC so APFS NFD readdir paths match NFC patterns (P7-XP-04; mirrors pathkey).
+	// NFC so NFD on-disk names (HFS+ legacy, archives, network filesystems,
+	// NFD-writing apps — APFS preserves whatever was written) match NFC
+	// patterns (P7-XP-04; mirrors pathkey).
 	relPath = norm.NFC.String(relPath)
 	ignored := false
 	for _, p := range m.patterns {

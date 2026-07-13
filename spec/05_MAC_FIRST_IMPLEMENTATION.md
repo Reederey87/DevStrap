@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-11
+last_reviewed: 2026-07-12
 tracks_code: [internal/platform/**, internal/cli/open.go, internal/cli/hydrate.go, .github/**]
 ---
 # Mac-First Implementation Guide
@@ -12,7 +12,7 @@ Build a Mac solution that feels native enough to solve the daily pain, while kee
 
 The 2026-06-28 cloud-sync decisions (see `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`, workstream `XP-*`) re-order this guide's build sequence: ship the **portable Go core first on both macOS and Ubuntu**, before any native macOS magic. The "Dropbox experience for code" — one identical `~/Code` tree on every device in a mixed macOS/Linux fleet (workstations, laptops, headless boxes, agent runners) — is delivered this cycle by the portable core (eager blobless clone on `devstrap sync`, age-encrypted env/draft blobs, and the signed HLC-ordered namespace map), not by a daemon or virtual filesystem.
 
-Consequently, treat the daemon, native FSEvents watcher, LaunchAgent, Endpoint Security, File Provider, and FUSE/StrapFS content below as **later layers, not this-cycle work**. The Mac-specific adapter seams in `internal/platform` stay valuable as the eventual home for that behavior and as the proof that Mac specifics stay behind adapters so Ubuntu remains first-class — but they are deferred. Materialization in the cross-platform core is **eager clone-everything on `devstrap sync`** (partial/blobless clone up front); there is no placeholder/lazy-VFS step in this design.
+Consequently, treat the daemon, native FSEvents watcher, Endpoint Security, File Provider, and FUSE/StrapFS content below as **later layers, not this-cycle work** — with one exception: the LaunchAgent shipped as `devstrap service install` (`P4-PROD-04`, wrapping the portable `run-loop`; see the shipped section below). The Mac-specific adapter seams in `internal/platform` stay valuable as the eventual home for that behavior and as the proof that Mac specifics stay behind adapters so Ubuntu remains first-class — but they are deferred. Materialization in the cross-platform core is **eager clone-everything on `devstrap sync`** (partial/blobless clone up front); there is no placeholder/lazy-VFS step in this design.
 
 ## Recommended Mac MVP
 
