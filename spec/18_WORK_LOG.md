@@ -65,7 +65,6 @@ Validated:
 Follow-ups:
 - None.
 
-<<<<<<< HEAD
 ## 2026-07-13 — fix(platform): real Seatbelt launch probe instead of stat-only check (P7-XP-07)
 
 Changed:

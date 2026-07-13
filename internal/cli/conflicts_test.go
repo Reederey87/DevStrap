@@ -91,6 +91,53 @@ func TestConflictResolveKeepRemoteSwitchesVariant(t *testing.T) {
 	}
 }
 
+// P4-SYNC-03: exercise the production epoch floor through the real CLI apply
+// path (internal/cli has no TestMain floor override, unlike internal/sync), so a
+// silent regression of epochFloorMS back to 0 would fail here. A signed but
+// sub-epoch remote event must be quarantined as untrustworthy_remote_time and
+// never land a namespace row.
+func TestApplyEventsRejectsSubEpochEventUnderProductionFloor(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init", "--workspace-name", "personal"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+	store, err := state.Open(context.Background(), filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(store)
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	const hlcShift = 16
+	// Physical component 1s below the DevStrap launch epoch (1704067200000 ms).
+	subEpoch, err := dssync.NewProjectEvent("device-x", dssync.EventProjectAdded, (realisticTestPhysicalMS-1000)<<hlcShift, dssync.ProjectPayload{
+		Path: "work/acme/api", Type: "git_repo", RemoteKey: "github.com/acme/api", RemoteURL: "https://github.com/acme/api",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dssync.ApplyEvents(ctx, store, []state.Event{subEpoch}); err != nil {
+		t.Fatalf("apply sub-epoch event: %v", err)
+	}
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projects) != 0 {
+		t.Fatalf("projects = %+v, want none — sub-epoch event must not claim a path", projects)
+	}
+	quarantined, err := store.OpenConflictsByType(ctx, dssync.ConflictUntrustworthyTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(quarantined) != 1 {
+		t.Fatalf("untrustworthy_remote_time conflicts = %d, want 1 (production floor inactive?)", len(quarantined))
+	}
+}
+
 func TestResolveActionValidation(t *testing.T) {
 	if _, err := resolveAction(false, false, false); err == nil {
 		t.Fatal("expected error when no keep-* flag is set")
