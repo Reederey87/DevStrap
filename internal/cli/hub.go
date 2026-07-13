@@ -562,7 +562,8 @@ func newHubInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 
 			if current := strings.TrimSpace(opts.v.GetString("hub")); current != "" {
 				if current == hubURI {
-					opts.progressf(stdout, "hub already configured as %s; nothing to do.\n", hubURI)
+					// Terminal confirmation of a completed state change, deliberately not gated by --quiet (P7-CLI-03).
+					_, _ = fmt.Fprintf(stdout, "hub already configured as %s; nothing to do.\n", hubURI)
 					printHubInitNextSteps(stdout, opts)
 					return nil
 				}
@@ -576,7 +577,8 @@ func newHubInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := rewriteConfigHub(paths, hubURI); err != nil {
 				return err
 			}
-			opts.progressf(stdout, "Configured hub: %s\n", hubURI)
+			// Terminal confirmation of a completed state change, deliberately not gated by --quiet (P7-CLI-03).
+			_, _ = fmt.Fprintf(stdout, "Configured hub: %s\n", hubURI)
 			if !noProbe {
 				probeGitHubCarrier(cmd.Context(), cmd.ErrOrStderr(), opts, remote, branch)
 			}

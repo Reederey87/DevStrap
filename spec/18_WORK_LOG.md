@@ -31,6 +31,33 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-13 — fix(cli): hub init / service install confirmations survive --quiet (P7-CLI-03)
+
+Changed:
+- P7-CLI-03: `hub init`, `service install`, and `service uninstall` routed their ONLY confirmation of a completed state change through `opts.progressf`, which `--quiet` suppresses (`internal/cli/root.go:52-57`). A `--quiet` invocation that actually started a background service or rewrote `config.yaml` therefore produced zero output — the user got no confirmation the mutation happened.
+- Un-gated the terminal confirmation lines by switching them from `opts.progressf(...)` to `fmt.Fprintf(...)`, copying the existing deferred-push precedent (`internal/cli/sync.go`, "Deliberately NOT gated by --quiet"): `internal/cli/service.go` (`installed … service`, `uninstalled … service`, `… not installed; nothing to do`) and `internal/cli/hub.go` (`Configured hub:`, `hub already configured …`). Auxiliary progress on the same commands stays gated (service install's `unit:`/`logs:` lines; `hub init`'s `Next:`/`Joiner:` hints).
+- Tests: `TestServiceInstallConfirmationSurvivesQuiet` / `TestServiceUninstallConfirmationSurvivesQuiet` (`internal/cli/service_test.go`) and `TestHubInitConfirmationSurvivesQuiet` (`internal/cli/hub_init_test.go`) assert the confirmation prints under `--quiet` while a gated line (`logs:` / `Next:`) stays suppressed.
+- Spec: extended the P6-CLI-04 resolution in `spec/13_CLI_DAEMON_API.md` with the P7-CLI-03 carve-out and bumped its `last_reviewed`.
+
+Validated:
+- `gofmt -l` clean; `go test -race ./internal/cli/` ok; `go run ./cmd/spec-drift --base origin/main --head HEAD` clean; `golangci-lint run` clean; `go test -race ./...` green.
+- Triple-reviewed (Codex + opus-4.8 + fable-5): all three independently found no code bugs and independently converged on the same non-blocking observation — `hub login`/`hub logout` have the same latent bug pattern (sole confirmation gated behind `progressf`, no alternate surface) but are out of this finding's scope.
+
+Follow-ups:
+- Candidate new P3 finding: un-gate (or explicitly document as deferred) the terminal confirmations on `hub login`/`hub logout`.
+
+### 2026-07-13 — review fixup (P7-CLI-03): don't infer "not installed" from a failed status pre-check
+
+CodeRabbit review (PR #184) caught that `service uninstall`'s best-effort `Status` pre-check discarded its error (`status, _ := mgr.Status(...)`), leaving `status.Installed` at its zero-value `false`. If `Status` failed (a transient `launchctl print`/D-Bus query failure) but `Uninstall` itself succeeded on a genuinely-installed service, the confirmation wrongly printed "not installed; nothing to do" instead of "uninstalled ... service" — misreporting a real removal as a no-op.
+
+- `internal/cli/service.go` (`newServiceUninstallCommand`): now captures `statusErr` from the pre-check and branches on it first — a Status failure prints "uninstalled ... service ... (prior state unknown: ...)" instead of guessing, preserving the success confirmation (Uninstall itself returned no error) without asserting a prior state the pre-check couldn't verify.
+- `internal/cli/service_test.go`: new `TestServiceUninstallStatusErrorDoesNotClaimNotInstalled` proves the fix — a `fakeServiceManager` with `statusErr` set asserts the output is NOT "not installed; nothing to do" and IS an uninstalled confirmation noting the unknown prior state.
+
+Validated (this fixup):
+- `go build ./...`; `go test ./internal/cli/... -run TestServiceUninstall -v` — all 4 uninstall tests pass, including the new one.
+- `gofmt -w cmd internal`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `go test -race ./...`.
+- Credit: CodeRabbit automated review on PR #184.
+
 ## 2026-07-13 — fix(hub): batch git-carrier writes into one commit per sync cycle (P7-HUB-01)
 
 Changed:

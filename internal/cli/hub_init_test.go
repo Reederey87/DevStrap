@@ -95,6 +95,28 @@ func TestHubInitSameURLNoOp(t *testing.T) {
 	}
 }
 
+func TestHubInitConfirmationSurvivesQuiet(t *testing.T) {
+	// P7-CLI-03: "Configured hub:" is a terminal confirmation and must print
+	// under --quiet; printHubInitNextSteps ("Next:") stays gated.
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	hubURI := "git+file://" + filepath.Join(t.TempDir(), "hub.git")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+
+	stdout, stderr, err := executeForTest("--home", home, "--quiet", "hub", "init", "--no-probe", hubURI)
+	if err != nil {
+		t.Fatalf("hub init stdout = %q stderr = %q err = %v", stdout, stderr, err)
+	}
+	if !strings.Contains(stdout, "Configured hub:") {
+		t.Fatalf("stdout = %q, want Configured hub: confirmation even under --quiet", stdout)
+	}
+	if strings.Contains(stdout, "Next:") {
+		t.Fatalf("stdout = %q, want Next: hint suppressed under --quiet", stdout)
+	}
+}
+
 func TestHubInitDifferentURLRefusedWithoutForce(t *testing.T) {
 	home := filepath.Join(t.TempDir(), ".devstrap")
 	root := filepath.Join(t.TempDir(), "Code")

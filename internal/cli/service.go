@@ -98,7 +98,8 @@ func newServiceInstallCommand(stdout io.Writer, opts *options) *cobra.Command {
 				}
 				return err
 			}
-			opts.progressf(stderr, "installed %s service %q\n", mgr.Name(), resolvedLabel)
+			// Terminal confirmation of a completed state change, deliberately not gated by --quiet (P7-CLI-03).
+			_, _ = fmt.Fprintf(stderr, "installed %s service %q\n", mgr.Name(), resolvedLabel)
 			if status, serr := mgr.Status(cmd.Context(), resolvedLabel); serr == nil && status.UnitPath != "" {
 				opts.progressf(stderr, "unit: %s\n", status.UnitPath)
 			}
@@ -211,8 +212,11 @@ func newServiceUninstallCommand(stdout io.Writer, opts *options) *cobra.Command 
 				resolvedLabel = mgr.DefaultLabel()
 			}
 			// Best-effort pre-check so we can report the idempotent "not
-			// installed" case; a Status error here never blocks uninstall.
-			status, _ := mgr.Status(cmd.Context(), resolvedLabel)
+			// installed" case; a Status error here never blocks uninstall, but
+			// it also means we cannot trust status.Installed's zero value as
+			// "was not installed" — that would misreport a real removal as a
+			// no-op (CodeRabbit review).
+			status, statusErr := mgr.Status(cmd.Context(), resolvedLabel)
 			notes, err := mgr.Uninstall(cmd.Context(), resolvedLabel)
 			if err != nil {
 				if errors.Is(err, platform.ErrUnsupported) {
@@ -220,10 +224,16 @@ func newServiceUninstallCommand(stdout io.Writer, opts *options) *cobra.Command 
 				}
 				return err
 			}
-			if status.Installed {
-				opts.progressf(stderr, "uninstalled %s service %q\n", mgr.Name(), resolvedLabel)
-			} else {
-				opts.progressf(stderr, "%s service %q not installed; nothing to do\n", mgr.Name(), resolvedLabel)
+			switch {
+			case statusErr != nil:
+				// Terminal confirmation of a completed state change, deliberately not gated by --quiet (P7-CLI-03).
+				_, _ = fmt.Fprintf(stderr, "uninstalled %s service %q (prior state unknown: %v)\n", mgr.Name(), resolvedLabel, statusErr)
+			case status.Installed:
+				// Terminal confirmation of a completed state change, deliberately not gated by --quiet (P7-CLI-03).
+				_, _ = fmt.Fprintf(stderr, "uninstalled %s service %q\n", mgr.Name(), resolvedLabel)
+			default:
+				// Terminal confirmation of a completed state change, deliberately not gated by --quiet (P7-CLI-03).
+				_, _ = fmt.Fprintf(stderr, "%s service %q not installed; nothing to do\n", mgr.Name(), resolvedLabel)
 			}
 			// Notes are operator advisories (e.g. headless systemd unit-file-only
 			// removal), not mere progress — print them verbatim even under --quiet.

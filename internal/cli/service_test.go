@@ -459,6 +459,52 @@ func TestServiceInstallPrintsAdapterNotes(t *testing.T) {
 	}
 }
 
+func TestServiceInstallConfirmationSurvivesQuiet(t *testing.T) {
+	// P7-CLI-03: the terminal "installed … service" line must print even under
+	// --quiet; auxiliary progress (logs:) stays gated.
+	f := &fakeServiceManager{}
+	withFakeService(t, f)
+	_, stderr, err := executeForTest(
+		"--home", t.TempDir(),
+		"--quiet",
+		"service", "install",
+		"--hub-file", filepath.Join(t.TempDir(), "hub.json"),
+		"--exec-path", "/usr/local/bin/devstrap",
+	)
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if !strings.Contains(stderr, "installed fake service") {
+		t.Errorf("stderr = %q, want install confirmation even under --quiet", stderr)
+	}
+	if strings.Contains(stderr, "logs:") {
+		t.Errorf("stderr = %q, want logs: progress suppressed under --quiet", stderr)
+	}
+}
+
+func TestServiceUninstallConfirmationSurvivesQuiet(t *testing.T) {
+	// P7-CLI-03: uninstall / not-installed terminal confirmations survive --quiet.
+	f := &fakeServiceManager{statusVal: platform.ServiceStatus{Installed: true}}
+	withFakeService(t, f)
+	_, stderr, err := executeForTest("--home", t.TempDir(), "--quiet", "service", "uninstall")
+	if err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if !strings.Contains(stderr, "uninstalled fake service") {
+		t.Errorf("stderr = %q, want uninstall confirmation even under --quiet", stderr)
+	}
+
+	f2 := &fakeServiceManager{statusVal: platform.ServiceStatus{Installed: false}}
+	withFakeService(t, f2)
+	_, stderr2, err := executeForTest("--home", t.TempDir(), "--quiet", "service", "uninstall")
+	if err != nil {
+		t.Fatalf("uninstall (not installed): %v", err)
+	}
+	if !strings.Contains(stderr2, "not installed") {
+		t.Errorf("stderr = %q, want not-installed confirmation even under --quiet", stderr2)
+	}
+}
+
 func TestServiceInstallEnvContainsNoSecrets(t *testing.T) {
 	// Pin the override off: CI exports DEVSTRAP_NO_KEYCHAIN=1 job-wide, and an
 	// explicitly-set override is DELIBERATELY baked (the one non-secret env the
@@ -514,6 +560,29 @@ func TestServiceUninstallIdempotent(t *testing.T) {
 	}
 	if !strings.Contains(stderr2, "uninstalled fake service") {
 		t.Errorf("stderr = %q, want an uninstalled line", stderr2)
+	}
+}
+
+// TestServiceUninstallStatusErrorDoesNotClaimNotInstalled is the CodeRabbit
+// review guard (PR #184): a failed pre-check Status call must not be treated
+// as proof the service was not installed. Before the fix, a Status error left
+// status.Installed at its false zero value, so a real removal (Uninstall
+// succeeds with no error) was misreported as "not installed; nothing to do".
+func TestServiceUninstallStatusErrorDoesNotClaimNotInstalled(t *testing.T) {
+	f := &fakeServiceManager{statusErr: errors.New("transient launchctl print failure")}
+	withFakeService(t, f)
+	_, stderr, err := executeForTest("--home", t.TempDir(), "service", "uninstall")
+	if err != nil {
+		t.Fatalf("uninstall: %v", err)
+	}
+	if !f.uninstalled {
+		t.Error("Uninstall was not called")
+	}
+	if strings.Contains(stderr, "not installed; nothing to do") {
+		t.Errorf("stderr = %q, must not claim not-installed on an unknown prior state", stderr)
+	}
+	if !strings.Contains(stderr, "uninstalled fake service") || !strings.Contains(stderr, "prior state unknown") {
+		t.Errorf("stderr = %q, want an uninstalled confirmation noting the unknown prior state", stderr)
 	}
 }
 
