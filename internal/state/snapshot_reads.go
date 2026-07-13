@@ -86,6 +86,10 @@ type SnapshotTombstone struct {
 type SnapshotTrustRow struct {
 	DeviceID   string
 	TrustState string
+	// RevokedAtHLC is the device's revocation boundary (P7-SYNC-02): the HLC of
+	// the earliest revocation, recorded when the revoke event applied and
+	// surviving compaction on the device row. 0 when unknown.
+	RevokedAtHLC int64
 }
 
 // SnapshotChainAnchor is one origin device's hash-chain anchor for the snapshot:
@@ -253,7 +257,7 @@ ORDER BY path_key;
 // floor — and the local device can never match (its state is 'local').
 func (s *Store) SnapshotTrust(ctx context.Context) ([]SnapshotTrustRow, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id, trust_state FROM devices
+SELECT id, trust_state, COALESCE(revoked_at_hlc, 0) FROM devices
 WHERE trust_state IN ('revoked', 'lost')
 ORDER BY id;
 `)
@@ -264,7 +268,7 @@ ORDER BY id;
 	var out []SnapshotTrustRow
 	for rows.Next() {
 		var tr SnapshotTrustRow
-		if err := rows.Scan(&tr.DeviceID, &tr.TrustState); err != nil {
+		if err := rows.Scan(&tr.DeviceID, &tr.TrustState, &tr.RevokedAtHLC); err != nil {
 			return nil, fmt.Errorf("scan snapshot device trust: %w", err)
 		}
 		out = append(out, tr)

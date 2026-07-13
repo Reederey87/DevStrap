@@ -123,16 +123,21 @@ type Snapshot struct {
 }
 
 // SnapshotTrust is one terminal device-trust row (P7-SYNC-01). State is
-// "revoked" or "lost" only — never pending/approved/local. It carries no
-// source-event coordinates: the revoke event may already be compacted away on
-// the builder (a compactor that itself snapshot-bootstrapped never held it),
-// and the apply is sticky/monotonic with no HLC compare, so State-only import
-// is exactly equivalent to replaying the revoke event. When P7-SYNC-02 records
-// a revoked_at_hlc, it becomes an additive omitempty field here — absence
-// means "unknown, apply sticky".
+// "revoked" or "lost" only — never pending/approved/local. The sticky/monotonic
+// import needs no source-event coordinates for the flip itself: the revoke
+// event may already be compacted away on the builder, so State-only import is
+// exactly equivalent to replaying it.
+//
+// RevokedAtHLC (P7-SYNC-02) carries the device's revocation boundary — the HLC
+// below which the device's events were emitted under trust and stay admissible
+// — so the time-scoped apply-path check survives compaction and snapshot
+// bootstrap. It is an additive omitempty field: an older snapshot (or a device
+// whose boundary was never recorded) decodes to 0, which the apply path treats
+// as "unknown boundary → fail closed", exactly as before this fix.
 type SnapshotTrust struct {
-	DeviceID string `json:"device_id"`
-	State    string `json:"state"`
+	DeviceID     string `json:"device_id"`
+	State        string `json:"state"`
+	RevokedAtHLC int64  `json:"revoked_at_hlc,omitempty"`
 }
 
 // ChainAnchor is one origin device's hash-chain anchor: the content hash of

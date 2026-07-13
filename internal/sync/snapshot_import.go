@@ -196,7 +196,11 @@ func importTrustTx(ctx context.Context, tx *state.Tx, trust []SnapshotTrust) err
 		if err := tx.EnsureRemoteDeviceTx(ctx, tr.DeviceID); err != nil {
 			return err
 		}
-		changed, err := tx.ApplyRemoteDeviceTrustTx(ctx, tr.DeviceID, tr.State)
+		// P7-SYNC-02: carry the revocation boundary so a snapshot-bootstrapped
+		// device time-scopes the revoked device's events exactly like a device
+		// that applied the revoke event directly. An older snapshot decodes
+		// RevokedAtHLC as 0, which leaves the boundary unknown (fail closed).
+		changed, err := tx.ApplyRemoteDeviceTrustTx(ctx, tr.DeviceID, tr.State, tr.RevokedAtHLC)
 		if err != nil {
 			return err
 		}

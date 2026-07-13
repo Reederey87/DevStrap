@@ -462,8 +462,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 26 {
-		t.Fatalf("schema version after down = %d, want 26", version)
+	if version != 27 {
+		t.Fatalf("schema version after down = %d, want 27", version)
 	}
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
@@ -504,12 +504,11 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
-	// Steps from 28 down to 23 are unrelated and must remain unaffected. Migration
-	// 00027 doesn't exist in this branch (renumbered to 00028 to avoid a
-	// collision), so goose's version sequence has no rung there: the first Down()
-	// rolls 00028 straight back to 26, matching the applied-versions set actually
-	// on disk.
-	if err := st.Down(); err != nil { // 28 -> 26 (00027 doesn't exist)
+	// Steps from 28 down to 23 are unrelated and must remain unaffected.
+	if err := st.Down(); err != nil { // 28 -> 27
+		t.Fatal(err)
+	}
+	if err := st.Down(); err != nil { // 27 -> 26
 		t.Fatal(err)
 	}
 	if err := st.Down(); err != nil { // 26 -> 25
@@ -577,7 +576,10 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
-	if err := st.Down(); err != nil { // 28 -> 26 (00027 doesn't exist in this branch)
+	if err := st.Down(); err != nil { // 28 -> 27
+		t.Fatal(err)
+	}
+	if err := st.Down(); err != nil { // 27 -> 26
 		t.Fatal(err)
 	}
 	if err := st.Down(); err != nil { // 26 -> 25
@@ -2045,7 +2047,7 @@ func TestApplyRemoteDeviceTrustTxMatrix(t *testing.T) {
 		var changed bool
 		if err := st.WithTx(ctx, func(tx *Tx) error {
 			var err error
-			changed, err = tx.ApplyRemoteDeviceTrustTx(ctx, tc.target, tc.to)
+			changed, err = tx.ApplyRemoteDeviceTrustTx(ctx, tc.target, tc.to, 0)
 			return err
 		}); err != nil {
 			t.Fatalf("%s -> %s: %v", tc.target, tc.to, err)
@@ -2065,7 +2067,7 @@ func TestApplyRemoteDeviceTrustTxMatrix(t *testing.T) {
 	}
 	// approved is not a valid remote transition target.
 	if err := st.WithTx(ctx, func(tx *Tx) error {
-		_, err := tx.ApplyRemoteDeviceTrustTx(ctx, "dev-pending", "approved")
+		_, err := tx.ApplyRemoteDeviceTrustTx(ctx, "dev-pending", "approved", 0)
 		return err
 	}); err == nil {
 		t.Fatal("remote approve must be rejected — approval is the local ceremony only")

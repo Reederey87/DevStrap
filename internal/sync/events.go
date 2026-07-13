@@ -956,7 +956,10 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 		if event.Type == EventDeviceLost {
 			trustState = "lost"
 		}
-		changed, err := tx.ApplyRemoteDeviceTrustTx(ctx, payload.DeviceID, trustState)
+		// P7-SYNC-02: carry the revocation event's signed HLC so the target's
+		// revocation boundary is recorded; the apply path admits that device's
+		// pre-boundary events regardless of delivery order.
+		changed, err := tx.ApplyRemoteDeviceTrustTx(ctx, payload.DeviceID, trustState, event.HLC)
 		if err != nil {
 			return err
 		}
