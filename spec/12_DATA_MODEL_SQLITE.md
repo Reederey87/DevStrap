@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-11
+last_reviewed: 2026-07-13
 tracks_code: [internal/state/**, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # SQLite Data Model
@@ -17,6 +17,15 @@ file:<path>?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_m
 db.SetMaxOpenConns(1)
 db.SetMaxIdleConns(1)
 ```
+
+`Open` opens **two** pools against the same file (`P4-SYNC-07`): the single-connection writer above, plus a bounded read-only pool so status/doctor/list queries are not serialized behind an in-flight write. WAL is what makes this safe — readers proceed against the last consistent snapshot without blocking the writer. The reader pool uses `mode=ro` and the same per-connection pragmas that matter for readers (`busy_timeout`, `foreign_keys`, `journal_mode(WAL)`, `query_only(1)`) — set via `_pragma=` so modernc applies them on every pooled connection — and no `_txlock` (it is read-only):
+
+```go
+file:<path>?mode=ro&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=query_only(1)
+readDB.SetMaxOpenConns(clamp(runtime.GOMAXPROCS(0), 2, 8))  // idle conns match
+```
+
+Only genuinely read-only, self-contained methods (pure `SELECT`, no `BeginTx`/`WithTx`/write) route through the reader pool (`Store.reader()`); anything in a read-modify-write path, any `*sql.Tx` work, and the FK-enforcement assertions stay on the writer connection. `OpenSnapshot` keeps a single ephemeral read-only pool (`readDB` nil) and `reader()` falls back to the writer.
 
 `state.db` and backups must be mode `0600`; the containing state directory must be `0700`.
 

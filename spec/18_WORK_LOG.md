@@ -31,6 +31,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-13 — fix(state): split reader/writer SQLite connection pools (P4-SYNC-07)
+
+Changed:
+- `internal/state/store.go`: `Open` now opens a second, read-only `*sql.DB` pool (`readerSQLiteDSN`: `mode=ro`, per-connection pragmas `busy_timeout(5000)`/`foreign_keys(1)`/`journal_mode(WAL)`/`query_only(1)` via `_pragma=`, no `_txlock`) sized `MaxOpenConns = clamp(runtime.GOMAXPROCS(0), 2, 8)` alongside the unchanged single-connection writer. New `Store.readDB` field + `Store.reader()` helper (falls back to the writer when `readDB` is nil). `Close` closes both pools (attempts both, returns first error). Genuinely read-only, self-contained methods route through `reader()`: `missingTable`, `WorkspaceID`, `CurrentDevice`, `ListDevices`, `Summary`, `CountTombstonesBelowHLC`, `ProjectByPath`, `ProjectByID`, `ListProjects`, `CountSecretBindingsNeedingRotation`, `CountOpenConflicts`, `GetLocalMeta`, `ApprovedDeviceSigningKey`, `ListWorktrees`, `ListAgentRuns`, `CountAgentRunsByStatus`, `CountRunsWithSandboxViolations`, `OpenSkippedEvents`. Every read-modify-write path, `*sql.Tx` work, and the FK-enforcement assertions stay on the writer. `OpenSnapshot` unchanged (single ephemeral pool, `readDB` nil).
+- `internal/state/store_readerpool_test.go`: `TestReaderPoolNotBlockedByWriteTxn` — `Summary` completes under a 2s context deadline while a write transaction holds the single writer connection open; would deadlock/time out if the read were still routed through the `MaxOpenConns(1)` writer.
+- `spec/12_DATA_MODEL_SQLITE.md`: documents the two-pool split + routing rule; `last_reviewed` → 2026-07-13.
+- `docs/audits/README.md`: `P4-SYNC-07` moved to _Recently shipped_; Pass 4 index count ~32→~33 shipped, ~12→~11 open.
+
+Validated:
+- `gofmt -l internal/state` (clean); `go build ./...`; `go test -race ./internal/state/...` (ok, 34s). Grep-confirmed no method routed to `reader()` contains INSERT/UPDATE/DELETE/REPLACE/BeginTx/WithTx.
+
+Follow-ups:
+- None. WAL already enabled; readers see the last consistent snapshot without blocking the writer.
+
 ## 2026-07-13 — fix(sync): admit pre-revocation events regardless of delivery order; exclude grants from the exemption (P7-SYNC-02)
 
 Changed:
