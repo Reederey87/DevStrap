@@ -209,6 +209,31 @@ func TestLandlockSandboxEnforcement(t *testing.T) {
 	if err := run(spec, cat, notes); err != nil {
 		t.Fatalf("non-credential home file blocked under default policy, over-blocked: %v", err)
 	}
+	// Symlinked-anchor sub-assertion (P7-SEC-03 Finding 1): a fake home whose
+	// .ssh is ITSELF a symlink into a dotfiles tree (the stow/chezmoi layout).
+	// Reading the secret through the real symlink path must STILL be denied —
+	// the anchor's EvalSymlinks target is carved out of the read grants, so the
+	// resolved credential path has no grant and returns EACCES. A separate home
+	// keeps the main fixture untouched.
+	symHome := filepath.Join(root, "symhome")
+	dotSSH := filepath.Join(symHome, "dotfiles", "ssh")
+	if err := os.MkdirAll(dotSSH, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dotSSH, "id_ed25519"), []byte("SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sshSymlink := filepath.Join(symHome, ".ssh")
+	if err := os.Symlink(dotSSH, sshSymlink); err != nil {
+		t.Fatal(err)
+	}
+	symSpec := spec
+	symSpec.UserHome = symHome
+	if err := run(symSpec, cat, filepath.Join(sshSymlink, "id_ed25519")); err == nil {
+		t.Fatal("credential read through a symlinked .ssh anchor succeeded, want kernel denial (P7-SEC-03 symlinked-anchor resolution)")
+	} else {
+		t.Logf("credential read through symlinked .ssh anchor denied: %v", err)
+	}
 	// Exit-code fidelity through re-exec: the shim execve()s in the same PID,
 	// so the agent's own exit code must come back untouched.
 	err = run(spec, sh, "-c", "exit 7")

@@ -431,7 +431,7 @@ Follow-ups:
 Changed:
 - `internal/platform/sandbox_landlock.go`: the Linux Landlock fallback no longer grants `RODirs("/")` wholesale on the default (non-`--read-confine`) path. New `credentialExcludingReadRules` builds leaf-hierarchy read grants that OMIT the credential anchors (`credentialAnchors` = `sensitiveHomeDirs`/`sensitiveHomeFiles` + `~/.devstrap/keys`, the exact set bubblewrap masks and Seatbelt denies), walking from `/` down only through anchor ancestors and granting each sibling wholesale. Applied whenever `spec.DenySensitiveReads` and NOT `spec.ReadConfine`, so credential reads (`~/.ssh`/`~/.aws`/`~/.git-credentials`-class) return `EACCES` in BOTH `--sandbox auto` and `require`, no longer only when `--read-confine` is engaged. Directories use `RODirs`, regular files use `ROFiles` (Landlock rejects directory access rights on a regular file with EINVAL, which `IgnoreIfMissing` does NOT suppress), a sibling symlink whose resolved target overlaps an anchor is skipped (no alias re-exposure), and a dir that cannot be enumerated receives no grant (fail closed). `spec.ReadConfine == true` is unchanged.
 - `internal/platform/sandbox_landlock_args.go`: dropped the now-false `"credential reads are NOT denied"` limitation from `landlockLimitations` (2 base entries).
-- `spec/06` (Linux agent-sandbox subsection, new), `spec/10`, `spec/15`: removed the "Landlock deliberately does not deny credential reads / bubblewrap-only" framing; describe the leaf-hierarchy fail-closed default and its residual (anchor-path-based, so a credential aliased by a symlink from outside the anchor set is not covered). `last_reviewed` bumped to 2026-07-13 on 06/10/15.
+- `spec/06` (Linux agent-sandbox subsection, new), `spec/10`, `spec/15`: removed the "Landlock deliberately does not deny credential reads / bubblewrap-only" framing; describe the leaf-hierarchy fail-closed default and its residual (anchor-path-based). `last_reviewed` bumped to 2026-07-13 on 06/10/15. (See the review-fixup sub-entry below — the symlinked-anchor case that these first drafts still listed as a residual is now closed.)
 
 - Note on residual: the deny is an explicit set of RODirs/ROFiles leaves omitting the anchor paths, not a kernel subtraction — a credential reachable ONLY via a non-anchor path is not covered, matching the by-path deny model of the Seatbelt/bubblewrap deny-lists.
 
@@ -441,7 +441,27 @@ Validated:
 - `gofmt -l cmd internal` clean; `GOOS=linux go vet ./internal/platform/` clean; `go run ./cmd/spec-drift --base origin/main --head HEAD` (after this entry); host `go test -race ./...` (Landlock e2e tags out on macOS — the Docker run above is the real proof).
 
 Follow-ups:
-- None. OS-enforced-sandbox residuals (containerization, symlink-alias subtraction) remain tracked separately.
+- None. OS-enforced-sandbox residuals (containerization) remain tracked separately.
+
+### 2026-07-13 — review fixup (P7-SEC-03): symlinked credential anchors + deterministic recursion tests
+
+An independent security review of the PR caught two real gaps in the first draft above.
+
+Finding 1 (MEDIUM) — the `denied` set was built from the LITERAL anchor paths only, so if an anchor is ITSELF a symlink into another location (the standard stow/chezmoi dotfiles layout, `~/.ssh -> ~/dotfiles/ssh`), the walk carved out the symlink path but granted the resolved target subtree (`~/dotfiles`) wholesale as a non-anchor sibling — the credential fully readable at its real path while `--sandbox require` reported the boundary enforced. The claimed parity with the Seatbelt (`seatbeltDenyPaths`) / bubblewrap (`existingRealPaths`) deny model was false for this case.
+
+- `internal/platform/sandbox_landlock.go`: before building `denied`, each anchor is now unioned with its `filepath.EvalSymlinks` resolution — the literal path is always kept, the resolved target added only on success (absent/unreadable anchor keeps just the literal), mirroring `seatbeltDenyPaths` exactly. The existing recursive walk then carves out the resolved target naturally (`containsDeny` descends into `~/dotfiles` and skips the `ssh` subdir, treating other siblings normally). Refactored the rule builder into a pure `credentialExcludingReadGrants(userHome, devstrapHome) []readGrant` helper (filesystem-walk + rule-list logic, no landlock/kernel dependency) that `credentialExcludingReadRules` maps onto `RODirs`/`ROFiles`, so the security-critical logic is unit-testable without a Landlock kernel.
+
+Finding 2 (MEDIUM) — the recursion (`containsDeny` → nested `walk`) and the `grantLeaf` symlink-alias skip had ZERO coverage on a default `go test` CI leg (only the kernel-gated `DEVSTRAP_SANDBOX_E2E` e2e touched them, and only for a trivial top-level anchor).
+
+- `internal/platform/sandbox_landlock_grants_test.go` (new, `//go:build linux`, runs on the ubuntu Go-tests leg with no env gate and no kernel syscalls): `TestCredentialExcludingReadGrantsNestedAnchor` (a `.config/gh` anchor two levels deep — anchor + descendants carved out, `$HOME`/`.config` recursed not granted wholesale, siblings at every level granted), `...SiblingSymlinkAlias` (a `.config` sibling symlink into the anchor is skipped; one to a safe target is granted), `...SymlinkedAnchor` (Finding 1: `~/.ssh -> ~/dotfiles/ssh` — literal AND resolved target subtree both excluded, `dotfiles`'s other siblings still granted; fails without the union), and `...NoAnchors` (the wholesale-root degenerate).
+- `internal/platform/sandbox_landlock_e2e_test.go`: added a symlinked-anchor sub-assertion to `TestLandlockSandboxEnforcement` — a separate fake home whose `.ssh` is a symlink into a `dotfiles/ssh` tree; reading the secret through the real symlink path is asserted STILL kernel-denied (main fixture untouched).
+- Doc parity corrected: `spec/06`/`spec/10`/`spec/15` now state that symlinked anchors ARE resolved and match the other two backends; the earlier "symlink from outside the anchor set is not covered" residual is narrowed to a credential kept at a wholly non-anchor location (neither an anchor nor the resolved target of one).
+
+Validated (this fixup):
+- **Live Landlock kernel re-proof:** `docker run --rm -v <repo>:/repo -w /repo golang:1.26 bash -c "cd internal/platform && DEVSTRAP_SANDBOX_E2E=1 go test -run TestLandlockSandboxEnforcement -v ./..."` — PASS, including the new symlinked-`.ssh` denial.
+- New deterministic unit tests PASS on Linux (`go test -run TestCredentialExcludingReadGrants ./internal/platform/`), no kernel required.
+- `gofmt -w cmd internal`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `go test -race ./...` (Landlock-tagged tests skip on macOS host — the Docker run is the kernel proof).
+- Credit: both findings surfaced by the independent PR review.
 
 ## 2026-07-11 — fix(cli): journaled all-or-nothing restore promotion + maintenance lock (P7-DATA-05)
 

@@ -89,19 +89,48 @@ func (s LandlockSandbox) Command(_ context.Context, spec SandboxSpec, argv []str
 	return SandboxCommand{Argv: sandboxHelperArgs(self, string(specJSON), argv), Cleanup: func() {}}, nil
 }
 
-// credentialExcludingReadRules grants every filesystem subtree except the
-// credential anchors. Landlock rules are additive, so the walk descends only
-// through anchor ancestors and grants their sibling leaves wholesale. If an
-// ancestor cannot be enumerated, its subtree receives no grant (fail closed).
-func credentialExcludingReadRules(userHome, devstrapHome string) []landlock.Rule {
+// readGrant is one carved-out read-allow leaf computed by
+// credentialExcludingReadGrants: a path plus whether it is a directory (mapped
+// to RODirs) or a regular file (mapped to ROFiles). grantRoot marks the
+// no-anchor case, a wholesale grant of the filesystem root.
+type readGrant struct {
+	path      string
+	dir       bool
+	grantRoot bool
+}
+
+// credentialExcludingReadGrants computes the leaf read grants that cover every
+// filesystem subtree except the credential anchors. It is pure filesystem-walk
+// plus rule-list logic — no landlock package or kernel syscall dependency — so
+// the security-critical recursion and symlink handling are unit-testable
+// without a Landlock-capable kernel. credentialExcludingReadRules maps the
+// result onto landlock.Rule values.
+//
+// The walk descends only through anchor ancestors and grants their sibling
+// leaves wholesale (Landlock rules are additive). If an ancestor cannot be
+// enumerated, its subtree receives no grant (fail closed).
+func credentialExcludingReadGrants(userHome, devstrapHome string) []readGrant {
 	anchors := credentialAnchors(userHome, devstrapHome)
 	if len(anchors) == 0 {
-		return []landlock.Rule{landlock.RODirs("/")}
+		return []readGrant{{path: string(os.PathSeparator), dir: true, grantRoot: true}}
 	}
 
-	denied := make(map[string]struct{}, len(anchors))
+	denied := make(map[string]struct{}, len(anchors)*2)
 	for _, anchor := range anchors {
 		denied[filepath.Clean(anchor)] = struct{}{}
+		// If the anchor is ITSELF a symlink (the stow/chezmoi dotfiles layout,
+		// e.g. ~/.ssh -> ~/dotfiles/ssh), the by-path carve-out on the literal
+		// alone would leave the resolved target's subtree (~/dotfiles) granted
+		// wholesale as a non-anchor sibling leaf, re-exposing the credential at
+		// its real path. Union the resolved target into the denied set so the
+		// walk carves it out too — mirroring seatbeltDenyPaths/existingRealPaths
+		// on the other two backends. Keep the literal always; add the resolved
+		// target only on success (an absent/unreadable anchor keeps just the
+		// literal, matching the by-path deny model — the walk simply never
+		// reaches a path that does not exist).
+		if real, err := filepath.EvalSymlinks(anchor); err == nil {
+			denied[filepath.Clean(real)] = struct{}{}
+		}
 	}
 	sep := string(os.PathSeparator)
 	// grantLeaf grants read+execute on ONE carved-out sibling, choosing the
@@ -112,7 +141,7 @@ func credentialExcludingReadRules(userHome, devstrapHome string) []landlock.Rule
 	// inside a credential anchor is skipped so it cannot re-expose by an alias a
 	// credential the by-path carve-out removed. Non-regular, non-dir nodes
 	// (sockets/fifos/devices) are skipped — there is nothing to read-grant.
-	grantLeaf := func(childPath string, entry os.DirEntry) []landlock.Rule {
+	grantLeaf := func(childPath string, entry os.DirEntry) []readGrant {
 		mode := entry.Type()
 		if mode&os.ModeSymlink != 0 {
 			real, err := filepath.EvalSymlinks(childPath)
@@ -132,20 +161,20 @@ func credentialExcludingReadRules(userHome, devstrapHome string) []landlock.Rule
 		}
 		switch {
 		case mode.IsDir():
-			return []landlock.Rule{landlock.RODirs(childPath).IgnoreIfMissing()}
+			return []readGrant{{path: childPath, dir: true}}
 		case mode.IsRegular():
-			return []landlock.Rule{landlock.ROFiles(childPath).IgnoreIfMissing()}
+			return []readGrant{{path: childPath, dir: false}}
 		default:
 			return nil
 		}
 	}
-	var walk func(string) []landlock.Rule
-	walk = func(dir string) []landlock.Rule {
+	var walk func(string) []readGrant
+	walk = func(dir string) []readGrant {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			return nil
 		}
-		var rules []landlock.Rule
+		var grants []readGrant
 		for _, entry := range entries {
 			childPath := filepath.Join(dir, entry.Name())
 			if _, deny := denied[childPath]; deny {
@@ -159,14 +188,35 @@ func credentialExcludingReadRules(userHome, devstrapHome string) []landlock.Rule
 				}
 			}
 			if containsDeny {
-				rules = append(rules, walk(childPath)...)
+				grants = append(grants, walk(childPath)...)
 				continue
 			}
-			rules = append(rules, grantLeaf(childPath, entry)...)
+			grants = append(grants, grantLeaf(childPath, entry)...)
 		}
-		return rules
+		return grants
 	}
 	return walk(string(os.PathSeparator))
+}
+
+// credentialExcludingReadRules maps credentialExcludingReadGrants onto the
+// landlock rule types: RODirs for directories, ROFiles for regular files. The
+// leaf grants carry IgnoreIfMissing so a path that vanishes between the walk
+// and RestrictPaths does not fail the whole ruleset; the no-anchor root grant
+// is the filesystem root, which always exists.
+func credentialExcludingReadRules(userHome, devstrapHome string) []landlock.Rule {
+	grants := credentialExcludingReadGrants(userHome, devstrapHome)
+	rules := make([]landlock.Rule, 0, len(grants))
+	for _, g := range grants {
+		switch {
+		case g.grantRoot:
+			rules = append(rules, landlock.RODirs(g.path))
+		case g.dir:
+			rules = append(rules, landlock.RODirs(g.path).IgnoreIfMissing())
+		default:
+			rules = append(rules, landlock.ROFiles(g.path).IgnoreIfMissing())
+		}
+	}
+	return rules
 }
 
 // applyLandlockPolicy maps a SandboxSpec onto stacked Landlock rulesets for
