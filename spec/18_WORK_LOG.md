@@ -91,7 +91,7 @@ Changed:
   one-cycle in-flight-race grace) → `withheld_tail`; a fold mismatch at a held
   seq → `fork`. Both are `event_omission` conflicts that block `hub gc`. Wired
   into `pullAndApplyEvents`; `maybeWriteSyncAck` publishes the head.
-- Migration `00027_device_heads.sql` (schema 27): `device_heads` table +
+- Migration `00028_device_heads.sql` (schema 28): `device_heads` table +
   `sync_chain_anchors.folded_hash`. Bumped hardcoded schema-version constants in
   `store_test.go`/`root_test.go`; added the fourth `Down()` step to the two
   migration-00023 down tests.
