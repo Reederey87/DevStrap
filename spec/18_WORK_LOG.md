@@ -31,6 +31,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-13 — feat(hub): op/byte counters + git-carrier cache GC (P4-HUB-14, P7-HUB-03)
+
+Changed:
+- **P4-HUB-14 (metrics):** new `internal/hub/metrics.go` adds an in-process `Metrics` counter (op-name counts + bytes up/down) and a `meteredS3` decorator over the shared `S3Client` boundary. Because every real backend (R2/S3, git carrier, folder) composes `R2Hub` over an `S3Client`, wrapping that one seam counts hub I/O for all of them with no change to `R2Hub`'s methods. `NewR2Hub(s3, ws)` wires the decorator and exposes `HubMetrics() (MetricsSnapshot, bool)`; `GitCarrierHub`/`FolderHub` delegate to their composed `R2Hub`. The three construction sites (`selectBackendHub` r2 literal, `NewGitCarrierHub`, `NewFolderHub`) switched from a bare `R2Hub{...}` literal to `NewR2Hub`; bare literals stay valid and simply carry no metrics. Bytes-up are counted only on a successful PUT. `doctor --remote` (`checkHubHealth`) unwraps the `EncryptedHub` and appends a `hub metrics` line from the snapshot its probe accumulated (a package-scope `hubMetricsCapable` interface avoids the local `hub` var shadowing the package).
+- **P7-HUB-03 (cache GC):** `GitCarrierHub.writeLoop` runs a threshold-gated, best-effort `git gc --auto` (via a `gitGCAuto` package-var seam) on the disposable clone after each successful batch push, and `CompactEventsBelow` runs it after the squash push. Never `gc --aggressive`. A gc failure never fails a push that already landed on the remote. `gitGCAuto` forces `gc.autoDetach=false` (Codex review) so the gc runs SYNCHRONOUSLY under the carrier lock — git's default background detach would let a `git prune` outlive the lock and race a LATER refresh's `checkHeadContinuityLocked`, pruning the last-verified head object so the prior head looks "not locally known" and the anti-rewind content gate (`checkCompactionDeletesLocked`) is silently skipped.
+- **P7-HUB-03 (observed pruning):** `refreshLocked` prunes the per-clone observation floor (`observed.json`) whenever the head advances since the last SUCCESSFUL prune — dropping floors for event objects another device's `hub compact` removed (which arrive via `git reset`, never `DeleteObject`, so they would otherwise accumulate forever) while re-observing every survivor. Gated on a separate `prunedSHA` (not `fetchedSHA`, which must advance for force-with-lease) so a failed prune is retried on the next refresh of the same head instead of leaking floors forever (Codex review). Runs only AFTER the head-continuity check passes; it mutates no continuity state (`head.json`/git refs/signatures) — only `observed.json` (its `listKeys` walk may reclaim hour-stale orphan `.tmp-*` temps, never a tracked object) — so it cannot race or weaken `checkHeadContinuityLocked`. Dropping a floor is fail-safe for gc (re-observed → kept one extra grace window, never deleted early). The empty-carrier reset prunes all floors.
+
+Validated:
+- `gofmt -w cmd internal`; `golangci-lint run` (0 issues, `contextcheck` active); `go run ./cmd/spec-drift --base origin/main --head HEAD`; `go test -race ./...`.
+- New tests: `TestMeteredS3CountsOpsAndBytes`, `TestR2HubMetricsWiring` (metrics); `TestGitCarrierGCAfterBatchCommit` (gc invoked after batch push + after compaction, against the carrier clone), `TestGitCarrierObservedPrunedAfterCompaction` (a device that learned floors before a remote compaction drops the compacted-away keys, keeps survivors, and advances `prunedSHA`), `TestFsObjectStorePruneObservedToKeepsLive` (prune predicate).
+- Independent review: opus-4.8 (ship) + Codex (found the gc-detach race, the prune-retry leak, and bytes-before-PUT — all fixed).
+
+Follow-ups:
+- None. (Integrates cleanly with the still-open P7-HUB-01 `Batch` PR #189: `Batch` routes through `writeLoop`, where the gc call lives, so it is covered whichever merge order lands.)
+
 ## 2026-07-13 — chore(lint): enable contextcheck + thread caller context through the forge chain (P4-QUAL-07)
 
 Changed:

@@ -163,8 +163,9 @@ func selectBackendHub(ctx context.Context, opts *options, store *state.Store, hu
 			return nil, "", err
 		}
 		// Hub-id keys per-hub sync cursors; "r2:"+ws is anticipated by migration
-		// 00008. Zero Retry => R2Hub's default retry policy (HUB-10).
-		return hub.R2Hub{S3: adapter, WorkspaceID: ws}, "r2:" + ws, nil
+		// 00008. NewR2Hub wires op/byte metering (P4-HUB-14) and the default
+		// retry policy (HUB-10, zero Retry).
+		return hub.NewR2Hub(adapter, ws), "r2:" + ws, nil
 	case strings.HasPrefix(uri, "folder:"):
 		path, err := parseFolderURI(uri)
 		if err != nil {

@@ -126,11 +126,17 @@ func NewFolderHub(dir, workspaceID, cacheRoot string) (*FolderHub, error) {
 		dir:           resolved,
 		lockPath:      filepath.Join(base, "folder.lock"),
 		store:         store,
-		r2:            R2Hub{S3: store, WorkspaceID: workspaceID},
+		r2:            NewR2Hub(store, workspaceID),
 		sleep:         time.Sleep,
 		lockWait:      fsLockWait,
 		lockHeartbeat: fsLockHeartbeat,
 	}, nil
+}
+
+// HubMetrics reports the accumulated op/byte counters for this folder carrier
+// (P4-HUB-14), delegating to the composed R2Hub's metered S3 client.
+func (f *FolderHub) HubMetrics() (MetricsSnapshot, bool) {
+	return f.r2.HubMetrics()
 }
 
 // lock takes the shared cross-process file lock, mirroring GitCarrierHub.lock.

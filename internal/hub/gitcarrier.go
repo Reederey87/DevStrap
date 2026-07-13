@@ -50,6 +50,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -126,6 +127,13 @@ type GitCarrierHub struct {
 	// the remote branch does not exist yet. It is the --force-with-lease
 	// expectation for the compaction squash.
 	fetchedSHA string
+	// prunedSHA is the last head at which the observation-floor prune (P7-HUB-03)
+	// SUCCEEDED. It is tracked separately from fetchedSHA (which must advance to
+	// carry the force-with-lease expectation) so a failed prune is retried on the
+	// next refresh of the same head instead of being skipped forever — otherwise
+	// a read-only device stuck on a compaction head as the last remote update
+	// would leak compacted-away floors indefinitely.
+	prunedSHA string
 	// sleep is a test seam for the backoff between push attempts.
 	sleep func(time.Duration)
 	// lockWait/lockHeartbeat are test seams for the cross-process lock timing.
@@ -169,11 +177,41 @@ func NewGitCarrierHub(remote, branch, workspaceID, cacheRoot string) (*GitCarrie
 		headPath:      filepath.Join(base, "head.json"),
 		runner:        git.NewRunner(),
 		store:         store,
-		r2:            R2Hub{S3: store, WorkspaceID: workspaceID},
+		r2:            NewR2Hub(store, workspaceID),
 		sleep:         time.Sleep,
 		lockWait:      fsLockWait,
 		lockHeartbeat: fsLockHeartbeat,
 	}, nil
+}
+
+// HubMetrics reports the accumulated op/byte counters for this carrier
+// (P4-HUB-14), delegating to the composed R2Hub whose metered S3 client counts
+// every object read/write the carrier performs.
+func (g *GitCarrierHub) HubMetrics() (MetricsSnapshot, bool) {
+	return g.r2.HubMetrics()
+}
+
+// gitGCAuto runs a threshold-gated incremental gc on the carrier clone so the
+// local cache cannot grow without bound as commits and object churn accumulate
+// (P7-HUB-03). It is `gc --auto`, never a forced `gc --aggressive`: it repacks
+// only once the standard gc.auto / gc.autoPackLimit thresholds are crossed, so
+// the common case is a no-op. It is best-effort — a gc failure never fails a
+// sync whose push already succeeded and is durable on the remote (the clone is
+// disposable).
+//
+// gc.autoDetach is forced OFF so the gc runs SYNCHRONOUSLY and completes before
+// this call returns (and therefore before the carrier lock is released). Git's
+// default detaches auto-gc into the background, where it would outlive the lock
+// and could `git prune` the last-verified head object concurrently with a LATER
+// refresh's checkHeadContinuityLocked — making the prior head look "not locally
+// known" and silently skipping the anti-rewind content gate. Keeping gc inside
+// the lock hold removes that race entirely.
+//
+// A package var so tests can observe invocations without a git double.
+var gitGCAuto = func(ctx context.Context, runner git.Runner, dir string) {
+	if _, err := runner.Run(ctx, dir, "-c", "gc.autoDetach=false", "gc", "--auto", "--quiet"); err != nil {
+		slog.Debug("git hub gc --auto failed (non-fatal)", "dir", dir, "error", err)
+	}
 }
 
 func (g *GitCarrierHub) headStateError(detail string, err error) error {
@@ -459,6 +497,21 @@ func (g *GitCarrierHub) refreshLocked(ctx context.Context) error {
 		if err := g.saveHeadStateLocked(ctx, sha); err != nil {
 			return err
 		}
+		// P7-HUB-03: when the head advanced since the last SUCCESSFUL prune,
+		// remote compaction may have removed event objects from the checkout;
+		// drop their now-dead observation floors so observed.json cannot grow
+		// without bound. Gated on prunedSHA (not fetchedSHA) so an idle refresh
+		// adds no checkout walk yet a failed prune is retried on the next refresh
+		// of the same head. Runs only after the continuity check above passed, so
+		// a refused rewind never prunes. A prune failure is non-fatal (fail-safe
+		// for gc: nothing is deleted early).
+		if sha != g.prunedSHA {
+			if perr := g.store.pruneObservedToCheckout(); perr != nil {
+				slog.Debug("git hub prune observed floors failed (non-fatal, will retry)", "dir", g.dir, "error", perr)
+			} else {
+				g.prunedSHA = sha
+			}
+		}
 		g.fetchedSHA = sha
 		return nil
 	case errors.Is(err, git.ErrBranchNotFound):
@@ -481,6 +534,9 @@ func (g *GitCarrierHub) refreshLocked(ctx context.Context) error {
 		if err := clearDirExceptGit(g.dir); err != nil {
 			return fmt.Errorf("empty git hub clone: %w", err)
 		}
+		// The checkout now holds no objects, so every observation floor is dead.
+		g.store.pruneObservedTo(nil)
+		g.prunedSHA = ""
 		g.fetchedSHA = ""
 		return nil
 	default:
@@ -622,6 +678,10 @@ func (g *GitCarrierHub) writeLoop(ctx context.Context, op string, apply func() e
 			if rerr := g.saveHeadStateLocked(ctx, headSHA); rerr != nil {
 				return rerr
 			}
+			// P7-HUB-03: keep the disposable clone from growing without bound as
+			// each batch adds a commit. Threshold-gated, so it is a no-op until
+			// gc.auto is crossed; best-effort, so it never fails a durable push.
+			gitGCAuto(ctx, g.runner, g.dir)
 			return nil
 		}
 		if !errors.Is(err, git.ErrNonFastForward) && !errors.Is(err, git.ErrNetwork) {
@@ -905,6 +965,10 @@ func (g *GitCarrierHub) CompactEventsBelow(ctx context.Context, floors dssync.Cu
 				return deleted, rerr
 			}
 			g.fetchedSHA = newSHA
+			// P7-HUB-03: the squash leaves the pre-squash history unreachable;
+			// prompt the clone to reclaim it (threshold-gated, best-effort). The
+			// remote host garbage-collects its own side.
+			gitGCAuto(ctx, g.runner, g.dir)
 			return deleted, nil
 		}
 		if !errors.Is(err, git.ErrNonFastForward) && !errors.Is(err, git.ErrNetwork) {
@@ -1156,6 +1220,66 @@ func (s *fsObjectStore) forgetObservedLocked(key string) {
 	}
 	delete(s.obs, key)
 	s.saveObsLocked()
+}
+
+// pruneObservedToCheckout drops observation-floor entries for keys no longer
+// present in the checkout (P7-HUB-03). Without it observed.json grows without
+// bound: this device's OWN deletes call forgetObservedLocked, but keys removed
+// by ANOTHER device's `hub compact` arrive via git reset — never through
+// DeleteObject — so their floors would linger forever. The live key set is
+// re-derived from the just-reset checkout, so every object still present keeps
+// its floor.
+//
+// It mutates NO continuity state — never head.json, a git ref, or a signature —
+// so it cannot interact with checkHeadContinuityLocked (which reads head.json +
+// git alone); it rewrites only observed.json. (It re-derives the live key set
+// via listKeys, which as a side effect may reclaim hour-stale orphan `.tmp-*`
+// writer temps — never a tracked object, the marker, or a sidecar.) The caller
+// runs it AFTER the continuity check has passed, under the same carrier lock, so
+// a refused rewind never reaches here. Dropping a floor is fail-safe for gc: a
+// re-observed key is treated as newly seen and kept one extra grace window —
+// never deleted early.
+func (s *fsObjectStore) pruneObservedToCheckout() error {
+	root, err := s.openRoot()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	keys, err := s.listKeys(root)
+	if err != nil {
+		return err
+	}
+	live := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		live[k] = true
+	}
+	s.pruneObservedTo(live)
+	return nil
+}
+
+// pruneObservedTo drops observed entries whose key is not in live. A nil/empty
+// live set prunes everything (the empty-carrier reset).
+func (s *fsObjectStore) pruneObservedTo(live map[string]bool) {
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
+	if s.obs == nil {
+		if raw, err := os.ReadFile(s.obsPath); err == nil {
+			s.obs = map[string]time.Time{}
+			_ = json.Unmarshal(raw, &s.obs)
+		} else {
+			return
+		}
+	}
+	changed := false
+	for key := range s.obs {
+		if !live[key] {
+			delete(s.obs, key)
+			changed = true
+		}
+	}
+	if changed {
+		s.saveObsLocked()
+	}
 }
 
 func (s *fsObjectStore) saveObsLocked() {
