@@ -138,22 +138,22 @@ type PullStats struct {
 	Undecryptable int
 }
 
-// Push envelope-encrypts every non-grant event under the current epoch's WCK
-// and forwards the carrier events to the backend. Grant events pass through
-// unchanged. The carrier preserves ID/DeviceID/Seq/HLC/DeviceSig so hub
-// ordering, dedup, and signature verification are byte-for-byte unchanged.
-func (h EncryptedHub) Push(ctx context.Context, events []state.Event) error {
+// encryptEvents applies the shared outgoing event-envelope pipeline used by
+// direct and batched pushes. Grant events pass through unchanged; every other
+// event is encrypted under the current epoch's WCK while preserving its carrier
+// fields for hub ordering, dedup, and signature verification.
+func (h EncryptedHub) encryptEvents(ctx context.Context, events []state.Event) ([]state.Event, error) {
 	// Prime the cache so PushKey can select from every held key. Prime is
 	// idempotent and only loads held keys that are not yet cached.
 	if err := h.Keyring.Prime(ctx); err != nil {
-		return fmt.Errorf("encrypted hub push: prime keyring: %w", err)
+		return nil, fmt.Errorf("encrypted hub push: prime keyring: %w", err)
 	}
 	epoch, _, wck, err := h.Keyring.PushKey(ctx)
 	if err != nil {
-		return fmt.Errorf("encrypted hub push: select push key: %w", err)
+		return nil, fmt.Errorf("encrypted hub push: select push key: %w", err)
 	}
 	if epoch == 0 {
-		return fmt.Errorf("%w: awaiting workspace key grant (approve this device from an existing device, or sync against an empty hub to found the workspace)", ErrMissingWorkspaceKey)
+		return nil, fmt.Errorf("%w: awaiting workspace key grant (approve this device from an existing device, or sync against an empty hub to found the workspace)", ErrMissingWorkspaceKey)
 	}
 	out := make([]state.Event, 0, len(events))
 	for _, event := range events {
@@ -163,11 +163,54 @@ func (h EncryptedHub) Push(ctx context.Context, events []state.Event) error {
 		}
 		enc, err := EncryptEvent(event, wck, epoch)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		out = append(out, enc)
 	}
+	return out, nil
+}
+
+// Push envelope-encrypts every non-grant event under the current epoch's WCK
+// and forwards the carrier events to the backend. Grant events pass through
+// unchanged. The carrier preserves ID/DeviceID/Seq/HLC/DeviceSig so hub
+// ordering, dedup, and signature verification are byte-for-byte unchanged.
+func (h EncryptedHub) Push(ctx context.Context, events []state.Event) error {
+	out, err := h.encryptEvents(ctx, events)
+	if err != nil {
+		return err
+	}
 	return h.Hub.Push(ctx, out)
+}
+
+type encryptedBatchOps struct {
+	h     EncryptedHub
+	inner BatchOps
+}
+
+func (b encryptedBatchOps) Push(ctx context.Context, events []state.Event) error {
+	out, err := b.h.encryptEvents(ctx, events)
+	if err != nil {
+		return err
+	}
+	return b.inner.Push(ctx, out)
+}
+
+func (b encryptedBatchOps) PutBlob(ctx context.Context, sha256Hex string, r io.Reader) error {
+	return b.inner.PutBlob(ctx, sha256Hex, r)
+}
+
+func (b encryptedBatchOps) DeleteBlob(ctx context.Context, sha256Hex string) error {
+	return b.inner.DeleteBlob(ctx, sha256Hex)
+}
+
+func (b encryptedBatchOps) PutAck(ctx context.Context, deviceID string, raw []byte) error {
+	return b.inner.PutAck(ctx, deviceID, raw)
+}
+
+func (h EncryptedHub) Batch(ctx context.Context, fn func(BatchOps) error) error {
+	return h.Hub.Batch(ctx, func(inner BatchOps) error {
+		return fn(encryptedBatchOps{h: h, inner: inner})
+	})
 }
 
 // Pull fetches events from the backend, primes the keyring, verifies grant

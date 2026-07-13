@@ -31,6 +31,24 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-13 — fix(hub): batch git-carrier writes into one commit per sync cycle (P7-HUB-01)
+
+Changed:
+- `internal/sync/hub.go`: added a `Batch(ctx, fn func(BatchOps) error) error` method to the `Hub` interface and a narrow `BatchOps` interface (`Push`/`PutBlob`/`DeleteBlob`/`PutAck`) — the subset of mutations a sync cycle groups. Documented that `fn` MUST be replayable (a lost push race re-runs it on the git carrier).
+- `internal/hub/gitcarrier.go`: `GitCarrierHub.Batch` reuses the existing, UNMODIFIED `writeLoop(ctx, "batch", …)`; a `gitCarrierBatchOps` delegates each op straight to the composed `R2Hub` (`g.r2`), writing only the working tree with no per-op `writeLoop`. The whole batch therefore refreshes once, applies all mutations, writes the marker once, commits once, and pushes once — inheriting `checkHeadContinuityLocked`, retention-floor, optimistic-replay, and head-state guarantees verbatim (`P7-HUB-02` untouched).
+- `internal/hub/r2.go`, `internal/hub/folder.go`, `internal/sync/hub.go` (`FileHub`): pass-through `Batch` (`return fn(h)`) — object stores have no per-commit cost to amortize, so callers stay backend-agnostic.
+- `internal/sync/encryptedhub.go`: factored the outgoing event-envelope pipeline into a shared `encryptEvents` helper used by both `Push` and a new `encryptedBatchOps.Push`, so batched pushes get byte-for-byte identical encryption/grant/epoch handling; blob/delete/ack ops pass straight through. `EncryptedHub.Batch` wraps the inner hub's `Batch`, handing `fn` an encrypting `BatchOps`.
+- `internal/cli/sync.go`: the sync push phase now wraps referenced-blob uploads plus the event-log push in one `hub.Batch(...)`; cursor advancement, pending-delete drain, and the ack write stay OUTSIDE the batch (post-pull / success-only). `pushReferencedBlobs` now takes `dssync.BatchOps` (still uses its `blobPushConcurrency` errgroup inside the batch; the fs object store is concurrency-safe for distinct keys).
+- `spec/03_SYSTEM_ARCHITECTURE.md`: documented the batched-write behavior in the git-carrier section.
+- Test: `TestGitCarrierBatchMultipleMutationsCreatesOneCommit` (`internal/hub/gitcarrier_test.go`) drives a 3-blob + 1-event batch and asserts the carrier commit delta is exactly 1, then verifies every event and blob round-trips through a fresh reader hub. Existing `TestGitCarrierConcurrentPushBothLand` and the 12 `gitcarrier_continuity_test.go` cases pass unmodified.
+
+Validated:
+- `gofmt -l cmd internal` (clean); `go build ./...`; `golangci-lint run` (0 issues); `go test -race ./...` (green, coordinator-run); Codex delegated the implementation and self-ran the targeted `-race` packages green.
+- Dual-reviewed (opus-4.8 + fable-5, Codex runtime unavailable): both independently confirmed `checkHeadContinuityLocked`/`P7-HUB-02` guarantees preserved verbatim, partial-batch failures leave no torn state (working tree reset by the next `refreshLocked`), and replay-on-conflict is safe (event push is idempotent via hub-level If-None-Match dedup; blob readers are regenerated fresh per attempt, not reused across retries). No blocking findings.
+
+Follow-ups:
+- None. The ack write (`PutAck`) remains a separate second write phase by design — it reflects post-pull state and cannot move into the push batch.
+
 ## 2026-07-13 — fix(state): split reader/writer SQLite connection pools (P4-SYNC-07)
 
 Changed:

@@ -233,6 +233,10 @@ func (h R2Hub) ackKey(deviceID string) string {
 	return h.acksPrefix() + deviceID + ".json"
 }
 
+func (h R2Hub) Batch(_ context.Context, fn func(dssync.BatchOps) error) error {
+	return fn(h)
+}
+
 func (h R2Hub) Push(ctx context.Context, events []state.Event) error {
 	for _, event := range events {
 		// P5-SYNC-01: the seq-keyed layout is meaningless for a pre-sequence

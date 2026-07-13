@@ -524,11 +524,15 @@ func pushLocalEventsGated(ctx context.Context, stdout io.Writer, opts *options, 
 		}
 	}
 
-	// DRAFT-02: push local blobs referenced by pending events to the hub.
-	if err := pushReferencedBlobs(ctx, hub, localEvents, opts.paths()); err != nil {
-		return 0, false, appError{code: exitNetwork, err: fmt.Errorf("push blobs: %w", err)}
-	}
-	if err := hub.Push(ctx, localEvents); err != nil {
+	// DRAFT-02: push local blobs referenced by pending events and the events
+	// themselves in one hub batch. On the git carrier this is one commit/push;
+	// object-store backends preserve their per-operation behavior.
+	if err := hub.Batch(ctx, func(ops dssync.BatchOps) error {
+		if err := pushReferencedBlobs(ctx, ops, localEvents, opts.paths()); err != nil {
+			return fmt.Errorf("push blobs: %w", err)
+		}
+		return ops.Push(ctx, localEvents)
+	}); err != nil {
 		return 0, false, appError{code: exitNetwork, err: err}
 	}
 	// SYNC-04/P5-SYNC-01: advance the push watermark to the highest pushed
@@ -566,7 +570,7 @@ func isJoiner(opts *options) bool {
 
 // pushReferencedBlobs pushes locally-cached blobs referenced by events to the
 // hub (DRAFT-02 blob plane).
-func pushReferencedBlobs(ctx context.Context, hub dssync.Hub, events []state.Event, paths config.Paths) error {
+func pushReferencedBlobs(ctx context.Context, hub dssync.BatchOps, events []state.Event, paths config.Paths) error {
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(blobPushConcurrency)
 	for _, event := range events {
