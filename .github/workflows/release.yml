@@ -204,7 +204,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     permissions:
-      contents: read
+      contents: write # gh release download needs write access to see a still-draft release; read-only 404s on it
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -228,8 +228,8 @@ jobs:
           set -Eeuo pipefail
           trap 'rc=$?; failed_command=$BASH_COMMAND; echo "::error::command failed at line $LINENO (exit $rc): $failed_command"; echo "::group::downloaded assets"; find . -maxdepth 2 -type f -print | sort; echo "::endgroup::"; exit "$rc"' ERR
 
-          # Authenticated tag lookup can see repository drafts, so gh downloads
-          # the staged assets without publishing the release first.
+          # Downloading a still-draft release requires a token with write (push)
+          # access - a read-only token 404s on it even though the draft exists.
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*'
 
           version=${TAG#v}
