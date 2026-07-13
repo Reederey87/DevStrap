@@ -81,8 +81,11 @@ func hubCompact(ctx context.Context, stdout, stderr io.Writer, opts *options, st
 	}
 	keyring := buildKeyring(ctx, opts, store)
 
-	// 1a. Converge (pull side) and refuse on any incomplete-view signal.
-	pull, err := refuseIfIncompleteView(ctx, stderr, store, hub, hubID, paths, keyring)
+	// 1a. Converge (pull side) and refuse on any incomplete-view signal EXCEPT an
+	// open omission alarm: compact is the documented cure for the permanent
+	// per-device gap that alarm reports (P5-SYNC-01 / P4-SYNC-05), so it must not
+	// be blocked by the gap's own alarm.
+	pull, err := refuseIfIncompleteView(ctx, stderr, store, hub, hubID, paths, keyring, true)
 	if err != nil {
 		return err
 	}

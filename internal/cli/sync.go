@@ -272,7 +272,32 @@ func pullAndApplyEvents(ctx context.Context, store *state.Store, hub dssync.Hub,
 	if _, err := dssync.ReplayPendingProjectConflicts(ctx, store); err != nil {
 		return pullApplyOutcome{}, err
 	}
+	// P4-SYNC-05: check every approved peer's signed head against the prefix we
+	// actually received, detecting a hub withholding a peer's newest events (or
+	// a forked stream). Runs after the cursor has advanced so localSeq reflects
+	// this batch. A hub read failure here is non-fatal to the sync (best-effort,
+	// like the ack write) — it only means no omission check this cycle.
+	if err := verifyPeerHeads(ctx, store, hub, hubID); err != nil {
+		logging.Logger(ctx).Warn("sync: peer-head omission check failed (best-effort)", "err", err.Error())
+	}
 	return pullApplyOutcome{events: remoteEvents, stats: stats}, nil
+}
+
+// verifyPeerHeads runs the P4-SYNC-05 omission/fork detector for one pull. It
+// gathers the local identity and delegates to dssync.VerifyPeerHeads, which
+// records any event_omission conflict.
+func verifyPeerHeads(ctx context.Context, store *state.Store, hub dssync.Hub, hubID string) error {
+	_ = hubID // heads are workspace-scoped, not per-hub; kept for call-site symmetry
+	workspaceID, err := store.WorkspaceID(ctx)
+	if err != nil {
+		return err
+	}
+	device, err := store.CurrentDevice(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = dssync.VerifyPeerHeads(ctx, store, hub, workspaceID, device.ID)
+	return err
 }
 
 // defaultKeyGrantGrace bounds how long a pull keeps deferring (truncating) on
@@ -732,9 +757,29 @@ func maybeWriteSyncAck(ctx context.Context, store *state.Store, hub dssync.Hub, 
 		log.Warn("sync ack: read workspace failed; not writing ack", "err", err.Error())
 		return
 	}
+	// P4-SYNC-05: the signed per-device head. Fold this device's own stream at
+	// the push watermark so a pulling peer can check its received prefix against
+	// our committed (seq, fold). Empty when nothing has been pushed, no fold seed
+	// can be established, or the fold could not reach the push watermark
+	// CONTIGUOUSLY (reached != push — e.g. a gap in this device's own stream from
+	// a future backup/restore or pruning edge). Signing a fold that does not
+	// correspond to `push` would make every honest peer raise a workspace-wide
+	// false `fork`; omitting it degrades fail-safe to the unseeded/skip path the
+	// verifier already handles. Mirrors the snapshot builder's
+	// `seeded && reached == anchorSeq` guard.
+	var foldedHash string
+	if push > 0 {
+		if reached, fh, seeded, ferr := store.DeviceFold(ctx, device.ID, push); ferr != nil {
+			log.Warn("sync ack: fold local head failed; not writing ack", "err", ferr.Error())
+			return
+		} else if seeded && reached == push {
+			foldedHash = fh
+		}
+	}
 	marker := dssync.AckMarker{
 		Cursor:           cursor,
 		DeviceID:         device.ID,
+		FoldedHash:       foldedHash,
 		HLCWatermark:     hlc,
 		ProducedAt:       hlc,
 		PushedThroughSeq: push,

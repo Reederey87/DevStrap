@@ -179,6 +179,39 @@ func TestHubCompactGateRefusesOnOpenConflict(t *testing.T) {
 	}
 }
 
+// TestHubCompactProceedsWithOpenOmissionConflict is the H1(a) recovery property
+// at the gate level: an open `event_omission` conflict — the alarm P4-SYNC-05
+// raises for a permanent per-device stream gap — must NOT block `hub compact`,
+// because compact is the documented cure for exactly that gap (publish a floor
+// above the stranded slot; the affected device re-bootstraps past it). The
+// detection guarantee is preserved for `hub gc` (which deletes blobs), which
+// still refuses on the same conflict.
+func TestHubCompactProceedsWithOpenOmissionConflict(t *testing.T) {
+	env, store, _ := setupCompact(t)
+	defer closeStore(store)
+
+	// The only open conflict is an omission alarm for a withheld/backfilled gap.
+	if err := store.InsertConflict(env.ctx, "", dssync.ConflictEventOmission,
+		`{"device_id":"dev_peer","kind":"withheld_tail","local_seq":2}`); err != nil {
+		t.Fatalf("InsertConflict: %v", err)
+	}
+
+	// compact must COMPLETE (the cure is reachable), writing a manifest.
+	if err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 2, 0, true, false); err != nil {
+		t.Fatalf("hubCompact must proceed despite an open omission conflict, got: %v", err)
+	}
+	fh := dssync.FileHub{Path: env.hubPath}
+	if _, _, err := fh.GetRetention(env.ctx); err != nil {
+		t.Fatalf("compact should have published a manifest: %v", err)
+	}
+
+	// The SAME conflict must still refuse `hub gc` (detection preserved: gc
+	// deletes blobs on an incomplete view, so its omission gate stays closed).
+	if _, _, gerr := hubGC(env.ctx, io.Discard, store, env.hub(t, store), env.hubID, env.paths, 2, 0, false); !errors.Is(gerr, errGCRefused) {
+		t.Fatalf("hubGC err = %v, want errGCRefused on the open omission conflict", gerr)
+	}
+}
+
 // TestHubCompactGateRefusesOnKeyGrantWait: the NEW gate — an open key_grant_waits
 // row means this device cannot decrypt part of the log, so compact refuses.
 func TestHubCompactGateRefusesOnKeyGrantWait(t *testing.T) {

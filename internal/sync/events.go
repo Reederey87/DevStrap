@@ -45,6 +45,13 @@ const (
 	ConflictEventVerification       = "event_verification_failure"
 	ConflictUntrustworthyTime       = "untrustworthy_remote_time"
 	ConflictEventHashChain          = "event_hash_chain_break"
+	// ConflictEventOmission (P4-SYNC-05) is raised when a peer's SIGNED head
+	// commits to a seq beyond the contiguous prefix we received (a hub
+	// withholding that peer's newest events), or when our independently-folded
+	// prefix disagrees with the peer's signed fold at the same seq (a fork /
+	// equivocation). Unlike the event-quarantine conflicts, no single event is
+	// held — the alarm is that our view is provably incomplete or divergent.
+	ConflictEventOmission = "event_omission"
 )
 
 // QuarantineConflictTypes are the conflict types that mean a pulled event was
@@ -56,6 +63,10 @@ var QuarantineConflictTypes = []string{
 	ConflictUntrustworthyTime,
 	ConflictEventHashChain,
 	ConflictEventVerification,
+	// An open omission alarm means a peer's newest events are provably being
+	// withheld (or its stream has forked): the local replica is missing events
+	// other devices may reference, so a mark-and-sweep must not run.
+	ConflictEventOmission,
 }
 
 // defaultReceiveMaxSkew bounds how far ahead of local physical time a remote

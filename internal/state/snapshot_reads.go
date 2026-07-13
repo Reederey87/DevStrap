@@ -92,8 +92,13 @@ type SnapshotTrustRow struct {
 // the content hash of the last event the snapshot covers for that device (at
 // seq = floor-1).
 type SnapshotChainAnchor struct {
-	DeviceID    string
-	Seq         int64
+	DeviceID string
+	Seq      int64
+	// FoldedHash is the P4-SYNC-05 running fold at Seq: the seed a
+	// snapshot-bootstrapped device needs to re-fold this origin's stream from
+	// the floor for omission detection. Empty when it cannot be computed
+	// (degrades that origin's omission check to fail-safe).
+	FoldedHash  string
 	ContentHash string
 	HLC         int64
 }
@@ -299,22 +304,34 @@ WHERE workspace_id = ? AND device_id = ? AND seq = ?;
 `, workspaceID, dev, anchorSeq).Scan(&contentHash, &hlc)
 		switch {
 		case err == nil:
-			out = append(out, SnapshotChainAnchor{DeviceID: dev, Seq: anchorSeq, ContentHash: contentHash, HLC: hlc})
+			// P4-SYNC-05: fold this device's held events up to the anchor seq so a
+			// snapshot-bootstrapped device can seed its omission-detection fold at
+			// the floor. A fold that cannot reach the anchor seq contiguously (or
+			// is unseeded) yields "" — that origin's omission check degrades
+			// fail-safe on the importer.
+			foldHex := ""
+			if reached, fh, seeded, ferr := s.DeviceFold(ctx, dev, anchorSeq); ferr != nil {
+				return nil, fmt.Errorf("fold chain anchor for %s: %w", dev, ferr)
+			} else if seeded && reached == anchorSeq {
+				foldHex = fh
+			}
+			out = append(out, SnapshotChainAnchor{DeviceID: dev, Seq: anchorSeq, FoldedHash: foldHex, ContentHash: contentHash, HLC: hlc})
 			continue
 		case !errors.Is(err, sql.ErrNoRows):
 			return nil, fmt.Errorf("read chain anchor event for %s: %w", dev, err)
 		}
 		// Fallback: a device we imported via snapshot has no event row below the
-		// floor; reuse the anchor row imported with that snapshot.
+		// floor; reuse the anchor row imported with that snapshot (including its
+		// folded hash, so the seed re-propagates through a re-published snapshot).
 		var aSeq, aHLC int64
-		var aHash string
+		var aHash, aFold string
 		err = s.db.QueryRowContext(ctx, `
-SELECT anchor_seq, anchor_content_hash, anchor_hlc FROM sync_chain_anchors
+SELECT anchor_seq, anchor_content_hash, anchor_hlc, COALESCE(folded_hash, '') FROM sync_chain_anchors
 WHERE workspace_id = ? AND device_id = ?;
-`, workspaceID, dev).Scan(&aSeq, &aHash, &aHLC)
+`, workspaceID, dev).Scan(&aSeq, &aHash, &aHLC, &aFold)
 		switch {
 		case err == nil:
-			out = append(out, SnapshotChainAnchor{DeviceID: dev, Seq: aSeq, ContentHash: aHash, HLC: aHLC})
+			out = append(out, SnapshotChainAnchor{DeviceID: dev, Seq: aSeq, FoldedHash: aFold, ContentHash: aHash, HLC: aHLC})
 		case errors.Is(err, sql.ErrNoRows):
 			// Neither an event row nor an imported anchor — skip.
 		default:
