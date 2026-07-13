@@ -25,6 +25,10 @@ type recordingHub struct {
 	sweepLockAt time.Time
 }
 
+func (r *recordingHub) Batch(_ context.Context, fn func(BatchOps) error) error {
+	return fn(r)
+}
+
 func (r *recordingHub) Push(_ context.Context, events []state.Event) error {
 	r.events = append(r.events, events...)
 	return nil

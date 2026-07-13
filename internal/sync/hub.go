@@ -58,6 +58,17 @@ type BlobInfo struct {
 	LastModified time.Time
 }
 
+// BatchOps is the subset of mutating Hub operations usable inside Batch. On the
+// git carrier every op writes only to the working clone; Batch emits ONE commit
+// + ONE push for the whole sequence. On object-store backends Batch is a
+// pass-through and each op behaves exactly as its Hub-level counterpart.
+type BatchOps interface {
+	Push(ctx context.Context, events []state.Event) error
+	PutBlob(ctx context.Context, sha256Hex string, r io.Reader) error
+	DeleteBlob(ctx context.Context, sha256Hex string) error
+	PutAck(ctx context.Context, deviceID string, raw []byte) error
+}
+
 // Hub is the two-plane zero-knowledge sync backend (HUB-01): (a) the signed
 // HLC-ordered namespace-map event log and (b) the content-addressed encrypted
 // blob store. The hub sees only ciphertext plus a signed carrier map. When
@@ -154,6 +165,11 @@ type BlobInfo struct {
 //     DeleteSweepLock to release or break it. The lock is ADVISORY: it
 //     serializes cooperating clients only, not a hostile writer (spec/15).
 type Hub interface {
+	// Batch groups multiple mutations into one hub write. fn MUST be replayable:
+	// on the git carrier a lost push race re-runs fn against a refreshed clone
+	// before the single retried commit+push (same optimistic model as the
+	// per-op path). Object-store backends run fn once directly.
+	Batch(ctx context.Context, fn func(BatchOps) error) error
 	Push(ctx context.Context, events []state.Event) error
 	Pull(ctx context.Context, after Cursor) ([]state.Event, error)
 	PutBlob(ctx context.Context, sha256Hex string, r io.Reader) error
@@ -216,6 +232,10 @@ type FileHub struct {
 	// retained). Test-only plumbing until snapshot exchange lands
 	// (P4-SYNC-02/P4-HUB-11).
 	RetentionSeqs map[string]int64
+}
+
+func (h FileHub) Batch(_ context.Context, fn func(BatchOps) error) error {
+	return fn(h)
 }
 
 func (h FileHub) Push(ctx context.Context, events []state.Event) error {

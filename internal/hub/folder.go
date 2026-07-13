@@ -189,6 +189,10 @@ func (f *FolderHub) revalidateRoot() error {
 
 // --- dssync.Hub: event plane ---
 
+func (f *FolderHub) Batch(_ context.Context, fn func(dssync.BatchOps) error) error {
+	return fn(f)
+}
+
 func (f *FolderHub) Push(ctx context.Context, events []state.Event) error {
 	return f.guard(func() error { return f.r2.Push(ctx, events) })
 }

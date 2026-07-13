@@ -711,6 +711,30 @@ func (g *GitCarrierHub) readRefresh(ctx context.Context, fn func() error) error 
 
 // --- dssync.Hub: event plane ---
 
+type gitCarrierBatchOps struct {
+	g *GitCarrierHub
+}
+
+func (b gitCarrierBatchOps) Push(ctx context.Context, events []state.Event) error {
+	return b.g.r2.Push(ctx, events)
+}
+
+func (b gitCarrierBatchOps) PutBlob(ctx context.Context, sha256Hex string, r io.Reader) error {
+	return b.g.r2.PutBlob(ctx, sha256Hex, r)
+}
+
+func (b gitCarrierBatchOps) DeleteBlob(ctx context.Context, sha256Hex string) error {
+	return b.g.r2.DeleteBlob(ctx, sha256Hex)
+}
+
+func (b gitCarrierBatchOps) PutAck(ctx context.Context, deviceID string, raw []byte) error {
+	return b.g.r2.PutAck(ctx, deviceID, raw)
+}
+
+func (g *GitCarrierHub) Batch(ctx context.Context, fn func(dssync.BatchOps) error) error {
+	return g.writeLoop(ctx, "batch", func() error { return fn(gitCarrierBatchOps{g: g}) })
+}
+
 func (g *GitCarrierHub) Push(ctx context.Context, events []state.Event) error {
 	return g.writeLoop(ctx, "push", func() error { return g.r2.Push(ctx, events) })
 }

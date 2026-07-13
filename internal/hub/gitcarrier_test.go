@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -259,6 +261,68 @@ func TestGitCarrierConcurrentPushBothLand(t *testing.T) {
 	}
 	if !sameEventIDs(got, []string{"a1", "b1", "a2", "b2"}) {
 		t.Fatalf("Pull ids = %v, want all events from both batches", ids(got))
+	}
+}
+
+func TestGitCarrierBatchMultipleMutationsCreatesOneCommit(t *testing.T) {
+	ctx := context.Background()
+	remote := newBareCarrier(t)
+	h := newGitCarrierTestHub(t, remote, "writer")
+	if err := h.Push(ctx, []state.Event{makeEvent("seed", "dev_a", 10, 1, "project.added", "{}")}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := strconv.Atoi(gitRevListCount(t, remote, "main"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobs := map[string]string{
+		strings.Repeat("a", 64): "ciphertext-a",
+		strings.Repeat("b", 64): "ciphertext-b",
+		strings.Repeat("c", 64): "ciphertext-c",
+	}
+	event := makeEvent("batched", "dev_a", 20, 2, "project.added", "{}")
+	if err := h.Batch(ctx, func(ops dssync.BatchOps) error {
+		for sha, body := range blobs {
+			if err := ops.PutBlob(ctx, sha, strings.NewReader(body)); err != nil {
+				return err
+			}
+		}
+		return ops.Push(ctx, []state.Event{event})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := strconv.Atoi(gitRevListCount(t, remote, "main"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delta := after - before; delta != 1 {
+		t.Fatalf("carrier commit delta = %d, want 1 (before=%d after=%d)", delta, before, after)
+	}
+
+	reader := newGitCarrierTestHub(t, remote, "reader")
+	events, err := reader.Pull(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameEventIDs(events, []string{"seed", "batched"}) {
+		t.Fatalf("Pull ids = %v, want seed and batched", ids(events))
+	}
+	for sha, want := range blobs {
+		rc, err := reader.GetBlob(ctx, sha)
+		if err != nil {
+			t.Fatalf("GetBlob(%s): %v", sha, err)
+		}
+		got, readErr := io.ReadAll(rc)
+		closeErr := rc.Close()
+		if readErr != nil {
+			t.Fatalf("read blob %s: %v", sha, readErr)
+		}
+		if closeErr != nil {
+			t.Fatalf("close blob %s: %v", sha, closeErr)
+		}
+		if string(got) != want {
+			t.Fatalf("blob %s = %q, want %q", sha, got, want)
+		}
 	}
 }
 
