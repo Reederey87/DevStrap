@@ -13,13 +13,15 @@ type SystemEditor struct{}
 func (SystemEditor) Name() string { return "system-editor" }
 
 func (SystemEditor) Open(ctx context.Context, dir, editor string) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
+	// Honor a caller-supplied cancellation before launching, but don't bind the
+	// editor process to ctx: the editor is deliberately detached (Start+Release
+	// below) so it outlives this short-lived CLI invocation.
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 	}
 	if _, err := exec.LookPath(editor); err != nil {
 		return fmt.Errorf("%w: %s", ErrEditorNotFound, editor)

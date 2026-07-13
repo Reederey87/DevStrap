@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -66,27 +67,27 @@ func TestParseForgeKind(t *testing.T) {
 func TestResolveForgePrecedence(t *testing.T) {
 	hostMap := map[string]ForgeKind{"git.acme.com": ForgeGitLab}
 	// Flag wins over everything.
-	if k := ResolveForge("https://git.acme.com/acme/repo", "gitea", "github", hostMap); k != ForgeGitea {
+	if k := ResolveForge(context.Background(), "https://git.acme.com/acme/repo", "gitea", "github", hostMap); k != ForgeGitea {
 		t.Errorf("flag precedence: got %q, want gitea", k)
 	}
 	// Project column wins over host map and detection.
-	if k := ResolveForge("https://git.acme.com/acme/repo", "", "github", hostMap); k != ForgeGitHub {
+	if k := ResolveForge(context.Background(), "https://git.acme.com/acme/repo", "", "github", hostMap); k != ForgeGitHub {
 		t.Errorf("project precedence: got %q, want github", k)
 	}
 	// Host map wins over detection for a self-hosted GitLab.
-	if k := ResolveForge("https://git.acme.com/acme/repo", "", "", hostMap); k != ForgeGitLab {
+	if k := ResolveForge(context.Background(), "https://git.acme.com/acme/repo", "", "", hostMap); k != ForgeGitLab {
 		t.Errorf("host-map precedence: got %q, want gitlab", k)
 	}
 	// Detection heuristic for a known host.
-	if k := ResolveForge("git@github.com:acme/repo.git", "", "", nil); k != ForgeGitHub {
+	if k := ResolveForge(context.Background(), "git@github.com:acme/repo.git", "", "", nil); k != ForgeGitHub {
 		t.Errorf("detection: got %q, want github", k)
 	}
 	// Unknown self-hosted with no overrides.
-	if k := ResolveForge("git@scm.internal:org/repo.git", "", "", nil); k != ForgeUnknown {
+	if k := ResolveForge(context.Background(), "git@scm.internal:org/repo.git", "", "", nil); k != ForgeUnknown {
 		t.Errorf("unknown: got %q, want empty", k)
 	}
 	// Invalid flag falls through to the next tier.
-	if k := ResolveForge("https://git.acme.com/acme/repo", "bogus", "", hostMap); k != ForgeGitLab {
+	if k := ResolveForge(context.Background(), "https://git.acme.com/acme/repo", "bogus", "", hostMap); k != ForgeGitLab {
 		t.Errorf("invalid flag fallthrough: got %q, want gitlab", k)
 	}
 }
@@ -132,7 +133,7 @@ func TestSSHHostAliasFromFileHonorsNegation(t *testing.T) {
 		t.Errorf("resolveSSHHostAliasFromFile(dev-gitlab) = %q, want real.gitlab.com", got)
 	}
 	// P5 review: a leading-dash alias is rejected (ssh-option injection guard).
-	if got := resolveSSHHostAlias("-Fmalicious"); got != "" {
+	if got := resolveSSHHostAlias(context.Background(), "-Fmalicious"); got != "" {
 		t.Errorf("resolveSSHHostAlias(-Fmalicious) = %q, want empty (leading-dash rejected)", got)
 	}
 }
@@ -161,13 +162,13 @@ Host *
 	if err := os.WriteFile(filepath.Join(sshDir, "config"), []byte(config), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := resolveSSHHostAlias("work-gitlab"); got != "git.acme.com" {
+	if got := resolveSSHHostAlias(context.Background(), "work-gitlab"); got != "git.acme.com" {
 		t.Errorf("resolveSSHHostAlias(work-gitlab) = %q, want git.acme.com", got)
 	}
-	if got := resolveSSHHostAlias("error-gitlab"); got != "fallback.gitlab.acme.com" {
+	if got := resolveSSHHostAlias(context.Background(), "error-gitlab"); got != "fallback.gitlab.acme.com" {
 		t.Errorf("resolveSSHHostAlias(error-gitlab) = %q, want fallback.gitlab.acme.com", got)
 	}
-	if got := resolveSSHHostAlias("other"); got != "" {
+	if got := resolveSSHHostAlias(context.Background(), "other"); got != "" {
 		t.Errorf("resolveSSHHostAlias(other) = %q, want empty", got)
 	}
 }
@@ -176,7 +177,7 @@ func TestSSHAliasResolutionUsesStub(t *testing.T) {
 	stubSSH(t)
 	t.Setenv("HOME", t.TempDir())
 
-	if got := resolveSSHHostAlias("marker-alias"); got != "marker.stub.invalid" {
+	if got := resolveSSHHostAlias(context.Background(), "marker-alias"); got != "marker.stub.invalid" {
 		t.Errorf("resolveSSHHostAlias(marker-alias) = %q, want marker.stub.invalid", got)
 	}
 }
@@ -196,7 +197,7 @@ func TestDetectForgeResolvesSSHAlias(t *testing.T) {
 	}
 	// The alias `forge-alias` resolves to `gitlab.acme.com` which contains
 	// "gitlab." and so DetectForge returns ForgeGitLab (GIT-05).
-	if got := DetectForge("git@forge-alias:org/repo.git"); got != ForgeGitLab {
+	if got := DetectForge(context.Background(), "git@forge-alias:org/repo.git"); got != ForgeGitLab {
 		t.Errorf("DetectForge(alias) = %q, want gitlab", got)
 	}
 }

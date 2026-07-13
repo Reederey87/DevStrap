@@ -31,6 +31,28 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-13 — chore(lint): enable contextcheck + thread caller context through the forge chain (P4-QUAL-07)
+
+Changed:
+- `.golangci.yml`: enabled the `contextcheck` linter, the last deferred `P4-QUAL-07` sub-item (`bodyclose`/`sqlclosecheck` shipped earlier). Updated the enable-block comment to reflect that the forge chain and editor launch were threaded to satisfy it (was previously a deferral note).
+- `internal/cli/forge.go`: threaded a caller `context.Context` through the forge-resolution chain — `DetectForge`, `ResolveForge`, `resolveForgeHost`, `resolveSSHHostAlias`, `sshDashGHostName`, and `forgeCompareURL` now take `ctx` as their first parameter. `sshDashGHostName`'s bounded 3s timeout now derives from the caller's context (`context.WithTimeout(ctx, …)`) instead of `context.Background()`, so a cancelled `agent pr`/`doctor` invocation aborts the `ssh -G` probe. Pure behavior-preserving plumbing; the `//nolint:gosec` on the validated-alias `exec.CommandContext` is unchanged.
+- `internal/cli/doctor.go`: `checkForgeCLIs` passes its existing `ctx` into `ResolveForge`.
+- `internal/cli/forge_test.go`: updated call sites to pass `context.Background()`.
+- `internal/platform/editor.go`: rewrote `SystemEditor.Open` so it honors a caller-cancelled context before launch but deliberately does NOT bind the editor process to it — the editor is detached (`Start`+`Release`) so it outlives the short-lived CLI invocation. This removes the `contextcheck`-flagged `ctx = context.Background()` reassignment while keeping the intentional detach; a self-explanatory comment records the rationale.
+- `.golangci.yml` exclusions: added `contextcheck` to the existing `_test\.go` rule (test helpers legitimately create fresh root contexts). The one known cobra false positive — `Execute(ctx)` calls `root.SetContext(ctx)` and every `RunE` sources its context from `cmd.Context()` (verified end-to-end in `init.go`), but `contextcheck` cannot trace inheritance through cobra's `SetContext`/`cmd.Context()` indirection and so flags `NewRootCommand` (built without a `ctx` param) — is suppressed with a **line-scoped `//nolint:contextcheck`** directly on the `root := NewRootCommand(...)` call in `Execute` (`internal/cli/root.go`), NOT a file-wide exclude-rule.
+- **Post-review fix (fable-5 review of this PR):** the original commit used a file-wide `- path: internal/cli/root\.go` exclude-rule for that false positive. The reviewer proved by injection that this silently masks *genuine* context-misuse anywhere else in `root.go` (a deliberate `state.Open(context.Background(), ...)` bug in `openState` produced 0 lint issues under the file-wide rule). Replaced the config rule with the line-scoped `//nolint:contextcheck` above, which still clears the one cobra FP but restores detection for the rest of the file — re-verified by injection (the same `openState` bug is now caught: `root.go:224: Non-inherited new context (contextcheck)`), then reverted. Every RunE-closure FP chain funnels through this single `NewRootCommand` call site, so the narrower directive is stable against future subcommands.
+- `spec/13_CLI_DAEMON_API.md`: documented the context threading in the `open` (editor) and `agent pr` (forge/`ssh -G`) paragraphs.
+- `docs/audits/README.md`: `P4-QUAL-07` moved to *Recently shipped* (full close — all three linters now enabled); the Pass-4 open count decremented; the ledger row notes the line-scoped `//nolint:contextcheck` at the `NewRootCommand` call site (not a file-wide exclusion) so a future auditor does not reopen it.
+
+Validated (native darwin host):
+- `gofmt -w cmd internal` (clean)
+- `golangci-lint run` — 0 issues with `contextcheck` now enabled
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
+
+Follow-ups:
+- None. `P4-QUAL-07` is fully closed. The `root.go` exclusion is the documented false-positive class, not open work.
+
 ## 2026-07-13 — fix(sync): enforce past-direction epoch quarantine (P4-SYNC-03)
 
 Changed:
