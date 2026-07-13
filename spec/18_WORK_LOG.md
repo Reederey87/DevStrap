@@ -31,6 +31,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-13 — chore(docs): wave-close ledger reconciliation
+
+Changed:
+- `docs/audits/README.md`: fixed a stale Pass 7 header/body arithmetic mismatch (title said "9 open" while the body's own count and the actual open-table row count were both 8, and again after this PR's own row removal — see below); corrected to **7 open of 47** (P1=0, P2=4, P3=3), matching the open-table row count exactly.
+- Removed the `P7-DOC-02` row from the Pass 7 open table: the finding (stale Pass-5 count self-consistency) is closed by self-reference — the Pass-5 count it flagged was already corrected in the same pass (see the `> **Count corrected 2026-07-10**` note in the Pass 5 section) — and it has no code/commit of its own to move to *Recently shipped*, so the row is deleted outright with an explanatory note in the Pass 7 arithmetic sentence rather than left as a stale open item.
+- Removed a pre-existing duplicate `P7-QUAL-07` row from *Recently shipped* (two near-identical rows describing the same `fix/p7-qual-07-fslock-owner` PR; kept the more precise wording covering the PID-recycled/`ProcessStartTime`-unresolvable case).
+- This closes the 14-finding sync/hub/security-hardening wave (all P7-SEC-03, P7-SYNC-02, P4-SYNC-05, P4-SYNC-03, P4-SYNC-07, P7-HUB-01, P4-HUB-14/P7-HUB-03, P7-DATA-06, P7-SEC-05, P7-CLI-03, P7-XP-07, P4-QUAL-07, and P7-DOC-03 findings now in *Recently shipped*).
+
+Validated:
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` (docs-only ledger change).
+- Manual row-count re-verification: `awk` over the Pass 7 open table confirms exactly 7 `| P7-` rows, matching the corrected header.
+
+Follow-ups:
+- None. The commercial-readiness cluster (control-plane identity, hub quotas, org trust, version-skew policy — 6 findings) remains deliberately deferred pending a business decision, per the original wave scope.
+
 ## 2026-07-13 — fix(cli): hub init / service install confirmations survive --quiet (P7-CLI-03)
 
 Changed:
