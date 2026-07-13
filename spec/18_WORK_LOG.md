@@ -68,6 +68,103 @@ Validated (native darwin host):
 Follow-ups:
 - None. `P4-QUAL-07` is fully closed. The `root.go` exclusion is the documented false-positive class, not open work.
 
+## 2026-07-13 — feat(sync): folded hash chain + signed per-device head for omission detection (P4-SYNC-05)
+
+Changed:
+- New `internal/fold` package: a folded running hash over a device's stream
+  (`fold_seq = SHA256(stepDomain ‖ fold_{seq-1} ‖ bigendian(seq) ‖ content_hash)`,
+  seeded per workspace+device). Where `prev_event_hash` is a POINTER (catches
+  mid-stream drop/reorder), the fold is a running COMMITMENT to the whole
+  prefix — the missing piece for TAIL truncation and FORK/equivocation.
+- Signed per-device head rides the existing per-device signed ack: `AckMarker`
+  bumped to **v2** with `folded_hash` (the fold over the device's own stream at
+  `pushed_through_seq`), signed under `devstrap:ack:v1`; `VerifyAckMarker`
+  accepts v1 and v2 (rolling-upgrade fail-safe). **No new `Hub` method** — the
+  ack plane is reused, so the 5-backend interface is untouched.
+- `Store.DeviceFold` recomputes a device's fold from `events`, seeding from a
+  new `sync_chain_anchors.folded_hash` column (snapshot bootstrap) and stopping
+  at the first seq gap. `snapshot.v2` `ChainAnchor` gains `folded_hash`
+  (additive/omitempty, no version bump); build/import/`UpsertChainAnchor` thread it.
+- `sync.VerifyPeerHeads` (pull path, after cursor advance): per approved peer,
+  advance a MONOTONE promise (`device_heads` table) then compare against the
+  contiguous prefix this device folded — a head beyond what we hold (past a
+  one-cycle in-flight-race grace) → `withheld_tail`; a fold mismatch at a held
+  seq → `fork`. Both are `event_omission` conflicts that block `hub gc`. Wired
+  into `pullAndApplyEvents`; `maybeWriteSyncAck` publishes the head.
+- Migration `00027_device_heads.sql` (schema 27): `device_heads` table +
+  `sync_chain_anchors.folded_hash`. Bumped hardcoded schema-version constants in
+  `store_test.go`/`root_test.go`; added the fourth `Down()` step to the two
+  migration-00023 down tests.
+
+- **Post-review (opus-4.8 + fable-5, both independently found H1):** the first
+  cut of the omission alarm PERMANENTLY WEDGED `hub compact`/`hub gc` — defeating
+  the very `P5-SYNC-01` recovery path (`recoverable end-to-end via hub compact`)
+  it was meant to preserve — even under an honest hub. Three compounding defects,
+  all fixed:
+  - **No recovery path.** `event_omission` was in `QuarantineConflictTypes` (so it
+    blocked gc) and both gc and compact gate through `refuseIfIncompleteView`,
+    whose own pull re-runs `VerifyPeerHeads` and RE-CREATES the conflict — so it
+    could never clear. Fix: (1) the alarm now RESOLVES when the peer's fold catches
+    up to (and matches) its promised head (`Store.ResolveOmissionConflictsForDevice`,
+    mirroring the existing `ResolveConflictByFingerprint`/`...ByEventID` pattern in
+    `events.go`); (2) `hub compact` is EXEMPT from the omission gate
+    (`refuseIfIncompleteView(..., allowOmission)`), since compact is the CURE for a
+    permanent gap — `hub gc` still refuses (it deletes blobs on an incomplete view).
+  - **False `withheld_tail` from LOCALLY-declined gaps.** `DeviceFold` stopped at
+    the first seq gap with no awareness of `sync_skipped_events`/`key_grant_waits`/
+    quarantine conflicts, so a peer whose enc.v2 carriers this device cannot yet
+    decrypt during a routine cross-epoch key-grant grace (up to 72h by design), or a
+    consumed skew/hash-chain/verification quarantine, false-alarmed against an
+    HONEST hub. Fix: `Store.DeviceGapLocallyDeclined` classifies such a gap as a
+    LOCAL decline (checked before raising `withheld_tail`) — suppressed, and any
+    stale `withheld_tail` for that peer resolved.
+  - **Unbounded conflict rows.** `omissionConflictDetails` embedded the
+    ever-growing `promised_seq`, so `insertConflict`'s dedup-by-identical-details
+    never matched for a live peer and rows accumulated per cycle. Fix: the dedup
+    identity is now the stable `(device_id, kind, local_seq)`.
+- **Post-review (fable-5, M2):** `maybeWriteSyncAck` discarded `DeviceFold`'s
+  `reached` return and signed `folded_hash` as "the fold at `pushed_through_seq`"
+  WITHOUT checking `reached == push`. Latent today, but a future local-stream gap
+  (backup/restore, pruning) would sign a head whose fold does not correspond to
+  `push`, tripping a workspace-wide false `fork` on every honest peer. Fix: only
+  set `folded_hash` when `seeded && reached == push` (mirrors the snapshot builder's
+  `seeded && reached == anchorSeq` guard); otherwise omit it (fail-safe skip).
+- **Post-review (opus-4.8 + fable-5, M1, docs):** `spec/15` overclaimed that the
+  mechanism "removes the SILENT-truncation class"; rewritten to scope the guarantee
+  honestly — it detects an INCONSISTENT view (a hub serving a fresher promise than
+  the events it backs, or a forked fold), NOT omission in general, and now names
+  two undetectable residuals: the consistent stale/frozen view (hub withholds ack +
+  events in lockstep — the classic split-view CT closes only via gossip/auditors,
+  which this design lacks) and the one-promise-lag bounded-staleness channel.
+
+Tests:
+- `internal/fold`: determinism, prefix-commitment (tail-omission), fork,
+  position-binding, device/workspace scoping, encode/decode.
+- `internal/sync/head_test.go`: the mandated omission property — a hub withholds
+  a peer's newest 3 events; B detects the gap via the signed-head mismatch on
+  the second cycle (grace on the first), plus fork detection, no-false-positive
+  on a complete stream, and unapproved-peer skip.
+- `internal/state/device_heads_test.go`: fold from seq 1, anchor-seeded fold
+  (compaction survival), bounded walk, and unseeded-when-prefix-missing; plus the
+  H1 fixups — `TestDeviceGapLocallyDeclined` (skip-slot / key-grant-wait /
+  seqless-quarantine branches) and `TestResolveOmissionConflictsForDevice`
+  (kind-filtered and all-kinds resolution).
+- H1 property tests: `TestVerifyPeerHeadsSuppressesLocallyDeclinedGap` (a durably
+  skipped slot never alarms), `TestVerifyPeerHeadsResolvesOnCatchUp` (a raised
+  `withheld_tail` resolves once the backfilled peer fold catches up), and
+  `TestHubCompactProceedsWithOpenOmissionConflict` (`internal/cli` — compact
+  completes with an open omission conflict; `hub gc` still refuses on it).
+
+Validation: `gofmt`, `golangci-lint run`, `go run ./cmd/spec-drift`,
+`go test -race ./...` all green (see PR).
+
+Docs: `spec/07` (folded head + omission detection mechanism; ack field list;
+`internal/fold` added to `tracks_code`; local-gap classification, resolve-on-catchup,
+and compact-exemption added post-review), `spec/12` (`device_heads` table +
+`folded_hash` column + migration list/version), `spec/15` (guarantee rescoped to
+detecting an INCONSISTENT view; explicit consistent-stale-view + one-promise-lag
+residuals), `docs/audits/README.md` (P4-SYNC-05 → Recently shipped).
+
 ## 2026-07-13 — fix(sync): enforce past-direction epoch quarantine (P4-SYNC-03)
 
 Changed:

@@ -796,7 +796,15 @@ var errGCRefused = errIncompleteView
 //
 // It returns the pull outcome so a caller may inspect it; both current callers
 // only need the pass/fail decision.
-func refuseIfIncompleteView(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync.Hub, hubID string, paths config.Paths, keyring *workspacekeys.Keyring) (pullApplyOutcome, error) {
+//
+// allowOmission excludes the `event_omission` conflict from the gate. `hub
+// compact` is the documented CURE for a permanent per-device stream gap
+// (`P5-SYNC-01`): once it publishes a floor above the stranded slot, the
+// affected device re-bootstraps from the snapshot past the gap, and the omission
+// alarm then clears on the next verify. Blocking compact on the gap's OWN alarm
+// would make that recovery unreachable, so compact passes true; `hub gc` (which
+// deletes blobs on an incomplete view) passes false and still refuses.
+func refuseIfIncompleteView(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync.Hub, hubID string, paths config.Paths, keyring *workspacekeys.Keyring, allowOmission bool) (pullApplyOutcome, error) {
 	pull, err := pullAndApplyEvents(ctx, store, hub, hubID)
 	if errors.Is(err, dssync.ErrSnapshotRequired) {
 		// P4-SYNC-02: recover via snapshot exchange before acting, so the view
@@ -874,6 +882,11 @@ func refuseIfIncompleteView(ctx context.Context, stderr io.Writer, store *state.
 	}
 	// Gate 6: any still-open quarantine-class conflict from an earlier cycle.
 	for _, typ := range dssync.QuarantineConflictTypes {
+		if allowOmission && typ == dssync.ConflictEventOmission {
+			// compact is the cure for the gap this alarm reports; do not let the
+			// alarm block the cure (see allowOmission above).
+			continue
+		}
 		open, cErr := store.OpenConflictsByType(ctx, typ)
 		if cErr != nil {
 			return pullApplyOutcome{}, cErr
@@ -905,7 +918,7 @@ func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync
 	// consumed blobs so they enter RetainedBlobRefs below, and refuses on any
 	// incomplete-view signal — a truncated/skipped pull, an awaited key grant,
 	// a quarantined/cursor-held apply, or an open quarantine conflict.
-	if _, gerr := refuseIfIncompleteView(ctx, stderr, store, hub, hubID, paths, buildKeyringFromPaths(ctx, paths, store)); gerr != nil {
+	if _, gerr := refuseIfIncompleteView(ctx, stderr, store, hub, hubID, paths, buildKeyringFromPaths(ctx, paths, store), false); gerr != nil {
 		return 0, 0, gerr
 	}
 	// P4-HUB-12: serialize the destructive sweep behind the advisory lock so a

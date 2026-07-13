@@ -104,6 +104,7 @@ func BuildSnapshot(ctx context.Context, st *state.Store, producedBy string, hlc 
 			DeviceID:    a.DeviceID,
 			Seq:         a.Seq,
 			ContentHash: a.ContentHash,
+			FoldedHash:  a.FoldedHash,
 			HLC:         a.HLC,
 		})
 	}

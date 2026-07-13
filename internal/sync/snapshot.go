@@ -144,7 +144,13 @@ type ChainAnchor struct {
 	DeviceID    string `json:"device_id"`
 	Seq         int64  `json:"seq"`
 	ContentHash string `json:"content_hash"`
-	HLC         int64  `json:"hlc"`
+	// FoldedHash is the P4-SYNC-05 running fold at Seq, so a snapshot-bootstrapped
+	// device can seed omission detection at the floor. Additive and omitempty: an
+	// older binary ignores it, and a snapshot produced before P4-SYNC-05 simply
+	// omits it (that origin's omission check degrades fail-safe on import). No
+	// snapshot version bump is needed because absence is handled, not rejected.
+	FoldedHash string `json:"folded_hash,omitempty"`
+	HLC        int64  `json:"hlc"`
 }
 
 // SnapshotEntry is one active namespace-map row with the source-event

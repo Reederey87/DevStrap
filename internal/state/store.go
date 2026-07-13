@@ -1206,19 +1206,20 @@ WHERE id = ?;
 // device's first post-floor event has a fallback predecessor. Keeps the HIGHEST
 // anchor_seq on conflict — a later snapshot's floor only ever moves forward, so a
 // stale re-import must never lower a device's anchor.
-func (tx *Tx) UpsertChainAnchor(ctx context.Context, deviceID string, anchorSeq int64, contentHash string, anchorHLC int64, snapshotSHA string) error {
+func (tx *Tx) UpsertChainAnchor(ctx context.Context, deviceID string, anchorSeq int64, contentHash, foldedHash string, anchorHLC int64, snapshotSHA string) error {
 	now := timestampNow()
 	_, err := tx.tx.ExecContext(ctx, `
-INSERT INTO sync_chain_anchors (workspace_id, device_id, anchor_seq, anchor_content_hash, anchor_hlc, snapshot_sha256, imported_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+INSERT INTO sync_chain_anchors (workspace_id, device_id, anchor_seq, anchor_content_hash, folded_hash, anchor_hlc, snapshot_sha256, imported_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(workspace_id, device_id) DO UPDATE SET
   anchor_seq = excluded.anchor_seq,
   anchor_content_hash = excluded.anchor_content_hash,
+  folded_hash = excluded.folded_hash,
   anchor_hlc = excluded.anchor_hlc,
   snapshot_sha256 = excluded.snapshot_sha256,
   imported_at = excluded.imported_at
 WHERE excluded.anchor_seq > sync_chain_anchors.anchor_seq;
-`, tx.workspaceID, deviceID, anchorSeq, contentHash, anchorHLC, snapshotSHA, now)
+`, tx.workspaceID, deviceID, anchorSeq, contentHash, foldedHash, anchorHLC, snapshotSHA, now)
 	if err != nil {
 		return fmt.Errorf("upsert chain anchor: %w", err)
 	}

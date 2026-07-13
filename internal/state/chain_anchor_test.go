@@ -39,7 +39,7 @@ func TestPrevEventHashFallsBackToChainAnchor(t *testing.T) {
 	const dev = "dev_remote"
 	const anchorHash = "sha256:anchor4"
 	if err := st.WithTx(ctx, func(tx *Tx) error {
-		return tx.UpsertChainAnchor(ctx, dev, 4, anchorHash, 900, "snapsha")
+		return tx.UpsertChainAnchor(ctx, dev, 4, anchorHash, "", 900, "snapsha")
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ SELECT anchor_seq, anchor_content_hash FROM sync_chain_anchors WHERE device_id =
 
 	upsert := func(seq int64, hash string) {
 		if err := st.WithTx(ctx, func(tx *Tx) error {
-			return tx.UpsertChainAnchor(ctx, dev, seq, hash, seq*10, "sha")
+			return tx.UpsertChainAnchor(ctx, dev, seq, hash, "", seq*10, "sha")
 		}); err != nil {
 			t.Fatal(err)
 		}

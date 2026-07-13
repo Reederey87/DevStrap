@@ -239,8 +239,8 @@ func TestMigrateEnsureSummaryAndVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 26 {
-		t.Fatalf("schema version = %d, want 26", version)
+	if version != 27 {
+		t.Fatalf("schema version = %d, want 27", version)
 	}
 
 	var tableCount int
@@ -462,8 +462,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 25 {
-		t.Fatalf("schema version after down = %d, want 25", version)
+	if version != 26 {
+		t.Fatalf("schema version after down = %d, want 26", version)
 	}
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
@@ -472,8 +472,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 26 {
-		t.Fatalf("schema version after re-migrate = %d, want 26", version)
+	if version != 27 {
+		t.Fatalf("schema version after re-migrate = %d, want 27", version)
 	}
 }
 
@@ -504,7 +504,10 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
-	// Steps from 26 down to 23 are unrelated and must remain unaffected.
+	// Steps from 27 down to 23 are unrelated and must remain unaffected.
+	if err := st.Down(); err != nil { // 27 -> 26
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 26 -> 25
 		t.Fatal(err)
 	}
@@ -570,6 +573,9 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
+	if err := st.Down(); err != nil { // 27 -> 26
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 26 -> 25
 		t.Fatal(err)
 	}

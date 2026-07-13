@@ -52,7 +52,7 @@ func ImportSnapshot(ctx context.Context, st *state.Store, snap Snapshot, snapsho
 			return err
 		}
 		for _, a := range snap.Anchors {
-			if err := tx.UpsertChainAnchor(ctx, a.DeviceID, a.Seq, a.ContentHash, a.HLC, snapshotSHA256); err != nil {
+			if err := tx.UpsertChainAnchor(ctx, a.DeviceID, a.Seq, a.ContentHash, a.FoldedHash, a.HLC, snapshotSHA256); err != nil {
 				return err
 			}
 		}
