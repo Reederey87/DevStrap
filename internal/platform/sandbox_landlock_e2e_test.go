@@ -86,12 +86,10 @@ func assertSeccompCanaryRuns(t *testing.T, run func(SandboxSpec, ...string) erro
 }
 
 // TestLandlockSandboxEnforcement proves the kernel actually enforces the
-// fallback's write confinement through the re-exec shim — and, just as
-// deliberately, pins what it does NOT enforce: credential reads stay allowed
-// (spec/18 decision — additive-allow, read-denial is bubblewrap-only). A
-// future slice that adds read-denial must consciously update this test and
-// landlockLimitations together. Env-gated like the Seatbelt/bubblewrap
-// enforcement tests because it execs real processes under restriction.
+// fallback's write confinement through the re-exec shim and denies credential
+// reads by default through leaf-hierarchy grants, while keeping non-sensitive
+// home paths readable. Env-gated like the Seatbelt/bubblewrap enforcement
+// tests because it execs real processes under restriction.
 func TestLandlockSandboxEnforcement(t *testing.T) {
 	if os.Getenv("DEVSTRAP_SANDBOX_E2E") != "1" {
 		t.Skip("set DEVSTRAP_SANDBOX_E2E=1 to run the landlock enforcement test")
@@ -135,6 +133,10 @@ func TestLandlockSandboxEnforcement(t *testing.T) {
 	if err := os.WriteFile(secret, []byte("SECRET"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	notes := filepath.Join(fakeHome, "notes.txt")
+	if err := os.WriteFile(notes, []byte("not sensitive"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	outside := filepath.Join(root, "outside.txt")
 	outsideExisting := filepath.Join(root, "existing.txt")
 	if err := os.WriteFile(outsideExisting, []byte("shrink me"), 0o644); err != nil {
@@ -150,7 +152,7 @@ func TestLandlockSandboxEnforcement(t *testing.T) {
 		TmpDir:             tmpAllow,
 		LogDir:             logs,
 		UserHome:           fakeHome,
-		DenySensitiveReads: true, // deliberately set — and deliberately NOT honored by this backend
+		DenySensitiveReads: true,
 	}
 
 	run := func(spec SandboxSpec, argv ...string) error {
@@ -199,12 +201,38 @@ func TestLandlockSandboxEnforcement(t *testing.T) {
 	if err := run(spec, touch, filepath.Join(logs, "tamper.txt")); err == nil {
 		t.Fatal("write into the log dir succeeded, want kernel denial")
 	}
-	// The documented degrade, pinned on purpose: this backend is
-	// additive-allow, so DenySensitiveReads is NOT enforceable — the
-	// credential stays readable and resolveAgentSandbox surfaces that through
-	// SandboxCapabilities.Limitations (spec/18, PR #121 follow-up decision).
-	if err := run(spec, cat, secret); err != nil {
-		t.Fatalf("credential read failed under landlock — the documented additive-allow degrade no longer holds; update landlockLimitations and spec/15 together: %v", err)
+	if err := run(spec, cat, secret); err == nil {
+		t.Fatal("credential read succeeded under default landlock policy, want kernel denial (P7-SEC-03 leaf-hierarchy credential deny)")
+	} else {
+		t.Logf("credential read denied under default landlock policy: %v", err)
+	}
+	if err := run(spec, cat, notes); err != nil {
+		t.Fatalf("non-credential home file blocked under default policy, over-blocked: %v", err)
+	}
+	// Symlinked-anchor sub-assertion (P7-SEC-03 Finding 1): a fake home whose
+	// .ssh is ITSELF a symlink into a dotfiles tree (the stow/chezmoi layout).
+	// Reading the secret through the real symlink path must STILL be denied —
+	// the anchor's EvalSymlinks target is carved out of the read grants, so the
+	// resolved credential path has no grant and returns EACCES. A separate home
+	// keeps the main fixture untouched.
+	symHome := filepath.Join(root, "symhome")
+	dotSSH := filepath.Join(symHome, "dotfiles", "ssh")
+	if err := os.MkdirAll(dotSSH, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dotSSH, "id_ed25519"), []byte("SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sshSymlink := filepath.Join(symHome, ".ssh")
+	if err := os.Symlink(dotSSH, sshSymlink); err != nil {
+		t.Fatal(err)
+	}
+	symSpec := spec
+	symSpec.UserHome = symHome
+	if err := run(symSpec, cat, filepath.Join(sshSymlink, "id_ed25519")); err == nil {
+		t.Fatal("credential read through a symlinked .ssh anchor succeeded, want kernel denial (P7-SEC-03 symlinked-anchor resolution)")
+	} else {
+		t.Logf("credential read through symlinked .ssh anchor denied: %v", err)
 	}
 	// Exit-code fidelity through re-exec: the shim execve()s in the same PID,
 	// so the agent's own exit code must come back untouched.
@@ -229,11 +257,10 @@ func TestLandlockSandboxEnforcement(t *testing.T) {
 		t.Logf("seccomp filters unsupported on this kernel: denylist sub-assertion skipped (the documented degrade)")
 	}
 
-	// Read confinement (opt-in) closes the additive-allow degrade above: with
-	// ReadConfine the fake home's .ssh is NOT among the read roots, so the same
-	// credential read that succeeded above is now kernel-DENIED, while a file
-	// inside the worktree (a read root) stays readable. The shim re-execs THIS
-	// test binary, so its directory must be a read root — hence ReadAllowExtra.
+	// Read confinement (opt-in) uses its narrower allow-list: the fake home's
+	// .ssh is not among the read roots, while a file inside the worktree stays
+	// readable. The shim re-execs THIS test binary, so its directory must be a
+	// read root — hence ReadAllowExtra.
 	rcSpec := spec
 	rcSpec.ReadConfine = true
 	rcSpec.ReadAllowExtra = []string{filepath.Dir(self)}

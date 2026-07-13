@@ -22,12 +22,10 @@ func sandboxHelperArgs(self string, specJSON string, argv []string) []string {
 }
 
 // landlockLimitations names, per kernel Landlock ABI, every guarantee the
-// bubblewrap backend provides that this fallback does not (spec/18 decision:
-// additive-allow, so read-denial stays bwrap-only). Kept build-tag-free and
-// pure so the degrade contract is unit-tested on every platform.
+// bubblewrap backend provides that this fallback does not. Kept build-tag-free
+// and pure so the degrade contract is unit-tested on every platform.
 func landlockLimitations(abi int) []string {
 	lims := []string{
-		"credential reads are NOT denied (Landlock is additive-allow; read masks stay bubblewrap-only)",
 		"no mount/pid namespace: /tmp and /dev/shm stay shared and orphaned grandchildren can outlive the run",
 	}
 	if abi >= 4 {

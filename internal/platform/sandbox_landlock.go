@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -27,19 +28,18 @@ const landlockMinABI = 3
 
 // LandlockSandbox is the layered Linux fallback for hosts where bubblewrap
 // cannot create namespaces (AGEN-03 / P4-GIT-03 slice 3). It confines writes
-// to the worktree and per-run temp dir via a hidden re-exec shim; unlike
-// bubblewrap it is additive-allow, so it deliberately does NOT deny
-// credential reads (spec/18 decision) — the degrade is surfaced through
-// SandboxCapabilities.
+// to the worktree and per-run temp dir via a hidden re-exec shim. When
+// requested, credential reads are denied with leaf-hierarchy read grants:
+// Landlock returns EACCES rather than masking the paths as bubblewrap does.
 type LandlockSandbox struct{}
 
 func (LandlockSandbox) Name() string { return "landlock" }
 
 // ReadConfineEnforcement implements SandboxReadConfinement: under read
-// confinement the additive-allow RODirs grant is restricted to the roots (the
-// strict V3 floor covers read+execute), so Landlock kernel-enforces read
-// confinement — and, unlike its default additive-allow reads, this finally
-// gives it a credential-read boundary.
+// confinement the RODirs grants are restricted to the allow-list roots (the
+// strict V3 floor covers read+execute), so Landlock kernel-enforces the read
+// boundary. Default policies separately carve credential paths out of their
+// leaf-hierarchy grants.
 func (LandlockSandbox) ReadConfineEnforcement() ReadConfineEnforcement {
 	return ReadConfineEnforced
 }
@@ -89,27 +89,161 @@ func (s LandlockSandbox) Command(_ context.Context, spec SandboxSpec, argv []str
 	return SandboxCommand{Argv: sandboxHelperArgs(self, string(specJSON), argv), Cleanup: func() {}}, nil
 }
 
+// readGrant is one carved-out read-allow leaf computed by
+// credentialExcludingReadGrants: a path plus whether it is a directory (mapped
+// to RODirs) or a regular file (mapped to ROFiles).
+type readGrant struct {
+	path string
+	dir  bool
+}
+
+// credentialExcludingReadGrants computes the leaf read grants that cover every
+// filesystem subtree except the credential anchors. It is pure filesystem-walk
+// plus rule-list logic — no landlock package or kernel syscall dependency — so
+// the security-critical recursion and symlink handling are unit-testable
+// without a Landlock-capable kernel. credentialExcludingReadRules maps the
+// result onto landlock.Rule values.
+//
+// The walk descends only through anchor ancestors and grants their sibling
+// leaves wholesale (Landlock rules are additive). If an ancestor cannot be
+// enumerated, its subtree receives no grant (fail closed).
+//
+// If userHome and devstrapHome are both empty, credentialAnchors has nothing
+// to protect: the caller asked for DenySensitiveReads but supplied no home to
+// scope it against. This fails closed with an error rather than falling back
+// to a wholesale RODirs("/") grant, which would silently defeat the very
+// feature the caller requested.
+func credentialExcludingReadGrants(userHome, devstrapHome string) ([]readGrant, error) {
+	anchors := credentialAnchors(userHome, devstrapHome)
+	if len(anchors) == 0 {
+		return nil, fmt.Errorf("landlock: DenySensitiveReads requested but no credential anchors resolved (UserHome/DevstrapHome unset)")
+	}
+
+	denied := make(map[string]struct{}, len(anchors)*2)
+	for _, anchor := range anchors {
+		denied[filepath.Clean(anchor)] = struct{}{}
+		// If the anchor is ITSELF a symlink (the stow/chezmoi dotfiles layout,
+		// e.g. ~/.ssh -> ~/dotfiles/ssh), the by-path carve-out on the literal
+		// alone would leave the resolved target's subtree (~/dotfiles) granted
+		// wholesale as a non-anchor sibling leaf, re-exposing the credential at
+		// its real path. Union the resolved target into the denied set so the
+		// walk carves it out too — mirroring seatbeltDenyPaths/existingRealPaths
+		// on the other two backends. Keep the literal always; add the resolved
+		// target only on success (an absent/unreadable anchor keeps just the
+		// literal, matching the by-path deny model — the walk simply never
+		// reaches a path that does not exist).
+		if real, err := filepath.EvalSymlinks(anchor); err == nil {
+			denied[filepath.Clean(real)] = struct{}{}
+		}
+	}
+	sep := string(os.PathSeparator)
+	// grantLeaf grants read+execute on ONE carved-out sibling, choosing the
+	// directory or file rule by the child's resolved type. Landlock rejects
+	// directory access rights on a regular file (EINVAL — NOT the ENOENT that
+	// IgnoreIfMissing suppresses), so a regular file MUST use ROFiles or the
+	// whole ruleset fails. Symlinks are resolved; one whose target lands on or
+	// inside a credential anchor is skipped so it cannot re-expose by an alias a
+	// credential the by-path carve-out removed. Non-regular, non-dir nodes
+	// (sockets/fifos/devices) are skipped — there is nothing to read-grant.
+	grantLeaf := func(childPath string, entry os.DirEntry) []readGrant {
+		mode := entry.Type()
+		if mode&os.ModeSymlink != 0 {
+			real, err := filepath.EvalSymlinks(childPath)
+			if err != nil {
+				return nil
+			}
+			for anchor := range denied {
+				if pathsOverlap(real, anchor) {
+					return nil
+				}
+			}
+			info, err := os.Stat(childPath)
+			if err != nil {
+				return nil
+			}
+			mode = info.Mode()
+		}
+		switch {
+		case mode.IsDir():
+			return []readGrant{{path: childPath, dir: true}}
+		case mode.IsRegular():
+			return []readGrant{{path: childPath, dir: false}}
+		default:
+			return nil
+		}
+	}
+	var walk func(string) []readGrant
+	walk = func(dir string) []readGrant {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return nil
+		}
+		var grants []readGrant
+		for _, entry := range entries {
+			childPath := filepath.Join(dir, entry.Name())
+			if _, deny := denied[childPath]; deny {
+				continue
+			}
+			containsDeny := false
+			for denyPath := range denied {
+				if strings.HasPrefix(denyPath, childPath+sep) {
+					containsDeny = true
+					break
+				}
+			}
+			if containsDeny {
+				grants = append(grants, walk(childPath)...)
+				continue
+			}
+			grants = append(grants, grantLeaf(childPath, entry)...)
+		}
+		return grants
+	}
+	return walk(string(os.PathSeparator)), nil
+}
+
+// credentialExcludingReadRules maps credentialExcludingReadGrants onto the
+// landlock rule types: RODirs for directories, ROFiles for regular files. The
+// leaf grants carry IgnoreIfMissing so a path that vanishes between the walk
+// and RestrictPaths does not fail the whole ruleset.
+func credentialExcludingReadRules(userHome, devstrapHome string) ([]landlock.Rule, error) {
+	grants, err := credentialExcludingReadGrants(userHome, devstrapHome)
+	if err != nil {
+		return nil, err
+	}
+	rules := make([]landlock.Rule, 0, len(grants))
+	for _, g := range grants {
+		switch {
+		case g.dir:
+			rules = append(rules, landlock.RODirs(g.path).IgnoreIfMissing())
+		default:
+			rules = append(rules, landlock.ROFiles(g.path).IgnoreIfMissing())
+		}
+	}
+	return rules, nil
+}
+
 // applyLandlockPolicy maps a SandboxSpec onto stacked Landlock rulesets for
-// the calling process. Additive-allow by design: DenySensitiveReads is
-// deliberately NOT implemented here — Landlock cannot subtract credential
-// paths from a broad read grant, so read-denial stays a bubblewrap-only
-// guarantee (spec/18, PR #121 follow-up) surfaced via landlockLimitations.
+// the calling process. Default reads use leaf-hierarchy grants to omit
+// credential anchors when DenySensitiveReads is set. Unlike bubblewrap masks,
+// omitted Landlock paths fail with EACCES rather than appearing empty.
 func applyLandlockPolicy(spec SandboxSpec) error {
 	abi, err := probeLandlock()
 	if err != nil {
 		return err
 	}
-	// Read roots: allow-default (read+execute everywhere, the analogue of
-	// bwrap's `--ro-bind / /`) unless read confinement restricts reads to the
-	// allow-list. Landlock is additive-allow, so restricting the RODirs grant
-	// to the roots IS the confinement — and because the credential dirs are not
-	// among the roots, read confinement finally gives the Landlock backend a
-	// credential-read boundary it otherwise lacks. IgnoreIfMissing so an absent
-	// root (e.g. /nix, /snap) does not fail the whole ruleset.
+	// Read roots: allow-default unless credential anchors must be carved out,
+	// or read confinement restricts reads to the allow-list. IgnoreIfMissing so
+	// an absent root (e.g. /nix, /snap) does not fail the whole ruleset.
 	var rules []landlock.Rule
 	if spec.ReadConfine {
 		for _, root := range readConfineRoots(spec) {
 			rules = append(rules, landlock.RODirs(root).IgnoreIfMissing())
+		}
+	} else if spec.DenySensitiveReads {
+		rules, err = credentialExcludingReadRules(spec.UserHome, spec.DevstrapHome)
+		if err != nil {
+			return err
 		}
 	} else {
 		rules = []landlock.Rule{landlock.RODirs("/")}
@@ -195,8 +329,8 @@ func ExecSandboxHelper(spec SandboxSpec, argv []string) error {
 		}
 	}
 	// Resolved via the sanitized child PATH the shim inherited, matching how
-	// bwrap launches the child. LookPath only needs read+execute, which the
-	// broad RODirs grant keeps allowed post-restriction.
+	// bwrap launches the child. LookPath only needs read+execute, which the read
+	// rules keep allowed post-restriction.
 	path, err := exec.LookPath(argv[0])
 	if err != nil {
 		return fmt.Errorf("sandbox-helper: %w", err)
