@@ -134,8 +134,10 @@ Every agent task gets a fresh worktree created from the *fetched* `origin/<defau
 never a stale local branch — with the base SHA recorded so `agent pr` can refuse to push work
 built on a moved base. Runs are logged to a `0600` file and tracked in a queryable registry.
 
-The wrapper's command/file policy is **guardrails, not a sandbox** — it layers beneath an
-OS-enforced sandbox on both platforms (`--sandbox auto|off|require`). On macOS a Seatbelt profile
+The wrapper's command/file policy is **guardrails, not a sandbox**. With
+`--sandbox auto` (the default), it uses an OS-enforced sandbox when the host supports one;
+`--sandbox require` fails closed when none is available, and `--sandbox off` disables it.
+On macOS a Seatbelt profile
 wraps the child: writes are confined to the worktree, credential paths (`~/.ssh`, `~/.aws`, …) are
 denied, and network is blocked for read-only policies. On Linux the child runs under bubblewrap,
 falling back to Landlock+seccomp where user namespaces are restricted; the Landlock path keeps

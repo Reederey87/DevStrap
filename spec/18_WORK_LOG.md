@@ -31,7 +31,7 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
-## 2026-07-11 — docs: truth-up service-installer and OS-sandbox claims across six files (P7-DOC-01)
+## 2026-07-12 — docs: truth-up service-installer and OS-sandbox claims across six files (P7-DOC-01)
 
 Changed:
 - Six files described two shipped capabilities as unbuilt/future/advisory; corrected to match the code and each file's own already-shipped statements. Both capabilities: `devstrap service install|uninstall|status` (launchd LaunchAgent / systemd `--user` unit wrapping `run-loop`, `P4-PROD-04`, 2026-07-06) and the OS-enforced agent sandbox (macOS Seatbelt default, Linux bubblewrap → Landlock+seccomp fallback, `P4-GIT-03`, 2026-07-05).

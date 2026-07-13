@@ -125,9 +125,12 @@ devstrap agent pr <run-id> --dry-run
 ```
 
 `agent run` wraps the child in an OS-enforced sandbox by default (`--sandbox auto|off|require`):
-macOS Seatbelt, and on Linux bubblewrap falling back to Landlock+seccomp where user namespaces are
-restricted. The wrapper's command/file policy is guardrails layered beneath that sandbox, not a
-full sandbox itself — see [`../spec/10_AGENT_WORKSPACES_AND_POLICIES.md`](../spec/10_AGENT_WORKSPACES_AND_POLICIES.md).
+`auto` is best-effort — it warns and retains today's advisory-only behavior when no supported
+backend is available; `require` refuses to run unsandboxed; `off` disables the sandbox entirely.
+When available: macOS Seatbelt, and on Linux bubblewrap falling back to Landlock+seccomp where
+user namespaces are restricted. The wrapper's command/file policy is guardrails layered beneath
+that sandbox, not a full sandbox itself — see
+[`../spec/10_AGENT_WORKSPACES_AND_POLICIES.md`](../spec/10_AGENT_WORKSPACES_AND_POLICIES.md).
 
 ## Where to next
 
