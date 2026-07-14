@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-13
+last_reviewed: 2026-07-14
 tracks_code: [internal/pathkey/**, internal/scan/**, internal/state/**, internal/sync/**, internal/fold/**, internal/workspacekeys/**, internal/devicekeys/**, internal/id/**, internal/pairing/**]
 ---
 # Namespace and Sync Model
@@ -156,6 +156,8 @@ dirty          dirty_state=dirty|ahead|diverged
 current        materialization_state=available && dirty_state=clean
 ready          current  (shipped ready = available && clean; env_ready/tooling_ready gating is planned — the fields exist but are unwired, PROD-01)
 ```
+
+`device_project_state` also carries a `last_error` column (P4-GIT-07, shipped, see `08_GIT_MATERIALIZATION_AND_WORKTREES.md`/`12_DATA_MODEL_SQLITE.md` for the write/read/surface path). `Store.UpdateProjectLocalState` — used directly by sync-convergence tests (`internal/sync/apply_test.go`, `internal/sync/snapshot_import_test.go`) to seed a project's local `dirty_state` fixture ahead of a delete/tombstone scenario — took a 6th `lastError string` argument as part of that change; those call sites now pass `""` (no local materialize error is relevant to the convergence scenarios under test), a pure call-signature update with no change to sync semantics.
 
 The `hydrating` branch was removed as dead code (no writer ever set it, `P5-PROD-01`); the state remains reserved.
 

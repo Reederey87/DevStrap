@@ -249,7 +249,7 @@ func TestApplyEventsDeleteVsDirtyRaisesConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.UpdateProjectLocalState(ctx, project.ID, "/tmp/Code/work/acme/api", "available", "dirty"); err != nil {
+	if err := st.UpdateProjectLocalState(ctx, project.ID, "/tmp/Code/work/acme/api", "available", "dirty", ""); err != nil {
 		t.Fatal(err)
 	}
 	del, err := NewProjectEvent(device.ID, EventProjectDeleted, 20<<hlcLogicalBits, ProjectPayload{Path: "work/acme/api"})
@@ -345,7 +345,7 @@ func TestApplyEventsStaleDeleteDoesNotDestroyNewerAdd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := stDirty.UpdateProjectLocalState(ctx, dirtyProject.ID, "/tmp/Code/work/acme/api", "available", "dirty"); err != nil {
+	if err := stDirty.UpdateProjectLocalState(ctx, dirtyProject.ID, "/tmp/Code/work/acme/api", "available", "dirty", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ApplyEvents(ctx, stDirty, []state.Event{newDel(t, devDirty.ID, 5<<hlcLogicalBits)}); err != nil {

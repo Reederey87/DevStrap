@@ -14,6 +14,7 @@ import (
 	dsgit "github.com/Reederey87/DevStrap/internal/git"
 	"github.com/Reederey87/DevStrap/internal/logging"
 	"github.com/Reederey87/DevStrap/internal/pathkey"
+	"github.com/Reederey87/DevStrap/internal/redact"
 	"github.com/Reederey87/DevStrap/internal/state"
 	"github.com/spf13/cobra"
 )
@@ -141,7 +142,7 @@ func hydrateProjectUnlocked(ctx context.Context, store *state.Store, opts *optio
 	if dsgit.IsRepo(localPath) {
 		r := gitRunner(opts)
 		dirty, _ := r.DirtyState(ctx, localPath)
-		_ = store.UpdateProjectLocalState(ctx, project.ID, localPath, "available", string(dirty))
+		_ = store.UpdateProjectLocalState(ctx, project.ID, localPath, "available", string(dirty), "")
 		return localPath, nil
 	}
 	if err := ensureHydratableTarget(localPath); err != nil {
@@ -167,11 +168,11 @@ func hydrateProjectUnlocked(ctx context.Context, store *state.Store, opts *optio
 		Submodules:           submodules,
 		AlsoFilterSubmodules: partial && submodules,
 	}); err != nil {
-		_ = store.UpdateProjectLocalState(ctx, project.ID, localPath, "failed", "unknown")
+		_ = store.UpdateProjectLocalState(ctx, project.ID, localPath, "failed", "unknown", redact.Scrub(fmt.Sprintf("clone: %v", err)))
 		return "", err
 	}
 	if err := promoteClonedRepo(tmpPath, localPath, project.Path, project.RemoteURL); err != nil {
-		_ = store.UpdateProjectLocalState(ctx, project.ID, localPath, "failed", "unknown")
+		_ = store.UpdateProjectLocalState(ctx, project.ID, localPath, "failed", "unknown", redact.Scrub(fmt.Sprintf("promote clone: %v", err)))
 		return "", err
 	}
 	cleanupTmp = false
@@ -205,7 +206,11 @@ func hydrateProjectUnlocked(ctx context.Context, store *state.Store, opts *optio
 		// hydrating a brand-new remote succeeds.
 		dirty = "clean"
 	}
-	if err := store.UpdateProjectLocalState(ctx, project.ID, localPath, matState, dirty); err != nil {
+	lastError := ""
+	if matState == "materialized-empty" {
+		lastError = redact.Scrub("clone produced an empty/broken checkout (remote HEAD may be broken)")
+	}
+	if err := store.UpdateProjectLocalState(ctx, project.ID, localPath, matState, dirty, lastError); err != nil {
 		return "", err
 	}
 	if matState == "materialized-empty" {

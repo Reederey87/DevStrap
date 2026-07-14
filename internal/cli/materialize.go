@@ -18,6 +18,7 @@ import (
 	"github.com/Reederey87/DevStrap/internal/draftbundle"
 	"github.com/Reederey87/DevStrap/internal/logging"
 	"github.com/Reederey87/DevStrap/internal/pathkey"
+	"github.com/Reederey87/DevStrap/internal/redact"
 	"github.com/Reederey87/DevStrap/internal/state"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
@@ -206,7 +207,7 @@ func materializeGitRepo(ctx context.Context, store *state.Store, opts *options, 
 	// always-policy LFS repo to available/clean with pointers. A usable checkout
 	// is guaranteed here: materialized-empty/broken-HEAD returns an error above.
 	if err := applyMaterializeLFSPolicy(ctx, gitRunner(opts), project, localPath); err != nil {
-		_ = store.UpdateProjectLocalState(ctx, project.ID, localPath, "failed", "unknown")
+		_ = store.UpdateProjectLocalState(ctx, project.ID, localPath, "failed", "unknown", redact.Scrub(fmt.Sprintf("lfs pull: %v", err)))
 		return err
 	}
 	// DRAFT-05/P6-GIT-03: dependency restores run lockfile/package lifecycle
@@ -225,6 +226,7 @@ func materializeGitRepo(ctx context.Context, store *state.Store, opts *options, 
 	// existing .env means we skip silently.
 	if err := materializeHydrateProjectEnv(ctx, store, opts, project, localPath); err != nil {
 		logging.Logger(ctx).Warn("env hydrate skipped", "path", project.Path, "err", err.Error())
+		_ = store.RecordProjectWarning(ctx, project.ID, redact.Scrub(fmt.Sprintf("env hydrate: %v", err)))
 	}
 	return nil
 }
@@ -257,7 +259,7 @@ func materializeDraft(ctx context.Context, store *state.Store, opts *options, pr
 		if err := os.MkdirAll(localPath, 0o750); err != nil {
 			return fmt.Errorf("create draft skeleton: %w", err)
 		}
-		if err := store.UpdateProjectLocalState(ctx, project.ID, localPath, "skeleton", "unknown"); err != nil {
+		if err := store.UpdateProjectLocalState(ctx, project.ID, localPath, "skeleton", "unknown", ""); err != nil {
 			return err
 		}
 		// P5-QUAL-01: honest interim state, classified as "skipped" upstream
@@ -265,10 +267,10 @@ func materializeDraft(ctx context.Context, store *state.Store, opts *options, pr
 		return fmt.Errorf("%s is %s: %w", project.Path, project.Type, ErrDraftNotMaterializable)
 	}
 	if err := extractDraftBundle(ctx, store, opts, project, localPath, bundle); err != nil {
-		_ = store.UpdateProjectLocalState(ctx, project.ID, localPath, "failed", "unknown")
+		_ = store.UpdateProjectLocalState(ctx, project.ID, localPath, "failed", "unknown", redact.Scrub(fmt.Sprintf("draft extract: %v", err)))
 		return err
 	}
-	return store.UpdateProjectLocalState(ctx, project.ID, localPath, "available", "clean")
+	return store.UpdateProjectLocalState(ctx, project.ID, localPath, "available", "clean", "")
 }
 
 func materializePlainFolder(ctx context.Context, store *state.Store, opts *options, project state.ProjectStatus) error {
@@ -284,7 +286,7 @@ func materializePlainFolder(ctx context.Context, store *state.Store, opts *optio
 	if err := os.MkdirAll(localPath, 0o750); err != nil {
 		return fmt.Errorf("create plain folder: %w", err)
 	}
-	return store.UpdateProjectLocalState(ctx, project.ID, localPath, "available", "clean")
+	return store.UpdateProjectLocalState(ctx, project.ID, localPath, "available", "clean", "")
 }
 
 // hydrateProjectEnv hydrates a project's bound env profile into the project

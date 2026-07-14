@@ -136,6 +136,7 @@ type ProjectStatus struct {
 	LocalPath            string `json:"local_path,omitempty"`
 	MaterializationState string `json:"materialization_state,omitempty"`
 	DirtyState           string `json:"dirty_state,omitempty"`
+	LastError            string `json:"last_error,omitempty"`
 }
 
 func timestampNow() string {
@@ -1681,7 +1682,7 @@ func projectByPath(ctx context.Context, queryer sqlExecutor, workspaceID string,
 SELECT n.id, n.path, n.path_key, n.type, COALESCE(n.display_name, ''), n.materialization_policy, n.status,
        COALESCE(n.source_event_hlc, 0), COALESCE(n.source_event_device_id, ''), COALESCE(n.source_event_id, ''),
        COALESCE(g.remote_url, ''), COALESCE(g.remote_key, ''), COALESCE(g.default_branch, ''), COALESCE(g.lfs_policy, ''), COALESCE(g.forge_kind, ''),
-       COALESCE(dps.local_path, ''), COALESCE(dps.materialization_state, ''), COALESCE(dps.dirty_state, '')
+       COALESCE(dps.local_path, ''), COALESCE(dps.materialization_state, ''), COALESCE(dps.dirty_state, ''), COALESCE(dps.last_error, '')
 FROM namespace_entries n
 LEFT JOIN git_repos g ON g.namespace_id = n.id
 LEFT JOIN devices d ON d.trust_state = 'local'
@@ -1691,7 +1692,7 @@ WHERE n.workspace_id = ? AND n.path_key = ? AND n.status = 'active';
 	var p ProjectStatus
 	err := row.Scan(&p.ID, &p.Path, &p.PathKey, &p.Type, &p.DisplayName, &p.MaterializationPolicy, &p.Status,
 		&p.SourceEventHLC, &p.SourceEventDeviceID, &p.SourceEventID,
-		&p.RemoteURL, &p.RemoteKey, &p.DefaultBranch, &p.LFSPolicy, &p.ForgeKind, &p.LocalPath, &p.MaterializationState, &p.DirtyState)
+		&p.RemoteURL, &p.RemoteKey, &p.DefaultBranch, &p.LFSPolicy, &p.ForgeKind, &p.LocalPath, &p.MaterializationState, &p.DirtyState, &p.LastError)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ProjectStatus{}, fmt.Errorf("unknown namespace path %q", pk.Display)
@@ -1706,7 +1707,7 @@ func projectByID(ctx context.Context, queryer sqlExecutor, workspaceID, id strin
 SELECT n.id, n.path, n.path_key, n.type, COALESCE(n.display_name, ''), n.materialization_policy, n.status,
        COALESCE(n.source_event_hlc, 0), COALESCE(n.source_event_device_id, ''), COALESCE(n.source_event_id, ''),
        COALESCE(g.remote_url, ''), COALESCE(g.remote_key, ''), COALESCE(g.default_branch, ''), COALESCE(g.lfs_policy, ''), COALESCE(g.forge_kind, ''),
-       COALESCE(dps.local_path, ''), COALESCE(dps.materialization_state, ''), COALESCE(dps.dirty_state, '')
+       COALESCE(dps.local_path, ''), COALESCE(dps.materialization_state, ''), COALESCE(dps.dirty_state, ''), COALESCE(dps.last_error, '')
 FROM namespace_entries n
 LEFT JOIN git_repos g ON g.namespace_id = n.id
 LEFT JOIN devices d ON d.trust_state = 'local'
@@ -1716,7 +1717,7 @@ WHERE n.workspace_id = ? AND n.id = ? AND n.status = 'active';
 	var p ProjectStatus
 	err := row.Scan(&p.ID, &p.Path, &p.PathKey, &p.Type, &p.DisplayName, &p.MaterializationPolicy, &p.Status,
 		&p.SourceEventHLC, &p.SourceEventDeviceID, &p.SourceEventID,
-		&p.RemoteURL, &p.RemoteKey, &p.DefaultBranch, &p.LFSPolicy, &p.ForgeKind, &p.LocalPath, &p.MaterializationState, &p.DirtyState)
+		&p.RemoteURL, &p.RemoteKey, &p.DefaultBranch, &p.LFSPolicy, &p.ForgeKind, &p.LocalPath, &p.MaterializationState, &p.DirtyState, &p.LastError)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ProjectStatus{}, fmt.Errorf("unknown namespace id %q", id)
@@ -1735,7 +1736,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]ProjectStatus, error) {
 SELECT n.id, n.path, n.path_key, n.type, COALESCE(n.display_name, ''), n.materialization_policy, n.status,
        COALESCE(n.source_event_hlc, 0), COALESCE(n.source_event_device_id, ''), COALESCE(n.source_event_id, ''),
        COALESCE(g.remote_url, ''), COALESCE(g.remote_key, ''), COALESCE(g.default_branch, ''), COALESCE(g.lfs_policy, ''), COALESCE(g.forge_kind, ''),
-       COALESCE(dps.local_path, ''), COALESCE(dps.materialization_state, ''), COALESCE(dps.dirty_state, '')
+       COALESCE(dps.local_path, ''), COALESCE(dps.materialization_state, ''), COALESCE(dps.dirty_state, ''), COALESCE(dps.last_error, '')
 FROM namespace_entries n
 LEFT JOIN git_repos g ON g.namespace_id = n.id
 LEFT JOIN devices d ON d.trust_state = 'local'
@@ -1755,7 +1756,7 @@ ORDER BY n.path_key;
 		var p ProjectStatus
 		if err := rows.Scan(&p.ID, &p.Path, &p.PathKey, &p.Type, &p.DisplayName, &p.MaterializationPolicy, &p.Status,
 			&p.SourceEventHLC, &p.SourceEventDeviceID, &p.SourceEventID,
-			&p.RemoteURL, &p.RemoteKey, &p.DefaultBranch, &p.LFSPolicy, &p.ForgeKind, &p.LocalPath, &p.MaterializationState, &p.DirtyState); err != nil {
+			&p.RemoteURL, &p.RemoteKey, &p.DefaultBranch, &p.LFSPolicy, &p.ForgeKind, &p.LocalPath, &p.MaterializationState, &p.DirtyState, &p.LastError); err != nil {
 			return nil, fmt.Errorf("scan project: %w", err)
 		}
 		projects = append(projects, p)
@@ -1763,23 +1764,45 @@ ORDER BY n.path_key;
 	return projects, rows.Err()
 }
 
-func (s *Store) UpdateProjectLocalState(ctx context.Context, namespaceID, localPath, materialization, dirty string) error {
+func (s *Store) UpdateProjectLocalState(ctx context.Context, namespaceID, localPath, materialization, dirty, lastError string) error {
 	device, err := s.CurrentDevice(ctx)
 	if err != nil {
 		return err
 	}
 	now := timestampNow()
 	_, err = s.db.ExecContext(ctx, `
-INSERT INTO device_project_state (device_id, namespace_id, local_path, materialization_state, dirty_state, updated_at)
-VALUES (?, ?, ?, ?, ?, ?)
+INSERT INTO device_project_state (device_id, namespace_id, local_path, materialization_state, dirty_state, last_error, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(device_id, namespace_id) DO UPDATE SET
   local_path = excluded.local_path,
   materialization_state = excluded.materialization_state,
   dirty_state = excluded.dirty_state,
+  last_error = excluded.last_error,
   updated_at = excluded.updated_at;
-`, device.ID, namespaceID, localPath, materialization, dirty, now)
+`, device.ID, namespaceID, localPath, materialization, dirty, lastError, now)
 	if err != nil {
 		return fmt.Errorf("update project local state: %w", err)
+	}
+	return nil
+}
+
+// RecordProjectWarning persists a non-fatal warning against a project's
+// current device_project_state row without altering its materialization or
+// dirty state (P4-GIT-07). Used for best-effort sub-steps (e.g. env hydrate)
+// that fail without failing the overall materialization. No-op if the row
+// does not exist yet (nothing to annotate).
+func (s *Store) RecordProjectWarning(ctx context.Context, namespaceID, warning string) error {
+	device, err := s.CurrentDevice(ctx)
+	if err != nil {
+		return err
+	}
+	now := timestampNow()
+	_, err = s.db.ExecContext(ctx, `
+UPDATE device_project_state SET last_error = ?, updated_at = ?
+WHERE device_id = ? AND namespace_id = ?;
+`, warning, now, device.ID, namespaceID)
+	if err != nil {
+		return fmt.Errorf("record project warning: %w", err)
 	}
 	return nil
 }

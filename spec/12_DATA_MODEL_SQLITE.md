@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-13
+last_reviewed: 2026-07-14
 tracks_code: [internal/state/**, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # SQLite Data Model
@@ -184,6 +184,8 @@ CREATE TABLE device_project_state (
 ```
 
 Note: `env_ready`/`tooling_ready` exist but are not yet written or read; the derived display status IS computed (`deriveDisplayStatus`, `P5-PROD-01`) from `materialization_state` + `dirty_state` only — expand it to require `env_ready`/`tooling_ready` once those are wired.
+
+**`last_error` (P4-GIT-07, shipped):** the column has always been in the initial schema; writers now populate it. `UpdateProjectLocalState` accepts a scrubbed error string on every materialize/hydrate state write — empty string on success paths clears any prior failure (self-heal). Failure sites prefix the cause (`clone:`, `promote clone:`, `lfs pull:`, `draft extract:`) and run the text through `redact.Scrub` before persistence. Best-effort sub-step failures that do not flip materialization state (e.g. env hydrate after a successful clone) use `RecordProjectWarning`, which updates only `last_error`/`updated_at`. Readers: `ListProjects` / `ProjectByPath` / `ProjectByID` project `COALESCE(dps.last_error, '')` into `ProjectStatus.LastError`; `status` human mode prints a "Failed materializations" section when any project has non-empty `last_error`, and `doctor` emits one `checkWarn` per `materialization_state=failed` project (detail = `last_error`, or a legacy fallback when the row predates this write path). No new migration.
 
 ### device_gitstate (working-state validation plane — sidecar)
 

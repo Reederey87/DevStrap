@@ -1,6 +1,6 @@
 ---
-last_reviewed: 2026-07-11
-tracks_code: [internal/git/**, internal/cli/add.go, internal/cli/clone.go, internal/cli/forge.go, internal/cli/hydrate.go, internal/cli/materialize.go, internal/cli/open.go, internal/cli/repo_lock.go, internal/cli/worktree.go]
+last_reviewed: 2026-07-14
+tracks_code: [internal/git/**, internal/cli/add.go, internal/cli/clone.go, internal/cli/forge.go, internal/cli/hydrate.go, internal/cli/materialize.go, internal/cli/open.go, internal/cli/repo_lock.go, internal/cli/worktree.go, internal/cli/status.go, internal/cli/doctor.go]
 ---
 # Git Materialization and Worktree Design
 
@@ -72,6 +72,14 @@ ephemeral  hydrate for agent/cloud task, then cleanup
 ```
 
 The hydrate implementation stages clones in a hidden sibling temp directory named like `.repo.devstrap-tmp-*` on the same filesystem as the final target, with atomic promotion after a successful clone. It validates the target before staging and revalidates it immediately before promotion, so a late local file blocks promotion without removing the dirty target; clone failures leave the original skeleton in place and the caller cleans staged temp directories before returning. `devstrap sync` drives this same code path eagerly for every namespace entry (`internal/cli/materialize.go`), while explicit `devstrap hydrate` remains for lazy/manual use.
+
+### Persisted materialize failure record (P4-GIT-07, shipped)
+
+Per-project materialize failures still **never abort the batch** (EAGER-04 isolation). What changed is visibility: writers persist the scrubbed failure text into the existing `device_project_state.last_error` column (no migration — the column was already in `00001_initial.sql`).
+
+- **Writers.** Clone failure, promote failure, LFS-policy failure (`always`/`agent`), draft-extract failure, and the empty/broken-HEAD (`materialized-empty`) path all call `UpdateProjectLocalState` with a scrubbed `last_error` (prefixed cause). Success and interim-skeleton writes pass `""`, which clears any stale error. Env hydrate is still best-effort (does not fail the project): on failure it keeps the Warn log and also calls `RecordProjectWarning` so the non-fatal warning is visible without flipping `materialization_state`.
+- **Resume.** Unchanged: `SkeletonProjects` still returns `skeleton` **and** `failed` projects, so the next `sync`/`materialize` retries automatically. There is no `--only-failed` flag and no new retry mechanism.
+- **Surfacing.** `status` (human) prints a "Failed materializations:" section for every project with non-empty `LastError`; `status --json` includes `last_error` on each project via the existing `Summary` payload. `doctor` emits one `warning`-tier check per `materialization_state=failed` project (`Name: materialize: <path>`, `Detail: last_error` or a legacy fallback, remedy points at re-running `materialize`/`sync`); when none failed it reports a single OK check so the suite always shows the check ran.
 
 ### Eager clone-everything on sync (EAGER-*, shipped)
 

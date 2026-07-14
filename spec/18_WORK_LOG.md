@@ -31,6 +31,35 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-14 — feat(state): persisted materialize failure record + status/doctor visibility (P4-GIT-07)
+
+`materializePass` already isolated per-project failures (EAGER-04) and `SkeletonProjects` already retried `failed` projects, but the failure *text* was only logged at Warn and dropped — operators could not see why a project failed from `status`/`doctor`. The schema already had an unused `device_project_state.last_error TEXT` column (migration 00001); no new migration.
+
+Changed:
+- `internal/state/store.go`: `ProjectStatus.LastError`; `ListProjects` / `ProjectByPath` / `ProjectByID` SELECT/Scan `COALESCE(dps.last_error, '')`; `UpdateProjectLocalState` gains a 6th `lastError` arg (empty string clears stale errors on success); new `RecordProjectWarning` for non-fatal sub-step annotations that must not flip materialization/dirty state.
+- `internal/cli/materialize.go` / `hydrate.go`: all `UpdateProjectLocalState` call sites pass scrubbed failure text (or `""` on success); env-hydrate failure additionally `RecordProjectWarning`s while keeping the Warn log.
+- `internal/cli/status.go`: human mode prints a "Failed materializations:" section when any project has non-empty `LastError` (JSON gets the field via the existing `Summary` payload).
+- `internal/cli/doctor.go`: new `checkFailedMaterializations` — one `checkWarn` per `materialization_state=failed` project, or a single OK "0" when clean; wired into `runDoctorChecks`.
+- `internal/cli/materialize_failure_test.go` (new): clone-failure fixture asserts store `last_error`, `status --json`, `doctor --json`, `SkeletonProjects` still lists the failed project, and a subsequent successful materialize clears `last_error` (self-heal regression guard).
+- `spec/08_GIT_MATERIALIZATION_AND_WORKTREES.md`, `spec/12_DATA_MODEL_SQLITE.md`: document the write/read/surface path; bumped `last_reviewed`.
+- Test call sites in `internal/sync/*_test.go` updated for the new `UpdateProjectLocalState` arity (pure signature update — the seeded `dirty_state` fixtures those convergence tests exercise are unaffected).
+- `spec/07_NAMESPACE_AND_SYNC_MODEL.md`: added a `last_error` cross-reference next to the existing `materialization_state`/`dirty_state` tuple doc, and a note on why the `internal/sync/*_test.go` call sites needed the new arg (`cmd/spec-drift` requires a specifically-owned spec for both `internal/cli` and `internal/sync` test-file changes; satisfied here for the sync side and via the new `--json` note below for the CLI side).
+- `spec/13_CLI_DAEMON_API.md`: added a "`status`/`doctor` failure visibility (P4-GIT-07)" note under the `--json` output conventions section, documenting the additive `last_error`/`checkWarn` fields and pointing at `materialize_failure_test.go` as the regression pin (satisfies `cmd/spec-drift`'s CLI-side requirement for the new test file).
+
+Validated:
+- `gofmt -l cmd internal` clean.
+- `golangci-lint run` (pinned v2.12.0) — 0 issues (one run needed a `cache clean` first: a stale cache from a since-removed sibling worktree, `wt-p7-qual-05`, surfaced ~16 phantom gosec issues from files that no longer exist on disk).
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` clean (13 changed files, including the two spec/07 and spec/13 additions above needed to satisfy the specific-owner gate for `internal/cli/materialize_failure_test.go` and `internal/sync/*_test.go`).
+- `GOCACHE=/tmp/devstrap-gocache DEVSTRAP_NO_KEYCHAIN=1 go test -race ./...` all packages pass, including the new `TestMaterializeFailurePersistsLastError`.
+
+Dual-reviewed (Codex + fable-5). Both found the change correct and complete (repo-wide `UpdateProjectLocalState` call-site audit, `RecordProjectWarning`'s row-exists precondition traced through the call chain, the test's deterministic `file://` clone failure verified as the real fallible step). No blocking findings. fable-5 additionally ran the new test under `-race -count=2`.
+
+Follow-ups:
+- Ledger reconciliation for P4-GIT-07 left to the orchestrator (`docs/audits/README.md` not touched here; it uses a different Pass-4 table format than the Pass-7 ledger rows touched in earlier entries this wave).
+- **Labeling/staleness (fable-5 + Codex, both independently flagged the same root cause):** the "Failed materializations:" section in `status` (human mode) surfaces ANY project with non-empty `LastError`, including one whose overall materialize succeeded but had a non-fatal env-hydrate warning (`RecordProjectWarning` does not flip `materialization_state`). Two consequences worth a follow-up: (1) the label reads as misleading for the warning-only case, and `doctor`'s `checkFailedMaterializations` (which filters on `materialization_state == "failed"`) does NOT surface these, so the two surfaces disagree; (2) the warning is also **sticky** — `SkeletonProjects` only retries `""`/`skeleton`/`failed` projects, never an `available`-with-warning one, so a fixed env profile synced from another device never clears the stale warning until someone manually re-runs `materialize <path>`. Candidate fix: either split `status`'s section into "Failed" vs. "Warnings", or have a routine re-sync re-evaluate warning-only projects.
+- **`materialized-empty` doctor blind spot (fable-5):** the empty/broken-HEAD checkout path (`hydrate.go`) now persists a `last_error` and `status` surfaces it, but `checkFailedMaterializations` only checks `materialization_state == "failed"`, so a `materialized-empty` project gets no `doctor` check despite having a recorded error. A natural one-line extension: include `materialized-empty` in the same check.
+- **Latent gap in a third, currently-unreachable writer (fable-5):** `Store.UpsertProject`'s own upsert path (`internal/state/store.go`, the `LocalPath != ""` branch) sets `materialization_state`/`dirty_state` but never touches `last_error`. Not reachable today — `Tx.UpsertProject` (used by `add`/`scan`) ignores `LocalPath`, and every other caller passes an empty `LocalPath` — but a future caller that flips a failed row to available through this path would strand a stale error, silently breaking the "success clears" invariant `spec/12` now documents. Worth a one-line comment or a clearing clause when someone next touches that method.
+
 ## 2026-07-14 — refactor(cli): migrate legacy --json commands to the Renderer seam (P5-CLI-01, part A)
 
 The `Renderer` seam (`internal/cli/render.go`, `opts.render(w, humanFunc, value)`) previously backed only 3 commands (`db backup --full`, `db restore`, `materialize`). Twelve call sites across eight command files still emitted `--json` output through an older, ad hoc `if opts.v.GetBool("json") { enc := json.NewEncoder(stdout); ...; return enc.Encode(v) }` pattern with no shared seam. This is part A of a multi-part rollout — `P5-CLI-01` stays OPEN; the remaining ~25 leaf commands with no `--json` support at all are separate future work (part B).
