@@ -1,6 +1,6 @@
 ---
-last_reviewed: 2026-07-04
-tracks_code: [internal/hub/**, internal/cli/hub.go]
+last_reviewed: 2026-07-14
+tracks_code: [internal/hub/**, internal/cli/hub.go, internal/cli/durability_export.go, internal/cli/doctor.go, internal/cli/run_loop.go, internal/cli/sync.go]
 ---
 # Cloud Provisioning & Configuration Guide
 
@@ -270,6 +270,111 @@ event segments/snapshots, and avoid unbounded prefix scans. Standard storage is 
 default for hot events/blobs; Infrequent Access has retrieval fees and a minimum storage
 duration, so it is not appropriate for the hot event log. A card is required to enable R2
 even while usage stays inside the free tier.
+
+### A.6 Hub durability replica and restore drill (`P4-HUB-16`)
+
+R2 confidentiality is not R2 durability. Cloudflare's current
+[S3 compatibility table](https://developers.cloudflare.com/r2/api/s3/api/) was checked on
+2026-07-14: `GetBucketVersioning` and `PutBucketVersioning` are unsupported.
+`PutObjectLockConfiguration` and `GetObjectLockConfiguration` are also unsupported, and
+Cloudflare's R2 changelog has stated that R2 does not yet support Object Lock. Therefore the
+runbook is **not** “enable S3 versioning + Object Lock.” Use an independently-administered
+replica hub so a primary bucket/account credential, deletion, corruption event, or ransomware
+event does not also destroy the replicated namespace recovery artifact.
+
+DevStrap reuses the normal multi-backend Hub interface. Configure `hub_replica` with a second
+`r2://`, `s3://`, `git+ssh://`, `git@host:path`, `folder:`, or `file:` target. After every
+successful `devstrap sync` (including the sync inside each `run-loop` tick), the client checks
+`durability.export_interval` (default `24h`; `0` disables). When due it reads the signed
+retention head from the primary, verifies the workspace, approved/local producer signature,
+producer identity, and object SHA-256, then copies the exact immutable sealed snapshot named by that head
+under the same `workspaces/<workspace_id>/snapshots/<sha256>.json` key on the replica, then
+CAS-publishes the same signed retention manifest. An already-more-advanced same-workspace head
+is a benign concurrent-exporter success; incomparable progress or a different workspace is
+refused. Snapshot-before-manifest ordering leaves the
+replica directly bootstrappable through the existing fail-closed snapshot-import path. If the
+primary has no compaction snapshot, export prints a skip with the remedy to run
+`devstrap hub compact`; it does not fail the otherwise-successful sync.
+
+This export covers the **event-plane namespace snapshot and retention head only**. It does not
+mirror the Hub blob plane: env-profile ciphertext and draft-bundle ciphertext remain separate
+content-addressed `age_blob:<sha256>` objects, while the snapshot carries only their `BlobRef`
+pointers. After total primary loss, the replica alone can restore namespace metadata (projects,
+device trust, pointers, and other compacted state), but not the referenced env/draft content.
+The RPO for that blob content is therefore whatever a surviving device still has cached locally
+and can re-push, not the scheduled namespace-metadata RPO below. Full blob-plane replication is
+future work; retain local copies on at least one surviving device for this runbook.
+
+The namespace-metadata target RPO is **up to `export_interval` + normal sync lag, default
+~24h**. That assumes the primary compaction snapshot is current: run `devstrap hub compact` at
+least at the same cadence and after important namespace changes. Override the run-loop schedule for one invocation with
+`--durability-export-interval <duration>`; the config key controls both one-shot `sync` and
+`run-loop`. A successful copy is recorded locally in `local_meta`, keyed to the configured
+replica URI, so changing the target forces an immediate first export.
+
+Example: a primary bucket in Cloudflare account A and a replica bucket in separately-controlled
+account B. Replica credentials are deliberately replica-scoped and do not fall back to the
+primary `AWS_*` variables or primary keychain slot:
+
+```yaml
+# ~/.devstrap/config.yaml
+hub: "r2://devstrap-hub-primary"
+hub_replica: "r2://devstrap-hub-dr"
+durability:
+  export_interval: "24h"
+```
+
+```bash
+# Primary credentials keep their existing DEVSTRAP_HUB_S3_* names.
+export DEVSTRAP_HUB_S3_ENDPOINT=https://<ACCOUNT_A_ID>.r2.cloudflarestorage.com
+
+# Replica credentials may be literal ephemeral env values or op:// references.
+export DEVSTRAP_HUB_REPLICA_S3_ENDPOINT=https://<ACCOUNT_B_ID>.r2.cloudflarestorage.com
+export DEVSTRAP_HUB_REPLICA_S3_REGION=auto
+export DEVSTRAP_HUB_REPLICA_S3_ACCESS_KEY_ID='op://DevStrap/R2 DR/access-key-id'
+export DEVSTRAP_HUB_REPLICA_S3_SECRET_ACCESS_KEY='op://DevStrap/R2 DR/secret-access-key'
+
+devstrap hub compact
+devstrap sync
+devstrap doctor
+```
+
+For provider diversity, the replica can instead be a private git carrier:
+
+```yaml
+hub_replica: "git+ssh://git@backup.example.com/devstrap/dr.git?branch=main"
+```
+
+`devstrap doctor` reports `hub durability export` as OK when replication is unconfigured
+(optional defense in depth) or fresh, warns when an opted-in replica has no successful export
+or the last success is older than twice `export_interval`, and gives a sync/run-loop retry
+remedy. A transient replica read/write outage is a loud warning during sync but does not halt
+primary convergence; invalid replica configuration remains a hard failure. Doctor separately
+queries open `event_hash_chain_break` conflicts. A break correlated to a pending workspace-key
+grant and preserved undecryptable predecessor is an expected self-healing **warning**; only an
+unexplained break is an **error** with “possible hub data loss, truncation, or corruption.”
+Generic conflict listing remains unchanged.
+
+Disaster-recovery drill (exercise this after provisioning and periodically thereafter):
+
+1. Run `devstrap hub compact`, then `devstrap sync`; confirm `devstrap doctor` reports a fresh
+   durability export.
+2. From a surviving trusted device, temporarily make the replica URI the primary `hub:` value
+   (retain the same workspace id, approved producer identity, and Workspace Content Key
+   custody). Preserve the old primary setting outside the config before editing it.
+3. Run `devstrap sync`. The replica's retention head forces the existing verified
+   snapshot-bootstrap path when the local cursor is behind; compare `devstrap status` and
+   representative project rows with the pre-drill state.
+4. Restore a clean primary carrier from that trusted device, compact/sync, reinstate the normal
+   primary and replica settings, then run `devstrap doctor` again. Do not delete the replica
+   during the drill. A truly fresh device still needs the normal out-of-band producer pinning
+   and WCK grant ceremony; the zero-knowledge replica cannot manufacture decryption keys.
+
+This is different from `devstrap db backup --full` / `devstrap db restore`. Those commands
+protect one local device's SQLite state, encrypted blobs, config, and key material. Durability
+export protects the Hub's sealed namespace/event-plane compaction snapshot and recovery head
+against primary bucket-level loss or corruption; it does not copy the blob plane described
+above. Use both layers and preserve surviving-device blob caches.
 
 ---
 

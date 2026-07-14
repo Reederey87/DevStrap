@@ -180,6 +180,7 @@ func initConfig(opts *options) error {
 	opts.v.SetDefault("materialization.clone_timeout", "30m")
 	opts.v.SetDefault("sync.key_grant_grace", "72h")
 	opts.v.SetDefault("keys.rotate_max_age", "2160h")
+	opts.v.SetDefault(durabilityExportConfigKey, defaultDurabilityExportInterval.String())
 
 	if opts.cfgFile != "" {
 		opts.v.SetConfigFile(opts.cfgFile)

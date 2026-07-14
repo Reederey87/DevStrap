@@ -2,15 +2,104 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/state"
+	dssync "github.com/Reederey87/DevStrap/internal/sync"
 	"github.com/spf13/viper"
 )
+
+func TestDoctorErrorsOnOpenHubHashChainBreak(t *testing.T) {
+	env, store, _ := setupRecovery(t, true)
+	defer closeStore(store)
+	if err := store.InsertConflict(env.ctx, "", dssync.ConflictEventHashChain, `{"device_id":"dev_lost"}`); err != nil {
+		t.Fatal(err)
+	}
+	results := checkHubHashChainConflicts(env.ctx, store)
+	if len(results) != 1 || results[0].Status != checkError || !strings.Contains(results[0].Detail, "possible hub data loss") {
+		t.Fatalf("hash-chain doctor result = %+v, want data-loss error", results)
+	}
+}
+
+func TestDoctorWarnsOnHashChainHoldExplainedByPendingGrant(t *testing.T) {
+	env, store, _ := setupRecovery(t, true)
+	defer closeStore(store)
+	if _, err := store.NoteMissingKeyGrant(env.ctx, 2, "kid-missing"); err != nil {
+		t.Fatal(err)
+	}
+	carrier := state.Event{
+		ID:          "evt_predecessor",
+		WorkspaceID: env.wsID,
+		DeviceID:    "dev_offline",
+		Seq:         4,
+		HLC:         4,
+		Type:        dssync.EventEncryptedV2,
+		PayloadJSON: `{"v":2,"epoch":2,"kid":"kid-missing","ct":"preserved"}`,
+	}
+	rawCarrier, err := json.Marshal(carrier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawVerification, err := json.Marshal(map[string]any{
+		"kind":       dssync.EventConflictKindUndecryptable,
+		"event_id":   carrier.ID,
+		"device_id":  carrier.DeviceID,
+		"event_json": string(rawCarrier),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertConflict(env.ctx, "", dssync.ConflictEventVerification, string(rawVerification)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertConflict(env.ctx, "", dssync.ConflictEventHashChain, `{"event_id":"evt_successor","device_id":"dev_offline","seq":5}`); err != nil {
+		t.Fatal(err)
+	}
+	results := checkHubHashChainConflicts(env.ctx, store)
+	if len(results) != 1 || results[0].Status != checkWarn || !strings.Contains(results[0].Detail, "explained by pending workspace key grant") {
+		t.Fatalf("hash-chain doctor result = %+v, want pending-grant warning", results)
+	}
+	if strings.Contains(results[0].Detail, "possible hub data loss") {
+		t.Fatalf("pending-grant hold was mislabeled as data loss: %+v", results[0])
+	}
+}
+
+func TestDoctorDurabilityExportStalenessIsOptIn(t *testing.T) {
+	env, store, _ := setupRecovery(t, true)
+	defer closeStore(store)
+	now := time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)
+	results := checkDurabilityExport(env.ctx, env.opts, store, now)
+	if len(results) != 1 || results[0].Status != checkOK || !strings.Contains(results[0].Detail, "not configured") {
+		t.Fatalf("unconfigured durability result = %+v, want informational ok", results)
+	}
+
+	env.opts.v.Set("hub_replica", "file:/replica/hub.json")
+	env.opts.v.Set(durabilityExportConfigKey, "24h")
+	results = checkDurabilityExport(env.ctx, env.opts, store, now)
+	if results[0].Status != checkWarn || !strings.Contains(results[0].Detail, "no successful export") {
+		t.Fatalf("never-exported durability result = %+v, want warning", results)
+	}
+	record := durabilityExportRecord{
+		Replica: "file:/replica/hub.json", SnapshotSHA256: strings.Repeat("a", 64), ExportedAt: now.Add(-49 * time.Hour),
+	}
+	raw, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetLocalMeta(env.ctx, durabilityExportMetaKey, string(raw)); err != nil {
+		t.Fatal(err)
+	}
+	results = checkDurabilityExport(env.ctx, env.opts, store, now)
+	if results[0].Status != checkWarn || !strings.Contains(results[0].Detail, "49h") {
+		t.Fatalf("stale durability result = %+v, want age warning", results)
+	}
+}
 
 func TestShouldWarnWorkspaceIDMismatch(t *testing.T) {
 	tests := []struct {

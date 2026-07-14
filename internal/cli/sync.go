@@ -116,7 +116,7 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 		if !imported {
 			// Keyless joiner: awaiting a grant. recoverFromSnapshot already
 			// printed the defer message; nothing to materialize or push yet.
-			return nil
+			return exportHubDurabilityAfterSync(ctx, stdout, opts, store, hub, hubFile, time.Now())
 		}
 		pull, err = pullAndApplyEvents(ctx, store, hub, hubID)
 		if errors.Is(err, dssync.ErrSnapshotRequired) {
@@ -188,6 +188,9 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 	maybeWriteSyncAck(ctx, store, hub, hubID, opts.paths(), pull, deferred)
 
 	if namespaceOnly {
+		if err := exportHubDurabilityAfterSync(ctx, stdout, opts, store, hub, hubFile, time.Now()); err != nil {
+			return err
+		}
 		if deferred {
 			opts.progressf(stdout, "Synced namespace events: pulled %d; %d local event(s) queued awaiting workspace key grant\n", len(remoteEvents), len(localEvents))
 			return nil
@@ -208,7 +211,7 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 	}
 	opts.progressf(stdout, "Synced events: pushed %d, pulled %d; materialized %d/%d projects (%d skipped)\n",
 		pushed, len(remoteEvents), results.succeeded, results.total, results.skipped)
-	return nil
+	return exportHubDurabilityAfterSync(ctx, stdout, opts, store, hub, hubFile, time.Now())
 }
 
 // pullApplyOutcome reports one pull+apply pass: the decrypted events and the
