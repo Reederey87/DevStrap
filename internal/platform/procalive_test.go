@@ -1,3 +1,5 @@
+//go:build darwin || linux || windows
+
 package platform
 
 import (
@@ -7,6 +9,12 @@ import (
 	"os/exec"
 	"testing"
 )
+
+// These tests require a build with a real liveness-checking ProcessAlive
+// (darwin/linux/windows); the conservative unsupported-platform fallback
+// (procalive_other.go) cannot positively confirm a process dead — including
+// after a helper process it spawned exits — so it cannot satisfy either
+// assertion below (CodeRabbit review, PR #198).
 
 const processAliveHelperEnv = "DEVSTRAP_WANT_PROCESS_ALIVE_HELPER"
 

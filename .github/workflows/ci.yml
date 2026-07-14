@@ -224,7 +224,13 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Test (platform-safe packages)
-        run: go test ./internal/platform/... ./internal/pathkey/... ./internal/ignore/... ./internal/git/... ./internal/draftbundle/... ./internal/envfile/... ./internal/redact/... ./internal/id/... ./internal/pairing/...
+        # internal/git is intentionally excluded: its test harness fakes a
+        # `git` executable via a Unix-style PATH prepend, which does not
+        # resolve on Windows (needs a .exe/.bat shim or a different fixture
+        # mechanism) — a test-infrastructure gap, not a production-code bug.
+        # Confirmed on this job's first real run (P4-QUAL-04); tracked as a
+        # follow-up in spec/18_WORK_LOG.md rather than fixed here.
+        run: go test ./internal/platform/... ./internal/pathkey/... ./internal/ignore/... ./internal/draftbundle/... ./internal/envfile/... ./internal/redact/... ./internal/id/... ./internal/pairing/...
 
   service-e2e:
     name: Service E2E (${{ matrix.os }})
