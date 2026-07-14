@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-13
+last_reviewed: 2026-07-14
 tracks_code: [internal/platform/**, internal/devicekeys/**, .github/**]
 ---
 # Linux Compatibility Plan
@@ -9,6 +9,12 @@ tracks_code: [internal/platform/**, internal/devicekeys/**, .github/**]
 Keep the portable Go core identical on macOS and Linux so a Linux box is a first-class DevStrap node now, not "early" — Ubuntu parity is a present requirement, not a later port. DevStrap targets mixed macOS/Linux fleets (developer workstations, headless servers, cloud machines, and agent runners), so the same `~/Code` tree and the same `devstrap sync` behavior must appear identically on both platforms from the one portable binary.
 
 The 2026-06-28 cloud-sync decisions (recorded in `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`, extending the 2026-06-27 second-pass audit) make this explicit: **cross-platform core first, OS-specific magic deferred** (workstream `XP-*`). Because target fleets are mixed by design — desktops and laptops across macOS and Linux, plus headless/cloud/agent runners — the same `~/Code` tree and the same `devstrap sync` eager-clone behavior must appear identically on macOS and Ubuntu running the one portable binary. No native daemon, FSEvents/inotify-specific watcher, or StrapFS is built this cycle on either platform; those remain deferred. The systemd unit below is a documented target, not shipped code.
+
+## Windows first-pass smoke (`P4-QUAL-04`)
+
+Windows is not yet a supported parity target, but process-liveness checks used by repo and folder-hub locks are now routed through one build-tagged `internal/platform.ProcessAlive` adapter. Darwin/Linux use signal 0 and treat only `ESRCH`/`os.ErrProcessDone` as dead; Windows uses `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` plus `GetExitCodeProcess` and treats `STILL_ACTIVE` (259), access denial, and other indeterminate results as alive. Unsupported platforms return alive unconditionally. The shared contract is fail-safe: a lock is stealable only when its holder is positively confirmed gone.
+
+CI has a separate advisory `windows-latest` smoke job that builds and vets `./...`, then tests the platform-safe `pathkey`, `ignore`, `draftbundle`, `envfile`, `redact`, `id`, and `pairing` packages plus only this PR's own tests within `internal/platform` (`TestProcessAlive*`, `TestRuntimeGOOSBranchesStayInPlatformPackage`). `internal/git` is excluded entirely: its test harness fakes a `git` executable via a Unix-style `PATH` prepend that does not resolve on Windows — a test-fixture gap, not a production-code bug. The rest of `internal/platform` is deliberately NOT run wholesale: most of its pure-logic golden tests (bwrap/Seatbelt credential deny-lists, launchd/systemd unit rendering) hardcode Unix-style absolute paths and fail on Windows — a pre-existing cross-platform-test gap, confirmed on this job's first real runs and tracked as a follow-up, unrelated to the `ProcessAlive` fix this job exists to smoke-test. The job also deliberately excludes the broader CLI/hub/state suites and remains `continue-on-error` for its first cycle; this is build/vet/narrow-test visibility, not a claim of full Windows support.
 
 ## Linux target
 

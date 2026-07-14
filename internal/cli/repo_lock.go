@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/Reederey87/DevStrap/internal/platform"
@@ -15,7 +14,7 @@ import (
 
 var (
 	repoLockStaleAfter   = 30 * time.Minute
-	repoLockProcessAlive = processAlive
+	repoLockProcessAlive = platform.ProcessAlive
 	processStartTime     = platform.ProcessStartTime
 )
 
@@ -210,14 +209,6 @@ func removeStaleRepoLock(lockPath string) error {
 		return fmt.Errorf("remove stale repo lock: %w", err)
 	}
 	return nil
-}
-
-func processAlive(pid int) bool {
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return process.Signal(syscall.Signal(0)) == nil
 }
 
 // processIdentityAlive reports whether pid is alive AND, when a start-time

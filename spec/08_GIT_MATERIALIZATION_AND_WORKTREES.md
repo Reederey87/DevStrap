@@ -404,7 +404,7 @@ Later:
 - **FORGE-01**: New `internal/cli/forge.go` with `DetectForge(remoteURL)`, `createForgePR` routing to `gh`/`glab`/`tea` based on detected forge; unknown forges get graceful degradation (branch pushed + compare URL).
 - **FORGE-02**: PR env allowlist is now forge-aware (GH_*/GITLAB_TOKEN/GLAB_*/GITEA_TOKEN/TEA_*/BITBUCKET_*/AZURE_DEVOPS_EXT_PAT).
 - **FORGE-03**: `normalizeHostPath` unifies Azure DevOps SSH (`ssh.dev.azure.com/v3/`) and HTTPS (`dev.azure.com/_git/`) forms to `dev.azure.com/org/proj/repo`.
-- **GIT-01**: `repoLockIsStale` treats same-host liveness as authoritative over age; a live PID is never declared stale regardless of `acquired_at`.
+- **GIT-01 / P4-QUAL-04**: `repoLockIsStale` treats same-host liveness as authoritative over age; both repo locks and folder-hub locks use the shared build-tagged `platform.ProcessAlive` adapter. Only a PID positively confirmed absent is dead; permission-denied or otherwise indeterminate checks stay alive, so an inaccessible live holder's lock is never stolen. A live PID is never declared stale regardless of `acquired_at`.
 - **NOVCS-01**: Scanner classifies no-remote/unvalidated-remote repos as `local_git` instead of `git_repo`.
 - **NOVCS-04**: `createFreshWorktree` preflights `project.RemoteKey == ""` with an actionable error.
 - **M2 (review fix)**: Agent run cleans up the just-created worktree when `enforceAgentFilePolicy` denies the command, preventing orphan git worktrees and DB rows.
