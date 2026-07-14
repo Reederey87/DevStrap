@@ -477,15 +477,12 @@ func newAgentListCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if opts.v.GetBool("json") {
-				enc := json.NewEncoder(stdout)
-				enc.SetIndent("", "  ")
-				return enc.Encode(runs)
-			}
-			for _, run := range runs {
-				_, _ = fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\n", run.ID, run.Status, run.Engine, run.Branch, run.Task)
-			}
-			return nil
+			return opts.render(stdout, func(w io.Writer) error {
+				for _, run := range runs {
+					_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", run.ID, run.Status, run.Engine, run.Branch, run.Task)
+				}
+				return nil
+			}, runs)
 		},
 	}
 }
@@ -512,30 +509,28 @@ func newAgentShowCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if opts.v.GetBool("json") {
-				enc := json.NewEncoder(stdout)
-				enc.SetIndent("", "  ")
-				return enc.Encode(struct {
-					state.AgentRun
-					Violations []state.SandboxViolation `json:"violations"`
-				}{AgentRun: run, Violations: violations})
-			}
-			if _, err := fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\nlog: %s\ndiff:\n%s\n", run.ID, run.Status, run.Engine, run.Task, run.LogPath, emptySummary(run.DiffSummary)); err != nil {
-				return err
-			}
-			if run.SandboxBackend != "" || run.SandboxMode != "" {
-				_, _ = fmt.Fprintf(stdout, "sandbox: %s mode=%s\n", emptyDash(run.SandboxBackend), run.SandboxMode)
-			}
-			if run.SandboxLimitations != "" {
-				_, _ = fmt.Fprintf(stdout, "sandbox limitations: %s\n", run.SandboxLimitations)
-			}
-			if len(violations) > 0 {
-				_, _ = fmt.Fprintf(stdout, "sandbox violations: %d\n", len(violations))
-				for _, v := range violations {
-					_, _ = fmt.Fprintf(stdout, "  %s %s\n", v.Operation, emptyDash(v.Path))
+			payload := struct {
+				state.AgentRun
+				Violations []state.SandboxViolation `json:"violations"`
+			}{AgentRun: run, Violations: violations}
+			return opts.render(stdout, func(w io.Writer) error {
+				if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\nlog: %s\ndiff:\n%s\n", run.ID, run.Status, run.Engine, run.Task, run.LogPath, emptySummary(run.DiffSummary)); err != nil {
+					return err
 				}
-			}
-			return nil
+				if run.SandboxBackend != "" || run.SandboxMode != "" {
+					_, _ = fmt.Fprintf(w, "sandbox: %s mode=%s\n", emptyDash(run.SandboxBackend), run.SandboxMode)
+				}
+				if run.SandboxLimitations != "" {
+					_, _ = fmt.Fprintf(w, "sandbox limitations: %s\n", run.SandboxLimitations)
+				}
+				if len(violations) > 0 {
+					_, _ = fmt.Fprintf(w, "sandbox violations: %d\n", len(violations))
+					for _, v := range violations {
+						_, _ = fmt.Fprintf(w, "  %s %s\n", v.Operation, emptyDash(v.Path))
+					}
+				}
+				return nil
+			}, payload)
 		},
 	}
 }

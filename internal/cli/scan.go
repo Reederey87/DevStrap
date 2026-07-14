@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -77,38 +76,35 @@ func newScanCommand(stdout io.Writer, opts *options) *cobra.Command {
 					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "quarantined secret file %s -> %s\n", m.from, m.to)
 				}
 			}
-			if opts.v.GetBool("json") {
-				enc := json.NewEncoder(stdout)
-				enc.SetIndent("", "  ")
-				return enc.Encode(result)
-			}
-			for _, finding := range result.Findings {
-				_, _ = fmt.Fprintf(stdout, "%s\t%s", finding.Path, finding.Type)
-				if finding.RemoteKey != "" {
-					_, _ = fmt.Fprintf(stdout, "\t%s", finding.RemoteKey)
+			return opts.render(stdout, func(w io.Writer) error {
+				for _, finding := range result.Findings {
+					_, _ = fmt.Fprintf(w, "%s\t%s", finding.Path, finding.Type)
+					if finding.RemoteKey != "" {
+						_, _ = fmt.Fprintf(w, "\t%s", finding.RemoteKey)
+					}
+					_, _ = fmt.Fprintln(w)
+					for _, warning := range finding.Warnings {
+						_, _ = fmt.Fprintf(w, "  warning: %s\n", warning)
+					}
 				}
-				_, _ = fmt.Fprintln(stdout)
-				for _, warning := range finding.Warnings {
-					_, _ = fmt.Fprintf(stdout, "  warning: %s\n", warning)
+				for _, duplicate := range result.Duplicates {
+					_, _ = fmt.Fprintf(w, "duplicate remote %s: %v; recommended %s\n", duplicate.RemoteKey, duplicate.Paths, duplicate.RecommendedPath)
 				}
-			}
-			for _, duplicate := range result.Duplicates {
-				_, _ = fmt.Fprintf(stdout, "duplicate remote %s: %v; recommended %s\n", duplicate.RemoteKey, duplicate.Paths, duplicate.RecommendedPath)
-			}
-			for _, warning := range result.Warnings {
-				_, _ = fmt.Fprintf(stdout, "warning: %s\n", warning)
-			}
-			if result.PrunedDirs > 0 {
-				// Informational, not a warning: routine default prunes
-				// (node_modules, build dirs) would otherwise chatter on every
-				// run-loop tick. Re-include a dir with a negation (e.g.
-				// "!bin/") in the workspace root .devstrapignore.
-				opts.progressf(stdout, "Pruned %d directories per ignore rules (defaults + root .devstrapignore)\n", result.PrunedDirs)
-			}
-			if adopt && !dryRun {
-				opts.progressf(stdout, "Adopted %d projects\n", len(result.Findings))
-			}
-			return nil
+				for _, warning := range result.Warnings {
+					_, _ = fmt.Fprintf(w, "warning: %s\n", warning)
+				}
+				if result.PrunedDirs > 0 {
+					// Informational, not a warning: routine default prunes
+					// (node_modules, build dirs) would otherwise chatter on every
+					// run-loop tick. Re-include a dir with a negation (e.g.
+					// "!bin/") in the workspace root .devstrapignore.
+					opts.progressf(w, "Pruned %d directories per ignore rules (defaults + root .devstrapignore)\n", result.PrunedDirs)
+				}
+				if adopt && !dryRun {
+					opts.progressf(w, "Adopted %d projects\n", len(result.Findings))
+				}
+				return nil
+			}, result)
 		},
 	}
 	cmd.Flags().BoolVar(&adopt, "adopt", false, "write discovered projects to local state")

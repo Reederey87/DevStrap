@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-13
+last_reviewed: 2026-07-14
 tracks_code: [cmd/**, internal/cli/**, internal/platform/**]
 ---
 # CLI and Daemon API
@@ -12,6 +12,23 @@ tracks_code: [cmd/**, internal/cli/**, internal/platform/**]
 - keep commands composable;
 - JSON output for automation;
 - human-friendly rich output by default.
+
+## `--json` output conventions (P5-CLI-01)
+
+Every command's terminal output should route through the `Renderer` seam (`internal/cli/render.go`): `opts.render(w, humanFunc, typedValue)` encodes `typedValue` as indented JSON when `--json` is set, otherwise it invokes `humanFunc`. This is the single seam — never an ad hoc `if opts.v.GetBool("json") { ... }` block inside a command's business logic — so `--json` is a uniform contract instead of a flag a minority of commands honor. The seam originally backed only `db backup --full`, `db restore`, and `materialize`; twelve more call sites across eight commands (`agent list`/`agent show`, `conflicts list`/`conflicts show`, `devices list`, `doctor`, `scan`, `worktree unlock`/`worktree status`/`worktree list`, `status`, `service status`) were migrated to it in the same change that added this section (`P5-CLI-01`, part A — see "Migration/compat rule" below). Roughly 25 leaf commands still have no `--json` support at all; wiring those is separate future work (part B) and does not close the `P5-CLI-01` finding. The conventions below are derived from the precedent already established across all fifteen current call sites and the typed values they encode (`state.Device`, `state.ProjectStatus`, `state.Conflict`, `state.AgentRun`, `state.Summary`, `fullBackupResult`, `checkResult`, `repoLockReport`, `worktreeStatusOutput`, `serviceStatusJSON`, `scan.Result`), not invented fresh.
+
+**Field naming.** Every `json:` tag in the codebase is `snake_case` for multi-word fields (`project_id`, `base_ref`, `dirty_state`, `workspace_id`, `remote_key`, `sandbox_backend`, `runner_started_at`, `exec_path_missing`, `warnings`, `secrets`, `entries`, ...). There is no camelCase precedent anywhere in `internal/state`, `internal/scan`, or `internal/cli`. New JSON-emitting types must use `snake_case` tags.
+
+**Named vs. anonymous inline result types.** Existing call sites follow one of three shapes, and new commands should pick the same way:
+- If the JSON payload *is* an existing exported type from its owning package (e.g. a list of `state.Device`, `state.ProjectStatus`, `state.Worktree`, or `state.Conflict` rows), encode that type directly — bare array or bare object — rather than introducing a synthetic wrapper. Don't add a wrapper struct purely to "give it a name."
+- If the payload assembles fields from multiple sources, needs derived/computed fields not on any store type, or is rendered by more than one code path, define a named struct at file scope in `internal/cli` (the `repoLockReport`, `worktreeStatusOutput`, `checkResult`, `serviceStatusJSON`, `fullBackupResult` pattern). Prefer this default for anything beyond a one-off.
+- Reserve an anonymous inline struct literal (the `materialize.go` pattern) for a single trivial summary that exists only to be passed once to `opts.render` and is never referenced elsewhere. When a payload needs to combine an existing typed value with one extra field, anonymous struct embedding is acceptable (`agent show`'s `struct { state.AgentRun; Violations []state.SandboxViolation \`json:"violations"\` }`).
+
+**Optional fields: value + `omitempty`, not pointers.** No type in the codebase uses a pointer field for an optional JSON value (e.g. `*string`); every optional field is a plain value type tagged `,omitempty` (`PID int` `json:"pid,omitempty"`, `Hostname string` `json:"hostname,omitempty"`, `ExecPath string` `json:"exec_path,omitempty"`). Follow this default: a pointer is only justified if the field's zero value (`0`, `""`, `false`) is itself a meaningful, distinct-from-absent observation that must round-trip — no shipped command currently needs that, so don't introduce a pointer field without a concrete case for it.
+
+**Warnings / partial-failure shape.** `P7-CLI-01` set the standard: a result struct carries a `Warnings []string` `json:"warnings,omitempty"` field (see `fullBackupResult`, `scan.Result`, `restoreResult`). Non-fatal warnings are appended to that slice instead of being `Fprintf`'d to stdout ahead of the JSON payload. The human-render callback passed to `opts.render` prints each warning line (`"warning: %s\n"`) before its summary; the JSON branch carries the same warnings inside the payload. This keeps `--json` stdout a single parseable document in both the success and partial-warning cases. New commands that can produce non-fatal warnings should follow this shape rather than writing warning text directly to stdout.
+
+**Migration/compat rule for this PR.** The twelve call sites across eight commands (`agent list`/`agent show`, `conflicts list`/`conflicts show`, `devices list`, `doctor`, `scan`, `worktree unlock`/`worktree status`/`worktree list`, `status`, `service status`) previously emitted `--json` output through an older inline `json.NewEncoder(stdout)` pattern rather than the `Renderer` seam. This change migrated all twelve to `opts.render` while **preserving each command's exact prior JSON output shape byte-for-byte** — only the internal call moved from a raw `json.NewEncoder`/`enc.Encode` block to `opts.render`; no field was renamed, added, removed, reordered, or reshaped as part of that move (see `internal/cli/render_migration_test.go`, which pins the shape for the ten call sites that had no prior `--json` test coverage). The conventions in this section govern *new* commands and any deliberate future reshaping of these commands' output — they do not retroactively authorize a breaking change to `--json` consumers of these commands going forward.
 
 ## Command groups
 
