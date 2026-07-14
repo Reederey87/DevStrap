@@ -256,6 +256,7 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 			results = append(results, checkForgeCLIs(ctx, opts, store)...)
 			results = append(results, checkAgentRunSweep(ctx, opts, store)...)
 			results = append(results, checkSandboxViolations(ctx, store)...)
+			results = append(results, checkFailedMaterializations(ctx, store)...)
 			results = append(results, checkBloblessCaveat(ctx, store)...)
 		}
 	} else if os.IsNotExist(err) {
@@ -365,6 +366,36 @@ func checkSandboxViolations(ctx context.Context, store *state.Store) []checkResu
 		Detail: fmt.Sprintf("%d run(s) with denials", n),
 		Remedy: "inspect with `devstrap agent show <run-id>`; a denial means the agent tried an operation the OS sandbox blocked — expected for hostile/buggy tools, investigate unexpected ones",
 	}}
+}
+
+// checkFailedMaterializations surfaces projects whose last materialize attempt
+// left materialization_state=failed (P4-GIT-07). Detail carries the scrubbed
+// last_error text when present so operators can see why without grepping logs.
+func checkFailedMaterializations(ctx context.Context, store *state.Store) []checkResult {
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return []checkResult{{Name: "failed materializations", Status: checkWarn, Detail: err.Error()}}
+	}
+	var out []checkResult
+	for _, p := range projects {
+		if p.MaterializationState != "failed" {
+			continue
+		}
+		detail := p.LastError
+		if detail == "" {
+			detail = "materialization failed (no recorded error)"
+		}
+		out = append(out, checkResult{
+			Name:   "materialize: " + p.Path,
+			Status: checkWarn,
+			Detail: detail,
+			Remedy: "re-run 'devstrap materialize' or 'devstrap sync' to retry",
+		})
+	}
+	if len(out) == 0 {
+		return []checkResult{{Name: "failed materializations", Status: checkOK, Detail: "0"}}
+	}
+	return out
 }
 
 func checkTool(name string, required bool) checkResult {

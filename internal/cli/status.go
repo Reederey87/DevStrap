@@ -107,6 +107,20 @@ func renderStatus(ctx context.Context, stdout io.Writer, opts *options) error {
 				}
 				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", project.Path, project.Type, status, dirty)
 			}
+			// P4-GIT-07: surface persisted materialize failure/warning text so
+			// operators can see WHY a project failed (not just that it failed).
+			var failed []state.ProjectStatus
+			for _, project := range summary.Projects {
+				if project.LastError != "" {
+					failed = append(failed, project)
+				}
+			}
+			if len(failed) > 0 {
+				_, _ = fmt.Fprintln(w, "\nFailed materializations:")
+				for _, project := range failed {
+					_, _ = fmt.Fprintf(w, "  %s: %s\n", project.Path, project.LastError)
+				}
+			}
 		}
 		return nil
 	}, summary)

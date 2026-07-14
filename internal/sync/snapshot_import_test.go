@@ -168,7 +168,7 @@ func TestImportSnapshotDirtyTombstoneConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.UpdateProjectLocalState(ctx, project.ID, "/tmp/Code/work/dirty", "available", "dirty"); err != nil {
+	if err := st.UpdateProjectLocalState(ctx, project.ID, "/tmp/Code/work/dirty", "available", "dirty", ""); err != nil {
 		t.Fatal(err)
 	}
 	snap := importOnly(nil, []SnapshotTombstone{{PathKey: "work/dirty", TombstoneHLC: h(900), SourceEventDeviceID: "dev_a", SourceEventID: "evt_del"}})
