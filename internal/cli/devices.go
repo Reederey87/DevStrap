@@ -231,24 +231,21 @@ func newDevicesListCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if opts.v.GetBool("json") {
-				enc := json.NewEncoder(stdout)
-				enc.SetIndent("", "  ")
-				return enc.Encode(devices)
-			}
-			for _, device := range devices {
-				// P4-SEC-04: fingerprint is the LAST column so existing awk
-				// scrapes of the earlier fields stay stable. A row missing
-				// either key (a bare placeholder) has no bindable fingerprint.
-				fp := "-"
-				if device.SigningPublicKey != "" && device.PublicKey != "" {
-					if computed, err := devicekeys.Fingerprint(device.SigningPublicKey, device.PublicKey); err == nil {
-						fp = computed
+			return opts.render(stdout, func(w io.Writer) error {
+				for _, device := range devices {
+					// P4-SEC-04: fingerprint is the LAST column so existing awk
+					// scrapes of the earlier fields stay stable. A row missing
+					// either key (a bare placeholder) has no bindable fingerprint.
+					fp := "-"
+					if device.SigningPublicKey != "" && device.PublicKey != "" {
+						if computed, err := devicekeys.Fingerprint(device.SigningPublicKey, device.PublicKey); err == nil {
+							fp = computed
+						}
 					}
+					_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s/%s\t%s\n", device.ID, device.TrustState, device.Name, device.OS, device.Arch, fp)
 				}
-				_, _ = fmt.Fprintf(stdout, "%s\t%s\t%s\t%s/%s\t%s\n", device.ID, device.TrustState, device.Name, device.OS, device.Arch, fp)
-			}
-			return nil
+				return nil
+			}, devices)
 		},
 	}
 }

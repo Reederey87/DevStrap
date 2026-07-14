@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -77,42 +76,40 @@ func renderStatus(ctx context.Context, stdout io.Writer, opts *options) error {
 		return err
 	}
 
-	if opts.v.GetBool("json") {
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(summary)
-	}
-
-	// P4-SEC-07 pairing: surface the workspace id so a founder can copy it for
-	// `init --join --workspace-id <id>` on a joining device, and so two devices
-	// can eyeball-compare that they share one hub prefix.
-	if _, err := fmt.Fprintf(stdout, "Workspace: %s\nWorkspace ID: %s\nRoot: %s\nProjects: %d\n", summary.WorkspaceName, summary.WorkspaceID, summary.RootPath, summary.ProjectCount); err != nil {
-		return err
-	}
-	// PROD-02: surface open conflict count in status.
-	if n, err := store.CountOpenConflicts(ctx); err == nil && n > 0 {
-		_, _ = fmt.Fprintf(stdout, "Open conflicts: %d (run `devstrap conflicts` to inspect)\n", n)
-	}
-	// P6-SYNC-02: surface skipped hub events — objects this device's pulls
-	// keep dropping (unknown envelope version, retired enc.v1, anti-downgrade
-	// plaintext); each holds its origin device's cursor until it applies.
-	if skipped, err := store.OpenSkippedEvents(ctx); err == nil && len(skipped) > 0 {
-		_, _ = fmt.Fprintf(stdout, "Skipped hub events: %d (run `devstrap doctor` for reasons)\n", len(skipped))
-	}
-	if len(summary.Projects) > 0 {
-		_, _ = fmt.Fprintln(stdout, "\nProject\tType\tStatus\tDirty")
-		for _, project := range summary.Projects {
-			// PROD-01: derive a display status from the materialization and
-			// dirty states instead of showing raw values.
-			status := deriveDisplayStatus(project.MaterializationState, project.DirtyState)
-			dirty := project.DirtyState
-			if dirty == "" {
-				dirty = "unknown"
-			}
-			_, _ = fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", project.Path, project.Type, status, dirty)
+	// status --watch --json reuses this path each tick: one full JSON document
+	// per render, no wrapper/delta framing (screen-clear stays outside when json).
+	return opts.render(stdout, func(w io.Writer) error {
+		// P4-SEC-07 pairing: surface the workspace id so a founder can copy it for
+		// `init --join --workspace-id <id>` on a joining device, and so two devices
+		// can eyeball-compare that they share one hub prefix.
+		if _, err := fmt.Fprintf(w, "Workspace: %s\nWorkspace ID: %s\nRoot: %s\nProjects: %d\n", summary.WorkspaceName, summary.WorkspaceID, summary.RootPath, summary.ProjectCount); err != nil {
+			return err
 		}
-	}
-	return nil
+		// PROD-02: surface open conflict count in status.
+		if n, err := store.CountOpenConflicts(ctx); err == nil && n > 0 {
+			_, _ = fmt.Fprintf(w, "Open conflicts: %d (run `devstrap conflicts` to inspect)\n", n)
+		}
+		// P6-SYNC-02: surface skipped hub events — objects this device's pulls
+		// keep dropping (unknown envelope version, retired enc.v1, anti-downgrade
+		// plaintext); each holds its origin device's cursor until it applies.
+		if skipped, err := store.OpenSkippedEvents(ctx); err == nil && len(skipped) > 0 {
+			_, _ = fmt.Fprintf(w, "Skipped hub events: %d (run `devstrap doctor` for reasons)\n", len(skipped))
+		}
+		if len(summary.Projects) > 0 {
+			_, _ = fmt.Fprintln(w, "\nProject\tType\tStatus\tDirty")
+			for _, project := range summary.Projects {
+				// PROD-01: derive a display status from the materialization and
+				// dirty states instead of showing raw values.
+				status := deriveDisplayStatus(project.MaterializationState, project.DirtyState)
+				dirty := project.DirtyState
+				if dirty == "" {
+					dirty = "unknown"
+				}
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", project.Path, project.Type, status, dirty)
+			}
+		}
+		return nil
+	}, summary)
 }
 
 // deriveDisplayStatus maps the raw materialization and dirty states to a

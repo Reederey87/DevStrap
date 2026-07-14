@@ -47,28 +47,25 @@ func runConflictsList(cmd *cobra.Command, stdout io.Writer, opts *options) error
 	if err != nil {
 		return err
 	}
-	if opts.v.GetBool("json") {
-		enc := json.NewEncoder(stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(conflicts)
-	}
-	if len(conflicts) == 0 {
-		_, err = fmt.Fprintln(stdout, "No open conflicts.")
-		return err
-	}
-	_, _ = fmt.Fprintf(stdout, "%d open conflict(s):\n\n", len(conflicts))
-	for _, c := range conflicts {
-		_, _ = fmt.Fprintf(stdout, "ID: %s\nType: %s\n", c.ID, c.Type)
-		if c.NamespaceID != "" {
-			_, _ = fmt.Fprintf(stdout, "Project: %s\n", c.NamespaceID)
+	return opts.render(stdout, func(w io.Writer) error {
+		if len(conflicts) == 0 {
+			_, err = fmt.Fprintln(w, "No open conflicts.")
+			return err
 		}
-		// event_verification_failure details embed a full remote event payload;
-		// scrub token-shaped values before display (defense-in-depth — payloads
-		// are attacker-influenced strings from unverified devices).
-		_, _ = fmt.Fprintf(stdout, "Details: %s\n\n", redact.Scrub(c.DetailsJSON))
-	}
-	_, _ = fmt.Fprintln(stdout, "Resolve with: devstrap conflicts resolve <id> --keep-local|--keep-remote|--keep-both")
-	return nil
+		_, _ = fmt.Fprintf(w, "%d open conflict(s):\n\n", len(conflicts))
+		for _, c := range conflicts {
+			_, _ = fmt.Fprintf(w, "ID: %s\nType: %s\n", c.ID, c.Type)
+			if c.NamespaceID != "" {
+				_, _ = fmt.Fprintf(w, "Project: %s\n", c.NamespaceID)
+			}
+			// event_verification_failure details embed a full remote event payload;
+			// scrub token-shaped values before display (defense-in-depth — payloads
+			// are attacker-influenced strings from unverified devices).
+			_, _ = fmt.Fprintf(w, "Details: %s\n\n", redact.Scrub(c.DetailsJSON))
+		}
+		_, _ = fmt.Fprintln(w, "Resolve with: devstrap conflicts resolve <id> --keep-local|--keep-remote|--keep-both")
+		return nil
+	}, conflicts)
 }
 
 func newConflictsShowCommand(stdout io.Writer, opts *options) *cobra.Command {
@@ -89,17 +86,14 @@ func newConflictsShowCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// Scrub token-shaped values from attacker-influenced details before
 			// display (the stored row keeps the full payload for replay).
 			c.DetailsJSON = redact.Scrub(c.DetailsJSON)
-			if opts.v.GetBool("json") {
-				enc := json.NewEncoder(stdout)
-				enc.SetIndent("", "  ")
-				return enc.Encode(c)
-			}
-			_, _ = fmt.Fprintf(stdout, "ID: %s\nType: %s\nStatus: %s\n", c.ID, c.Type, c.Status)
-			if c.NamespaceID != "" {
-				_, _ = fmt.Fprintf(stdout, "Project: %s\n", c.NamespaceID)
-			}
-			_, _ = fmt.Fprintf(stdout, "Details: %s\n", c.DetailsJSON)
-			return nil
+			return opts.render(stdout, func(w io.Writer) error {
+				_, _ = fmt.Fprintf(w, "ID: %s\nType: %s\nStatus: %s\n", c.ID, c.Type, c.Status)
+				if c.NamespaceID != "" {
+					_, _ = fmt.Fprintf(w, "Project: %s\n", c.NamespaceID)
+				}
+				_, _ = fmt.Fprintf(w, "Details: %s\n", c.DetailsJSON)
+				return nil
+			}, c)
 		},
 	}
 }

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -67,14 +66,11 @@ func newDoctorCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if remoteFlag {
 				results = append(results, checkHubHealth(cmd.Context(), opts, hubFile)...)
 			}
-			if opts.v.GetBool("json") {
-				enc := json.NewEncoder(stdout)
-				enc.SetIndent("", "  ")
-				if err := enc.Encode(results); err != nil {
-					return err
-				}
-			} else {
-				renderDoctorResults(stdout, results)
+			if err := opts.render(stdout, func(w io.Writer) error {
+				renderDoctorResults(w, results)
+				return nil
+			}, results); err != nil {
+				return err
 			}
 			errs := 0
 			for _, r := range results {

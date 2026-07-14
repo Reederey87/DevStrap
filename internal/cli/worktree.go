@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -74,20 +73,17 @@ func newWorktreeUnlockCommand(stdout io.Writer, opts *options) *cobra.Command {
 				}
 				report.Cleared = cleared
 			}
-			if opts.v.GetBool("json") {
-				enc := json.NewEncoder(stdout)
-				enc.SetIndent("", "  ")
-				return enc.Encode(report)
-			}
-			switch {
-			case !held:
-				_, err = fmt.Fprintf(stdout, "No repo lock held for %s\n", project.Path)
-			case report.Cleared:
-				_, err = fmt.Fprintf(stdout, "Cleared %s repo lock for %s (pid %d on %s, acquired %s)\n", staleLabel(stale), project.Path, info.PID, info.Hostname, info.AcquiredAt)
-			default:
-				_, err = fmt.Fprintf(stdout, "Repo lock for %s held by pid %d on %s (acquired %s)\n", project.Path, info.PID, info.Hostname, info.AcquiredAt)
-			}
-			return err
+			return opts.render(stdout, func(w io.Writer) error {
+				switch {
+				case !held:
+					_, err = fmt.Fprintf(w, "No repo lock held for %s\n", project.Path)
+				case report.Cleared:
+					_, err = fmt.Fprintf(w, "Cleared %s repo lock for %s (pid %d on %s, acquired %s)\n", staleLabel(stale), project.Path, info.PID, info.Hostname, info.AcquiredAt)
+				default:
+					_, err = fmt.Fprintf(w, "Repo lock for %s held by pid %d on %s (acquired %s)\n", project.Path, info.PID, info.Hostname, info.AcquiredAt)
+				}
+				return err
+			}, report)
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "clear the lock even if its holder appears alive")
@@ -312,17 +308,14 @@ func newWorktreeStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 				Behind:     drift.Behind,
 				DirtyState: string(dirty),
 			}
-			if opts.v.GetBool("json") {
-				enc := json.NewEncoder(stdout)
-				enc.SetIndent("", "  ")
-				return enc.Encode(out)
-			}
-			status := "fresh"
-			if !drift.Fresh {
-				status = fmt.Sprintf("stale (behind %d)", drift.Behind)
-			}
-			_, err = fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\n", wt.ID, status, wt.BaseRef, drift.CurrentSHA, dirty)
-			return err
+			return opts.render(stdout, func(w io.Writer) error {
+				status := "fresh"
+				if !drift.Fresh {
+					status = fmt.Sprintf("stale (behind %d)", drift.Behind)
+				}
+				_, err = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", wt.ID, status, wt.BaseRef, drift.CurrentSHA, dirty)
+				return err
+			}, out)
 		},
 	}
 }
@@ -385,15 +378,12 @@ func newWorktreeListCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if opts.v.GetBool("json") {
-				enc := json.NewEncoder(stdout)
-				enc.SetIndent("", "  ")
-				return enc.Encode(worktrees)
-			}
-			for _, wt := range worktrees {
-				_, _ = fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", wt.ID, wt.Branch, wt.BaseRef, wt.Path)
-			}
-			return nil
+			return opts.render(stdout, func(w io.Writer) error {
+				for _, wt := range worktrees {
+					_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", wt.ID, wt.Branch, wt.BaseRef, wt.Path)
+				}
+				return nil
+			}, worktrees)
 		},
 	}
 }

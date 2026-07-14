@@ -31,6 +31,29 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-14 — refactor(cli): migrate legacy --json commands to the Renderer seam (P5-CLI-01, part A)
+
+The `Renderer` seam (`internal/cli/render.go`, `opts.render(w, humanFunc, value)`) previously backed only 3 commands (`db backup --full`, `db restore`, `materialize`). Twelve call sites across eight command files still emitted `--json` output through an older, ad hoc `if opts.v.GetBool("json") { enc := json.NewEncoder(stdout); ...; return enc.Encode(v) }` pattern with no shared seam. This is part A of a multi-part rollout — `P5-CLI-01` stays OPEN; the remaining ~25 leaf commands with no `--json` support at all are separate future work (part B).
+
+Changed:
+- `spec/13_CLI_DAEMON_API.md`: new "`--json` output conventions (P5-CLI-01)" section documenting, from real precedent already in the codebase (not invented): snake_case field naming, named-vs-anonymous result-struct rules, value+`omitempty` (never pointer) optional fields, the `P7-CLI-01` warnings-array shape for future partial-failure commands, and — critically — a named "migration/compat rule for this PR": the twelve legacy call sites migrated below must keep their exact current JSON shape byte-for-byte; this document governs new/future commands, not a silent reshape of these twelve.
+- Migrated all twelve call sites to `opts.render`, each preserving its exact current JSON payload and human-output text verbatim (plumbing-only move): `agent.go` (`agent list`, `agent show`), `conflicts.go` (`conflicts list`, `conflicts show`), `devices.go` (`devices list`), `doctor.go` (`doctor`), `scan.go` (`scan`), `service.go` (`service status`), `status.go` (`status`, including the `status --watch --json` per-tick re-render path — `renderStatus` was already the shared per-tick entry point, so wrapping its body in `opts.render` required no separate watch-loop handling), `worktree.go` (`worktree unlock`, `worktree status`, `worktree list`). Removed the now-unused `encoding/json` import from files where nothing else needed it.
+- `internal/cli/render_migration_test.go` (new): ten tests proving the byte-for-byte rule held for the ten call sites without prior `--json` coverage (each unmarshals `--json` stdout into the exact production type — `state.AgentRun`, `state.Conflict`, `state.Device`, `checkResult`, `scan.Result`, `repoLockReport`, `worktreeStatusOutput`, `state.Summary` — and asserts on real seeded values, not just "no error"). `worktree list` (`listWorktreesForTest`) and `service status` (`TestServiceStatusJSON`) already had equivalent coverage and are unchanged.
+
+Validated:
+- `gofmt -l cmd internal` clean.
+- `golangci-lint run` clean.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` clean.
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...` all packages pass, including the 10 new tests + the pre-existing `TestServiceStatusJSON`/`listWorktreesForTest`-backed tests.
+
+Follow-ups:
+- Part B: wire `--json`/`Renderer` for the ~25 leaf commands with no JSON support today, using the schema convention above (tracked separately, `P5-CLI-01` stays open until that lands).
+- fable-5 review flagged a pre-existing asymmetry, faithfully preserved (not introduced here, and out of scope under the byte-for-byte compat rule): `conflicts list --json` emits unscrubbed `DetailsJSON` while its human branch scrubs via `redact.Scrub` before display (`conflicts.go`), whereas `conflicts show` scrubs before both branches. `DetailsJSON` can carry attacker-influenced remote event payloads (e.g. `event_verification_failure` conflicts). Candidate follow-up finding for a future pass: scrub once before branching in `runConflictsList`, matching `conflicts show`'s pattern.
+
+### 2026-07-14 — review fixup (P5-CLI-01): spec/13 self-falsifying tense
+
+fable-5 review caught that the new spec/13 section described this PR's own migration in future/ongoing tense ("As of this addendum the seam backs [3 commands]; migrating the remaining commands ... is tracked separately", "Eight commands ... currently emit [the old pattern] ... Migrating their plumbing ... is a separate, later change") — but this PR performs exactly that migration, so the spec would ship self-contradicting its own code (and the work-log entry above, which correctly says all twelve migrated) the moment it merged. Reworded both passages to past tense describing what this change did, corrected "Eight commands" to the accurate "twelve call sites across eight commands", and pointed at `render_migration_test.go` as the shape-preservation pin. Codex's independent pass found no issues; re-ran `gofmt -l cmd internal` (clean) and `go run ./cmd/spec-drift --base origin/main --head HEAD` (clean) after the fix.
+
 ## 2026-07-14 — fix(ci): per-package coverage floor (P7-QUAL-05)
 
 A single aggregate coverage floor can mask a package-local regression when another package's unrelated gains offset it in the total (`cmd/spec-drift` had zero test files and 0.0% coverage, yet the 50% aggregate floor never tripped).

@@ -2,7 +2,6 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -278,36 +277,34 @@ func newServiceStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 				}
 				return err
 			}
-			if opts.v.GetBool("json") {
-				enc := json.NewEncoder(stdout)
-				enc.SetIndent("", "  ")
-				return enc.Encode(serviceStatusJSON{
-					Manager:         mgr.Name(),
-					Label:           resolvedLabel,
-					Installed:       status.Installed,
-					Running:         status.Running,
-					Detail:          status.Detail,
-					UnitPath:        status.UnitPath,
-					ExecPath:        status.ExecPath,
-					ExecPathMissing: status.ExecPathMissing,
-				})
+			out := serviceStatusJSON{
+				Manager:         mgr.Name(),
+				Label:           resolvedLabel,
+				Installed:       status.Installed,
+				Running:         status.Running,
+				Detail:          status.Detail,
+				UnitPath:        status.UnitPath,
+				ExecPath:        status.ExecPath,
+				ExecPathMissing: status.ExecPathMissing,
 			}
-			_, _ = fmt.Fprintf(stdout, "manager:   %s\n", mgr.Name())
-			_, _ = fmt.Fprintf(stdout, "label:     %s\n", resolvedLabel)
-			_, _ = fmt.Fprintf(stdout, "installed: %t\n", status.Installed)
-			_, _ = fmt.Fprintf(stdout, "running:   %t\n", status.Running)
-			if status.Detail != "" {
-				_, _ = fmt.Fprintf(stdout, "detail:    %s\n", status.Detail)
-			}
-			if status.UnitPath != "" {
-				_, _ = fmt.Fprintf(stdout, "unit:      %s\n", status.UnitPath)
-			}
-			if status.ExecPathMissing {
-				_, _ = fmt.Fprintf(stdout, "exec:      %s (MISSING — re-run 'devstrap service install')\n", status.ExecPath)
-			} else if status.ExecPath != "" {
-				_, _ = fmt.Fprintf(stdout, "exec:      %s\n", status.ExecPath)
-			}
-			return nil
+			return opts.render(stdout, func(w io.Writer) error {
+				_, _ = fmt.Fprintf(w, "manager:   %s\n", mgr.Name())
+				_, _ = fmt.Fprintf(w, "label:     %s\n", resolvedLabel)
+				_, _ = fmt.Fprintf(w, "installed: %t\n", status.Installed)
+				_, _ = fmt.Fprintf(w, "running:   %t\n", status.Running)
+				if status.Detail != "" {
+					_, _ = fmt.Fprintf(w, "detail:    %s\n", status.Detail)
+				}
+				if status.UnitPath != "" {
+					_, _ = fmt.Fprintf(w, "unit:      %s\n", status.UnitPath)
+				}
+				if status.ExecPathMissing {
+					_, _ = fmt.Fprintf(w, "exec:      %s (MISSING — re-run 'devstrap service install')\n", status.ExecPath)
+				} else if status.ExecPath != "" {
+					_, _ = fmt.Fprintf(w, "exec:      %s\n", status.ExecPath)
+				}
+				return nil
+			}, out)
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "service label (defaults to the OS-idiomatic label)")
