@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-12
+last_reviewed: 2026-07-14
 tracks_code: [cmd/**, internal/**, internal/specdrift/**, .github/**, go.mod, go.sum]
 ---
 # Test Plan
@@ -19,6 +19,8 @@ golangci-lint run
 go run ./cmd/spec-drift --base origin/main --head HEAD
 go test -race ./...
 ```
+
+**Per-package coverage floor (`P7-QUAL-05`).** The single aggregate 50% floor above can mask a package-local regression when another package's unrelated gains offset it in the total. CI layers a second, ubuntu-only gate on top of it: `.testcoverage.yml` (`vladopajic/go-test-coverage`, pinned `v2.18.8`) consumes the same `coverage.out` and enforces a `threshold.package` fallback (60%) plus per-package `override` floors seeded from each package's measured baseline minus a safety buffer (widest for `internal/platform`, whose OS-build-tag-split files vary most between the ubuntu and macos CI runners), with `cmd/devstrap` excluded (pure `main()` wiring, covered by the testscript e2e harness instead). These floors are a baseline backstop, not yet ratcheted toward each package's ceiling — raising them package-by-package as coverage improves is a separate future cleanup.
 
 The Phase 0 suite must cover:
 
