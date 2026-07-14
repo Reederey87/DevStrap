@@ -2,9 +2,11 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -250,6 +252,8 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 			results = append(results, checkKeyGrantWaits(ctx, store)...)
 
 			results = append(results, checkSkippedEvents(ctx, store)...)
+			results = append(results, checkHubHashChainConflicts(ctx, store)...)
+			results = append(results, checkDurabilityExport(ctx, opts, store, time.Now())...)
 			results = append(results, checkWorkspaceKeyAge(ctx, opts, store)...)
 			results = append(results, checkWCKRotationPending(ctx, store)...)
 			results = append(results, checkRevokeContainmentPending(ctx, store)...)
@@ -267,6 +271,145 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 	results = append(results, checkRepoLocks(paths.Home)...)
 	results = append(results, checkService(ctx, opts, serviceStore)...)
 	return results
+}
+
+// checkHubHashChainConflicts elevates unexplained origin-stream breaks. A
+// missing workspace-key grant can produce the same conflict transiently: an
+// undecryptable predecessor is quarantined, then its successor cannot join the
+// local chain until the grant arrives and replay restores the predecessor. The
+// open grant wait and preserved carrier let doctor distinguish that documented,
+// self-healing P6-SEC-03 hold from a break with no such explanation.
+func checkHubHashChainConflicts(ctx context.Context, store *state.Store) []checkResult {
+	conflicts, err := store.OpenConflictsByType(ctx, dssync.ConflictEventHashChain)
+	if err != nil {
+		return []checkResult{{Name: "hub hash-chain integrity", Status: checkError, Detail: err.Error()}}
+	}
+	if len(conflicts) == 0 {
+		return []checkResult{{Name: "hub hash-chain integrity", Status: checkOK, Detail: "0 open hash-chain breaks"}}
+	}
+	pendingPredecessors, err := devicesAwaitingPredecessorGrant(ctx, store)
+	if err != nil {
+		return []checkResult{{Name: "hub hash-chain integrity", Status: checkError, Detail: err.Error()}}
+	}
+	explained := 0
+	for _, conflict := range conflicts {
+		var details struct {
+			DeviceID string `json:"device_id"`
+			Seq      int64  `json:"seq"`
+		}
+		if json.Unmarshal([]byte(conflict.DetailsJSON), &details) == nil {
+			for _, predecessorSeq := range pendingPredecessors[details.DeviceID] {
+				if predecessorSeq > 0 && predecessorSeq < details.Seq {
+					explained++
+					break
+				}
+			}
+		}
+	}
+	unexplained := len(conflicts) - explained
+	if unexplained == 0 {
+		return []checkResult{{
+			Name:   "hub hash-chain integrity",
+			Status: checkWarn,
+			Detail: fmt.Sprintf("%d hash-chain hold(s) explained by pending workspace key grant(s); expected to auto-resolve after grant replay", explained),
+			Remedy: "follow the awaiting-key-grants remedy; quarantined predecessors replay automatically after the grant arrives",
+		}}
+	}
+	detail := fmt.Sprintf("%d unexplained open %s conflict(s): possible hub data loss, truncation, or corruption", unexplained, dssync.ConflictEventHashChain)
+	if explained > 0 {
+		detail += fmt.Sprintf(" (%d additional hold(s) explained by pending key grants)", explained)
+	}
+	return []checkResult{{
+		Name:   "hub hash-chain integrity",
+		Status: checkError,
+		Detail: detail,
+		Remedy: "inspect with `devstrap conflicts list`; stop destructive hub maintenance and recover from a verified durability replica if the primary lost data",
+	}}
+}
+
+// devicesAwaitingPredecessorGrant returns origin devices whose preserved
+// undecryptable carrier names an epoch/kid that is still in key_grant_waits.
+// key_grant_waits is workspace-scoped rather than device-scoped, so the
+// carrier is the necessary bridge from a pending epoch to the hash conflict's
+// origin device.
+func devicesAwaitingPredecessorGrant(ctx context.Context, store *state.Store) (map[string][]int64, error) {
+	waits, err := store.OpenKeyGrantWaits(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(waits) == 0 {
+		return map[string][]int64{}, nil
+	}
+	waiting := func(epoch int64, kid string) bool {
+		for _, wait := range waits {
+			if wait.Epoch == epoch && (wait.KID == "" || kid == "" || wait.KID == kid) {
+				return true
+			}
+		}
+		return false
+	}
+	verificationConflicts, err := store.OpenConflictsByType(ctx, dssync.ConflictEventVerification)
+	if err != nil {
+		return nil, err
+	}
+	devices := make(map[string][]int64)
+	for _, conflict := range verificationConflicts {
+		var details struct {
+			Kind      string `json:"kind"`
+			DeviceID  string `json:"device_id"`
+			EventJSON string `json:"event_json"`
+		}
+		if json.Unmarshal([]byte(conflict.DetailsJSON), &details) != nil ||
+			details.Kind != dssync.EventConflictKindUndecryptable || details.DeviceID == "" {
+			continue
+		}
+		var carrier state.Event
+		if json.Unmarshal([]byte(details.EventJSON), &carrier) != nil || carrier.DeviceID != details.DeviceID {
+			continue
+		}
+		envelope, err := dssync.ParseEncryptedEnvelope(carrier)
+		if err == nil && waiting(envelope.Epoch, envelope.KID) {
+			devices[details.DeviceID] = append(devices[details.DeviceID], carrier.Seq)
+		}
+	}
+	return devices, nil
+}
+
+// checkDurabilityExport reports only actionable staleness for an opted-in
+// replica. An unconfigured replica is an OK informational row because hub
+// replication is defense in depth, not a prerequisite for correct sync.
+func checkDurabilityExport(ctx context.Context, opts *options, store *state.Store, now time.Time) []checkResult {
+	replica := strings.TrimSpace(opts.v.GetString("hub_replica"))
+	if replica == "" {
+		return []checkResult{{Name: "hub durability export", Status: checkOK, Detail: "not configured (optional; set hub_replica for namespace-metadata bucket-loss protection)"}}
+	}
+	interval, err := durabilityExportInterval(opts)
+	if err != nil {
+		return []checkResult{{Name: "hub durability export", Status: checkWarn, Detail: err.Error(), Remedy: "set durability.export_interval to a duration such as 24h, or 0 to disable"}}
+	}
+	if interval == 0 {
+		return []checkResult{{Name: "hub durability export", Status: checkOK, Detail: "disabled by durability.export_interval=0"}}
+	}
+	record, ok, err := readDurabilityExportRecord(ctx, store)
+	if err != nil {
+		return []checkResult{{Name: "hub durability export", Status: checkWarn, Detail: err.Error(), Remedy: "run `devstrap sync` or `devstrap run-loop --once` to replace the invalid record"}}
+	}
+	if !ok || record.Replica != replica {
+		return []checkResult{{Name: "hub durability export", Status: checkWarn, Detail: "no successful export recorded for the configured replica", Remedy: "run `devstrap hub compact`, then `devstrap sync` or `devstrap run-loop --once`"}}
+	}
+	age := now.Sub(record.ExportedAt)
+	if age < 0 {
+		return []checkResult{{Name: "hub durability export", Status: checkWarn, Detail: fmt.Sprintf("last success timestamp is %s in the future", record.ExportedAt.UTC().Format(time.RFC3339)), Remedy: "correct the system clock, then re-run `devstrap sync`"}}
+	}
+	staleAfter := interval * 2
+	if interval > time.Duration(math.MaxInt64/2) {
+		staleAfter = time.Duration(math.MaxInt64)
+	}
+	detail := fmt.Sprintf("last success %s ago (snapshot %s; interval %s)", age.Round(time.Second), record.SnapshotSHA256, interval)
+	if age > staleAfter {
+		return []checkResult{{Name: "hub durability export", Status: checkWarn, Detail: detail, Remedy: "re-run `devstrap sync` or `devstrap run-loop --once`; verify replica credentials and reachability if it fails"}}
+	}
+	return []checkResult{{Name: "hub durability export", Status: checkOK, Detail: detail}}
 }
 
 func checkRestoreJournal(home string) []checkResult {

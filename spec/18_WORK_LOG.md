@@ -31,6 +31,25 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-14 — fix(hub): periodic whole-state snapshot replica + durability doctor checks (P4-HUB-16)
+
+Changed:
+- Added opt-in `hub_replica` backend resolution across the existing file/R2/S3/git/folder Hub implementations, with separately-scoped `DEVSTRAP_HUB_REPLICA_S3_*` credentials for independent R2 accounts/providers. `sync` and the shared run-loop body verify and export the primary retention head's immutable sealed snapshot before its manifest when `durability.export_interval` is due (default 24h, 0 disables; run-loop flag override), refuse replica HLC/floor rollback, and record the successful target/snapshot/time in `local_meta`; no compaction snapshot is a clear non-fatal skip.
+- `doctor` now errors on unexplained open `event_hash_chain_break` conflicts as possible hub data loss while grading pending-key-grant/self-healing holds as warnings, and reports opted-in durability-export freshness (warning after 2x the interval; unconfigured remains optional/OK). Tests cover no-snapshot skip, schedule gating, doctor grading, and a restore drill that compacts/syncs a primary, exports to a file-backed replica, deletes the entire primary carrier, and bootstraps a fresh trusted/keyed device directly from the replica through the production snapshot-recovery path.
+- `spec/19` §A.6 documents Cloudflare's verified 2026-07-14 R2 versioning/Object-Lock incompatibility, the replica configuration/RPO/credentials, doctor signals, second-account and git-carrier examples, and the exercised restore runbook; `spec/13` records the CLI/config/doctor contract. `docs/audits/README.md` intentionally remains untouched for orchestrator reconciliation.
+
+Validated:
+- `gofmt -l cmd internal` and `git diff --check` clean; `GOCACHE=/tmp/devstrap-gocache go vet ./...` passed; `GOCACHE=/tmp/devstrap-gocache go run ./cmd/spec-drift --base origin/main --head HEAD` passed (22 specs, 12 changed files).
+- `golangci-lint run` could not run because the binary is not installed; the required pinned fallback could not resolve `proxy.golang.org` because this sandbox has no DNS/network access. No stale-cache/phantom finding was emitted.
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...` passed every task-related and other package but the pre-existing macOS Seatbelt probe `TestSeatbeltResolvesCredentialLeafSymlinks`, whose `sandbox-exec` call is denied by this execution sandbox (`Operation not permitted`). The same full race command with `-skip '^TestSeatbeltResolvesCredentialLeafSymlinks$'` passed every package; the focused durability/doctor tests and updated `sync_never_granted_epoch_wedge` e2e passed separately.
+
+Follow-ups:
+- Full blob-plane replication remains future/out-of-scope work: this implementation mirrors the sealed namespace/event-plane snapshot and retention head, not env-profile or draft-bundle `age_blob` objects. Their disaster-recovery source remains a surviving device with local copies to re-push.
+
+### 2026-07-14 — review fixup (P4-HUB-16): Codex + fable-5 dual-review findings
+
+Applied all five dual-review findings. Doctor now correlates hash-chain breaks with open key-grant waits through the preserved undecryptable carrier's device/epoch/kid, so the documented P6-SEC-03 wedge is a self-healing warning and only unexplained breaks claim possible data loss. The runbook and doctor wording now limit the guarantee to namespace/event-plane metadata, explicitly excluding env/draft blob content and recording full blob-plane replication as future work; the unverified R2 dummy-response clause was removed. Retention mirroring treats an already-dominating same-workspace head as a benign concurrent-exporter no-op while refusing incomparable/cross-workspace heads. Replica operational failures now warn without failing primary sync/run-loop convergence, while malformed/same-target configuration remains hard. Finally, the local snapshot-producer path explicitly requires the store's `local` approved-self trust sentinel as well as its signing key, matching the remote path's fail-closed trust gate instead of accepting any non-empty key.
+
 ## 2026-07-14 — fix(platform): correct Windows process-liveness check + Windows CI leg (P4-QUAL-04)
 
 Changed:

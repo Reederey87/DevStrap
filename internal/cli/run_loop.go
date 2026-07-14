@@ -36,10 +36,17 @@ func newRunLoopCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var interval time.Duration
 	var once bool
 	var namespaceOnly bool
+	var durabilityInterval time.Duration
 	cmd := &cobra.Command{
 		Use:   "run-loop",
 		Short: "Run scan + sync + materialize on an interval (portable, no daemon)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("durability-export-interval") {
+				if durabilityInterval < 0 {
+					return appError{code: exitUsage, err: fmt.Errorf("--durability-export-interval must be >= 0 (0 disables)")}
+				}
+				opts.v.Set(durabilityExportConfigKey, durabilityInterval.String())
+			}
 			// P5-CLI-05: progress/diagnostics go to stderr so a scheduler or log
 			// consumer can keep stdout (the sync result stream) clean.
 			stderr := cmd.ErrOrStderr()
@@ -61,6 +68,7 @@ func newRunLoopCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().DurationVar(&interval, "interval", 5*time.Minute, "time between sync cycles")
 	cmd.Flags().BoolVar(&once, "once", false, "run a single sync cycle and exit (for cron)")
 	cmd.Flags().BoolVar(&namespaceOnly, "namespace-only", false, "sync namespace metadata only; skip materialization")
+	cmd.Flags().DurationVar(&durabilityInterval, "durability-export-interval", defaultDurabilityExportInterval, "minimum time between successful hub snapshot exports (0 disables)")
 	return cmd
 }
 

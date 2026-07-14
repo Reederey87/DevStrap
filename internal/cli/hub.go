@@ -121,6 +121,29 @@ func selectBackendHub(ctx context.Context, opts *options, store *state.Store, hu
 	if uri == "" {
 		return nil, "", fmt.Errorf("no hub configured: pass --hub-file <path> or set 'hub' in config")
 	}
+	return selectConfiguredBackendHub(ctx, opts, store, uri, false)
+}
+
+// replicaHubFromOptions resolves the optional durability replica through the
+// same backend selection seam as the primary hub. A replica is deliberately a
+// raw Hub: durability export copies already-sealed snapshot bytes and their
+// signed retention manifest, so no event-plane encryption/decryption occurs.
+func replicaHubFromOptions(ctx context.Context, opts *options, store *state.Store) (dssync.Hub, string, error) {
+	uri := strings.TrimSpace(opts.v.GetString("hub_replica"))
+	if uri == "" {
+		return nil, "", nil
+	}
+	return selectConfiguredBackendHub(ctx, opts, store, uri, true)
+}
+
+// selectConfiguredBackendHub builds any configured Hub backend. replica selects
+// replica-scoped S3 credentials and separate git/folder cache directories so a
+// primary and replica of the same backend type can be used in one process.
+func selectConfiguredBackendHub(ctx context.Context, opts *options, store *state.Store, uri string, replica bool) (dssync.Hub, string, error) {
+	cachePrefix := "hub"
+	if replica {
+		cachePrefix = "hub-replica"
+	}
 	switch {
 	case strings.HasPrefix(uri, "file:"):
 		path := strings.TrimPrefix(uri, "file:")
@@ -140,21 +163,36 @@ func selectBackendHub(ctx context.Context, opts *options, store *state.Store, hu
 			}
 			return nil, "", err
 		}
+		endpointKey := "hub_s3_endpoint"
+		regionKey := "hub_s3_region"
+		if replica {
+			endpointKey = "hub_replica_s3_endpoint"
+			regionKey = "hub_replica_s3_region"
+		}
 		endpoint := spec.endpoint
 		if endpoint == "" {
-			endpoint = strings.TrimSpace(opts.v.GetString("hub_s3_endpoint"))
+			endpoint = strings.TrimSpace(opts.v.GetString(endpointKey))
 		}
 		if endpoint == "" {
-			return nil, "", fmt.Errorf("r2 hub %q: no endpoint set (set ?endpoint= on the hub uri or DEVSTRAP_HUB_S3_ENDPOINT)", spec.bucket)
+			envName := "DEVSTRAP_HUB_S3_ENDPOINT"
+			if replica {
+				envName = "DEVSTRAP_HUB_REPLICA_S3_ENDPOINT"
+			}
+			return nil, "", fmt.Errorf("r2 hub %q: no endpoint set (set ?endpoint= on the hub uri or %s)", spec.bucket, envName)
 		}
 		region := spec.region
 		if region == "" {
-			region = strings.TrimSpace(opts.v.GetString("hub_s3_region"))
+			region = strings.TrimSpace(opts.v.GetString(regionKey))
 		}
 		if region == "" {
 			region = "auto"
 		}
-		creds, err := resolveHubS3Credentials(ctx, opts, store, ws)
+		var creds hubS3Creds
+		if replica {
+			creds, err = resolveReplicaHubS3Credentials(ctx, opts)
+		} else {
+			creds, err = resolveHubS3Credentials(ctx, opts, store, ws)
+		}
 		if err != nil {
 			return nil, "", err
 		}
@@ -178,7 +216,7 @@ func selectBackendHub(ctx context.Context, opts *options, store *state.Store, hu
 			}
 			return nil, "", err
 		}
-		cacheRoot := filepath.Join(filepath.Dir(opts.paths().KeyDir()), "hub-folder")
+		cacheRoot := filepath.Join(filepath.Dir(opts.paths().KeyDir()), cachePrefix+"-folder")
 		folderHub, err := hub.NewFolderHub(path, ws, cacheRoot)
 		if err != nil {
 			return nil, "", err
@@ -196,7 +234,7 @@ func selectBackendHub(ctx context.Context, opts *options, store *state.Store, hu
 			}
 			return nil, "", err
 		}
-		cacheRoot := filepath.Join(filepath.Dir(opts.paths().KeyDir()), "hub-git")
+		cacheRoot := filepath.Join(filepath.Dir(opts.paths().KeyDir()), cachePrefix+"-git")
 		gitHub, err := hub.NewGitCarrierHub(remote, branch, ws, cacheRoot)
 		if err != nil {
 			return nil, "", err
@@ -296,6 +334,39 @@ func resolveHubS3Credentials(ctx context.Context, opts *options, store *state.St
 	}
 	if resolvedSecret.IsZero() || accessKeyID == "" {
 		return hubS3Creds{}, fmt.Errorf("no hub S3 credentials: set DEVSTRAP_HUB_S3_ACCESS_KEY_ID and DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY (values may be 1Password op:// refs), or store them once with 'devstrap hub login' (see spec/19_CLOUD_PROVISIONING_GUIDE.md)")
+	}
+	return hubS3Creds{accessKeyID: accessKeyID, secret: resolvedSecret, source: source}, nil
+}
+
+// resolveReplicaHubS3Credentials mirrors the primary hub's explicit
+// env/config + op:// resolution under DEVSTRAP_HUB_REPLICA_S3_*. It does not
+// fall back to AWS_* or the primary hub's custody slot: a second account or
+// provider must never silently receive the primary destination's credentials.
+func resolveReplicaHubS3Credentials(ctx context.Context, opts *options) (hubS3Creds, error) {
+	accessKeyID := strings.TrimSpace(opts.v.GetString("hub_replica_s3_access_key_id"))
+	secret := strings.TrimSpace(opts.v.GetString("hub_replica_s3_secret_access_key"))
+	source := "env/config"
+	if strings.HasPrefix(accessKeyID, "op://") {
+		resolved, err := resolveOpRef(ctx, accessKeyID)
+		if err != nil {
+			return hubS3Creds{}, fmt.Errorf("resolve replica hub s3 access key id: %w", err)
+		}
+		accessKeyID = resolved.Reveal()
+		source = "op"
+	}
+	var resolvedSecret redact.Secret
+	if strings.HasPrefix(secret, "op://") {
+		resolved, err := resolveOpRef(ctx, secret)
+		if err != nil {
+			return hubS3Creds{}, fmt.Errorf("resolve replica hub s3 secret access key: %w", err)
+		}
+		resolvedSecret = resolved
+		source = "op"
+	} else if secret != "" {
+		resolvedSecret = redact.New(secret)
+	}
+	if accessKeyID == "" || resolvedSecret.IsZero() {
+		return hubS3Creds{}, fmt.Errorf("no replica hub S3 credentials: set DEVSTRAP_HUB_REPLICA_S3_ACCESS_KEY_ID and DEVSTRAP_HUB_REPLICA_S3_SECRET_ACCESS_KEY (values may be 1Password op:// refs)")
 	}
 	return hubS3Creds{accessKeyID: accessKeyID, secret: resolvedSecret, source: source}, nil
 }

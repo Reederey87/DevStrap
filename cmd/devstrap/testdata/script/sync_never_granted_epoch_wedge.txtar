@@ -78,6 +78,8 @@ stdout '4 open conflict'
 exec devstrap --home=$WORK/homeC --root=$WORK/CodeC doctor
 stdout 'awaiting key grants'
 stdout 'epoch 2'
+stdout 'explained by pending workspace key grant'
+! stdout 'possible hub data loss'
 
 # The contiguity guard: C must not propagate its gap by approving new devices
 # while it knows it is missing epoch 2 — unless explicitly overridden.
