@@ -26,7 +26,11 @@ import (
 // requested to minimize the chance OpenProcess denies access, since a
 // combined access mask can only succeed if every requested right is granted.
 func ProcessAlive(pid int) bool {
-	if pid <= 0 || pid > math.MaxUint32 {
+	// Widen to uint64 before comparing: on windows/386 (32-bit int), `pid >
+	// math.MaxUint32` would overflow the untyped constant into int and fail
+	// to compile. DevStrap doesn't ship a 386 build today, but this file must
+	// still compile for any windows/GOARCH the module supports.
+	if pid <= 0 || uint64(pid) > math.MaxUint32 {
 		return false
 	}
 	handle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
