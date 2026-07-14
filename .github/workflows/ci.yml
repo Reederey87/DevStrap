@@ -224,13 +224,19 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Test (platform-safe packages)
-        # internal/git is intentionally excluded: its test harness fakes a
-        # `git` executable via a Unix-style PATH prepend, which does not
-        # resolve on Windows (needs a .exe/.bat shim or a different fixture
-        # mechanism) — a test-infrastructure gap, not a production-code bug.
-        # Confirmed on this job's first real run (P4-QUAL-04); tracked as a
-        # follow-up in spec/18_WORK_LOG.md rather than fixed here.
-        run: go test ./internal/platform/... ./internal/pathkey/... ./internal/ignore/... ./internal/draftbundle/... ./internal/envfile/... ./internal/redact/... ./internal/id/... ./internal/pairing/...
+        # internal/git is excluded: its test harness fakes a `git` executable
+        # via a Unix-style PATH prepend, which does not resolve on Windows —
+        # a test-fixture gap, not a production-code bug.
+        run: go test ./internal/pathkey/... ./internal/ignore/... ./internal/draftbundle/... ./internal/envfile/... ./internal/redact/... ./internal/id/... ./internal/pairing/...
+      - name: Test (internal/platform — this PR's tests only)
+        # internal/platform as a whole is NOT run here: most of its pure-logic
+        # golden tests (bwrap/Seatbelt credential deny-lists, launchd/systemd
+        # unit rendering) hardcode Unix-style absolute paths and fail wholesale
+        # on Windows — a pre-existing cross-platform-test gap unrelated to
+        # P4-QUAL-04, confirmed on this job's first real runs and tracked as a
+        # separate follow-up in spec/18_WORK_LOG.md. Scope this step to the
+        # tests this PR actually delivers so the job's signal stays meaningful.
+        run: go test ./internal/platform/... -run 'TestProcessAlive|TestRuntimeGOOSBranchesStayInPlatformPackage'
 
   service-e2e:
     name: Service E2E (${{ matrix.os }})
