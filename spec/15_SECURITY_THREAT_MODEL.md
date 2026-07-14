@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-13
+last_reviewed: 2026-07-14
 tracks_code: [internal/childenv/**, internal/cli/**, internal/devicekeys/**, internal/envbundle/**, internal/git/**, internal/hub/**, internal/redact/**, internal/state/**, internal/sync/**, internal/logging/**, internal/workspacekeys/**]
 ---
 # Security Threat Model
@@ -10,7 +10,7 @@ DevStrap is dangerous if designed casually because it touches code, secrets, Git
 
 The product should be safe by default and explicit when convenience weakens security.
 
-Local repo-lock and agent-run crash reconciliation pair each recorded PID with an opaque platform process start-time identity when available (`P7-GIT-03`). A recycled PID therefore cannot impersonate the crashed holder and indefinitely preserve a repo lock or a `running` agent row; an unavailable/failed identity lookup remains fail-safe and does not break a lock it cannot disprove.
+Local repo-lock, folder-hub lock, and agent-run crash reconciliation route process existence through the shared build-tagged `platform.ProcessAlive` adapter (`P4-QUAL-04`) and pair each recorded PID with an opaque platform process start-time identity when available (`P7-GIT-03`). Only an explicit absent-process result is dead; permission denial or another ambiguous response stays alive, including Windows `OpenProcess` access denial, so DevStrap never steals a live-but-inaccessible holder's lock. A recycled PID therefore cannot impersonate the crashed holder and indefinitely preserve a repo lock or a `running` agent row; an unavailable/failed identity lookup remains fail-safe and does not break a lock it cannot disprove.
 
 ## Assets
 

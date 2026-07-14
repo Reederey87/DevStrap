@@ -31,6 +31,32 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-14 — fix(platform): correct Windows process-liveness check + Windows CI leg (P4-QUAL-04)
+
+Changed:
+- Added build-tagged `platform.ProcessAlive`: Darwin/Linux use signal 0 and recognize `ESRCH`/`os.ErrProcessDone`; Windows uses `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `GetExitCodeProcess`; unsupported platforms conservatively report alive. All adapters return alive for access-denied/ambiguous results and dead only when absence is positively established.
+- Repointed the repo-lock and folder-hub lock test seams to the shared adapter, removing both local signal-0 implementations while preserving the existing seam names used by tests.
+- Added an OS-agnostic self-exec behavioral test covering a running child, the same child after exit/reap, and a sentinel nonexistent PID.
+- Added a separate advisory `windows-latest` CI job: build/vet `./...`, then test the narrow platform-safe package set (`platform`, `pathkey`, `ignore`, `git`, `draftbundle`, `envfile`, `redact`, `id`, `pairing`).
+- Updated specs 06, 08, 15, and 16 to document the fail-safe liveness contract and explicitly limit the Windows leg to first-pass build/vet/narrow-test visibility, not full Windows support.
+
+Validated:
+- `gofmt -l cmd internal` and `git diff --check` clean.
+- `golangci-lint run` fallback could not execute: no binary is installed, and restricted network access prevented the pinned `go run ...@v2.12.0` from resolving its uncached transitive metadata; the offline retry failed for the same cache gap.
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...` passed every package except the pre-existing macOS Seatbelt test `TestSeatbeltResolvesCredentialLeafSymlinks`, whose `sandbox-exec` probe is denied by this execution sandbox (`Operation not permitted`). `go test -race ./internal/platform/... -run '^TestProcessAlive' -v` passed all new liveness tests.
+- `GOOS=windows GOARCH=amd64 GOCACHE=/tmp/devstrap-gocache go build ./internal/platform/... ./internal/cli/... ./internal/hub/...` passed; the broader CI-equivalent `go build ./...` cross-build also passed.
+- `GOOS=windows GOARCH=amd64 GOCACHE=/tmp/devstrap-gocache go vet ./internal/platform/... ./internal/cli/... ./internal/hub/...` passed; the broader CI-equivalent `go vet ./...` cross-vet also passed.
+- `go test ./internal/platform/... -run TestRuntimeGOOSBranchesStayInPlatformPackage -v` passed.
+- `GOCACHE=/tmp/devstrap-gocache go run ./cmd/spec-drift --base origin/main --head HEAD` passed (the default cache path was sandbox-denied, so validation used the writable task cache).
+
+Dual-reviewed: the orchestrator independently confirmed every `golang.org/x/sys/windows` symbol used (`OpenProcess`, `GetExitCodeProcess`, `PROCESS_QUERY_LIMITED_INFORMATION`=0x1000, `ERROR_ACCESS_DENIED`=`syscall.Errno(5)`, `ERROR_INVALID_PARAMETER`=`syscall.Errno(87)`) against `go doc` and re-ran every validation command (including the `GOOS=windows` cross-compiles) independently, since this PR has no local Windows toolchain to test against. fable-5 then gave it a high-scrutiny pass walking every branch of both platform adapters by hand — no blocking findings; ship as designed. fable-5 additionally found that the Unix adapter's `os.ErrProcessDone` check (added beyond the original task spec) is not scope creep but a required fix for a real, separate, pre-existing bug: since Go 1.23, `os.FindProcess` on Linux uses `pidfd` when available, and for an already-dead PID returns a done-marked `Process` whose `Signal` call returns `os.ErrProcessDone` without ever reaching `ESRCH` — so the OLD `hubProcessAlive` (ESRCH-only) was reporting dead processes as ALIVE on pidfd-capable Linux, making a crashed holder's hub lock unstealable. The new unified check fixes this latent bug as a side effect.
+
+Follow-ups:
+- Promote the Windows smoke job from advisory after it has run green for a cycle and audit the excluded Unix-assumption-heavy suites separately.
+- **Windows PID-reuse guard gap (fable-5):** there is no `procstart_windows.go`, so Windows falls through to `procstart_other.go`'s `ErrUnsupported` stub — every Windows-written lock has `StartedAt=0`, meaning the P7-GIT-03 PID-reuse identity guard does not exist on Windows yet. Combined with the fail-safe `ProcessAlive` semantics (access-denied/ambiguous → alive), a recycled PID on Windows could wedge a crashed holder's lock indefinitely with no mtime backstop on the hub-lock path. `spec/06`'s new Windows section doesn't call this out explicitly (a gap worth closing next time that file is touched). Candidate fix: a `procstart_windows.go` using `GetProcessTimes`'s creation time — the same `PROCESS_QUERY_LIMITED_INFORMATION` handle already grants the needed access, no new privilege required.
+- **`continue-on-error` visibility (fable-5):** confirm on the Windows smoke job's first real run how a step failure renders in the PR checks UI — job-level `continue-on-error: true` is known to sometimes show as green/neutral even on a failing step, which would undermine the "promote once green for a cycle" plan if failures go unnoticed. If so, consider step-level `continue-on-error` plus a final `always()`-gated status-reporting step before promoting the job to required.
+- Audit-ledger reconciliation remains with the orchestrator; `docs/audits/README.md` was intentionally not touched.
+
 ## 2026-07-14 — feat(state): persisted materialize failure record + status/doctor visibility (P4-GIT-07)
 
 `materializePass` already isolated per-project failures (EAGER-04) and `SkeletonProjects` already retried `failed` projects, but the failure *text* was only logged at Warn and dropped — operators could not see why a project failed from `status`/`doctor`. The schema already had an unused `device_project_state.last_error TEXT` column (migration 00001); no new migration.

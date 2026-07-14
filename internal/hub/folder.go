@@ -50,7 +50,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/Reederey87/DevStrap/internal/platform"
@@ -427,16 +426,7 @@ type fsLock struct {
 	sleep     func(time.Duration)
 }
 
-var hubProcessAlive = func(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return true // liveness is indeterminate, not provably dead
-	}
-	return !errors.Is(process.Signal(syscall.Signal(0)), syscall.ESRCH)
-}
+var hubProcessAlive = platform.ProcessAlive
 
 // hubProcessStartTime is a test seam over the platform start-time identity.
 var hubProcessStartTime = platform.ProcessStartTime
