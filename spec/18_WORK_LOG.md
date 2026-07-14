@@ -31,6 +31,37 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-14 — fix(ci): per-package coverage floor (P7-QUAL-05)
+
+A single aggregate coverage floor can mask a package-local regression when another package's unrelated gains offset it in the total (`cmd/spec-drift` had zero test files and 0.0% coverage, yet the 50% aggregate floor never tripped).
+
+Changed:
+- `cmd/spec-drift/main.go`: extracted flag parsing + the check/report wiring out of `main()` into a testable `run(args []string, stdout, stderr io.Writer) int`; `main()` is now `os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))`.
+- `cmd/spec-drift/main_test.go` (new): five tests against `run` using a real `git init` temp repo — invalid-flag exit 2, a clean repo exits 0, strict-mode drift exits 1 with the work-log finding, advisory mode exits 0 with a `::warning::` annotation, and a non-git repo surfaces `Check`'s wrapped git error. 94.4% package coverage.
+- `.testcoverage.yml` (new, repo root): configures `vladopajic/go-test-coverage` v2.18.8 against `coverage.out` — `threshold.total: 50` (unchanged aggregate backstop), `threshold.package: 60` fallback, and per-package `override` floors seeded from each package's measured baseline minus a safety buffer (widest for `internal/platform`, the most OS-build-tag-split package). `cmd/devstrap` is excluded (pure `main()` wiring covered by the testscript e2e harness, not unit tests).
+- `.github/workflows/ci.yml`: new "Per-package coverage floor" step in the `test` job, right after "Coverage floor", gated `if: matrix.os == 'ubuntu-latest'` (mirrors the existing Fuzz-smoke steps' single-OS convention, since the seeded floors are calibrated to one measured baseline and coverage differs a little across runners).
+- `spec/16_TEST_PLAN.md`: documented the two-tier coverage policy under "Current coverage gate"; bumped `last_reviewed`.
+- `docs/audits/README.md`: moved `P7-QUAL-05` from the Pass 7 open table to *Recently shipped*; corrected the Pass 7 header/arithmetic to 6 open of 47 (P1=0, P2=4, P3=2).
+
+Validated:
+- `gofmt -l cmd internal` clean.
+- `golangci-lint run` clean.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` clean.
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...` all packages pass.
+- `go test -covermode=atomic -coverprofile=coverage.out ./...` then `go run github.com/vladopajic/go-test-coverage/v2@v2.18.8 --config=./.testcoverage.yml` — exit 0, "Package coverage threshold (60%) satisfied: PASS", "Total coverage threshold (50%) satisfied: PASS" against this commit's own baseline.
+
+Follow-ups:
+- Ratchet per-package floors upward over time as coverage improves (not part of this change).
+
+### 2026-07-14 — review fixup (P7-QUAL-05): `-h`/`--help` exit-code regression
+
+Dual review (Codex + fable-5, independently) caught that the `main()` → `run(args, stdout, stderr) int` extraction changed `spec-drift -h`'s exit code from 0 to 2: the original global `flag.CommandLine` (`ExitOnError`) special-cases `flag.ErrHelp` and exits 0, but the new `flag.NewFlagSet(..., flag.ContinueOnError)` path collapsed every parse error — including help — into the generic exit-2 usage-error branch. Neither CI nor `AGENTS.md` invoke `-h`, so this was unused in practice but a genuine, verified regression (both reviewers built and ran both binaries to confirm).
+
+- `cmd/spec-drift/main.go`: `run`'s flag-parse error branch now checks `errors.Is(err, flag.ErrHelp)` and returns 0 in that case, matching stdlib's `ExitOnError` behavior; every other parse error still returns 2.
+- `cmd/spec-drift/main_test.go`: added `TestRunHelpFlagExitsZero` pinning the carve-out; also hardened `runGit`'s test env with `GIT_CONFIG_GLOBAL=/dev/null`/`GIT_CONFIG_NOSYSTEM=1` (matching `internal/git/git_test.go`'s existing convention) per fable-5's non-blocking finding that the temp-repo tests were not isolated from a developer's global/system git config.
+
+Validated: `gofmt -l cmd internal` clean; `go test -race ./cmd/spec-drift/...` (6 tests, all pass); full `go test -race ./...` and `golangci-lint run` re-run clean; `go run ./cmd/spec-drift --base origin/main --head HEAD` clean.
+
 ## 2026-07-13 — chore(docs): reconcile Pass 7 shipped-list narrative against the table (wave-close review fixup)
 
 CodeRabbit review (PR #194) caught that the Pass 7 header narrative sentence — the prose enumerating which finding IDs shipped on which date — had drifted from the *Recently shipped* table it describes: `P7-QUAL-07`, `P7-SYNC-03`, `P7-SEC-04`, and `P7-DATA-07` (all shipped 2026-07-11) were missing from the narrative, and `P7-GIT-03` appeared as a genuine duplicate ROW in the table itself (not just the narrative), independent of the `P7-QUAL-07` duplicate already fixed in the wave-close entry below.

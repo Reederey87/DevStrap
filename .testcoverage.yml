@@ -1,0 +1,79 @@
+# P7-QUAL-05: per-package coverage floors, layered on top of the existing
+# aggregate 50% floor (.github/workflows/ci.yml "Coverage floor" step).
+#
+# A single aggregate floor can mask a package-local regression when another
+# package's unrelated gains offset it in the total. `threshold.package` below
+# is a fallback floor for any package not explicitly seeded; each `override`
+# entry seeds a package's floor from its measured baseline (2026-07-14, macOS
+# runner) minus a safety buffer, since coverage varies a little between the
+# ubuntu and macos CI runners for platform-split packages. Ratcheting these
+# floors up over time as coverage improves is a separate future cleanup, not
+# part of this change (see spec/16_TEST_PLAN.md).
+#
+# Run via: go run github.com/vladopajic/go-test-coverage/v2@v2.18.8
+#   --config=./.testcoverage.yml
+#
+# Paths below are module-root-relative (the tool strips the go.mod module
+# path from every file/package name), NOT full import paths.
+profile: coverage.out
+
+threshold:
+  file: 0
+  package: 60
+  total: 50
+
+override:
+  - path: ^internal/childenv$
+    threshold: 80
+  - path: ^internal/cli$
+    threshold: 62
+  - path: ^internal/config$
+    threshold: 35
+  - path: ^internal/devicekeys$
+    threshold: 72
+  - path: ^internal/draftbundle$
+    threshold: 68
+  - path: ^internal/envbundle$
+    threshold: 34
+  - path: ^internal/envfile$
+    threshold: 83
+  - path: ^internal/fold$
+    threshold: 90
+  - path: ^internal/git$
+    threshold: 65
+  - path: ^internal/hub$
+    threshold: 67
+  - path: ^internal/id$
+    threshold: 86
+  - path: ^internal/ignore$
+    threshold: 77
+  - path: ^internal/logging$
+    threshold: 74
+  - path: ^internal/pairing$
+    threshold: 90
+  - path: ^internal/pathkey$
+    threshold: 65
+  # Widest buffer: this package has the most OS-build-tag-split files, and
+  # coverage differs meaningfully between the ubuntu and macos CI runners.
+  - path: ^internal/platform$
+    threshold: 55
+  - path: ^internal/redact$
+    threshold: 76
+  - path: ^internal/scan$
+    threshold: 62
+  - path: ^internal/specdrift$
+    threshold: 64
+  - path: ^internal/state$
+    threshold: 44
+  - path: ^internal/sync$
+    threshold: 69
+  - path: ^internal/workspacekeys$
+    threshold: 69
+  - path: ^cmd/spec-drift$
+    threshold: 80
+
+exclude:
+  paths:
+    # Pure main() wiring/plumbing with intentionally no direct unit test; it
+    # is exercised by the testscript e2e harness instead (P7-QUAL-05).
+    - ^cmd/devstrap/

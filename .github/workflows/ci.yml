@@ -191,6 +191,14 @@ jobs:
           total=$(go tool cover -func=coverage.out | tail -1 | awk '{print $3}' | tr -d '%')
           echo "total coverage: ${total}%"
           awk -v t="$total" 'BEGIN { if (t+0 < 50.0) { printf("coverage %.1f%% is below the 50%% floor\n", t); exit 1 } }'
+      - name: Per-package coverage floor
+        # P7-QUAL-05: the aggregate floor above can mask a package-local
+        # regression when another package's unrelated gains offset it in the
+        # total. Ubuntu-only (mirrors the Fuzz smoke steps in this same job):
+        # the seeded floors in .testcoverage.yml are calibrated to a single
+        # measured baseline and coverage differs a little across runners.
+        if: matrix.os == 'ubuntu-latest'
+        run: go run github.com/vladopajic/go-test-coverage/v2@v2.18.8 --config=./.testcoverage.yml
       - name: Module hygiene
         run: |
           go mod tidy
