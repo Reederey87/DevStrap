@@ -80,10 +80,12 @@ devstrap run-loop        # optional: scan + sync + materialize on an interval, n
 
 Devices converge only when they share **one** workspace id. The founder mints it; every later
 device adopts it. The founder's pairing code is a `devstrap-pair2:` blob that now carries the
-founder's fingerprint **and** the hub URI, so a fresh second device joins with a single
-`devstrap join` command. Reading the fingerprint aloud is **optional high-assurance**: the
-embedded value trusts your paste channel (1Password/Slack/iMessage); pass `--fingerprint` to also
-compare it out-of-band, which is the only thing that defends a *compromised* paste channel.
+founder's fingerprint **and** (for a remote hub) the hub URI, so a fresh second device joins with
+a single `devstrap join` command. Reading the fingerprint aloud is **optional high-assurance**:
+the embedded value trusts your paste channel (1Password/Slack/iMessage); pass `--fingerprint` to
+also compare it out-of-band, which is the only thing that defends a *compromised* paste channel.
+A carried `file:`/`folder:` hub is never auto-applied — the blob is unauthenticated, so a local
+filesystem target always needs a manual `devstrap hub init` to confirm it.
 
 ```bash
 # Founder — found the workspace and print the pairing code

@@ -773,11 +773,15 @@ fingerprint you confirmed out-of-band; a mismatch fails **before any filesystem 
 devstrap join '<founder-code>' --fingerprint <founder-fingerprint>
 ```
 
-If the founder's code carried a hub URI, `join` writes it into `~/.devstrap/config.yaml`
-automatically (skip E.3's `hub init`); if it carried none, `join` says so and you run
-`devstrap hub init <url>` yourself before the first sync. On a **v1** code (older founder binary,
-no embedded fingerprint) `join` falls back to the same interactive/`--fingerprint`/pending
-behavior `init --join --code` has always had.
+If the founder's code carried a **remote** hub URI (`r2://`, `s3://`, `git+ssh://`,
+`git@host:path`), `join` writes it into `~/.devstrap/config.yaml` automatically (skip E.3's
+`hub init`); a **local** `file:`/`folder:` URI is reported but never auto-applied — the pairing
+blob is unauthenticated, so a compromised paste channel must not be able to silently redirect
+your sync at an attacker-chosen local path; run `devstrap hub init <url>` yourself to confirm it.
+If the code carried no hub at all, `join` says so and you run `devstrap hub init <url>` yourself
+before the first sync. On a **v1** code (older founder binary, no embedded fingerprint) `join`
+falls back to the same interactive/`--fingerprint`/pending behavior `init --join --code` has
+always had.
 
 The manual, step-by-step fallback is still supported for recovery, tests, and v1 codes:
 `devstrap init ~/Code --join --code '<founder-code>' --fingerprint <fp>` (adopt + pin), then
