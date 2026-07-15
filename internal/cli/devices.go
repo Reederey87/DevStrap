@@ -181,40 +181,58 @@ func newDevicesPairingCodeCommand(stdout io.Writer, opts *options) *cobra.Comman
 				return err
 			}
 			defer closeStore(store)
-			dev, err := store.CurrentDevice(cmd.Context())
-			if err != nil {
-				return err
-			}
-			workspaceID, err := store.WorkspaceID(cmd.Context())
-			if err != nil {
-				return err
-			}
-			if dev.PublicKey == "" || dev.SigningPublicKey == "" {
-				return appError{code: exitInvalidConfig, err: fmt.Errorf("local device is missing keys; run devstrap init")}
-			}
-			blob, err := pairing.Encode(pairing.Code{
-				WorkspaceID:      workspaceID,
-				DeviceID:         dev.ID,
-				Name:             dev.Name,
-				OS:               dev.OS,
-				Arch:             dev.Arch,
-				AgeRecipient:     dev.PublicKey,
-				SigningPublicKey: dev.SigningPublicKey,
-			})
-			if err != nil {
-				return err
-			}
-			fp, err := devicekeys.Fingerprint(dev.SigningPublicKey, dev.PublicKey)
+			blob, fp, err := buildLocalPairingCode(cmd.Context(), opts, store)
 			if err != nil {
 				return err
 			}
 			if _, err := fmt.Fprintln(stdout, blob); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(cmd.ErrOrStderr(), "Pairing code printed to stdout. On the other device run:\n  devstrap init --join --code '<paste>'      # first device setup\n  devstrap devices enroll --code '<paste>' --approve --fingerprint <this device's fingerprint>\nThis device's fingerprint (read it aloud over a trusted channel; the approver must confirm it):\n  %s\n", fp)
+			// P7-PROD-01: the fingerprint now travels inside the (v2) code, so a
+			// fresh second device joins in one step with `devstrap join`. Reading
+			// the fingerprint aloud is OPTIONAL high-assurance (it defends a
+			// compromised paste channel); the embedded value trusts the channel.
+			_, err = fmt.Fprintf(cmd.ErrOrStderr(), "Pairing code printed to stdout (a devstrap-pair2: code — the fingerprint travels inside it).\nOn a fresh second device, one command joins and pins this device:\n  devstrap join '<paste>'\n  # add --fingerprint <this fingerprint> to also verify it out-of-band (defends a compromised paste channel)\nThen approve the code that device prints back:\n  devstrap devices enroll --code '<its code>' --approve --fingerprint <its fingerprint>\nThis device's fingerprint (optional high-assurance; read aloud over a trusted channel):\n  %s\n", fp)
 			return err
 		},
 	}
+}
+
+// buildLocalPairingCode encodes this device's current one-paste pairing code and
+// returns the blob plus its fingerprint (P7-PROD-01). The blob is v2: it embeds
+// the fingerprint and, when a hub is configured locally, the hub URI, so a fresh
+// joiner's `devstrap join` can auto-configure the hub and auto-trust the
+// fingerprint. It refuses when the local device is missing either public key.
+func buildLocalPairingCode(ctx context.Context, opts *options, store *state.Store) (blob, fingerprint string, err error) {
+	dev, err := store.CurrentDevice(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	workspaceID, err := store.WorkspaceID(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	if dev.PublicKey == "" || dev.SigningPublicKey == "" {
+		return "", "", appError{code: exitInvalidConfig, err: fmt.Errorf("local device is missing keys; run devstrap init")}
+	}
+	blob, err = pairing.Encode(pairing.Code{
+		WorkspaceID:      workspaceID,
+		DeviceID:         dev.ID,
+		Name:             dev.Name,
+		OS:               dev.OS,
+		Arch:             dev.Arch,
+		AgeRecipient:     dev.PublicKey,
+		SigningPublicKey: dev.SigningPublicKey,
+		HubURI:           strings.TrimSpace(opts.v.GetString("hub")),
+	})
+	if err != nil {
+		return "", "", err
+	}
+	fingerprint, err = devicekeys.Fingerprint(dev.SigningPublicKey, dev.PublicKey)
+	if err != nil {
+		return "", "", err
+	}
+	return blob, fingerprint, nil
 }
 
 func newDevicesListCommand(stdout io.Writer, opts *options) *cobra.Command {

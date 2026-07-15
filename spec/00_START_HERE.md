@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-13
+last_reviewed: 2026-07-15
 tracks_code: [cmd/**, internal/**, .github/**, AGENTS.md, README.md, go.mod, go.sum, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # DevStrap — Start Here
@@ -126,7 +126,7 @@ Implemented in this repository:
 
 - Go module: `github.com/Reederey87/DevStrap`.
 - CLI entrypoint: `cmd/devstrap`.
-- Commands: `version`, `init`, `scan`, `add`, `clone`, `hydrate`, `open`, `sync --hub-file`, `hub init`, `hub compact`, `hub gc`, `hub login`, `hub logout`, `hub migrate-events`, `keys rotate`, `materialize`, `draft snapshot create`, `run-loop`, `service install`, `service uninstall`, `service status`, `worktree new`, `worktree status`, `worktree finalize`, `worktree list`, `worktree remove`, `worktree cleanup`, `worktree unlock`, `env capture`, `env hydrate`, `env bind`, `env rotate`, `run`, `agent run`, `agent list`, `agent show`, `agent pr`, `devices enroll`, `devices list`, `devices approve`, `devices revoke`, `devices lost`, `devices rename`, `devices recipient`, `devices pairing-code`, `conflicts list`, `conflicts show`, `conflicts resolve`, `status` (`--watch`), `doctor` (`--remote`), `db migrate`, `db status`, `db backup` (`--full`), `db restore`, and `db down`.
+- Commands: `version`, `init`, `join`, `scan`, `add`, `clone`, `hydrate`, `open`, `sync --hub-file`, `hub init`, `hub compact`, `hub gc`, `hub login`, `hub logout`, `hub migrate-events`, `keys rotate`, `materialize`, `draft snapshot create`, `run-loop`, `service install`, `service uninstall`, `service status`, `worktree new`, `worktree status`, `worktree finalize`, `worktree list`, `worktree remove`, `worktree cleanup`, `worktree unlock`, `env capture`, `env hydrate`, `env bind`, `env rotate`, `run`, `agent run`, `agent list`, `agent show`, `agent pr`, `devices enroll`, `devices list`, `devices approve`, `devices revoke`, `devices lost`, `devices rename`, `devices recipient`, `devices pairing-code`, `conflicts list`, `conflicts show`, `conflicts resolve`, `status` (`--watch`), `doctor` (`--remote`), `db migrate`, `db status`, `db backup` (`--full`), `db restore`, and `db down`.
 - Structured `slog` setup with CLI/env log-level control, secret-key/value redaction helpers, and no whole-context log attributes.
 - Local state package with embedded Goose SQLite migrations.
 - SQLite open path with per-connection pragmas, WAL, busy timeout, asserted foreign-key enforcement, startup `foreign_key_check`, `0600` database mode, and single-writer pool.

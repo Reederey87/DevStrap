@@ -116,9 +116,11 @@ compaction can never resurrect a deleted project on a lagging device.
 
 A workspace is a set of devices that share one workspace id. The founder mints the id at
 `init`; every later device *adopts* it. Pairing is a two-paste ceremony (each device shows the
-other a `devstrap-pair1:` code) plus one out-of-band fingerprint read in each direction — the
-code is a non-secret prefix selector, but the fingerprint, read over a trusted channel, is what
-authorizes the keys. Each device holds age X25519 (encryption) and Ed25519 (signing)
+other a `devstrap-pair2:` code); a fresh second device joins with one `devstrap join <code>`
+command. The code carries a non-secret prefix selector plus the founder's fingerprint and hub
+URI, so the out-of-band fingerprint read is now optional high-assurance — the embedded value
+trusts the paste channel, and `join --fingerprint` re-adds the read-aloud check that defends a
+compromised channel. Each device holds age X25519 (encryption) and Ed25519 (signing)
 identities; private keys stay in the OS keychain (or a `0600` file for headless/CI), never in
 SQLite or config. Revoking a device re-encrypts affected blobs to the reduced recipient set and
 flags the exposed secrets for rotation; the workspace key also rotates automatically once its

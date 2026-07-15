@@ -31,6 +31,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-15 — feat(cli): guided pairing wire format v2 + `devstrap join` (P7-PROD-01 slice 1)
+
+Changed:
+- `internal/pairing`: versioned the wire format. `Encode` now emits a **v2** `devstrap-pair2:` code carrying two OPTIONAL new fields — the fingerprint (derived at Encode from the same keys) and an optional hub URI — behind a `devstrap-pair<N>:` prefix that is authoritative for the version (the inner `v` field must agree, else the blob is rejected). `Decode` still parses a legacy **v1** `devstrap-pair1:` blob exactly (no fingerprint/hub → `Code.HasFingerprint()/HasHubURI()` report false), verifies a v2 embedded fingerprint against the carried keys (mismatch = corrupted-in-transit refusal — a corruption check, NOT authentication), rejects control chars in the hub field, and still errors "created by a newer devstrap; upgrade" for a prefix version above this binary's. `Code` gained `Version`/`Fingerprint`/`HubURI` + `HasFingerprint()`/`HasHubURI()`.
+- `devstrap devices pairing-code` now emits the v2 format (fingerprint embedded; hub URI embedded when one is configured locally) via a shared `buildLocalPairingCode` helper, and its stderr guidance points at the one-step `devstrap join` flow while still printing the fingerprint for the optional out-of-band read.
+- New `devstrap join <pairing-code>` (`internal/cli/join.go`, registered in `root.go`): the one-command joiner side. It reuses `runInit` (init.go factored into `runInit(cmd,args,stdout,opts,initParams)` with `autoTrustFounder`/`calledFromJoin` hooks — no re-shell), then auto-configures the hub from the embedded URI (or tells the user to run `hub init`), then prints THIS device's own v2 code to stdout unconditionally (essential result, not `--quiet`-suppressed, `P7-CLI-03`). It **auto-trusts** a v2 embedded fingerprint by default (trusts the paste channel — not authentication); `--fingerprint <fp>` enforces the constant-time out-of-band compare and refuses on mismatch; a v1 code falls back to `init --join --code`'s existing TTY-prompt / non-TTY-pending behavior. `devstrap pair`/`devstrap up` are a later slice (not built).
+- Security honesty: no help text/comment/doc claims the default embedded-fingerprint path is cryptographically authenticated; each names the `--fingerprint` escape hatch. The founder-side `devices enroll --approve --fingerprint` ceremony is untouched.
+- Docs: `docs/quickstart.md` "Pair a second device" shows the `devstrap join` flow; `spec/19` §E runbook, `spec/07` (pairing-code wire-version note under `internal/pairing/**`), and `spec/13` (command list + new `### join` section + updated pairing-code/`--code` prose) match. `spec/00`/`spec/13` command inventories add `join`; `last_reviewed` bumped on 00/07/13/19. `docs/audits/README.md` intentionally left for orchestrator reconciliation.
+
+Validated:
+- `gofmt -l cmd internal` (clean); `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOCACHE=/tmp/devstrap-join-gocache go test -race ./...`.
+- New tests: `internal/pairing` v1-decode regression, v2 fingerprint round-trip (matches a fresh `devicekeys.Fingerprint`), hub-URI round-trip, prefix/version and corrupted-fingerprint error classes; `internal/cli/join_test.go` covers v2 auto-trust + hub config + own-code emission, v2 no-hub message, v1 fallback-to-pending, `--fingerprint` mismatch refusal, and `--fingerprint` match.
+
+Follow-ups:
+- `devstrap pair` wizard + `devstrap up` (P7-PROD-01 slice 2), reusing the v2 wire format and `join` built here.
+
 ## 2026-07-14 — fix(hub): periodic whole-state snapshot replica + durability doctor checks (P4-HUB-16)
 
 Changed:
