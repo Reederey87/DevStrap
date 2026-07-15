@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -225,6 +226,53 @@ func TestHubInitNoProbeSkipsGitRunner(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("--no-probe ran git ls-remote; marker err = %v", err)
+	}
+}
+
+// TestHubInitJSON pins the P5-CLI-01 part B --json shape for hub init.
+func TestHubInitJSON(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	hubURI := "git+file://" + filepath.Join(t.TempDir(), "hub.git") + "?branch=main"
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+
+	stdout, stderr, err := executeForTest("--home", home, "--json", "hub", "init", "--no-probe", hubURI)
+	if err != nil {
+		t.Fatalf("hub init --json stderr = %q err = %v", stderr, err)
+	}
+	var got hubInitResult
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("hub init --json is not a hubInitResult: %v\n%s", err, stdout)
+	}
+	if got.HubURI != hubURI {
+		t.Errorf("hub_uri = %q, want %q", got.HubURI, hubURI)
+	}
+	if got.Branch != "main" {
+		t.Errorf("branch = %q, want main", got.Branch)
+	}
+	if got.Remote == "" {
+		t.Error("remote is empty")
+	}
+	if got.ReplacedPrevious {
+		t.Error("replaced_previous = true on first init, want false")
+	}
+	if strings.Contains(stdout, "Configured hub:") {
+		t.Fatalf("hub init --json leaked human confirmation: %s", stdout)
+	}
+
+	// Force-replace a different hub: replaced_previous must be true.
+	newHub := "git+file://" + filepath.Join(t.TempDir(), "other.git")
+	stdout, stderr, err = executeForTest("--home", home, "--json", "hub", "init", "--no-probe", "--force", newHub)
+	if err != nil {
+		t.Fatalf("forced hub init --json stderr = %q err = %v", stderr, err)
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("forced hub init --json: %v\n%s", err, stdout)
+	}
+	if !got.ReplacedPrevious || got.HubURI != newHub {
+		t.Fatalf("force replace --json = %+v, want replaced_previous=true hub_uri=%s", got, newHub)
 	}
 }
 

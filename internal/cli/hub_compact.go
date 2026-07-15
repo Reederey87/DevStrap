@@ -17,6 +17,20 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// hubCompactResult is the --json shape for `hub compact` (P5-CLI-01 part B).
+// Fields match the success summary already printed in human mode. Non-fatal
+// warnings (revoked-stream reclaim, snapshot prune failures) go to stderr only
+// and are not part of this payload.
+type hubCompactResult struct {
+	SnapshotRef             string `json:"snapshot_ref"`
+	FloorsAdvanced          int    `json:"floors_advanced"`
+	EventsDeleted           int    `json:"events_deleted"`
+	TombstonesGCd           int    `json:"tombstones_gcd"`
+	RevokedObjectsReclaimed int    `json:"revoked_objects_reclaimed"`
+	SnapshotsPruned         int    `json:"snapshots_pruned"`
+	DryRun                  bool   `json:"dry_run"`
+}
+
 func newHubCompactCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var hubFile string
 	var dryRun bool
@@ -174,7 +188,23 @@ func hubCompact(ctx context.Context, stdout, stderr io.Writer, opts *options, st
 	}
 
 	if dryRun {
-		return printCompactPlan(ctx, stdout, store, device.ID, hlc, previewFloors, estimate, keepSnapshots, gcTombstones, gcReady, gcBeforeHLC, gcSkip)
+		out := hubCompactResult{
+			FloorsAdvanced: len(previewFloors),
+			EventsDeleted:  estimate,
+			DryRun:         true,
+		}
+		// Only pre-count for --json so the human dry-run path (including
+		// mid-plan CountTombstonesBelowHLC failures) stays byte-identical.
+		if opts.v.GetBool("json") && gcTombstones && gcReady {
+			n, cerr := store.CountTombstonesBelowHLC(ctx, gcBeforeHLC)
+			if cerr != nil {
+				return cerr
+			}
+			out.TombstonesGCd = n
+		}
+		return opts.render(stdout, func(w io.Writer) error {
+			return printCompactPlan(ctx, w, store, device.ID, hlc, previewFloors, estimate, keepSnapshots, gcTombstones, gcReady, gcBeforeHLC, gcSkip)
+		}, out)
 	}
 
 	// P4-HUB-12: serialize the destructive publish/delete sequence behind the
@@ -335,12 +365,22 @@ func hubCompact(ctx context.Context, stdout, stderr io.Writer, opts *options, st
 		return err
 	}
 
-	_, err = fmt.Fprintf(stdout, "hub compact: published snapshot %s; advanced %d device floor(s); deleted %d cold event(s); GC'd %d tombstone(s); reclaimed %d revoked-stream object(s); pruned %d superseded snapshot(s)\n",
-		shortSHA(snapSHA), len(manifest.Floors), deleted, tombstonesGCd, revokedObjs, prunedSnaps)
-	if err != nil {
-		return err
+	out := hubCompactResult{
+		SnapshotRef:             shortSHA(snapSHA),
+		FloorsAdvanced:          len(manifest.Floors),
+		EventsDeleted:           deleted,
+		TombstonesGCd:           tombstonesGCd,
+		RevokedObjectsReclaimed: revokedObjs,
+		SnapshotsPruned:         prunedSnaps,
+		DryRun:                  false,
 	}
-	return printFloors(stdout, manifest.Floors)
+	return opts.render(stdout, func(w io.Writer) error {
+		if _, err := fmt.Fprintf(w, "hub compact: published snapshot %s; advanced %d device floor(s); deleted %d cold event(s); GC'd %d tombstone(s); reclaimed %d revoked-stream object(s); pruned %d superseded snapshot(s)\n",
+			shortSHA(snapSHA), len(manifest.Floors), deleted, tombstonesGCd, revokedObjs, prunedSnaps); err != nil {
+			return err
+		}
+		return printFloors(w, manifest.Floors)
+	}, out)
 }
 
 // planTombstoneGC derives the safe tombstone-GC floor from signed sync acks

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -279,6 +280,114 @@ func TestHubLoginLogoutRoundTrip(t *testing.T) {
 	}
 	if _, err := resolveHubS3Credentials(context.Background(), opts, st, ws); err == nil {
 		t.Fatal("resolve after logout: want error, got credentials")
+	}
+}
+
+// TestHubLoginJSON pins the P5-CLI-01 part B --json shape for hub login
+// (workspace id + custody backend name; never the secret).
+func TestHubLoginJSON(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init: %v (%s)", err, stderr)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd := NewRootCommand(&stdout, &stderr)
+	cmd.SetIn(strings.NewReader("login-secret-json\n"))
+	cmd.SetArgs([]string{"--home", home, "--root", root, "--json", "hub", "login", "--access-key-id", "AKIAJSON"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("hub login --json: %v (%s)", err, stderr.String())
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "login-secret-json") {
+		t.Fatalf("login --json leaked the secret: %s / %s", stdout.String(), stderr.String())
+	}
+	var got hubLoginResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("hub login --json is not a hubLoginResult: %v\n%s", err, stdout.String())
+	}
+	if got.WorkspaceID == "" || !strings.HasPrefix(got.WorkspaceID, "ws_") {
+		t.Errorf("workspace_id = %q, want ws_…", got.WorkspaceID)
+	}
+	if got.CredentialStore != "file" {
+		t.Errorf("credential_store = %q, want file (DEVSTRAP_NO_KEYCHAIN=1)", got.CredentialStore)
+	}
+}
+
+// TestHubLogoutJSON pins the P5-CLI-01 part B --json shape for hub logout.
+func TestHubLogoutJSON(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init: %v (%s)", err, stderr)
+	}
+
+	// Absent credentials: removed=false.
+	stdout, stderrOut, err := executeForTest("--home", home, "--root", root, "--json", "hub", "logout")
+	if err != nil {
+		t.Fatalf("hub logout --json (absent): %v (%s)", err, stderrOut)
+	}
+	var got hubLogoutResult
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("hub logout --json is not a hubLogoutResult: %v\n%s", err, stdout)
+	}
+	if got.Removed {
+		t.Error("removed = true when no credentials stored, want false")
+	}
+	if got.WorkspaceID == "" {
+		t.Error("workspace_id is empty")
+	}
+
+	// Store then logout: removed=true.
+	var out, errb bytes.Buffer
+	cmd := NewRootCommand(&out, &errb)
+	cmd.SetIn(strings.NewReader("logout-json-secret\n"))
+	cmd.SetArgs([]string{"--home", home, "--root", root, "hub", "login", "--access-key-id", "AKIALOGOUT"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("hub login setup: %v (%s)", err, errb.String())
+	}
+	stdout, stderrOut, err = executeForTest("--home", home, "--root", root, "--json", "hub", "logout")
+	if err != nil {
+		t.Fatalf("hub logout --json (present): %v (%s)", err, stderrOut)
+	}
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("hub logout --json after login: %v\n%s", err, stdout)
+	}
+	if !got.Removed {
+		t.Error("removed = false after login, want true")
+	}
+}
+
+// TestHubGCJSON pins the P5-CLI-01 part B --json shape for hub gc.
+func TestHubGCJSON(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	hubPath := filepath.Join(t.TempDir(), "hub.json")
+	if err := os.WriteFile(hubPath, []byte("[]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init: %v (%s)", err, stderr)
+	}
+
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "--json", "hub", "gc", "--hub-file", hubPath, "--dry-run")
+	if err != nil {
+		t.Fatalf("hub gc --json: %v (%s)", err, stderr)
+	}
+	var got hubGCResult
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("hub gc --json is not a hubGCResult: %v\n%s", err, stdout)
+	}
+	if !got.DryRun {
+		t.Error("dry_run = false, want true")
+	}
+	if got.PrunedSnapshots < 0 || got.RemovedBlobs < 0 {
+		t.Errorf("counts negative: %+v", got)
+	}
+	if strings.Contains(stdout, "hub gc:") {
+		t.Fatalf("hub gc --json leaked human summary: %s", stdout)
 	}
 }
 

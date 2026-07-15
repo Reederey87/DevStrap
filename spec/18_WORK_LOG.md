@@ -31,6 +31,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-15 — feat(cli): wire --json for hub commands (P5-CLI-01 part B, batch 1/6)
+
+Changed:
+- Wired six hub commands that previously had no `--json` support onto the existing `opts.render` seam (`internal/cli/render.go`), without changing human-mode stdout text: `hub init`, `hub login`, `hub logout`, `hub gc`, `hub compact`, `hub migrate-events`.
+- Named result types (snake_case tags): `hubInitResult` (`hub_uri`, `remote`, `branch`, `replaced_previous`), `hubLoginResult` (`workspace_id`, `credential_store` — never the secret), `hubLogoutResult` (`workspace_id`, `removed`), `hubGCResult` (`pruned_snapshots`, `removed_blobs`, `dry_run`), `hubCompactResult` (`snapshot_ref`, `floors_advanced`, `events_deleted`, `tombstones_gcd`, `revoked_objects_reclaimed`, `snapshots_pruned`, `dry_run`), `hubMigrateEventsResult` (`migrated`, `kept`, `dry_run`).
+- `hub init`'s P7-CLI-03 confirmation routes through `render` so `--json` prints the payload once (not confirmation text + JSON). Compact non-fatal reclaim/prune warnings remain on stderr only (no empty `warnings` field).
+- Tests: `TestHubInitJSON`, `TestHubLoginJSON`, `TestHubLogoutJSON`, `TestHubGCJSON`, `TestHubCompactJSON`, `TestHubMigrateEventsJSON` / `TestHubMigrateEventsHumanMode`; existing human-mode hub tests unchanged.
+- `spec/13_CLI_DAEMON_API.md`: extended the P5-CLI-01 conventions intro for this batch and noted `--json` on each hub subsection. Ledger left to the orchestrator (`docs/audits/README.md` not touched; multi-PR finding).
+
+Validated:
+- `gofmt -l cmd internal`; `golangci-lint run` (or pinned `go run …@v2.12.0`); `go run ./cmd/spec-drift --base origin/main --head HEAD`; `GOCACHE=/tmp/devstrap-p5cli01-hub-gocache go test -race ./...`.
+
+Follow-ups:
+- Remaining part B batches for the other leaf commands still without `--json` (`P5-CLI-01` stays open).
+
 ## 2026-07-15 — feat(cli): guided pairing wire format v2 + `devstrap join` (P7-PROD-01 slice 1)
 
 Changed:

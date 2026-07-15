@@ -10,6 +10,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// hubMigrateEventsResult is the --json shape for `hub migrate-events` (P5-CLI-01 part B).
+type hubMigrateEventsResult struct {
+	Migrated int  `json:"migrated"`
+	Kept     int  `json:"kept"`
+	DryRun   bool `json:"dry_run"`
+}
+
 func newHubMigrateEventsCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var hubFile string
 	var dryRun bool
@@ -51,8 +58,11 @@ legacy objects and reports the plan without writing anything.`,
 			if dryRun {
 				verb = "would migrate"
 			}
-			_, err = fmt.Fprintf(stdout, "hub migrate-events: %s %d legacy event(s); kept %d unmigratable object(s)\n", verb, migrated, kept)
-			return err
+			out := hubMigrateEventsResult{Migrated: migrated, Kept: kept, DryRun: dryRun}
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "hub migrate-events: %s %d legacy event(s); kept %d unmigratable object(s)\n", verb, migrated, kept)
+				return err
+			}, out)
 		},
 	}
 	cmd.Flags().StringVar(&hubFile, "hub-file", "", "file-backed test hub path")

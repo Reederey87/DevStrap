@@ -605,6 +605,14 @@ func newHubCommand(stdout io.Writer, opts *options) *cobra.Command {
 	return cmd
 }
 
+// hubInitResult is the --json shape for `hub init` (P5-CLI-01 part B).
+type hubInitResult struct {
+	HubURI           string `json:"hub_uri"`
+	Remote           string `json:"remote"`
+	Branch           string `json:"branch"`
+	ReplacedPrevious bool   `json:"replaced_previous"`
+}
+
 func newHubInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var force bool
 	var noProbe bool
@@ -631,30 +639,42 @@ func newHubInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return appError{code: exitUsage, err: err}
 			}
 
+			out := hubInitResult{HubURI: hubURI, Remote: remote, Branch: branch}
 			if current := strings.TrimSpace(opts.v.GetString("hub")); current != "" {
 				if current == hubURI {
 					// Terminal confirmation of a completed state change, deliberately not gated by --quiet (P7-CLI-03).
-					_, _ = fmt.Fprintf(stdout, "hub already configured as %s; nothing to do.\n", hubURI)
-					printHubInitNextSteps(stdout, opts)
-					return nil
+					// Under --json the payload IS that confirmation (printed once via render).
+					return opts.render(stdout, func(w io.Writer) error {
+						if _, err := fmt.Fprintf(w, "hub already configured as %s; nothing to do.\n", hubURI); err != nil {
+							return err
+						}
+						printHubInitNextSteps(w, opts)
+						return nil
+					}, out)
 				}
 				if !force {
 					// The current value is hand-editable config and could carry
 					// embedded credentials; strip userinfo before echoing it.
 					return appError{code: exitConflict, err: fmt.Errorf("hub already configured as %s; refusing to replace with %s (use --force to overwrite)", redact.URL(current), hubURI)}
 				}
+				out.ReplacedPrevious = true
 			}
 
 			if err := rewriteConfigHub(paths, hubURI); err != nil {
 				return err
 			}
 			// Terminal confirmation of a completed state change, deliberately not gated by --quiet (P7-CLI-03).
-			_, _ = fmt.Fprintf(stdout, "Configured hub: %s\n", hubURI)
+			// Under --json the payload IS that confirmation (printed once via render).
 			if !noProbe {
 				probeGitHubCarrier(cmd.Context(), cmd.ErrOrStderr(), opts, remote, branch)
 			}
-			printHubInitNextSteps(stdout, opts)
-			return nil
+			return opts.render(stdout, func(w io.Writer) error {
+				if _, err := fmt.Fprintf(w, "Configured hub: %s\n", hubURI); err != nil {
+					return err
+				}
+				printHubInitNextSteps(w, opts)
+				return nil
+			}, out)
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing different hub value")
@@ -676,6 +696,13 @@ func probeGitHubCarrier(ctx context.Context, stderr io.Writer, opts *options, re
 func printHubInitNextSteps(stdout io.Writer, opts *options) {
 	opts.progressf(stdout, "Next: devstrap sync\n")
 	opts.progressf(stdout, "Joiner: run the joiner ceremony from `devstrap init --join` before syncing another device.\n")
+}
+
+// hubLoginResult is the --json shape for `hub login` (P5-CLI-01 part B).
+// Never carries the secret — only the metadata already shown in human mode.
+type hubLoginResult struct {
+	WorkspaceID     string `json:"workspace_id"`
+	CredentialStore string `json:"credential_store"`
 }
 
 func newHubLoginCommand(stdout io.Writer, opts *options) *cobra.Command {
@@ -730,12 +757,21 @@ time. Remove stored credentials with 'devstrap hub logout'.`,
 			if err != nil {
 				return err
 			}
-			opts.progressf(stdout, "Stored hub S3 credentials for workspace %s in the %s store.\n", ws, location)
-			return nil
+			out := hubLoginResult{WorkspaceID: ws, CredentialStore: location}
+			return opts.render(stdout, func(w io.Writer) error {
+				opts.progressf(w, "Stored hub S3 credentials for workspace %s in the %s store.\n", ws, location)
+				return nil
+			}, out)
 		},
 	}
 	cmd.Flags().StringVar(&accessKeyID, "access-key-id", "", "S3/R2 access key id (not secret; the secret is always prompted or piped)")
 	return cmd
+}
+
+// hubLogoutResult is the --json shape for `hub logout` (P5-CLI-01 part B).
+type hubLogoutResult struct {
+	WorkspaceID string `json:"workspace_id"`
+	Removed     bool   `json:"removed"`
 }
 
 func newHubLogoutCommand(stdout io.Writer, opts *options) *cobra.Command {
@@ -753,11 +789,18 @@ func newHubLogoutCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			keys := hubCredStore(cmd.Context(), opts, store)
+			// Detect whether a credential was present so --json can report removed
+			// vs. already-absent; human mode still always prints the same line.
+			_, loadErr := keys.LoadHubS3Credentials(cmd.Context(), ws)
+			removed := loadErr == nil
 			if err := keys.DeleteHubS3Credentials(cmd.Context(), ws); err != nil {
 				return err
 			}
-			opts.progressf(stdout, "Removed stored hub S3 credentials for workspace %s.\n", ws)
-			return nil
+			out := hubLogoutResult{WorkspaceID: ws, Removed: removed}
+			return opts.render(stdout, func(w io.Writer) error {
+				opts.progressf(w, "Removed stored hub S3 credentials for workspace %s.\n", ws)
+				return nil
+			}, out)
 		},
 	}
 }
@@ -794,6 +837,13 @@ func promptSecret(cmd *cobra.Command, reader *bufio.Reader, prompt string) (reda
 		return redact.Secret{}, fmt.Errorf("read secret from stdin: %w", err)
 	}
 	return redact.New(strings.TrimSpace(line)), nil
+}
+
+// hubGCResult is the --json shape for `hub gc` (P5-CLI-01 part B).
+type hubGCResult struct {
+	PrunedSnapshots int  `json:"pruned_snapshots"`
+	RemovedBlobs    int  `json:"removed_blobs"`
+	DryRun          bool `json:"dry_run"`
 }
 
 func newHubGCCommand(stdout io.Writer, opts *options) *cobra.Command {
@@ -836,8 +886,11 @@ scope (spec/15).`,
 			if dryRun {
 				verb = "would delete"
 			}
-			opts.progressf(stdout, "hub gc: pruned %d superseded draft snapshot(s); %s %d unreferenced hub blob(s)\n", pruned, verb, removed)
-			return nil
+			out := hubGCResult{PrunedSnapshots: pruned, RemovedBlobs: removed, DryRun: dryRun}
+			return opts.render(stdout, func(w io.Writer) error {
+				opts.progressf(w, "hub gc: pruned %d superseded draft snapshot(s); %s %d unreferenced hub blob(s)\n", pruned, verb, removed)
+				return nil
+			}, out)
 		},
 	}
 	cmd.Flags().StringVar(&hubFile, "hub-file", "", "file-backed test hub path")

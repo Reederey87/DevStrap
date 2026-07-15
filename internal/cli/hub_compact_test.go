@@ -118,6 +118,37 @@ func TestHubCompactHappyPath(t *testing.T) {
 	}
 }
 
+// TestHubCompactJSON pins the P5-CLI-01 part B --json shape for hub compact.
+func TestHubCompactJSON(t *testing.T) {
+	env, store, _ := setupCompact(t)
+	defer closeStore(store)
+
+	env.opts.v.Set("json", true)
+	var out bytes.Buffer
+	if err := hubCompact(env.ctx, &out, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 2, 0, true, false); err != nil {
+		t.Fatalf("hubCompact --json: %v", err)
+	}
+	var got hubCompactResult
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("hub compact --json is not a hubCompactResult: %v\n%s", err, out.String())
+	}
+	if got.SnapshotRef == "" {
+		t.Error("snapshot_ref is empty")
+	}
+	if got.FloorsAdvanced < 1 {
+		t.Errorf("floors_advanced = %d, want >= 1", got.FloorsAdvanced)
+	}
+	if got.EventsDeleted < 1 {
+		t.Errorf("events_deleted = %d, want >= 1", got.EventsDeleted)
+	}
+	if got.DryRun {
+		t.Error("dry_run = true on a real compact, want false")
+	}
+	if strings.Contains(out.String(), "published snapshot") {
+		t.Fatalf("hub compact --json leaked human summary: %s", out.String())
+	}
+}
+
 // TestHubCompactDryRunWritesNothing: a dry run prints the plan but writes no
 // snapshot, no manifest, and deletes no events.
 func TestHubCompactDryRunWritesNothing(t *testing.T) {
