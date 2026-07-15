@@ -86,7 +86,7 @@ func newDeviceEnrollCommand(stdout io.Writer, opts *options) *cobra.Command {
 				arch = decoded.Arch
 				ageRecipient = decoded.AgeRecipient
 				signingPublicKey = decoded.SigningPublicKey
-				return runDeviceEnroll(cmd, stdout, opts, store, deviceID, name, osName, arch, ageRecipient, signingPublicKey, approve, allowEpochGap, fingerprint)
+				return runDeviceEnroll(cmd, bufio.NewReader(cmd.InOrStdin()), stdout, opts, store, deviceID, name, osName, arch, ageRecipient, signingPublicKey, approve, allowEpochGap, fingerprint)
 			}
 			if len(args) == 0 {
 				return appError{code: exitUsage, err: fmt.Errorf("device id argument required (or use --code)")}
@@ -99,7 +99,7 @@ func newDeviceEnrollCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			defer closeStore(store)
-			return runDeviceEnroll(cmd, stdout, opts, store, deviceID, name, osName, arch, ageRecipient, signingPublicKey, approve, allowEpochGap, fingerprint)
+			return runDeviceEnroll(cmd, bufio.NewReader(cmd.InOrStdin()), stdout, opts, store, deviceID, name, osName, arch, ageRecipient, signingPublicKey, approve, allowEpochGap, fingerprint)
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "", "device display name")
@@ -114,7 +114,13 @@ func newDeviceEnrollCommand(stdout io.Writer, opts *options) *cobra.Command {
 	return cmd
 }
 
-func runDeviceEnroll(cmd *cobra.Command, stdout io.Writer, opts *options, store *state.Store, deviceID, name, osName, arch, ageRecipient, signingPublicKey string, approve, allowEpochGap bool, fingerprint string) error {
+// runDeviceEnroll enrolls (and optionally approves) a device record. reader is
+// the stdin source for the P4-SEC-04 fingerprint confirmation prompt; callers
+// pass a single shared *bufio.Reader so a wizard that already consumed one line
+// of stdin (e.g. `devstrap pair` reading the pasted code) can reuse the same
+// buffered reader for the "yes" confirmation without a second reader dropping
+// buffered input.
+func runDeviceEnroll(cmd *cobra.Command, reader *bufio.Reader, stdout io.Writer, opts *options, store *state.Store, deviceID, name, osName, arch, ageRecipient, signingPublicKey string, approve, allowEpochGap bool, fingerprint string) error {
 	// SECU-05: require a signing public key when --approve is set so an
 	// approved device can never silently combine with the fail-open event
 	// verification path (SECU-03).
@@ -140,7 +146,7 @@ func runDeviceEnroll(cmd *cobra.Command, stdout io.Writer, opts *options, store 
 	// is computed from the flag/code inputs (the keys being enrolled), never
 	// from the local keystore.
 	if approve {
-		if err := confirmDeviceFingerprint(cmd, deviceID, signingPublicKey, ageRecipient, fingerprint); err != nil {
+		if err := confirmDeviceFingerprint(cmd, reader, deviceID, signingPublicKey, ageRecipient, fingerprint); err != nil {
 			return err
 		}
 	}
@@ -313,7 +319,7 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 						"device %s cannot be approved: it has no %s on record (a bare placeholder auto-created by sync). Re-enroll it with full keys: devstrap devices enroll %s --name <n> --os <os> --arch <arch> --age-recipient <rec> --signing-public-key <sig> --approve --fingerprint <fp>",
 						args[0], missingDeviceKeyDesc(dev), args[0])}
 				}
-				if err := confirmDeviceFingerprint(cmd, args[0], dev.SigningPublicKey, dev.PublicKey, fingerprint); err != nil {
+				if err := confirmDeviceFingerprint(cmd, bufio.NewReader(cmd.InOrStdin()), args[0], dev.SigningPublicKey, dev.PublicKey, fingerprint); err != nil {
 					return err
 				}
 			}
@@ -666,6 +672,18 @@ func missingDeviceKeyDesc(dev state.Device) string {
 	}
 }
 
+// stdinIsTerminal reports whether the command's stdin is an interactive
+// terminal. It is a package-level seam (like keychainBackend) so tests that
+// exercise interactive prompts — the `pair` wizard's paste read and the
+// fingerprint-confirmation "yes" — can force the TTY branch while feeding a
+// piped stdin. Production always uses the real *os.File terminal check.
+var stdinIsTerminal = func(cmd *cobra.Command) bool {
+	if f, ok := cmd.InOrStdin().(*os.File); ok {
+		return term.IsTerminal(int(f.Fd()))
+	}
+	return false
+}
+
 // confirmDeviceFingerprint gates a device approval on out-of-band fingerprint
 // confirmation (P4-SEC-04). expected is derived from the keys being approved
 // (never from the local keystore). It returns nil to proceed and a non-nil
@@ -675,7 +693,7 @@ func missingDeviceKeyDesc(dev state.Device) string {
 //     refuses.
 //   - no flag + non-TTY: refuses with a copy-paste remedy embedding the
 //     computed fingerprint.
-func confirmDeviceFingerprint(cmd *cobra.Command, deviceID, signingPublicKey, ageRecipient, flagFP string) error {
+func confirmDeviceFingerprint(cmd *cobra.Command, reader *bufio.Reader, deviceID, signingPublicKey, ageRecipient, flagFP string) error {
 	expected, err := devicekeys.Fingerprint(signingPublicKey, ageRecipient)
 	if err != nil {
 		return appError{code: exitInvalidConfig, err: fmt.Errorf("cannot compute fingerprint for device %s: %w", deviceID, err)}
@@ -689,12 +707,11 @@ func confirmDeviceFingerprint(cmd *cobra.Command, deviceID, signingPublicKey, ag
 			deviceID, expected)}
 	}
 	stderr := cmd.ErrOrStderr()
-	if f, ok := cmd.InOrStdin().(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+	if stdinIsTerminal(cmd) {
 		_, _ = fmt.Fprintf(stderr,
 			"Approving device %s. Verify its fingerprint out-of-band (it must match\n'devstrap devices recipient --fingerprint' on that device, character for character):\n\n  %s\n\n",
 			deviceID, expected)
 		_, _ = fmt.Fprint(stderr, "Type 'yes' to approve: ")
-		reader := bufio.NewReader(cmd.InOrStdin())
 		line, _ := reader.ReadString('\n')
 		if strings.TrimSpace(line) != "yes" {
 			return appError{code: exitInvalidConfig, err: fmt.Errorf("approval of device %s refused: fingerprint not confirmed", deviceID)}

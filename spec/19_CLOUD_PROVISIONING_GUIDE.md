@@ -702,8 +702,15 @@ joiner, joiner code → founder). Since `P7-PROD-01` (slice 1) the joiner side i
 `devstrap join <code>` command, and the founder's fingerprint travels **inside** the code, so
 the out-of-band fingerprint read is now **optional high-assurance** (below) rather than
 mandatory in each direction. It closes the local pairing plane of `P4-SEC-04` (founder-pinning +
-full-256-bit fingerprint confirmation) and `P4-SEC-07` (workspace-id adoption); founder-side
-*automation* (the `devstrap pair`/`devstrap up` wizard) remains future work (slice 2).
+full-256-bit fingerprint confirmation) and `P4-SEC-07` (workspace-id adoption). Since
+`P7-PROD-01` slice 2 the founder side is also guided: **`devstrap up [root] --hub <url>`** folds
+init + scan + hub + sync into the one-command founder bootstrap (E.1), and **`devstrap pair`** is
+the interactive founder wizard that prints this device's code + the exact `devstrap join` command
+for the second device, blocks until you paste the joiner's code back, then auto-approves it and
+publishes the grant (E.4) — an interactive convenience over the manual `devices pairing-code` →
+`devices enroll --code --approve` → `sync` steps, which stay the documented fallback for scripts,
+CI, recovery, and v1 codes. `pair` needs a TTY; a non-interactive invocation fast-fails with the
+manual-flow remedy rather than hanging.
 
 The R2/S3 hub keys every object under `workspaces/<workspace_id>/` (section A.2), so two
 devices converge only when they share one workspace id. The **founder** mints it at
@@ -737,6 +744,10 @@ or quarantined ciphertext, never someone else's plaintext.
 > and always requires the out-of-band read. `Decode` still parses it exactly.
 
 ### E.1 Founder — found the workspace and publish the pairing material
+
+The guided one-liner is **`devstrap up ~/Code --hub <url>`** — it folds the `init` + `sync`
+(founding) below (plus `scan --adopt`) into one idempotent, resumable command, then prints a
+summary pointing at `devstrap pair` (E.4). The explicit steps, still valid as the manual path:
 
 ```bash
 devstrap init ~/Code                 # mints the workspace id; does NOT self-mint a WCK yet
@@ -828,8 +839,13 @@ read its fingerprint aloud only for the high-assurance check.
 
 ### E.4 Founder — approve the joiner, then both sync
 
-The founder enrolls and approves the joiner in one command — `--approve` wraps every held WCK
-epoch to the joiner's recipient (`GrantAllEpochs`), so the joiner can decrypt the full history:
+The guided founder wizard **`devstrap pair`** automates this whole half: at a terminal it printed
+the founder's code (E.1) and the exact `devstrap join` command, then blocks on one line of stdin;
+paste the joiner's code back and it enrolls + approves (the same out-of-band fingerprint
+confirmation as below) + syncs to publish the grant in one step. The manual equivalent — the
+fallback for scripts/CI (where `pair` fast-fails for lack of a TTY), recovery, and v1 codes —
+enrolls and approves the joiner in one command; `--approve` wraps every held WCK epoch to the
+joiner's recipient (`GrantAllEpochs`), so the joiner can decrypt the full history:
 
 ```bash
 # on the founder

@@ -42,6 +42,10 @@ type initParams struct {
 	// calledFromJoin suppresses init's trailing joiner next-steps hint so the
 	// `join` wrapper can print its own consolidated guidance.
 	calledFromJoin bool
+	// calledFromUp suppresses init's trailing next-steps hint so the founder-side
+	// `up` wrapper (which immediately runs the hub-config + sync steps the hint
+	// would suggest) can print its own consolidated summary instead.
+	calledFromUp bool
 	// pinnedFounderOut, when non-nil, receives whether a carried founder
 	// (via codeBlob) ended up actually approved/pinned rather than left
 	// pending — so a caller like `join` can report accurate status instead
@@ -348,7 +352,7 @@ func runInit(cmd *cobra.Command, args []string, stdout io.Writer, opts *options,
 			}
 			opts.progressf(stdout, "%s", hint)
 		}
-	} else {
+	} else if !p.calledFromUp {
 		opts.progressf(stdout, "Next: devstrap status • devstrap scan --adopt • set 'hub: git@github.com:<you>/<hub-repo>.git' (any private repo; or r2://<bucket>) in ~/.devstrap/config.yaml then devstrap sync\n")
 	}
 	return nil
