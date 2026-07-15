@@ -153,6 +153,31 @@ func TestDecodeV1CodeHasNoEmbeddedFields(t *testing.T) {
 	}
 }
 
+// TestDecodeAcceptsPaddedPayload: Encode never pads (RawURLEncoding), but the
+// pre-v2 decoder tolerated a padded payload (some other tool or
+// hand-transcription step could introduce one), and that tolerance must
+// survive the v2 rewrite — a regression here would silently break any v1
+// pairing code that picked up padding before reaching Decode.
+func TestDecodeAcceptsPaddedPayload(t *testing.T) {
+	code := validCode(t)
+	unpadded := encodeWireWithPrefix(t, "devstrap-pair1:", wireCode{
+		V:    1,
+		WS:   code.WorkspaceID,
+		Dev:  code.DeviceID,
+		Name: code.Name,
+		OS:   code.OS,
+		Arch: code.Arch,
+		Age:  code.AgeRecipient,
+		Sig:  code.SigningPublicKey,
+	})
+	padded := unpadded + "=="
+	got, err := Decode(padded)
+	if err != nil {
+		t.Fatalf("Decode(padded) = %v, want success", err)
+	}
+	assertCoreEqual(t, got, code)
+}
+
 func TestDecodeErrorClasses(t *testing.T) {
 	base := validWire(t)
 	tests := []struct {

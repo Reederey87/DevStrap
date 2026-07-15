@@ -179,6 +179,15 @@ func TestJoinV1FallsBackToManualFlow(t *testing.T) {
 		!strings.Contains(stderr, "devstrap devices approve "+joinTestFounderID) {
 		t.Fatalf("stderr = %q, want not-pinned warning + approve follow-up", stderr)
 	}
+	// The final summary line must reflect the TRUE pending state, not claim
+	// success — a prior version of this message unconditionally said "pinned
+	// the founder" even when it was left pending, which is misleading.
+	if strings.Contains(stderr, "pinned the founder") {
+		t.Fatalf("stderr = %q, falsely claims the founder was pinned", stderr)
+	}
+	if !strings.Contains(stderr, "still pending approval") {
+		t.Fatalf("stderr = %q, want an accurate pending-approval summary", stderr)
+	}
 	store, err := state.Open(ctx, filepath.Join(home, "state.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -232,6 +241,33 @@ func TestJoinFingerprintMatchApproves(t *testing.T) {
 	}
 	if founder.TrustState != "approved" {
 		t.Fatalf("founder trust = %q, want approved", founder.TrustState)
+	}
+}
+
+// TestJoinLocalHubURINotAutoApplied: a carried file:/folder: hub URI must never
+// be auto-configured from an unauthenticated pairing code — a compromised
+// paste channel could otherwise silently redirect the joiner's sync at an
+// attacker-chosen local filesystem path. join reports it and leaves the hub
+// unset instead.
+func TestJoinLocalHubURINotAutoApplied(t *testing.T) {
+	for _, hubURI := range []string{"file:/tmp/attacker-controlled-hub.json", "folder:/tmp/attacker-controlled-hub"} {
+		t.Run(hubURI, func(t *testing.T) {
+			home := filepath.Join(t.TempDir(), ".devstrap")
+			root := filepath.Join(t.TempDir(), "Code")
+			code, _ := founderV2Code(t, hubURI)
+
+			_, stderr, err := executeForTest("--home", home, "--root", root, "join", code)
+			if err != nil {
+				t.Fatalf("join stderr = %q err = %v", stderr, err)
+			}
+			cfg := readConfig(t, home)
+			if strings.Contains(cfg, "hub:") {
+				t.Fatalf("config = %q, a local hub URI must not be auto-applied", cfg)
+			}
+			if !strings.Contains(stderr, "local hub") || !strings.Contains(stderr, hubURI) {
+				t.Fatalf("stderr = %q, want a local-hub-not-applied note naming %q", stderr, hubURI)
+			}
+		})
 	}
 }
 

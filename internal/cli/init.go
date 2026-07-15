@@ -42,6 +42,12 @@ type initParams struct {
 	// calledFromJoin suppresses init's trailing joiner next-steps hint so the
 	// `join` wrapper can print its own consolidated guidance.
 	calledFromJoin bool
+	// pinnedFounderOut, when non-nil, receives whether a carried founder
+	// (via codeBlob) ended up actually approved/pinned rather than left
+	// pending — so a caller like `join` can report accurate status instead
+	// of assuming success. Left at its zero value (false) when there is no
+	// carried founder at all.
+	pinnedFounderOut *bool
 }
 
 func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
@@ -252,6 +258,9 @@ func runInit(cmd *cobra.Command, args []string, stdout io.Writer, opts *options,
 			pinnedFounder = true
 		} else {
 			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: founder not pinned (no TTY for fingerprint confirmation). Verify the fingerprint out-of-band, then run: devstrap devices approve %s --fingerprint %s\n", founderCode.DeviceID, founderFingerprint)
+		}
+		if p.pinnedFounderOut != nil {
+			*p.pinnedFounderOut = pinnedFounder
 		}
 	}
 	// P6-SEC-02: init no longer mints the WCK epoch-1 key. Founding is

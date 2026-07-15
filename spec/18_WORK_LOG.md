@@ -47,6 +47,12 @@ Validated:
 Follow-ups:
 - `devstrap pair` wizard + `devstrap up` (P7-PROD-01 slice 2), reusing the v2 wire format and `join` built here.
 
+### 2026-07-15 — review fixup (P7-PROD-01 slice 1): Codex + fable-5 dual-review findings
+
+Two design questions were confirmed with the maintainer before fixing: (1) `join`'s silent-by-default auto-trust of an embedded v2 fingerprint is the intended tradeoff — kept as built, `--fingerprint` remains the opt-in high-assurance path; (2) a carried `file:`/`folder:` hub URI must never be auto-applied from an unauthenticated pairing code, since a compromised paste channel could otherwise silently redirect a joiner's sync at an attacker-chosen local filesystem path — fixed.
+
+Applied three fixes: `initParams` gained `pinnedFounderOut *bool` so `runInit` reports whether a carried founder actually ended up approved rather than left pending; `join`'s closing summary now says "the founder is still pending approval" instead of unconditionally (and misleadingly) claiming "pinned the founder" on the v1/non-TTY fallback path. `join` now refuses to auto-apply a carried `file:`/`folder:` hub URI (`isLocalHubURI`) — it's reported on stderr with a `hub init`-yourself remedy instead of written to config; remote schemes (`r2://`, `s3://`, `git+ssh://`, `git@host:path`) are unaffected. `pairing.Decode` restores the pre-v2 decoder's tolerance for a padded base64url payload (`strings.TrimRight(payload, "=")` before decode), fixing a backward-compat regression where a padded v1 blob (never emitted by DevStrap's own encoder, but previously accepted) would have failed to decode. New tests: `TestJoinLocalHubURINotAutoApplied` (both local schemes), `TestDecodeAcceptsPaddedPayload`, plus the misleading-message assertion added to the existing v1-fallback test. Docs (`docs/quickstart.md`, `spec/07`, `spec/13` ×2, `spec/19` §E) updated to describe the remote-only auto-apply scope.
+
 ## 2026-07-14 — fix(hub): periodic whole-state snapshot replica + durability doctor checks (P4-HUB-16)
 
 Changed:
