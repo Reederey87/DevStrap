@@ -140,7 +140,10 @@ func Decode(blob string) (Code, error) {
 	if ver > Version {
 		return Code{}, fmt.Errorf("pairing code was created by a newer devstrap (v%d); upgrade this binary", ver)
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(payload)
+	// Encode never pads (RawURLEncoding), but tolerate a padded payload some
+	// other tool or hand-transcription may have introduced — matches the
+	// pre-v2 decoder's behavior, so a padded v1 blob still decodes.
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(payload, "="))
 	if err != nil {
 		return Code{}, fmt.Errorf("pairing code is not valid base64url: %w", err)
 	}
