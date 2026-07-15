@@ -32,16 +32,25 @@ func validCode(t *testing.T) Code {
 
 func encodeWire(t *testing.T, wire wireCode) string {
 	t.Helper()
+	return encodeWireWithPrefix(t, Prefix, wire)
+}
+
+func encodeWireWithPrefix(t *testing.T, prefix string, wire wireCode) string {
+	t.Helper()
 	raw, err := json.Marshal(wire)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return Prefix + base64.RawURLEncoding.EncodeToString(raw)
+	return prefix + base64.RawURLEncoding.EncodeToString(raw)
 }
 
 func validWire(t *testing.T) wireCode {
 	t.Helper()
 	code := validCode(t)
+	fp, err := devicekeys.Fingerprint(code.SigningPublicKey, code.AgeRecipient)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return wireCode{
 		V:    Version,
 		WS:   code.WorkspaceID,
@@ -51,11 +60,54 @@ func validWire(t *testing.T) wireCode {
 		Arch: code.Arch,
 		Age:  code.AgeRecipient,
 		Sig:  code.SigningPublicKey,
+		FP:   fp,
 	}
 }
 
-func TestEncodeDecodeRoundTrip(t *testing.T) {
+// assertCoreEqual compares the seven carried identity fields, ignoring the
+// decode-only Version/Fingerprint/HubURI metadata.
+func assertCoreEqual(t *testing.T, got, want Code) {
+	t.Helper()
+	got.Version, got.Fingerprint, got.HubURI = 0, "", ""
+	want.Version, want.Fingerprint, want.HubURI = 0, "", ""
+	if got != want {
+		t.Fatalf("core fields = %#v, want %#v", got, want)
+	}
+}
+
+func TestEncodeEmitsCurrentVersionWithFingerprint(t *testing.T) {
 	input := validCode(t)
+	blob, err := Encode(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(blob, Prefix) {
+		t.Fatalf("blob = %q, want %s prefix", blob, Prefix)
+	}
+	got, err := Decode(blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCoreEqual(t, got, input)
+	if got.Version != Version {
+		t.Fatalf("Version = %d, want %d", got.Version, Version)
+	}
+	// The embedded fingerprint must equal a fresh derivation from the same keys.
+	want, err := devicekeys.Fingerprint(input.SigningPublicKey, input.AgeRecipient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.HasFingerprint() || !devicekeys.FingerprintEqual(got.Fingerprint, want) {
+		t.Fatalf("Fingerprint = %q, want %q", got.Fingerprint, want)
+	}
+	if got.HasHubURI() {
+		t.Fatalf("HubURI = %q, want empty (no hub set)", got.HubURI)
+	}
+}
+
+func TestEncodeDecodeCarriesHubURI(t *testing.T) {
+	input := validCode(t)
+	input.HubURI = "git@github.com:me/devstrap-hub.git"
 	blob, err := Encode(input)
 	if err != nil {
 		t.Fatal(err)
@@ -64,8 +116,40 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != input {
-		t.Fatalf("Decode(Encode(input)) = %#v, want %#v", got, input)
+	if !got.HasHubURI() || got.HubURI != input.HubURI {
+		t.Fatalf("HubURI = %q, want %q", got.HubURI, input.HubURI)
+	}
+}
+
+// TestDecodeV1CodeHasNoEmbeddedFields is the regression guard: a v1
+// `devstrap-pair1:` blob (as an old binary emits it — no fp/hub fields) still
+// decodes, and the fingerprint/hub-uri report as absent so callers fall back to
+// the manual out-of-band flow.
+func TestDecodeV1CodeHasNoEmbeddedFields(t *testing.T) {
+	code := validCode(t)
+	blob := encodeWireWithPrefix(t, "devstrap-pair1:", wireCode{
+		V:    1,
+		WS:   code.WorkspaceID,
+		Dev:  code.DeviceID,
+		Name: code.Name,
+		OS:   code.OS,
+		Arch: code.Arch,
+		Age:  code.AgeRecipient,
+		Sig:  code.SigningPublicKey,
+	})
+	got, err := Decode(blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCoreEqual(t, got, code)
+	if got.Version != 1 {
+		t.Fatalf("Version = %d, want 1", got.Version)
+	}
+	if got.HasFingerprint() {
+		t.Fatalf("v1 code reported a fingerprint %q, want none", got.Fingerprint)
+	}
+	if got.HasHubURI() {
+		t.Fatalf("v1 code reported a hub uri %q, want none", got.HubURI)
 	}
 }
 
@@ -79,7 +163,17 @@ func TestDecodeErrorClasses(t *testing.T) {
 		{
 			name:    "missing prefix",
 			blob:    "not-a-code",
-			wantErr: "not a devstrap pairing code (expected the devstrap-pair1: prefix)",
+			wantErr: "not a devstrap pairing code (expected the devstrap-pair2: prefix)",
+		},
+		{
+			name:    "unparseable version",
+			blob:    "devstrap-pairX:abc",
+			wantErr: "not a devstrap pairing code (expected the devstrap-pair2: prefix)",
+		},
+		{
+			name:    "zero version",
+			blob:    encodeWireWithPrefix(t, "devstrap-pair0:", base),
+			wantErr: "not a devstrap pairing code (expected the devstrap-pair2: prefix)",
 		},
 		{
 			name:    "too large",
@@ -101,18 +195,27 @@ func TestDecodeErrorClasses(t *testing.T) {
 			blob: func() string {
 				w := base
 				w.V = Version + 1
-				return encodeWire(t, w)
+				return encodeWireWithPrefix(t, "devstrap-pair3:", w)
 			}(),
 			wantErr: "newer devstrap",
 		},
 		{
-			name: "missing version",
+			name: "prefix/field version mismatch",
 			blob: func() string {
 				w := base
-				w.V = 0
+				w.V = 1
+				return encodeWire(t, w) // prefix says v2, field says v1
+			}(),
+			wantErr: "does not match its devstrap-pair2: prefix",
+		},
+		{
+			name: "corrupted embedded fingerprint",
+			blob: func() string {
+				w := base
+				w.FP = "AAAA-BBBB-CCCC-DDDD-EEEE-FFFF-GGGG"
 				return encodeWire(t, w)
 			}(),
-			wantErr: "pairing code has no version",
+			wantErr: "embedded fingerprint does not match its keys",
 		},
 		{
 			name: "bad workspace id",
@@ -164,6 +267,7 @@ func TestDecodeErrorClasses(t *testing.T) {
 			blob: func() string {
 				w := base
 				w.Age = "age1bad"
+				w.FP = ""
 				return encodeWire(t, w)
 			}(),
 			wantErr: "pairing code carries an invalid age recipient:",
@@ -173,9 +277,19 @@ func TestDecodeErrorClasses(t *testing.T) {
 			blob: func() string {
 				w := base
 				w.Sig = "ed25519:bad"
+				w.FP = ""
 				return encodeWire(t, w)
 			}(),
 			wantErr: "pairing code carries an invalid signing public key:",
+		},
+		{
+			name: "control char in hub uri",
+			blob: func() string {
+				w := base
+				w.Hub = "git@github.com:me/hub.git\nrm -rf"
+				return encodeWire(t, w)
+			}(),
+			wantErr: "control character in the device hub uri",
 		},
 	}
 	for _, tc := range tests {
@@ -211,9 +325,7 @@ func TestDecodeAllowsUnknownFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != code {
-		t.Fatalf("Decode with unknown field = %#v, want %#v", got, code)
-	}
+	assertCoreEqual(t, got, code)
 }
 
 func TestDecodeTrimsWhitespace(t *testing.T) {
@@ -226,9 +338,7 @@ func TestDecodeTrimsWhitespace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != code {
-		t.Fatalf("Decode whitespace = %#v, want %#v", got, code)
-	}
+	assertCoreEqual(t, got, code)
 }
 
 // Post-#57 opus review (M2): the blob is an untrusted ingestion path and its
@@ -243,6 +353,7 @@ func TestDecodeRejectsControlCharacters(t *testing.T) {
 		{"newline in name", func(c *Code) { c.Name = "lap\ntop" }},
 		{"escape in os", func(c *Code) { c.OS = "lin\x1bux" }},
 		{"delete in arch", func(c *Code) { c.Arch = "arm\x7f64" }},
+		{"newline in hub uri", func(c *Code) { c.HubURI = "git@h\nub" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

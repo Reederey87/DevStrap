@@ -79,19 +79,22 @@ devstrap run-loop        # optional: scan + sync + materialize on an interval, n
 ## Pair a second device
 
 Devices converge only when they share **one** workspace id. The founder mints it; every later
-device adopts it. Pairing is a two-paste ceremony plus one out-of-band fingerprint read in each
-direction — the code is non-secret, but the fingerprint (read aloud over a trusted channel) is
-what authorizes the keys.
+device adopts it. The founder's pairing code is a `devstrap-pair2:` blob that now carries the
+founder's fingerprint **and** the hub URI, so a fresh second device joins with a single
+`devstrap join` command. Reading the fingerprint aloud is **optional high-assurance**: the
+embedded value trusts your paste channel (1Password/Slack/iMessage); pass `--fingerprint` to also
+compare it out-of-band, which is the only thing that defends a *compromised* paste channel.
 
 ```bash
 # Founder — found the workspace and print the pairing code
 devstrap sync                         # founds the workspace, pushes the namespace map
-devstrap devices pairing-code         # stdout: devstrap-pair1:…   stderr: founder fingerprint
+devstrap devices pairing-code         # stdout: devstrap-pair2:… (fingerprint + hub embedded)
 
-# Joiner — adopt the id and pin the founder in one step
-devstrap init ~/Code --join --code '<founder-code>' --fingerprint <founder-fingerprint>
-devstrap hub init git@github.com:you/devstrap-hub.git   # same hub as the founder
-devstrap devices pairing-code         # the joiner's own code + fingerprint, sent back
+# Joiner — one command: adopt the id, pin the founder, configure the hub
+devstrap join '<founder-code>'
+# High-assurance variant (verify the fingerprint out-of-band against the founder's stderr):
+#   devstrap join '<founder-code>' --fingerprint <founder-fingerprint>
+# `join` prints THIS device's own code; send it back to the founder.
 
 # Founder — approve the joiner, then push the key grants
 devstrap devices enroll --code '<joiner-code>' --approve --fingerprint <joiner-fingerprint>
@@ -100,6 +103,12 @@ devstrap sync
 # Joiner — sync once more; the whole tree materializes
 devstrap sync
 ```
+
+`devstrap join` folds `init --join --code` + `hub init` + generating the joiner's own code. If the
+founder's code carried no hub (a founder who had not configured one yet), `join` says so and you
+run `devstrap hub init <url>` yourself before the first `sync`. The older manual sequence
+(`devstrap init ~/Code --join --code … --fingerprint …` then `devstrap hub init …` then
+`devstrap devices pairing-code`) still works and remains the fallback for v1 codes.
 
 The workspace key rotates automatically during `sync` once its epoch ages past
 `keys.rotate_max_age` (default 90 days); `devstrap keys rotate` forces it, and
