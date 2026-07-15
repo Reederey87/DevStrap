@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -192,6 +193,98 @@ func TestPairNonTTYFailsFast(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "needs an interactive terminal") {
 		t.Fatalf("stderr = %q, want the non-TTY manual-flow message", stderr)
+	}
+}
+
+// TestPairRefusesOwnCode proves the fix for a review finding (PR #202): pasting
+// this device's OWN pairing code back (a plausible fat-finger, since it's
+// printed directly above the paste prompt) must be refused with a clear
+// message, not silently re-approve/re-grant the device to itself.
+func TestPairRefusesOwnCode(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+	forceTTY(t)
+	ctx := context.Background()
+
+	home, root, _, _ := upFounder(t)
+	store, err := state.Open(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.CurrentDevice(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeStore(store)
+	ownCode, _, err := executeForTest("--home", home, "--root", root, "devices", "pairing-code")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := executeForTestWithStdin(strings.NewReader(pairingLine(t, ownCode)+"\n"), "--home", home, "--root", root, "pair")
+	if err == nil {
+		t.Fatalf("pair pasted its own code and succeeded, want refusal; stdout=%q stderr=%q", stdout, stderr)
+	}
+	if !strings.Contains(stderr, "OWN pairing code") {
+		t.Fatalf("stderr = %q, want the own-code refusal", stderr)
+	}
+
+	// Nothing about the local device changed.
+	store2, err := state.Open(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(store2)
+	after, err := store2.CurrentDevice(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.TrustState != before.TrustState {
+		t.Fatalf("local device trust state changed from %q to %q after a refused self-paste", before.TrustState, after.TrustState)
+	}
+}
+
+// TestPairRejectsNegativeTimeout: --timeout must be >= 0; a negative value is a
+// usage error, not another way to spell "wait indefinitely" (0 already means
+// that) (review finding, PR #202).
+func TestPairRejectsNegativeTimeout(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	home, root, _, _ := upFounder(t)
+	_, stderr, err := executeForTest("--home", home, "--root", root, "pair", "--timeout", "-1s")
+	if err == nil {
+		t.Fatalf("pair --timeout -1s succeeded, want a usage refusal; stderr = %q", stderr)
+	}
+	if !strings.Contains(stderr, "--timeout must be >= 0") {
+		t.Fatalf("stderr = %q, want the negative-timeout usage message", stderr)
+	}
+}
+
+// TestPairTimesOutOnNoPaste exercises the ACTUAL timeout branch (not the
+// blank-line/EOF branch, which is a distinct code path): stdin blocks forever
+// (an unclosed pipe, simulating an operator who never pastes anything and
+// never hits Ctrl-C or EOF either), and a short --timeout must still return
+// cleanly with the manual follow-up rather than hanging.
+func TestPairTimesOutOnNoPaste(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	forceTTY(t)
+	home, root, _, _ := upFounder(t)
+
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close(); _ = pr.Close() })
+
+	stdout, stderr, err := executeForTestWithStdin(pr, "--home", home, "--root", root, "pair", "--timeout", "50ms")
+	if err != nil {
+		t.Fatalf("pair should time out cleanly, not error: %v\nstderr=%s", err, stderr)
+	}
+	if !strings.Contains(stderr, "Timed out waiting") {
+		t.Fatalf("stderr = %q, want the timeout message (not the blank/EOF message)", stderr)
+	}
+	if !strings.Contains(stderr, "Finish the founder side by hand") {
+		t.Fatalf("stderr = %q, want the manual follow-up", stderr)
+	}
+	if strings.Contains(stdout, "Paired: device") {
+		t.Fatalf("stdout = %q, must not claim a pairing after a timeout", stdout)
 	}
 }
 

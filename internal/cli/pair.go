@@ -51,6 +51,13 @@ func newPairCommand(stdout io.Writer, opts *options) *cobra.Command {
 			stderr := cmd.ErrOrStderr()
 			paths := opts.paths()
 
+			// Only 0 (documented as "wait indefinitely") legitimately disables the
+			// timer; a negative duration is a usage mistake, not another way to
+			// spell "forever" (review finding, PR #202).
+			if timeout < 0 {
+				return appError{code: exitUsage, err: fmt.Errorf("--timeout must be >= 0 (0 waits indefinitely)")}
+			}
+
 			// A friendly refusal for a home that was never initialized, before the
 			// raw sqlite "unable to open database file" surfaces.
 			if _, err := os.Stat(paths.StateDB()); errors.Is(err, os.ErrNotExist) {
@@ -74,6 +81,10 @@ func newPairCommand(stdout io.Writer, opts *options) *cobra.Command {
 			}
 			if isJoiner(opts) {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("this device joined an existing workspace (role: joiner); 'devstrap pair' is the FOUNDER's wizard — run 'devstrap join <code>' here instead, or run 'devstrap pair' on the founding device")}
+			}
+			localDevice, err := store.CurrentDevice(ctx)
+			if err != nil {
+				return err
 			}
 
 			// Step 1+2: print this device's code (stdout, unconditional per
@@ -150,6 +161,13 @@ func newPairCommand(stdout io.Writer, opts *options) *cobra.Command {
 			}
 			if code.WorkspaceID != localWS {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("that pairing code is for workspace %s, but this device is %s — it was generated on a device from a different workspace", code.WorkspaceID, localWS)}
+			}
+			// A fat-fingered paste of THIS device's own code (printed just above
+			// the prompt) would otherwise proceed into runDeviceEnroll and
+			// re-approve/re-grant this device to itself — benign but confusing.
+			// Refuse it with a clear message instead (review finding, PR #202).
+			if code.DeviceID == localDevice.ID {
+				return appError{code: exitInvalidConfig, err: fmt.Errorf("that is this device's OWN pairing code (printed above) — paste the SECOND device's code instead, once you've run 'devstrap join' there")}
 			}
 			if err := runDeviceEnroll(cmd, reader, stdout, opts, store, code.DeviceID, code.Name, code.OS, code.Arch, code.AgeRecipient, code.SigningPublicKey, true, false, ""); err != nil {
 				return err

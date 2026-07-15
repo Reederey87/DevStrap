@@ -46,6 +46,18 @@ Validated:
 Follow-ups:
 - None. This slice completes P7-PROD-01 (the wire format + `join` shipped in slice 1); the orchestrator reconciles the audit ledger.
 
+### 2026-07-15 — review fixup (P7-PROD-01 slice 2): Codex + fable-5 dual-review findings
+
+Codex found three real correctness gaps in `up`'s idempotency/preflight claims (plus two smaller `pair` nits); fable-5 independently traced the same safety claims clean but flagged a self-paste UX gap and missing timeout/cancellation test coverage. Fixed all of it:
+
+- `up`'s default `--scan` no longer calls `init`'s one-shot `adoptFindings` (which re-stamps a fresh `project.added` event on every call, even though the project row itself is only upserted) — it now runs `runLoopScanAdopt`/`adoptNewFindings` as a separate step after `init`, the same idempotent path `run-loop`'s per-tick scan already uses, so a retried `up` never duplicates a project's event history.
+- `up` now refuses up front on a device whose local role is already `joiner` — previously it silently proceeded (an existing joiner config is left untouched by `runInit`), the `P6-SEC-02` founder gate correctly deferred without founding anything, yet `up` still printed a false "founded" success.
+- `hubConfigured` now rejects a bare `file:` (empty path) instead of accepting it unvalidated — previously `up --hub file:` founded the workspace and minted a key epoch before the empty path failed downstream in the hub backend, defeating the "preflight before any write" design.
+- `pair` now refuses a pasted code that names the local device's OWN id (a plausible fat-finger, since the code is printed directly above the paste prompt) instead of silently re-approving/re-granting the device to itself.
+- `pair --timeout` now rejects a negative duration as a usage error; only `0` means "wait indefinitely."
+- New regression tests for all five: `TestUpScanRetryDoesNotDuplicateAdoption` (queries the LOCAL plaintext event log, since the hub file stores envelope-encrypted events with no readable `Type`), `TestUpRefusesExistingJoiner`, `TestUpRejectsEmptyFileHub`, `TestPairRefusesOwnCode`, `TestPairRejectsNegativeTimeout`, and `TestPairTimesOutOnNoPaste` (an unclosed `io.Pipe` plus a 50ms `--timeout`, proving the actual timeout branch fires distinctly from the blank-line/EOF branch and returns promptly rather than hanging).
+- `docs/audits/README.md` reconciled in the same PR (not left for a separate orchestrator pass this time, since the ledger update is mechanical): `P7-PROD-01` moved to *Recently shipped*, Pass 7 open count 6→5.
+
 ## 2026-07-15 — feat(cli): guided pairing wire format v2 + `devstrap join` (P7-PROD-01 slice 1)
 
 Changed:

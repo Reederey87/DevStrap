@@ -548,6 +548,14 @@ func hubConfigured(opts *options, hubFile string) error {
 	}
 	switch {
 	case strings.HasPrefix(uri, "file:"):
+		// An empty path (bare "file:") previously passed unvalidated, letting
+		// a caller like `devstrap up` mint a workspace key epoch before the
+		// empty path failed downstream in the hub backend (review finding,
+		// PR #202) — reject it here instead, before any persistent state
+		// changes.
+		if strings.TrimSpace(strings.TrimPrefix(uri, "file:")) == "" {
+			return fmt.Errorf("file hub uri must include a path (file:<path>)")
+		}
 		return nil
 	case strings.HasPrefix(uri, "r2://"), strings.HasPrefix(uri, "s3://"):
 		if _, err := parseHubURI(uri); err != nil {

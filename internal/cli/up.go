@@ -28,7 +28,19 @@ func newUpCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Short: "Bootstrap a new workspace in one step: init + scan + hub + sync (P7-PROD-01)",
 		Args:  usageArgs(cobra.MaximumNArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 			stderr := cmd.ErrOrStderr()
+
+			// `up` founds a NEW workspace; a device that already joined an
+			// existing one (role: joiner) must use `join`/`pair` instead — an
+			// already-persisted joiner config is left untouched by runInit
+			// below, so silently proceeding would rewrite the hub and adopt
+			// projects while sync just defers (never founding), yet still
+			// report a false "founded" success (review finding, PR #202).
+			if isJoiner(opts) {
+				return appError{code: exitInvalidConfig, err: fmt.Errorf("this device already joined an existing workspace (role: joiner); 'devstrap up' founds a NEW workspace — run 'devstrap sync' here instead, or 'devstrap join <code>' if you haven't joined yet")}
+			}
+
 			hub := strings.TrimSpace(hubURL)
 			if hub == "" {
 				return appError{code: exitUsage, err: fmt.Errorf("--hub is required: the hub to configure (a git carrier git@host:path.git / git+ssh://…, or r2://<bucket> / s3://<bucket>)")}
@@ -45,15 +57,25 @@ func newUpCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return appError{code: exitUsage, err: fmt.Errorf("invalid --hub %q: %w", hub, err)}
 			}
 
-			// Step 1 (init + optional scan/adopt): found the workspace and this
-			// device's key identity. Idempotent — a re-run over an initialized home
-			// is a no-op that leaves config untouched.
+			// Step 1 (init only — no scan yet): found the workspace and this
+			// device's key identity. Idempotent — a re-run over an initialized
+			// home is a no-op that leaves config untouched. Scan/adopt is a
+			// SEPARATE step below so retries use the idempotent adopt path
+			// (adoptNewFindings), not init's one-shot adoptFindings, which
+			// re-stamps a fresh project.added event on every call (review
+			// finding, PR #202) — safe for a single `init --scan`, but not for
+			// a command explicitly designed to be re-run on failure.
 			if err := runInit(cmd, args, stdout, opts, initParams{
 				workspaceName: workspaceName,
-				scanAdopt:     scanAdopt,
 				calledFromUp:  true,
 			}); err != nil {
 				return err
+			}
+			if scanAdopt {
+				if err := runLoopScanAdopt(ctx, stderr, opts); err != nil {
+					opts.progressf(stderr, "up: the workspace was initialized (safe to keep); only the scan/adopt step failed. Re-run 'devstrap up' — it will not duplicate any project already adopted.\n")
+					return err
+				}
 			}
 
 			// Step 2 (hub): persist the hub into config.yaml via the surgical
@@ -72,7 +94,7 @@ func newUpCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// namespace map. Surface sync's own error UNWRAPPED — a hub-unreachable
 			// failure keeps the exact error and exit class sync already produces;
 			// `up` is a thin wrapper, not a new error-handling layer.
-			if err := runSyncCycle(cmd.Context(), stdout, opts, "", false, false); err != nil {
+			if err := runSyncCycle(ctx, stdout, opts, "", false, false); err != nil {
 				opts.progressf(stderr, "up: init and hub configuration already succeeded and are safe to keep; only the final sync failed. Re-run 'devstrap up' — or just 'devstrap sync' — to finish from here.\n")
 				return err
 			}
@@ -80,8 +102,8 @@ func newUpCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// Closing summary: name the founded workspace so the operator can copy
 			// it and knows exactly what just happened.
 			wsID := ""
-			if store, serr := opts.openState(cmd.Context()); serr == nil {
-				if w, ierr := store.WorkspaceID(cmd.Context()); ierr == nil {
+			if store, serr := opts.openState(ctx); serr == nil {
+				if w, ierr := store.WorkspaceID(ctx); ierr == nil {
 					wsID = w
 				}
 				closeStore(store)
