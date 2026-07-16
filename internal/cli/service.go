@@ -35,6 +35,16 @@ func newServiceCommand(stdout io.Writer, opts *options) *cobra.Command {
 	return cmd
 }
 
+// serviceInstallResult is the --json shape for `devstrap service install`
+// (P5-CLI-01 part B). The stderr confirmation lines stay unchanged (P7-CLI-03,
+// deliberately not gated by --quiet); this is purely additive for --json.
+type serviceInstallResult struct {
+	Manager  string   `json:"manager"`
+	Label    string   `json:"label"`
+	UnitPath string   `json:"unit_path,omitempty"`
+	Notes    []string `json:"notes,omitempty"`
+}
+
 func newServiceInstallCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var interval time.Duration
 	var namespaceOnly bool
@@ -99,7 +109,9 @@ func newServiceInstallCommand(stdout io.Writer, opts *options) *cobra.Command {
 			}
 			// Terminal confirmation of a completed state change, deliberately not gated by --quiet (P7-CLI-03).
 			_, _ = fmt.Fprintf(stderr, "installed %s service %q\n", mgr.Name(), resolvedLabel)
+			unitPath := ""
 			if status, serr := mgr.Status(cmd.Context(), resolvedLabel); serr == nil && status.UnitPath != "" {
+				unitPath = status.UnitPath
 				opts.progressf(stderr, "unit: %s\n", status.UnitPath)
 			}
 			opts.progressf(stderr, "logs: %s, %s\n", spec.StdoutPath, spec.StderrPath)
@@ -108,7 +120,12 @@ func newServiceInstallCommand(stdout io.Writer, opts *options) *cobra.Command {
 			for _, note := range notes {
 				_, _ = fmt.Fprintln(stderr, note)
 			}
-			return nil
+			return opts.render(stdout, func(w io.Writer) error { return nil }, serviceInstallResult{
+				Manager:  mgr.Name(),
+				Label:    resolvedLabel,
+				UnitPath: unitPath,
+				Notes:    notes,
+			})
 		},
 	}
 	cmd.Flags().DurationVar(&interval, "interval", 5*time.Minute, "run-loop sync interval")
@@ -197,6 +214,16 @@ func checkServiceInstallCustody(ctx context.Context, stderr io.Writer, opts *opt
 	return false, nil
 }
 
+// serviceUninstallResult is the --json shape for `devstrap service uninstall`
+// (P5-CLI-01 part B). The stderr confirmation lines stay unchanged (P7-CLI-03,
+// deliberately not gated by --quiet); this is purely additive for --json.
+type serviceUninstallResult struct {
+	Manager      string   `json:"manager"`
+	Label        string   `json:"label"`
+	WasInstalled bool     `json:"was_installed"`
+	Notes        []string `json:"notes,omitempty"`
+}
+
 func newServiceUninstallCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var label string
 	cmd := &cobra.Command{
@@ -223,6 +250,7 @@ func newServiceUninstallCommand(stdout io.Writer, opts *options) *cobra.Command 
 				}
 				return err
 			}
+			wasInstalled := true
 			switch {
 			case statusErr != nil:
 				// Terminal confirmation of a completed state change, deliberately not gated by --quiet (P7-CLI-03).
@@ -233,13 +261,19 @@ func newServiceUninstallCommand(stdout io.Writer, opts *options) *cobra.Command 
 			default:
 				// Terminal confirmation of a completed state change, deliberately not gated by --quiet (P7-CLI-03).
 				_, _ = fmt.Fprintf(stderr, "%s service %q not installed; nothing to do\n", mgr.Name(), resolvedLabel)
+				wasInstalled = false
 			}
 			// Notes are operator advisories (e.g. headless systemd unit-file-only
 			// removal), not mere progress — print them verbatim even under --quiet.
 			for _, note := range notes {
 				_, _ = fmt.Fprintln(stderr, note)
 			}
-			return nil
+			return opts.render(stdout, func(w io.Writer) error { return nil }, serviceUninstallResult{
+				Manager:      mgr.Name(),
+				Label:        resolvedLabel,
+				WasInstalled: wasInstalled,
+				Notes:        notes,
+			})
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "service label (defaults to the OS-idiomatic label)")

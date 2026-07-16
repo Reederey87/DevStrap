@@ -19,6 +19,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// hydrateResult is the --json shape for `devstrap hydrate` (P5-CLI-01 part B).
+type hydrateResult struct {
+	Path string `json:"path"`
+}
+
 func newHydrateCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var partial bool
 	var full bool
@@ -41,8 +46,10 @@ func newHydrateCommand(stdout io.Writer, opts *options) *cobra.Command {
 					return err
 				}
 			}
-			_, err = fmt.Fprintf(stdout, "Hydrated %s\n", localPath)
-			return err
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "Hydrated %s\n", localPath)
+				return err
+			}, hydrateResult{Path: localPath})
 		},
 	}
 	cmd.Flags().BoolVar(&partial, "partial", true, "use partial clone with blob filtering")

@@ -9,6 +9,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// openResult is the --json shape for `devstrap open` (P5-CLI-01 part B).
+type openResult struct {
+	Path   string `json:"path"`
+	Editor string `json:"editor"`
+}
+
 func newOpenCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var cursor bool
 	var vscode bool
@@ -34,8 +40,10 @@ func newOpenCommand(stdout io.Writer, opts *options) *cobra.Command {
 				}
 				return err
 			}
-			_, err = fmt.Fprintf(stdout, "Opened %s with %s\n", localPath, editor)
-			return err
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "Opened %s with %s\n", localPath, editor)
+				return err
+			}, openResult{Path: localPath, Editor: editor})
 		},
 	}
 	cmd.Flags().BoolVar(&cursor, "cursor", false, "open with Cursor")

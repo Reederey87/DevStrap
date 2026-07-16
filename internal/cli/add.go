@@ -12,6 +12,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// addResult is the --json shape for `devstrap add` (P5-CLI-01 part B).
+type addResult struct {
+	Path   string `json:"path"`
+	Remote string `json:"remote"`
+}
+
 func newAddCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var nsPath string
 	var defaultBranch string
@@ -33,8 +39,10 @@ func newAddCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return appError{code: exitInvalidConfig, err: err}
 			}
-			_, err = fmt.Fprintf(stdout, "Added %s -> %s\n", project.Path, args[0])
-			return err
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "Added %s -> %s\n", project.Path, args[0])
+				return err
+			}, addResult{Path: project.Path, Remote: args[0]})
 		},
 	}
 	cmd.Flags().StringVar(&nsPath, "path", "", "namespace path")

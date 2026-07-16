@@ -77,6 +77,29 @@ func newInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 	return cmd
 }
 
+// initResult is the --json shape for `devstrap init` (P5-CLI-01 part B). It
+// covers both the --dry-run preview and the real-run outcome; fields
+// meaningless to a given branch stay at their zero value and are omitted.
+//
+// `init` is also invoked internally by `up`/`join` (initParams.calledFromUp /
+// calledFromJoin) — in that case runInit deliberately does NOT call
+// opts.render at all (see the calledFromUp/calledFromJoin check below), so
+// this type is only ever encoded when `init` runs standalone. `up --json`
+// instead inherits its single JSON document for free from its terminal
+// runSyncCycle call (see spec/13's P5-CLI-01 note); `join --json` builds its
+// own joinResult once runInit's internal render has been suppressed.
+type initResult struct {
+	DryRun        bool   `json:"dry_run,omitempty"`
+	Root          string `json:"root,omitempty"`
+	Home          string `json:"home,omitempty"`
+	LogDir        string `json:"log_dir,omitempty"`
+	StateDB       string `json:"state_db,omitempty"`
+	WorkspaceName string `json:"workspace_name,omitempty"`
+	Join          bool   `json:"join,omitempty"`
+	WorkspaceID   string `json:"workspace_id,omitempty"`
+	Adopted       int    `json:"adopted,omitempty"`
+}
+
 func runInit(cmd *cobra.Command, args []string, stdout io.Writer, opts *options, p initParams) error {
 	workspaceName := p.workspaceName
 	join := p.join
@@ -152,13 +175,37 @@ func runInit(cmd *cobra.Command, args []string, stdout io.Writer, opts *options,
 	opts.v.Set("root", cleanRoot)
 
 	if p.dryRun {
-		if workspaceID != "" {
-			if _, err := fmt.Fprintf(stdout, "Would adopt workspace id %s (join)\n", workspaceID); err != nil {
-				return err
-			}
+		result := initResult{
+			DryRun:        true,
+			Root:          paths.Root,
+			Home:          paths.Home,
+			LogDir:        paths.LogDir(),
+			StateDB:       paths.StateDB(),
+			WorkspaceName: workspaceName,
+			WorkspaceID:   workspaceID,
+			Join:          join,
 		}
-		_, err := fmt.Fprintf(stdout, "Would create %s, %s, %s, and %s\n", paths.Root, paths.Home, paths.LogDir(), paths.StateDB())
-		return err
+		human := func(w io.Writer) error {
+			if workspaceID != "" {
+				if _, err := fmt.Fprintf(w, "Would adopt workspace id %s (join)\n", workspaceID); err != nil {
+					return err
+				}
+			}
+			_, err := fmt.Fprintf(w, "Would create %s, %s, %s, and %s\n", paths.Root, paths.Home, paths.LogDir(), paths.StateDB())
+			return err
+		}
+		// See initResult's doc comment: init called internally by up/join must
+		// never self-render under --json (the outer caller owns the single
+		// JSON document), but still prints its normal human-mode lines when
+		// --json is not set — up/join's own human-mode output is layered on
+		// top of, not instead of, init's.
+		if p.calledFromUp || p.calledFromJoin {
+			if opts.v.GetBool("json") {
+				return nil
+			}
+			return human(stdout)
+		}
+		return opts.render(stdout, human, result)
 	}
 
 	//nolint:gosec // The managed code root is user-facing project storage, not a secret state directory.
@@ -303,67 +350,95 @@ func runInit(cmd *cobra.Command, args []string, stdout io.Writer, opts *options,
 		}
 	}
 
-	opts.progressf(stdout, "Initialized DevStrap workspace %q at %s\n", workspaceName, paths.Root)
+	result := initResult{
+		Root:          paths.Root,
+		Home:          paths.Home,
+		LogDir:        paths.LogDir(),
+		StateDB:       paths.StateDB(),
+		WorkspaceName: workspaceName,
+		Join:          join,
+	}
 	if p.scanAdopt {
-		opts.progressf(stdout, "Adopted %d existing project(s).\n", adopted)
+		result.Adopted = adopted
 	}
-	// PROD-03: always print a short next-steps hint (clig.dev: suggest
-	// the next command and surface state after every action). The hint
-	// is role-aware (P6-SEC-02): a joining device must be approved from
-	// an existing device before its events can sync.
-	if join {
-		// P4-SEC-07 pairing: remote hubs (git carrier, r2/s3) key
-		// everything under workspaces/<workspace_id>/, so a joiner that
-		// mints its own id reads an empty prefix and never sees the
-		// founder. Flat file hubs are unaffected. The hint (and warning,
-		// when the id is missing) walks the founder-status → copy-id →
-		// re-init path.
-		if workspaceID == "" {
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: remote hubs (git carrier, r2/s3) key events by workspace id; without --workspace-id this device minted its own id and will not see the founder's hub data (file hubs are unaffected)\n")
-		} else {
-			opts.progressf(stdout, "Adopted workspace id %s.\n", workspaceID)
+	if join && workspaceID != "" {
+		result.WorkspaceID = workspaceID
+	}
+	human := func(w io.Writer) error {
+		opts.progressf(w, "Initialized DevStrap workspace %q at %s\n", workspaceName, paths.Root)
+		if p.scanAdopt {
+			opts.progressf(w, "Adopted %d existing project(s).\n", adopted)
 		}
-		// `join` prints its own consolidated next steps (hub configured,
-		// this device's returned code); suppress init's numbered hint there.
-		if !p.calledFromJoin {
-			hint := "Joining an existing workspace. Next:\n"
-			var steps []string
-			if founderCode.DeviceID != "" {
-				steps = []string{
-					"on the founding device: devstrap devices pairing-code           # copy the code + read its fingerprint aloud",
-					"(this init already adopted the workspace id and pinned the founder when you passed --code)",
-					"devstrap devices pairing-code                                   # now generate THIS device's code; paste it on the founder",
-					"on the founding device: devstrap devices enroll --code '<code>' --approve --fingerprint <this device's fingerprint>",
-					"set 'hub: git@github.com:<you>/<hub-repo>.git' (any private repo; or r2://<bucket>) in ~/.devstrap/config.yaml, then devstrap sync",
-				}
-				if !pinnedFounder {
-					steps[1] = "(this init already adopted the workspace id; pin the founder with the warning command before your first sync)"
-				}
-			} else {
-				steps = []string{
-					"pin the founder — and every other existing device — BEFORE your first sync: devstrap devices enroll <device-id> --name <n> --os <os> --arch <arch> --age-recipient <rec> --signing-public-key <sig> --approve --fingerprint <fp>  # closes the TOFU window (P4-SEC-04); events from devices you have not pinned yet quarantine and replay once approved",
-					"devstrap devices recipient              # copy this device's age recipient",
-					"devstrap devices recipient --signing    # and its signing key",
-					"devstrap devices recipient --fingerprint  # and its fingerprint to compare out-of-band during approval",
-					"on an approved device: devstrap devices enroll <id> --age-recipient <rec> --signing-public-key <sig> --approve --fingerprint <fp>  # compare the fingerprint against 'devstrap devices recipient --fingerprint' here before approving",
-					"set 'hub: git@github.com:<you>/<hub-repo>.git' (any private repo; or r2://<bucket>) in ~/.devstrap/config.yaml, then devstrap sync  # ingests the grant, then pushes your projects",
-				}
-			}
+		// PROD-03: always print a short next-steps hint (clig.dev: suggest
+		// the next command and surface state after every action). The hint
+		// is role-aware (P6-SEC-02): a joining device must be approved from
+		// an existing device before its events can sync.
+		if join {
+			// P4-SEC-07 pairing: remote hubs (git carrier, r2/s3) key
+			// everything under workspaces/<workspace_id>/, so a joiner that
+			// mints its own id reads an empty prefix and never sees the
+			// founder. Flat file hubs are unaffected. The hint (and warning,
+			// when the id is missing) walks the founder-status → copy-id →
+			// re-init path.
 			if workspaceID == "" {
-				// This init already minted a local id, so a plain re-run
-				// with --workspace-id would hit the mismatch refusal — the
-				// recovery hint must include removing the state home.
-				steps = append([]string{fmt.Sprintf("on the founding device: devstrap status  # copy its Workspace ID, then (remote hubs only — file hubs need no id) rm -r %s here and re-run: devstrap init --join --workspace-id <id>", paths.Home)}, steps...)
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: remote hubs (git carrier, r2/s3) key events by workspace id; without --workspace-id this device minted its own id and will not see the founder's hub data (file hubs are unaffected)\n")
+			} else {
+				opts.progressf(w, "Adopted workspace id %s.\n", workspaceID)
 			}
-			for i, step := range steps {
-				hint += fmt.Sprintf("  %d. %s\n", i+1, step)
+			// `join` prints its own consolidated next steps (hub configured,
+			// this device's returned code); suppress init's numbered hint there.
+			if !p.calledFromJoin {
+				hint := "Joining an existing workspace. Next:\n"
+				var steps []string
+				if founderCode.DeviceID != "" {
+					steps = []string{
+						"on the founding device: devstrap devices pairing-code           # copy the code + read its fingerprint aloud",
+						"(this init already adopted the workspace id and pinned the founder when you passed --code)",
+						"devstrap devices pairing-code                                   # now generate THIS device's code; paste it on the founder",
+						"on the founding device: devstrap devices enroll --code '<code>' --approve --fingerprint <this device's fingerprint>",
+						"set 'hub: git@github.com:<you>/<hub-repo>.git' (any private repo; or r2://<bucket>) in ~/.devstrap/config.yaml, then devstrap sync",
+					}
+					if !pinnedFounder {
+						steps[1] = "(this init already adopted the workspace id; pin the founder with the warning command before your first sync)"
+					}
+				} else {
+					steps = []string{
+						"pin the founder — and every other existing device — BEFORE your first sync: devstrap devices enroll <device-id> --name <n> --os <os> --arch <arch> --age-recipient <rec> --signing-public-key <sig> --approve --fingerprint <fp>  # closes the TOFU window (P4-SEC-04); events from devices you have not pinned yet quarantine and replay once approved",
+						"devstrap devices recipient              # copy this device's age recipient",
+						"devstrap devices recipient --signing    # and its signing key",
+						"devstrap devices recipient --fingerprint  # and its fingerprint to compare out-of-band during approval",
+						"on an approved device: devstrap devices enroll <id> --age-recipient <rec> --signing-public-key <sig> --approve --fingerprint <fp>  # compare the fingerprint against 'devstrap devices recipient --fingerprint' here before approving",
+						"set 'hub: git@github.com:<you>/<hub-repo>.git' (any private repo; or r2://<bucket>) in ~/.devstrap/config.yaml, then devstrap sync  # ingests the grant, then pushes your projects",
+					}
+				}
+				if workspaceID == "" {
+					// This init already minted a local id, so a plain re-run
+					// with --workspace-id would hit the mismatch refusal — the
+					// recovery hint must include removing the state home.
+					steps = append([]string{fmt.Sprintf("on the founding device: devstrap status  # copy its Workspace ID, then (remote hubs only — file hubs need no id) rm -r %s here and re-run: devstrap init --join --workspace-id <id>", paths.Home)}, steps...)
+				}
+				for i, step := range steps {
+					hint += fmt.Sprintf("  %d. %s\n", i+1, step)
+				}
+				opts.progressf(w, "%s", hint)
 			}
-			opts.progressf(stdout, "%s", hint)
+		} else if !p.calledFromUp {
+			opts.progressf(w, "Next: devstrap status • devstrap scan --adopt • set 'hub: git@github.com:<you>/<hub-repo>.git' (any private repo; or r2://<bucket>) in ~/.devstrap/config.yaml then devstrap sync\n")
 		}
-	} else if !p.calledFromUp {
-		opts.progressf(stdout, "Next: devstrap status • devstrap scan --adopt • set 'hub: git@github.com:<you>/<hub-repo>.git' (any private repo; or r2://<bucket>) in ~/.devstrap/config.yaml then devstrap sync\n")
+		return nil
 	}
-	return nil
+	// See initResult's doc comment: init called internally by up/join must
+	// never self-render under --json (the outer caller owns the single JSON
+	// document), but still prints its normal human-mode lines when --json is
+	// not set — up/join's own human-mode output is layered on top of, not
+	// instead of, init's.
+	if p.calledFromUp || p.calledFromJoin {
+		if opts.v.GetBool("json") {
+			return nil
+		}
+		return human(stdout)
+	}
+	return opts.render(stdout, human, result)
 }
 
 // confirmFounderFromPairingCode decides whether the founder carried in a pairing
