@@ -207,7 +207,7 @@ func TestHubCompactProceedsWithOpenOmissionConflict(t *testing.T) {
 
 	// The SAME conflict must still refuse `hub gc` (detection preserved: gc
 	// deletes blobs on an incomplete view, so its omission gate stays closed).
-	if _, _, gerr := hubGC(env.ctx, io.Discard, store, env.hub(t, store), env.hubID, env.paths, 2, 0, false); !errors.Is(gerr, errGCRefused) {
+	if _, _, _, gerr := hubGC(env.ctx, io.Discard, store, env.hub(t, store), env.hubID, env.paths, 2, 0, false); !errors.Is(gerr, errGCRefused) {
 		t.Fatalf("hubGC err = %v, want errGCRefused on the open omission conflict", gerr)
 	}
 }

@@ -31,6 +31,24 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-16 — feat(cli): hub * --json via Renderer seam (P5-CLI-01 part B, hub domain)
+
+Changed:
+- Wired `hub init`, `hub login`, `hub logout`, `hub gc`, `hub compact` (incl. `--dry-run`), and `hub migrate-events` through `opts.render` (`internal/cli/render.go`) so `--json` emits typed, indented JSON instead of being ignored.
+- Named result structs (snake_case tags, value+`omitempty` optionals): `hubInitResult` (hub, scheme, already_configured), `hubLoginResult` (workspace_id, location, action — no secret material), `hubLogoutResult` (workspace_id, action), `hubGCResult` (pruned_snapshots, blobs_deleted, blobs_retained, dry_run, grace_window, keep), `hubCompactResult` (dry_run, snapshot_sha, floors, cold_events_deleted/estimate, tombstones_gc, revoked_stream_objects, superseded_snapshots_pruned, keep_snapshots, dry-run snapshot size fields, tombstone GC metadata), `hubMigrateEventsResult` (migrated, already_migrated, unparseable_kept, dry_run). `hubGC` now also returns a retained-blob count for the JSON payload.
+- Human paths unchanged: `hub init`'s "Configured hub:" / already-configured lines still use direct `fmt.Fprintf` (P7-CLI-03, survive `--quiet`); login/logout/gc summaries stay on `progressf`; compact/migrate-events keep their prior human summaries.
+- Tests: `internal/cli/hub_render_test.go` (`TestHubInitJSON`, `TestHubLoginLogoutJSON`, `TestHubGCJSON`, `TestHubCompactJSON`, `TestHubCompactDryRunJSON`, `TestHubMigrateEventsJSON`) — executeForTest / hubCompact + json.Unmarshal into the exact result types.
+- Call sites of `hubGC` updated for the extra return value. Ledger (`docs/audits/README.md`) not touched (last PR of the wave). `spec/13_CLI_DAEMON_API.md` gained a "Part B progress: `hub *` domain wired" note (and its `last_reviewed` bumped) — required by the spec-drift gate for touching `internal/cli/hub*.go`, and the honest place to record which part-B domains are done vs. still outstanding.
+
+Validated:
+- `gofmt -l cmd internal` clean.
+- `GOCACHE=/tmp/devstrap-b1-hub-gocache go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` — caught one real `staticcheck` S1009 nit in the new test file (redundant nil-check before `len()`), fixed; clean on re-run.
+- `GOCACHE=/tmp/devstrap-b1-hub-gocache go run ./cmd/spec-drift --base origin/main --head HEAD` passed (22 specs, 9 changed files) after adding the spec/13 note above.
+- `GOCACHE=/tmp/devstrap-b1-hub-gocache go test -race ./...` passed, zero FAIL lines.
+
+Follow-ups:
+- Remaining non-hub leaf commands still without `--json` (rest of P5-CLI-01 part B); ledger reconciliation for this finding in the final wave PR.
+
 ## 2026-07-16 — docs(audits): ledger reconciliation for P4-HUB-16 (documentation-only)
 
 Changed:

@@ -626,6 +626,47 @@ func newHubCommand(stdout io.Writer, opts *options) *cobra.Command {
 	return cmd
 }
 
+// hubInitResult is the --json shape for `hub init` (P5-CLI-01 part B).
+type hubInitResult struct {
+	Hub               string `json:"hub"`
+	Scheme            string `json:"scheme"`
+	AlreadyConfigured bool   `json:"already_configured,omitempty"`
+}
+
+// hubLoginResult is the --json shape for `hub login` (no secret material).
+type hubLoginResult struct {
+	WorkspaceID string `json:"workspace_id"`
+	Location    string `json:"location"`
+	Action      string `json:"action"`
+}
+
+// hubLogoutResult is the --json shape for `hub logout`.
+type hubLogoutResult struct {
+	WorkspaceID string `json:"workspace_id"`
+	Action      string `json:"action"`
+}
+
+// hubGCResult is the --json shape for `hub gc` (and --dry-run).
+type hubGCResult struct {
+	PrunedSnapshots int    `json:"pruned_snapshots"`
+	BlobsDeleted    int    `json:"blobs_deleted"`
+	BlobsRetained   int    `json:"blobs_retained"`
+	DryRun          bool   `json:"dry_run,omitempty"`
+	GraceWindow     string `json:"grace_window"`
+	Keep            int    `json:"keep"`
+}
+
+// hubURIScheme returns the URI scheme prefix (e.g. "git+ssh", "git+file").
+func hubURIScheme(uri string) string {
+	if i := strings.Index(uri, "://"); i > 0 {
+		return uri[:i]
+	}
+	if i := strings.Index(uri, ":"); i > 0 {
+		return uri[:i]
+	}
+	return ""
+}
+
 func newHubInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var force bool
 	var noProbe bool
@@ -654,10 +695,13 @@ func newHubInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 
 			if current := strings.TrimSpace(opts.v.GetString("hub")); current != "" {
 				if current == hubURI {
-					// Terminal confirmation of a completed state change, deliberately not gated by --quiet (P7-CLI-03).
-					_, _ = fmt.Fprintf(stdout, "hub already configured as %s; nothing to do.\n", hubURI)
-					printHubInitNextSteps(stdout, opts)
-					return nil
+					result := hubInitResult{Hub: hubURI, Scheme: hubURIScheme(hubURI), AlreadyConfigured: true}
+					return opts.render(stdout, func(w io.Writer) error {
+						// Terminal confirmation of a completed state change, deliberately not gated by --quiet (P7-CLI-03).
+						_, _ = fmt.Fprintf(w, "hub already configured as %s; nothing to do.\n", hubURI)
+						printHubInitNextSteps(w, opts)
+						return nil
+					}, result)
 				}
 				if !force {
 					// The current value is hand-editable config and could carry
@@ -669,13 +713,16 @@ func newHubInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := rewriteConfigHub(paths, hubURI); err != nil {
 				return err
 			}
-			// Terminal confirmation of a completed state change, deliberately not gated by --quiet (P7-CLI-03).
-			_, _ = fmt.Fprintf(stdout, "Configured hub: %s\n", hubURI)
 			if !noProbe {
 				probeGitHubCarrier(cmd.Context(), cmd.ErrOrStderr(), opts, remote, branch)
 			}
-			printHubInitNextSteps(stdout, opts)
-			return nil
+			result := hubInitResult{Hub: hubURI, Scheme: hubURIScheme(hubURI)}
+			return opts.render(stdout, func(w io.Writer) error {
+				// Terminal confirmation of a completed state change, deliberately not gated by --quiet (P7-CLI-03).
+				_, _ = fmt.Fprintf(w, "Configured hub: %s\n", hubURI)
+				printHubInitNextSteps(w, opts)
+				return nil
+			}, result)
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing different hub value")
@@ -751,8 +798,11 @@ time. Remove stored credentials with 'devstrap hub logout'.`,
 			if err != nil {
 				return err
 			}
-			opts.progressf(stdout, "Stored hub S3 credentials for workspace %s in the %s store.\n", ws, location)
-			return nil
+			result := hubLoginResult{WorkspaceID: ws, Location: location, Action: "stored"}
+			return opts.render(stdout, func(w io.Writer) error {
+				opts.progressf(w, "Stored hub S3 credentials for workspace %s in the %s store.\n", ws, location)
+				return nil
+			}, result)
 		},
 	}
 	cmd.Flags().StringVar(&accessKeyID, "access-key-id", "", "S3/R2 access key id (not secret; the secret is always prompted or piped)")
@@ -777,8 +827,11 @@ func newHubLogoutCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := keys.DeleteHubS3Credentials(cmd.Context(), ws); err != nil {
 				return err
 			}
-			opts.progressf(stdout, "Removed stored hub S3 credentials for workspace %s.\n", ws)
-			return nil
+			result := hubLogoutResult{WorkspaceID: ws, Action: "removed"}
+			return opts.render(stdout, func(w io.Writer) error {
+				opts.progressf(w, "Removed stored hub S3 credentials for workspace %s.\n", ws)
+				return nil
+			}, result)
 		},
 	}
 }
@@ -849,7 +902,7 @@ scope (spec/15).`,
 			if err != nil {
 				return appError{code: exitInvalidConfig, err: err}
 			}
-			pruned, removed, err := hubGC(cmd.Context(), cmd.ErrOrStderr(), store, hub, hubID, opts.paths(), keep, graceWindow, dryRun)
+			pruned, removed, retained, err := hubGC(cmd.Context(), cmd.ErrOrStderr(), store, hub, hubID, opts.paths(), keep, graceWindow, dryRun)
 			if err != nil {
 				return err
 			}
@@ -857,8 +910,18 @@ scope (spec/15).`,
 			if dryRun {
 				verb = "would delete"
 			}
-			opts.progressf(stdout, "hub gc: pruned %d superseded draft snapshot(s); %s %d unreferenced hub blob(s)\n", pruned, verb, removed)
-			return nil
+			result := hubGCResult{
+				PrunedSnapshots: pruned,
+				BlobsDeleted:    removed,
+				BlobsRetained:   retained,
+				DryRun:          dryRun,
+				GraceWindow:     graceWindow.String(),
+				Keep:            keep,
+			}
+			return opts.render(stdout, func(w io.Writer) error {
+				opts.progressf(w, "hub gc: pruned %d superseded draft snapshot(s); %s %d unreferenced hub blob(s)\n", pruned, verb, removed)
+				return nil
+			}, result)
 		},
 	}
 	cmd.Flags().StringVar(&hubFile, "hub-file", "", "file-backed test hub path")
@@ -1006,14 +1069,14 @@ func refuseIfIncompleteView(ctx context.Context, stderr io.Writer, store *state.
 // gcUnreferencedBlobs (which only reclaims the LOCAL cache). A dry run prunes
 // nothing but uses RetainedBlobRefs so the preview reflects post-prune state and
 // matches what a real run would delete (P5 review).
-func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync.Hub, hubID string, paths config.Paths, keep int, grace time.Duration, dryRun bool) (pruned, removed int, err error) {
+func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync.Hub, hubID string, paths config.Paths, keep int, grace time.Duration, dryRun bool) (pruned, removed, retained int, err error) {
 	// P6-HUB-01: sweep only from a fully-synced, complete replica. The shared
 	// gate pulls + applies (recovering via snapshot when required), caches the
 	// consumed blobs so they enter RetainedBlobRefs below, and refuses on any
 	// incomplete-view signal — a truncated/skipped pull, an awaited key grant,
 	// a quarantined/cursor-held apply, or an open quarantine conflict.
 	if _, gerr := refuseIfIncompleteView(ctx, stderr, store, hub, hubID, paths, buildKeyringFromPaths(ctx, paths, store), false); gerr != nil {
-		return 0, 0, gerr
+		return 0, 0, 0, gerr
 	}
 	// P4-HUB-12: serialize the destructive sweep behind the advisory lock so a
 	// concurrent gc/compact/migrate-events on a cooperating client cannot
@@ -1021,19 +1084,19 @@ func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync
 	if !dryRun {
 		release, lerr := hubSweepLock(ctx, store, hub, defaultSweepLockTTL)
 		if lerr != nil {
-			return 0, 0, lerr
+			return 0, 0, 0, lerr
 		}
 		defer release()
 	}
 	if !dryRun {
 		pruned, err = store.PruneDraftSnapshots(ctx, keep)
 		if err != nil {
-			return 0, 0, err
+			return 0, 0, 0, err
 		}
 	}
 	hubBlobs, err := hub.ListBlobs(ctx)
 	if err != nil {
-		return pruned, 0, fmt.Errorf("list hub blobs: %w", err)
+		return pruned, 0, 0, fmt.Errorf("list hub blobs: %w", err)
 	}
 	// RetainedBlobRefs is the post-prune referenced set: env binding refs + the
 	// kept (top-`keep`) draft snapshot refs. Using it for both dry-run and real
@@ -1041,7 +1104,7 @@ func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync
 	// which AllBlobRefs == RetainedBlobRefs).
 	refs, err := store.RetainedBlobRefs(ctx, keep)
 	if err != nil {
-		return pruned, 0, err
+		return pruned, 0, 0, err
 	}
 	referenced := make(map[string]bool, len(refs))
 	for _, ref := range refs {
@@ -1053,12 +1116,14 @@ func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync
 	for _, info := range hubBlobs {
 		key := info.Key
 		if referenced[key] {
+			retained++
 			continue
 		}
 		// P6-HUB-01 gate 3: age grace window. A zero LastModified means the
 		// backend could not report an age — treat it as young (keep) rather
 		// than guess.
 		if grace > 0 && (info.LastModified.IsZero() || now.Sub(info.LastModified) < grace) {
+			retained++
 			continue
 		}
 		// P4-HUB-12 pre-delete revalidation: `info.LastModified` came from the
@@ -1075,8 +1140,10 @@ func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync
 				continue // already gone
 			case sErr != nil:
 				_, _ = fmt.Fprintf(stderr, "warning: failed to stat hub blob %s before delete: %v\n", key, sErr)
+				retained++
 				continue // fail safe: keep
 			case cur.LastModified.IsZero() || now.Sub(cur.LastModified) < grace:
+				retained++
 				continue // refreshed since the pre-sweep list — just re-referenced
 			}
 		}
@@ -1087,9 +1154,10 @@ func hubGC(ctx context.Context, stderr io.Writer, store *state.Store, hub dssync
 		}
 		if delErr := hub.DeleteBlob(ctx, key); delErr != nil {
 			_, _ = fmt.Fprintf(stderr, "warning: failed to delete hub blob %s: %v\n", key, delErr)
+			retained++
 			continue
 		}
 		removed++
 	}
-	return pruned, removed, nil
+	return pruned, removed, retained, nil
 }
