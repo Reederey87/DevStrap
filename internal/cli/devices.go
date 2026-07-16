@@ -172,8 +172,16 @@ func runDeviceEnroll(cmd *cobra.Command, reader *bufio.Reader, stdout io.Writer,
 		// replay them just like `devices approve` does.
 		replayQuarantinedEvents(cmd.Context(), cmd.ErrOrStderr(), opts, store, deviceID)
 	}
-	_, err := fmt.Fprintf(stdout, "Device %s enrolled as %s\n", deviceID, trustState)
-	return err
+	return opts.render(stdout, func(w io.Writer) error {
+		_, err := fmt.Fprintf(w, "Device %s enrolled as %s\n", deviceID, trustState)
+		return err
+	}, deviceEnrollResult{DeviceID: deviceID, TrustState: trustState})
+}
+
+// deviceEnrollResult is the --json shape for `devices enroll`.
+type deviceEnrollResult struct {
+	DeviceID   string `json:"device_id"`
+	TrustState string `json:"trust_state"`
 }
 
 func newDevicesPairingCodeCommand(stdout io.Writer, opts *options) *cobra.Command {
@@ -191,17 +199,28 @@ func newDevicesPairingCodeCommand(stdout io.Writer, opts *options) *cobra.Comman
 			if err != nil {
 				return err
 			}
-			if _, err := fmt.Fprintln(stdout, blob); err != nil {
+			if err := opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintln(w, blob)
+				return err
+			}, devicesPairingCodeResult{Code: blob, Fingerprint: fp}); err != nil {
 				return err
 			}
 			// P7-PROD-01: the fingerprint now travels inside the (v2) code, so a
 			// fresh second device joins in one step with `devstrap join`. Reading
 			// the fingerprint aloud is OPTIONAL high-assurance (it defends a
 			// compromised paste channel); the embedded value trusts the channel.
+			// Guidance stays on stderr always (not --json-gated): optional human
+			// help, separate from the primary stdout payload.
 			_, err = fmt.Fprintf(cmd.ErrOrStderr(), "Pairing code printed to stdout (a devstrap-pair2: code — the fingerprint travels inside it).\nOn a fresh second device, one command joins and pins this device:\n  devstrap join '<paste>'\n  # add --fingerprint <this fingerprint> to also verify it out-of-band (defends a compromised paste channel)\nThen approve the code that device prints back:\n  devstrap devices enroll --code '<its code>' --approve --fingerprint <its fingerprint>\nThis device's fingerprint (optional high-assurance; read aloud over a trusted channel):\n  %s\n", fp)
 			return err
 		},
 	}
+}
+
+// devicesPairingCodeResult is the --json shape for `devices pairing-code`.
+type devicesPairingCodeResult struct {
+	Code        string `json:"code"`
+	Fingerprint string `json:"fingerprint"`
 }
 
 // buildLocalPairingCode encodes this device's current one-paste pairing code and
@@ -366,7 +385,10 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 					return err
 				}
 			}
-			if _, err := fmt.Fprintf(stdout, "Device %s marked %s\n", args[0], trustState); err != nil {
+			if err := opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "Device %s marked %s\n", args[0], trustState)
+				return err
+			}, deviceTrustResult{DeviceID: args[0], TrustState: trustState}); err != nil {
 				return err
 			}
 			// P4-SEC-07: approving a device grants every held WCK epoch to it
@@ -452,6 +474,13 @@ func newDeviceTrustCommand(stdout io.Writer, opts *options, use, trustState stri
 	return cmd
 }
 
+// deviceTrustResult is the --json shape for `devices approve`/`revoke`/`lost`
+// (all share newDeviceTrustCommand).
+type deviceTrustResult struct {
+	DeviceID   string `json:"device_id"`
+	TrustState string `json:"trust_state"`
+}
+
 // checkEpochContiguity refuses an approval from a device whose own workspace
 // keyring is demonstrably incomplete (P6-SEC-03). Approval grants exactly the
 // approver's held epochs (GrantAllEpochs), so a gap in 1..max — or an open
@@ -522,10 +551,18 @@ func newDeviceRenameCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := store.RenameDevice(cmd.Context(), args[0], args[1]); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(stdout, "Device %s renamed to %s\n", args[0], args[1])
-			return err
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "Device %s renamed to %s\n", args[0], args[1])
+				return err
+			}, deviceRenameResult{DeviceID: args[0], Name: args[1]})
 		},
 	}
+}
+
+// deviceRenameResult is the --json shape for `devices rename`.
+type deviceRenameResult struct {
+	DeviceID string `json:"device_id"`
+	Name     string `json:"name"`
 }
 
 type eventVerificationConflictDetails struct {
@@ -749,6 +786,14 @@ func newDeviceRecipientCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			defer closeStore(store)
+			// Human mode keeps a single bare value on a line (frozen contract for
+			// existing scripts). --json only adds a kind/value envelope.
+			printValue := func(kind, value string) error {
+				return opts.render(stdout, func(w io.Writer) error {
+					_, err := fmt.Fprintln(w, value)
+					return err
+				}, deviceRecipientResult{Kind: kind, Value: value})
+			}
 			// P4-SEC-07 pairing: print the workspace id alone so scripts can
 			// thread it into `init --join --workspace-id` (the bare recipient
 			// output is frozen — existing scripts consume it unadorned).
@@ -757,8 +802,7 @@ func newDeviceRecipientCommand(stdout io.Writer, opts *options) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				_, err = fmt.Fprintln(stdout, wsID)
-				return err
+				return printValue("workspace_id", wsID)
 			}
 			dev, err := store.CurrentDevice(cmd.Context())
 			if err != nil {
@@ -768,8 +812,7 @@ func newDeviceRecipientCommand(stdout io.Writer, opts *options) *cobra.Command {
 				if dev.SigningPublicKey == "" {
 					return appError{code: exitInvalidConfig, err: fmt.Errorf("local device has no signing public key; run devstrap init")}
 				}
-				_, err = fmt.Fprintln(stdout, dev.SigningPublicKey)
-				return err
+				return printValue("signing", dev.SigningPublicKey)
 			}
 			// P4-SEC-04: print this device's fingerprint so it can be read aloud
 			// on the untrusted pairing channel and compared during approval.
@@ -781,20 +824,26 @@ func newDeviceRecipientCommand(stdout io.Writer, opts *options) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				_, err = fmt.Fprintln(stdout, fp)
-				return err
+				return printValue("fingerprint", fp)
 			}
 			if dev.PublicKey == "" {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("local device has no age recipient; run devstrap init")}
 			}
-			_, err = fmt.Fprintln(stdout, dev.PublicKey)
-			return err
+			return printValue("recipient", dev.PublicKey)
 		},
 	}
 	cmd.Flags().BoolVar(&signing, "signing", false, "print the Ed25519 signing public key instead of the age recipient")
 	cmd.Flags().BoolVar(&workspaceID, "workspace-id", false, "print the workspace id instead of the age recipient (for init --join --workspace-id)")
 	cmd.Flags().BoolVar(&fingerprint, "fingerprint", false, "print this device's fingerprint to compare out-of-band during approval (P4-SEC-04)")
 	return cmd
+}
+
+// deviceRecipientResult is the --json shape for `devices recipient` (and its
+// --signing / --workspace-id / --fingerprint modes). Kind names which value was
+// selected; human mode still prints only Value on a bare line.
+type deviceRecipientResult struct {
+	Kind  string `json:"kind"`
+	Value string `json:"value"`
 }
 
 // grantWorkspaceKeyToApprovedDevice grants every held WCK epoch to the
