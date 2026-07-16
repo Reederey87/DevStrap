@@ -31,6 +31,28 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-16 — feat(cli): devices * --json via Renderer seam (P5-CLI-01 part B, devices domain)
+
+Changed:
+- Wired `devices enroll`, `devices pairing-code`, `devices approve`/`revoke`/`lost` (shared `newDeviceTrustCommand`), `devices rename`, and `devices recipient` through `opts.render` (`internal/cli/render.go`). `devices list` was already part A — left untouched.
+- Named result structs (snake_case tags): `deviceEnrollResult` (device_id, trust_state), `devicesPairingCodeResult` (code, fingerprint), `deviceTrustResult` (device_id, trust_state — reused by approve/revoke/lost), `deviceRenameResult` (device_id, name), `deviceRecipientResult` (kind, value). Enroll render lives inside `runDeviceEnroll` so both the `--code` and manual-flags call sites share one path. Recipient human mode still prints a bare value line (frozen script contract); `--json` only adds the kind/value envelope.
+- Stderr diagnostics for trust/revoke/pairing-code guidance are unchanged and not folded into JSON `Warnings` (side-effect notes, not the command's own result payload).
+- Tests: `internal/cli/devices_render_test.go` (`TestDevicesEnrollJSON`, `TestDevicesEnrollCodeApproveJSON`, `TestDevicesPairingCodeJSON`, `TestDevicesApproveJSON`, `TestDevicesRevokeJSON`, `TestDevicesLostJSON`, `TestDevicesRenameJSON`, `TestDevicesRecipientJSON`).
+- `spec/13_CLI_DAEMON_API.md` gained a "Part B progress: `devices *` domain wired" note (and `last_reviewed` already 2026-07-16). Ledger not touched (wave-final PR only).
+
+Validated:
+- `gofmt -l cmd internal` — empty (clean).
+- `GOCACHE=/tmp/devstrap-b2-devices-gocache go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` — clean (after a `cache clean`, which cleared stale entries referencing a since-removed sibling worktree).
+- `GOCACHE=/tmp/devstrap-b2-devices-gocache go run ./cmd/spec-drift --base origin/main --head HEAD` — passed after the spec/13 note.
+- `GOCACHE=/tmp/devstrap-b2-devices-gocache go test -race ./...` — passed, zero FAIL lines, after a test fixup (see below).
+
+Follow-ups:
+- None for this batch; remaining `P5-CLI-01` part-B domains tracked as separate PRs in the same wave.
+
+### 2026-07-16 — review fixup (P5-CLI-01 part B, devices domain): test-only device-id shape bug
+
+`internal/id.Valid` requires an id to be `<prefix>_` followed by exactly 32 lowercase hex digits; `pairing.Decode` enforces this on the carried `DeviceID` (`internal/pairing/pairing.go`, "pairing code carries an invalid device id"). `TestDevicesEnrollCodeApproveJSON` used the literal `dev_enroll_code_json_0000000000000002`, which isn't 32 hex digits, so the `devices enroll --code` path under test failed at decode — a bug in the new test, not in `devices.go`. Fixed by using `dev_33333333333333333333333333333333` (32 hex digits), matching the existing `dev_22222222222222222222222222222222` convention already used elsewhere in `devices_pairing_test.go`. `TestDevicesEnrollJSON`'s similarly-shaped literal is unaffected — the manual-flags enroll path never decodes a pairing code, so it never hits `id.Valid`. Full `go test -race ./...` re-run clean (24/24 packages) after the fix.
+
 ## 2026-07-16 — feat(cli): hub * --json via Renderer seam (P5-CLI-01 part B, hub domain)
 
 Changed:
