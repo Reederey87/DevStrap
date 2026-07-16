@@ -124,8 +124,10 @@ func newWorktreeNewCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(stdout, "Created worktree %s at %s from %s %s\n", wt.Branch, wt.Path, wt.BaseRef, wt.BaseSHA)
-			return err
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "Created worktree %s at %s from %s %s\n", wt.Branch, wt.Path, wt.BaseRef, wt.BaseSHA)
+				return err
+			}, wt)
 		},
 	}
 	cmd.Flags().BoolVar(&freshUpstream, "fresh-upstream", false, "base the worktree on fetched remote default branch")
@@ -320,6 +322,15 @@ func newWorktreeStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 	}
 }
 
+type worktreeFinalizeResult struct {
+	ID         string `json:"id"`
+	BaseRef    string `json:"base_ref"`
+	BaseSHA    string `json:"base_sha"`
+	CurrentSHA string `json:"current_sha"`
+	Fresh      bool   `json:"fresh"`
+	Behind     int    `json:"behind"`
+}
+
 func newWorktreeFinalizeCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var allowStaleBase bool
 	cmd := &cobra.Command{
@@ -343,12 +354,22 @@ func newWorktreeFinalizeCommand(stdout io.Writer, opts *options) *cobra.Command 
 			if !drift.Fresh && !allowStaleBase {
 				return appError{code: exitConflict, err: fmt.Errorf("base %s moved %d commits; rebase or pass --allow-stale-base", wt.BaseRef, drift.Behind)}
 			}
-			if !drift.Fresh {
-				_, err = fmt.Fprintf(stdout, "Warning: finalizing stale worktree %s; %s moved %d commits to %s\n", wt.ID, wt.BaseRef, drift.Behind, drift.CurrentSHA)
-				return err
+			out := worktreeFinalizeResult{
+				ID:         wt.ID,
+				BaseRef:    wt.BaseRef,
+				BaseSHA:    wt.BaseSHA,
+				CurrentSHA: drift.CurrentSHA,
+				Fresh:      drift.Fresh,
+				Behind:     drift.Behind,
 			}
-			_, err = fmt.Fprintf(stdout, "Worktree %s is ready for finalization; %s is still at %s\n", wt.ID, wt.BaseRef, wt.BaseSHA)
-			return err
+			return opts.render(stdout, func(w io.Writer) error {
+				if !out.Fresh {
+					_, err = fmt.Fprintf(w, "Warning: finalizing stale worktree %s; %s moved %d commits to %s\n", out.ID, out.BaseRef, out.Behind, out.CurrentSHA)
+					return err
+				}
+				_, err = fmt.Fprintf(w, "Worktree %s is ready for finalization; %s is still at %s\n", out.ID, out.BaseRef, out.BaseSHA)
+				return err
+			}, out)
 		},
 	}
 	cmd.Flags().BoolVar(&allowStaleBase, "allow-stale-base", false, "allow finalization even when the recorded base moved")
@@ -386,6 +407,11 @@ func newWorktreeListCommand(stdout io.Writer, opts *options) *cobra.Command {
 			}, worktrees)
 		},
 	}
+}
+
+type worktreeRemoveResult struct {
+	ID     string `json:"id"`
+	Pruned bool   `json:"pruned"`
 }
 
 func newWorktreeRemoveCommand(stdout io.Writer, opts *options) *cobra.Command {
@@ -428,8 +454,11 @@ func newWorktreeRemoveCommand(stdout io.Writer, opts *options) *cobra.Command {
 				if err := store.MarkWorktreeRemoved(cmd.Context(), args[0]); err != nil {
 					return err
 				}
-				_, err = fmt.Fprintf(stdout, "Pruned missing worktree %s\n", args[0])
-				return err
+				out := worktreeRemoveResult{ID: args[0], Pruned: true}
+				return opts.render(stdout, func(w io.Writer) error {
+					_, err := fmt.Fprintf(w, "Pruned missing worktree %s\n", out.ID)
+					return err
+				}, out)
 			}
 			dirty, err := r.DirtyState(cmd.Context(), wt.Path)
 			if err != nil {
@@ -444,12 +473,28 @@ func newWorktreeRemoveCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := store.MarkWorktreeRemoved(cmd.Context(), args[0]); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(stdout, "Removed worktree %s\n", args[0])
-			return err
+			out := worktreeRemoveResult{ID: args[0], Pruned: false}
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "Removed worktree %s\n", out.ID)
+				return err
+			}, out)
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "remove dirty or missing worktrees and prune stale Git metadata")
 	return cmd
+}
+
+type worktreeReapEntry struct {
+	ID         string `json:"id"`
+	Branch     string `json:"branch"`
+	MergeLabel string `json:"merge_label"`
+	BranchTip  string `json:"branch_tip,omitempty"`
+}
+
+type worktreeCleanupResult struct {
+	Removed int                 `json:"removed"`
+	Skipped int                 `json:"skipped"`
+	Reaped  []worktreeReapEntry `json:"reaped,omitempty"`
 }
 
 func newWorktreeCleanupCommand(stdout io.Writer, opts *options) *cobra.Command {
@@ -479,10 +524,12 @@ func newWorktreeCleanupCommand(stdout io.Writer, opts *options) *cobra.Command {
 			}
 			removed := 0
 			skipped := 0
+			var reaped []worktreeReapEntry
 			// One base fetch per (project, base ref) per run — N worktrees on
 			// the same project must not trigger N redundant network fetches
 			// (review finding).
 			refreshed := map[string]bool{}
+			stderr := cmd.ErrOrStderr()
 			for _, wt := range worktrees {
 				r := gitRunner(opts)
 				project, err := store.ProjectByID(cmd.Context(), wt.NamespaceID)
@@ -493,18 +540,36 @@ func newWorktreeCleanupCommand(stdout io.Writer, opts *options) *cobra.Command {
 				if repoPath == "" {
 					repoPath = filepath.Join(opts.paths().Root, filepath.FromSlash(project.Path))
 				}
-				didRemove, err := cleanupOneWorktree(cmd.Context(), opts, stdout, store, r, project, repoPath, wt, force, refreshed)
+				entry, err := cleanupOneWorktree(cmd.Context(), opts, stderr, store, r, project, repoPath, wt, force, refreshed)
 				if err != nil {
 					return err
 				}
-				if didRemove {
+				if entry != nil {
 					removed++
+					reaped = append(reaped, *entry)
 				} else {
 					skipped++
 				}
 			}
-			_, err = fmt.Fprintf(stdout, "Cleaned up %d worktrees (%d skipped)\n", removed, skipped)
-			return err
+			out := worktreeCleanupResult{Removed: removed, Skipped: skipped, Reaped: reaped}
+			return opts.render(stdout, func(w io.Writer) error {
+				for _, e := range out.Reaped {
+					// Path-missing reaps historically had no per-worktree line
+					// (only the final summary); skip empty merge labels.
+					if e.MergeLabel == "" {
+						continue
+					}
+					if e.BranchTip != "" {
+						if _, err := fmt.Fprintf(w, "Removed worktree %s (%s; branch %s was at %s)\n", e.ID, e.MergeLabel, e.Branch, e.BranchTip); err != nil {
+							return err
+						}
+					} else if _, err := fmt.Fprintf(w, "Removed worktree %s (%s)\n", e.ID, e.MergeLabel); err != nil {
+						return err
+					}
+				}
+				_, err := fmt.Fprintf(w, "Cleaned up %d worktrees (%d skipped)\n", out.Removed, out.Skipped)
+				return err
+			}, out)
 		},
 	}
 	cmd.Flags().BoolVar(&merged, "merged", false, "only remove merged, clean worktrees")
@@ -513,17 +578,18 @@ func newWorktreeCleanupCommand(stdout io.Writer, opts *options) *cobra.Command {
 }
 
 // cleanupOneWorktree reaps one worktree — missing-path metadata prune or full
-// remove — entirely under the project repo lock (P7-GIT-01/02). removed==false
-// with err==nil means skip.
-func cleanupOneWorktree(ctx context.Context, opts *options, stdout io.Writer, store *state.Store, r dsgit.Runner, project state.ProjectStatus, repoPath string, wt state.Worktree, force bool, refreshed map[string]bool) (removed bool, err error) {
+// remove — entirely under the project repo lock (P7-GIT-01/02). entry==nil
+// with err==nil means skip; a non-nil entry means reaped. Diagnostic warnings
+// go to stderr so --json stdout stays a pure document.
+func cleanupOneWorktree(ctx context.Context, opts *options, stderr io.Writer, store *state.Store, r dsgit.Runner, project state.ProjectStatus, repoPath string, wt state.Worktree, force bool, refreshed map[string]bool) (entry *worktreeReapEntry, err error) {
 	unlock, err := acquireRepoLock(opts.paths().Home, project.ID)
 	if err != nil {
 		var app appError
 		if errors.As(err, &app) && app.code == exitConflict {
 			logging.Logger(ctx).Warn("worktree cleanup skipped: repo lock held", "worktree", wt.ID, "project", project.ID, "error", err.Error())
-			return false, nil
+			return nil, nil
 		}
-		return false, err
+		return nil, err
 	}
 	defer unlock()
 
@@ -532,11 +598,11 @@ func cleanupOneWorktree(ctx context.Context, opts *options, stdout io.Writer, st
 	// worktree can never be observed here without its running row.
 	runs, err := store.RunningAgentRunsByWorktree(ctx, wt.ID)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	if len(runs) > 0 {
 		logging.Logger(ctx).Warn("worktree cleanup skipped: running agent run", "run", runs[0].ID, "worktree", wt.ID)
-		return false, nil
+		return nil, nil
 	}
 
 	if _, err := os.Stat(wt.Path); err != nil {
@@ -548,28 +614,30 @@ func cleanupOneWorktree(ctx context.Context, opts *options, stdout io.Writer, st
 				_ = r.WorktreePrune(ctx, repoPath)
 			}
 			if err := store.MarkWorktreeRemoved(ctx, wt.ID); err != nil {
-				return false, err
+				return nil, err
 			}
-			return true, nil
+			// No merge label / tip: historically only the summary counted this
+			// reap (no "Removed worktree …" line).
+			return &worktreeReapEntry{ID: wt.ID, Branch: wt.Branch}, nil
 		}
 		// Unreadable path is an error, not "missing": surface it instead of
 		// silently leaving the worktree behind forever.
 		logging.Logger(ctx).Warn("worktree cleanup skipped: stat failed", "worktree", wt.ID, "path", wt.Path, "error", err.Error())
-		return false, nil
+		return nil, nil
 	}
 
 	dirty, err := r.DirtyState(ctx, wt.Path)
 	if err != nil {
 		logging.Logger(ctx).Warn("worktree cleanup skipped: dirty-state check failed", "worktree", wt.ID, "path", wt.Path, "error", err.Error())
-		return false, nil
+		return nil, nil
 	}
 	if dirty != dsgit.DirtyClean && !force {
-		return false, nil
+		return nil, nil
 	}
 	if refreshKey := project.ID + "\x00" + wt.BaseRef; !refreshed[refreshKey] {
 		refreshed[refreshKey] = true
 		if err := refreshWorktreeBaseLocked(ctx, r, repoPath, wt.BaseRef); err != nil {
-			_, _ = fmt.Fprintf(stdout, "warning: could not refresh %s for worktree %s: %v; using local ref\n", wt.BaseRef, wt.ID, err)
+			_, _ = fmt.Fprintf(stderr, "warning: could not refresh %s for worktree %s: %v; using local ref\n", wt.BaseRef, wt.ID, err)
 		}
 	}
 	mergeLabel := "merged"
@@ -577,7 +645,7 @@ func cleanupOneWorktree(ctx context.Context, opts *options, stdout io.Writer, st
 	if err != nil || !strings.Contains(mergedOut, wt.Branch) {
 		squashMerged, squashErr := r.IsSquashMerged(ctx, wt.Path, wt.Branch, wt.BaseRef)
 		if squashErr != nil || !squashMerged {
-			return false, nil
+			return nil, nil
 		}
 		mergeLabel = "merged (squash)"
 	}
@@ -587,10 +655,10 @@ func cleanupOneWorktree(ctx context.Context, opts *options, stdout io.Writer, st
 	dirty, err = r.DirtyState(ctx, wt.Path)
 	if err != nil {
 		logging.Logger(ctx).Warn("worktree cleanup skipped: dirty-state check failed", "worktree", wt.ID, "path", wt.Path, "error", err.Error())
-		return false, nil
+		return nil, nil
 	}
 	if dirty != dsgit.DirtyClean && !force {
-		return false, nil
+		return nil, nil
 	}
 	// Recovery breadcrumb: content-equivalence can match a
 	// coincidentally-identical unrelated commit (documented
@@ -602,20 +670,20 @@ func cleanupOneWorktree(ctx context.Context, opts *options, stdout io.Writer, st
 	}
 	if err := r.WorktreeRemove(ctx, repoPath, wt.Path, force); err != nil {
 		logging.Logger(ctx).Warn("worktree cleanup skipped: removal failed", "worktree", wt.ID, "path", wt.Path, "error", err.Error())
-		return false, nil
+		return nil, nil
 	}
 	if _, err := r.Run(ctx, repoPath, "branch", "-D", wt.Branch); err != nil {
-		_, _ = fmt.Fprintf(stdout, "warning: failed to delete branch %s for removed worktree %s: %v\n", wt.Branch, wt.ID, err)
+		_, _ = fmt.Fprintf(stderr, "warning: failed to delete branch %s for removed worktree %s: %v\n", wt.Branch, wt.ID, err)
 	}
 	if err := store.MarkWorktreeRemoved(ctx, wt.ID); err != nil {
-		return false, err
+		return nil, err
 	}
-	if tip != "" {
-		_, _ = fmt.Fprintf(stdout, "Removed worktree %s (%s; branch %s was at %s)\n", wt.ID, mergeLabel, wt.Branch, tip)
-	} else {
-		_, _ = fmt.Fprintf(stdout, "Removed worktree %s (%s)\n", wt.ID, mergeLabel)
-	}
-	return true, nil
+	return &worktreeReapEntry{
+		ID:         wt.ID,
+		Branch:     wt.Branch,
+		MergeLabel: mergeLabel,
+		BranchTip:  tip,
+	}, nil
 }
 
 // refreshWorktreeBaseLocked parses remote/branch and fetches. Caller must hold
