@@ -17,6 +17,25 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// hubCompactResult is the --json shape for `hub compact` (and --dry-run) (P5-CLI-01 part B).
+type hubCompactResult struct {
+	DryRun                    bool             `json:"dry_run,omitempty"`
+	SnapshotSHA               string           `json:"snapshot_sha,omitempty"`
+	Floors                    map[string]int64 `json:"floors"`
+	ColdEventsDeleted         int              `json:"cold_events_deleted,omitempty"`
+	ColdEventsEstimate        int              `json:"cold_events_estimate,omitempty"`
+	TombstonesGC              int              `json:"tombstones_gc,omitempty"`
+	RevokedStreamObjects      int              `json:"revoked_stream_objects,omitempty"`
+	SupersededSnapshotsPruned int              `json:"superseded_snapshots_pruned,omitempty"`
+	KeepSnapshots             int              `json:"keep_snapshots,omitempty"`
+	SnapshotEntries           int              `json:"snapshot_entries,omitempty"`
+	SnapshotTombstones        int              `json:"snapshot_tombstones,omitempty"`
+	SnapshotAnchors           int              `json:"snapshot_anchors,omitempty"`
+	SnapshotBytes             int              `json:"snapshot_bytes,omitempty"`
+	TombstoneGCBeforeHLC      int64            `json:"tombstone_gc_before_hlc,omitempty"`
+	TombstoneGCSkipped        string           `json:"tombstone_gc_skipped,omitempty"`
+}
+
 func newHubCompactCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var hubFile string
 	var dryRun bool
@@ -106,7 +125,12 @@ func hubCompact(ctx context.Context, stdout, stderr io.Writer, opts *options, st
 		if eh, ok := hub.(dssync.EncryptedHub); ok && eh.Stats != nil {
 			rawSeen = eh.Stats.RawSeen
 		}
-		_, deferred, ferr := pushLocalEventsGated(ctx, stdout, opts, store, hub, hubID, localEvents, rawSeen)
+		// P5-CLI-01 part B: pushLocalEventsGated's two possible messages
+		// ("Awaiting workspace key grant…" / "Removed N superseded blob(s)…")
+		// are informational status, not this command's structured result —
+		// route them to stderr so `--json` stdout stays a single parseable
+		// hubCompactResult document.
+		_, deferred, ferr := pushLocalEventsGated(ctx, stderr, opts, store, hub, hubID, localEvents, rawSeen)
 		if ferr != nil {
 			return ferr
 		}
@@ -174,7 +198,7 @@ func hubCompact(ctx context.Context, stdout, stderr io.Writer, opts *options, st
 	}
 
 	if dryRun {
-		return printCompactPlan(ctx, stdout, store, device.ID, hlc, previewFloors, estimate, keepSnapshots, gcTombstones, gcReady, gcBeforeHLC, gcSkip)
+		return printCompactPlan(ctx, stdout, opts, store, device.ID, hlc, previewFloors, estimate, keepSnapshots, gcTombstones, gcReady, gcBeforeHLC, gcSkip)
 	}
 
 	// P4-HUB-12: serialize the destructive publish/delete sequence behind the
@@ -335,12 +359,22 @@ func hubCompact(ctx context.Context, stdout, stderr io.Writer, opts *options, st
 		return err
 	}
 
-	_, err = fmt.Fprintf(stdout, "hub compact: published snapshot %s; advanced %d device floor(s); deleted %d cold event(s); GC'd %d tombstone(s); reclaimed %d revoked-stream object(s); pruned %d superseded snapshot(s)\n",
-		shortSHA(snapSHA), len(manifest.Floors), deleted, tombstonesGCd, revokedObjs, prunedSnaps)
-	if err != nil {
-		return err
+	result := hubCompactResult{
+		SnapshotSHA:               snapSHA,
+		Floors:                    manifest.Floors,
+		ColdEventsDeleted:         deleted,
+		TombstonesGC:              tombstonesGCd,
+		RevokedStreamObjects:      revokedObjs,
+		SupersededSnapshotsPruned: prunedSnaps,
+		KeepSnapshots:             keepSnapshots,
 	}
-	return printFloors(stdout, manifest.Floors)
+	return opts.render(stdout, func(w io.Writer) error {
+		if _, err := fmt.Fprintf(w, "hub compact: published snapshot %s; advanced %d device floor(s); deleted %d cold event(s); GC'd %d tombstone(s); reclaimed %d revoked-stream object(s); pruned %d superseded snapshot(s)\n",
+			shortSHA(snapSHA), len(manifest.Floors), deleted, tombstonesGCd, revokedObjs, prunedSnaps); err != nil {
+			return err
+		}
+		return printFloors(w, manifest.Floors)
+	}, result)
 }
 
 // planTombstoneGC derives the safe tombstone-GC floor from signed sync acks
@@ -586,8 +620,8 @@ func pruneSnapshotObjects(ctx context.Context, stderr io.Writer, hub dssync.Hub,
 // printCompactPlan renders the dry-run plan: the per-device floors, the
 // event-delete estimate, the snapshot document size, the retention policy, and
 // the tombstone-GC decision (the safe floor derived from acks, or the reason it
-// is skipped).
-func printCompactPlan(ctx context.Context, stdout io.Writer, store *state.Store, producedBy string, hlc int64, floors dssync.Cursor, estimate, keepSnapshots int, gcTombstones, gcReady bool, gcBeforeHLC int64, gcSkip string) error {
+// is skipped). Under --json it encodes hubCompactResult instead.
+func printCompactPlan(ctx context.Context, stdout io.Writer, opts *options, store *state.Store, producedBy string, hlc int64, floors dssync.Cursor, estimate, keepSnapshots int, gcTombstones, gcReady bool, gcBeforeHLC int64, gcSkip string) error {
 	snap, err := dssync.BuildSnapshot(ctx, store, producedBy, hlc, floors)
 	if err != nil {
 		return err
@@ -596,29 +630,51 @@ func printCompactPlan(ctx context.Context, stdout io.Writer, store *state.Store,
 	if err != nil {
 		return fmt.Errorf("marshal snapshot plan: %w", err)
 	}
-	if _, err := fmt.Fprintf(stdout, "hub compact (dry run): would publish a snapshot of %d entr(y/ies), %d tombstone(s), %d anchor(s) (~%d bytes plaintext); would delete ~%d cold event(s); keep %d snapshot(s)\n",
-		len(snap.Entries), len(snap.Tombstones), len(snap.Anchors), len(raw), estimate, keepSnapshots); err != nil {
-		return err
+	result := hubCompactResult{
+		DryRun:             true,
+		Floors:             map[string]int64(floors),
+		ColdEventsEstimate: estimate,
+		KeepSnapshots:      keepSnapshots,
+		SnapshotEntries:    len(snap.Entries),
+		SnapshotTombstones: len(snap.Tombstones),
+		SnapshotAnchors:    len(snap.Anchors),
+		SnapshotBytes:      len(raw),
 	}
+	var gcable int
 	switch {
 	case !gcTombstones:
-		if _, err := fmt.Fprintf(stdout, "tombstone GC: disabled (--gc-tombstones=false)\n"); err != nil {
-			return err
-		}
+		result.TombstoneGCSkipped = "disabled"
 	case gcReady:
-		gcable, cerr := store.CountTombstonesBelowHLC(ctx, gcBeforeHLC)
-		if cerr != nil {
-			return cerr
-		}
-		if _, err := fmt.Fprintf(stdout, "tombstone GC: would purge %d tombstone(s) below HLC %d (min ack watermark)\n", gcable, gcBeforeHLC); err != nil {
+		gcable, err = store.CountTombstonesBelowHLC(ctx, gcBeforeHLC)
+		if err != nil {
 			return err
 		}
+		result.TombstoneGCBeforeHLC = gcBeforeHLC
+		result.TombstonesGC = gcable
 	default:
-		if _, err := fmt.Fprintf(stdout, "tombstone GC: skipped (%s)\n", gcSkip); err != nil {
+		result.TombstoneGCSkipped = gcSkip
+	}
+	return opts.render(stdout, func(w io.Writer) error {
+		if _, err := fmt.Fprintf(w, "hub compact (dry run): would publish a snapshot of %d entr(y/ies), %d tombstone(s), %d anchor(s) (~%d bytes plaintext); would delete ~%d cold event(s); keep %d snapshot(s)\n",
+			len(snap.Entries), len(snap.Tombstones), len(snap.Anchors), len(raw), estimate, keepSnapshots); err != nil {
 			return err
 		}
-	}
-	return printFloors(stdout, map[string]int64(floors))
+		switch {
+		case !gcTombstones:
+			if _, err := fmt.Fprintf(w, "tombstone GC: disabled (--gc-tombstones=false)\n"); err != nil {
+				return err
+			}
+		case gcReady:
+			if _, err := fmt.Fprintf(w, "tombstone GC: would purge %d tombstone(s) below HLC %d (min ack watermark)\n", gcable, gcBeforeHLC); err != nil {
+				return err
+			}
+		default:
+			if _, err := fmt.Fprintf(w, "tombstone GC: skipped (%s)\n", gcSkip); err != nil {
+				return err
+			}
+		}
+		return printFloors(w, map[string]int64(floors))
+	}, result)
 }
 
 // printFloors renders the per-device floors in deterministic device order.

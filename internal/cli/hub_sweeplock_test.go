@@ -193,7 +193,7 @@ func TestHubGCAcquiresAndReleasesSweepLock(t *testing.T) {
 	st := newRewrapTestStore(t)
 	hub := &countingLockHub{Hub: dssync.FileHub{Path: filepath.Join(t.TempDir(), "hub.json")}}
 
-	if _, _, err := hubGC(ctx, io.Discard, st, hub, "test-hub", testGCPaths(t), 1, 0, false); err != nil {
+	if _, _, _, err := hubGC(ctx, io.Discard, st, hub, "test-hub", testGCPaths(t), 1, 0, false); err != nil {
 		t.Fatalf("hubGC: %v", err)
 	}
 	if hub.puts != 1 || hub.deletes != 1 {
@@ -206,7 +206,7 @@ func TestHubGCDryRunTakesNoSweepLock(t *testing.T) {
 	st := newRewrapTestStore(t)
 	hub := &countingLockHub{Hub: dssync.FileHub{Path: filepath.Join(t.TempDir(), "hub.json")}}
 
-	if _, _, err := hubGC(ctx, io.Discard, st, hub, "test-hub", testGCPaths(t), 1, 0, true); err != nil {
+	if _, _, _, err := hubGC(ctx, io.Discard, st, hub, "test-hub", testGCPaths(t), 1, 0, true); err != nil {
 		t.Fatalf("hubGC dry-run: %v", err)
 	}
 	if hub.puts != 0 {
@@ -237,7 +237,7 @@ func TestHubGCGraceWindowProtectsRepushedBlob(t *testing.T) {
 		t.Fatalf("re-PutBlob: %v", err)
 	}
 	// With a 1h grace window the just-refreshed blob is protected.
-	_, removed, err := hubGC(ctx, io.Discard, st, hub, "test-hub", testGCPaths(t), 1, time.Hour, false)
+	_, removed, _, err := hubGC(ctx, io.Discard, st, hub, "test-hub", testGCPaths(t), 1, time.Hour, false)
 	if err != nil {
 		t.Fatalf("hubGC: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestHubGCRevalidatesBeforeDeleteKeepsRefreshedBlob(t *testing.T) {
 	// The object's real (stat) mtime is now; the list reports it as 48h old.
 	hub := staleListHub{Hub: fh, staleTime: time.Now().Add(-48 * time.Hour)}
 
-	_, removed, err := hubGC(ctx, io.Discard, st, hub, "test-hub", testGCPaths(t), 1, time.Hour, false)
+	_, removed, _, err := hubGC(ctx, io.Discard, st, hub, "test-hub", testGCPaths(t), 1, time.Hour, false)
 	if err != nil {
 		t.Fatalf("hubGC: %v", err)
 	}

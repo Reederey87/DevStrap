@@ -10,6 +10,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// hubMigrateEventsResult is the --json shape for `hub migrate-events` (P5-CLI-01 part B).
+// The hub backend returns (migrated, kept): migrated covers both newly re-keyed
+// and already-at-new-key objects whose legacy copy is cleaned up; kept is the
+// fail-open unparseable/undecodable residual. A separate already_migrated count
+// is not exposed by MigrateLegacyEvents, so it is always 0 here.
+type hubMigrateEventsResult struct {
+	Migrated        int  `json:"migrated"`
+	AlreadyMigrated int  `json:"already_migrated"`
+	UnparseableKept int  `json:"unparseable_kept"`
+	DryRun          bool `json:"dry_run,omitempty"`
+}
+
 func newHubMigrateEventsCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var hubFile string
 	var dryRun bool
@@ -51,8 +63,16 @@ legacy objects and reports the plan without writing anything.`,
 			if dryRun {
 				verb = "would migrate"
 			}
-			_, err = fmt.Fprintf(stdout, "hub migrate-events: %s %d legacy event(s); kept %d unmigratable object(s)\n", verb, migrated, kept)
-			return err
+			result := hubMigrateEventsResult{
+				Migrated:        migrated,
+				AlreadyMigrated: 0,
+				UnparseableKept: kept,
+				DryRun:          dryRun,
+			}
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err = fmt.Fprintf(w, "hub migrate-events: %s %d legacy event(s); kept %d unmigratable object(s)\n", verb, migrated, kept)
+				return err
+			}, result)
 		},
 	}
 	cmd.Flags().StringVar(&hubFile, "hub-file", "", "file-backed test hub path")
