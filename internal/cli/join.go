@@ -36,7 +36,7 @@ import (
 type joinResult struct {
 	WorkspaceID   string `json:"workspace_id"`
 	FounderPinned bool   `json:"founder_pinned"`
-	HubConfigured bool   `json:"hub_configured,omitempty"`
+	HubConfigured bool   `json:"hub_configured"`
 	Code          string `json:"code"`
 	Fingerprint   string `json:"fingerprint"`
 }

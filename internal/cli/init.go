@@ -352,6 +352,8 @@ func runInit(cmd *cobra.Command, args []string, stdout io.Writer, opts *options,
 	result := initResult{
 		Root:          paths.Root,
 		Home:          paths.Home,
+		LogDir:        paths.LogDir(),
+		StateDB:       paths.StateDB(),
 		WorkspaceName: workspaceName,
 		Join:          join,
 	}
