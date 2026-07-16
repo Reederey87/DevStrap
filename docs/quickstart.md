@@ -79,24 +79,57 @@ devstrap run-loop        # optional: scan + sync + materialize on an interval, n
 ## Pair a second device
 
 Devices converge only when they share **one** workspace id. The founder mints it; every later
-device adopts it. The founder's pairing code is a `devstrap-pair2:` blob that now carries the
-founder's fingerprint **and** (for a remote hub) the hub URI, so a fresh second device joins with
-a single `devstrap join` command. Reading the fingerprint aloud is **optional high-assurance**:
-the embedded value trusts your paste channel (1Password/Slack/iMessage); pass `--fingerprint` to
-also compare it out-of-band, which is the only thing that defends a *compromised* paste channel.
-A carried `file:`/`folder:` hub is never auto-applied — the blob is unauthenticated, so a local
-filesystem target always needs a manual `devstrap hub init` to confirm it.
+device adopts it. Three commands make the two-device ceremony one guided path each side:
+`devstrap up` bootstraps the founder, `devstrap pair` runs the founder's half of the ceremony, and
+`devstrap join` is the joiner's single command. The founder's pairing code is a `devstrap-pair2:`
+blob that carries the founder's fingerprint **and** (for a remote hub) the hub URI. Reading the
+fingerprint aloud is **optional high-assurance**: the embedded value trusts your paste channel
+(1Password/Slack/iMessage); pass `--fingerprint` to also compare it out-of-band, which is the only
+thing that defends a *compromised* paste channel. A carried `file:`/`folder:` hub is never
+auto-applied — the blob is unauthenticated, so a local filesystem target always needs a manual
+`devstrap hub init` to confirm it.
 
 ```bash
-# Founder — found the workspace and print the pairing code
-devstrap sync                         # founds the workspace, pushes the namespace map
-devstrap devices pairing-code         # stdout: devstrap-pair2:… (fingerprint + hub embedded)
+# Founder — one command bootstraps the workspace: init + scan + hub + sync
+devstrap up ~/Code --hub git@github.com:you/devstrap-hub.git
 
-# Joiner — one command: adopt the id, pin the founder, configure the hub
+# Founder — the guided wizard: it prints your code + the exact command for the
+# second device, then blocks until you paste the code that device prints back,
+# and automatically approves it and publishes the key grant.
+devstrap pair
+#   → prints: devstrap-pair2:… and "On the SECOND device, run: devstrap join '<code>'"
+#   → then paste the joiner's code when prompted; pair enrolls + approves + syncs
+
+# Joiner — one command: adopt the id, pin the founder, configure the hub, and
+# print this device's own code (paste it back into the founder's `pair` prompt)
 devstrap join '<founder-code>'
 # High-assurance variant (verify the fingerprint out-of-band against the founder's stderr):
 #   devstrap join '<founder-code>' --fingerprint <founder-fingerprint>
-# `join` prints THIS device's own code; send it back to the founder.
+
+# Joiner — sync once more to receive the grant; the whole tree materializes
+devstrap sync
+```
+
+`devstrap up` folds `init` (+ `scan --adopt`) + hub configuration + `sync` (each step is
+independently idempotent, so a re-run resumes from any interruption). `devstrap pair` folds the
+founder side of `devices pairing-code` + `devices enroll --code --approve` + `sync`; it needs an
+interactive terminal (in a script/CI use the manual flow below). `devstrap join` folds
+`init --join --code` + `hub init` + generating the joiner's own code — if the founder's code
+carried no hub (or a local `file:`/`folder:` one), `join` says so and you run `devstrap hub init
+<url>` yourself before the first `sync`.
+
+The manual step-by-step ceremony remains the documented fallback (for scripts, CI, recovery, and
+v1 codes):
+
+```bash
+# Founder
+devstrap sync                                       # founds the workspace, pushes the namespace map
+devstrap devices pairing-code                       # stdout: devstrap-pair2:… (fingerprint + hub embedded)
+
+# Joiner
+devstrap init ~/Code --join --code '<founder-code>' --fingerprint <founder-fingerprint>
+devstrap hub init <url>                             # required if the code carried no remote hub, or only a local file:/folder: hub
+devstrap devices pairing-code                       # this device's own code + fingerprint
 
 # Founder — approve the joiner, then push the key grants
 devstrap devices enroll --code '<joiner-code>' --approve --fingerprint <joiner-fingerprint>
@@ -105,12 +138,6 @@ devstrap sync
 # Joiner — sync once more; the whole tree materializes
 devstrap sync
 ```
-
-`devstrap join` folds `init --join --code` + `hub init` + generating the joiner's own code. If the
-founder's code carried no hub (a founder who had not configured one yet), `join` says so and you
-run `devstrap hub init <url>` yourself before the first `sync`. The older manual sequence
-(`devstrap init ~/Code --join --code … --fingerprint …` then `devstrap hub init …` then
-`devstrap devices pairing-code`) still works and remains the fallback for v1 codes.
 
 The workspace key rotates automatically during `sync` once its epoch ages past
 `keys.rotate_max_age` (default 90 days); `devstrap keys rotate` forces it, and

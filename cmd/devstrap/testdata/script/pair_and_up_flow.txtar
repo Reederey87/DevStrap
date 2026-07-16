@@ -1,0 +1,80 @@
+# P7-PROD-01 slice 2: the guided founder bootstrap (`devstrap up`) and the
+# joiner one-command flow (`devstrap join`) drive a full two-device loop.
+#
+# Device A bootstraps with a single `devstrap up` (init + scan + hub + sync).
+# Device B joins with `devstrap join`. The founder-side `devstrap pair` wizard is
+# interactive (TTY-only), so through the compiled binary — where stdin is a pipe,
+# not a terminal — it fast-fails with the manual-flow remedy instead of hanging;
+# this test asserts that guard and then completes the approval via the documented
+# manual `devices enroll --code --approve` fallback. The interactive pair approve
+# path itself is covered by the in-process Go tests (internal/cli/pair_test.go).
+
+env DEVSTRAP_NO_KEYCHAIN=1
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+# Two bare remotes, one per project.
+exec git init --bare -b main $WORK/remoteA.git
+exec git clone $WORK/remoteA.git $WORK/srcA
+exec sh -c 'echo hello-a > $WORK/srcA/README.md'
+exec sh -c 'cd $WORK/srcA && git add README.md && git commit -m init && git branch -M main && git push origin main'
+exec git init --bare -b main $WORK/remoteB.git
+exec git clone $WORK/remoteB.git $WORK/srcB
+exec sh -c 'echo hello-b > $WORK/srcB/README.md'
+exec sh -c 'cd $WORK/srcB && git add README.md && git commit -m init && git branch -M main && git push origin main'
+
+# Device A (founder): ONE command bootstraps the workspace — init + scan + hub +
+# sync. The empty hub is founded (epoch 1) and the hub URI is written to config.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA up --hub file:$WORK/hub.json
+stdout 'Workspace up:'
+
+# A adds a project and syncs through the config-configured hub (no --hub-file).
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/a-proj $WORK/remoteA.git
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync
+stdout 'pushed 1'
+
+# Device B (joiner): ONE command joins. B pins the founder (v2 auto-trust). A's
+# code carries a LOCAL file: hub, which join deliberately never auto-applies, so B
+# supplies the hub with --hub-file on its own syncs.
+exec sh -c 'CODE=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices pairing-code 2>/dev/null); devstrap --home=$WORK/homeB --root=$WORK/CodeB join "$CODE"'
+stdout 'devstrap-pair2:'
+
+# Both stores now report the same workspace id.
+exec sh -c 'test "$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --workspace-id)" = "$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --workspace-id)"'
+
+# B pinned the founder during join.
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB devices list
+stdout 'approved'
+
+# B adds a project and syncs BEFORE it is approved — the push defers (no key yet).
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB add --path work/b-proj $WORK/remoteB.git
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
+stdout 'pushed 0'
+
+# The founder's `pair` wizard cannot read a pasted code without a terminal, so
+# through the binary it fast-fails with the manual-flow remedy (never hangs).
+! exec devstrap --home=$WORK/homeA --root=$WORK/CodeA pair
+stderr 'needs an interactive terminal'
+
+# Founder-side manual fallback: approve B under its real device id + fingerprint.
+exec sh -c 'BCODE=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices pairing-code 2>/dev/null); BFP=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --fingerprint); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll --code "$BCODE" --approve --fingerprint "$BFP"'
+stdout 'enrolled as approved'
+
+# A syncs to publish the grant events.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync
+
+# B syncs: ingests its grant, then pushes the previously-queued b-proj event.
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
+stdout 'pushed 1'
+
+# A syncs: pulls B's project and materializes it.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync
+stdout 'materialized'
+
+# Both devices have both projects on disk — converged.
+exec sh -c 'test -d $WORK/CodeA/work/a-proj/.git'
+exec sh -c 'test -d $WORK/CodeA/work/b-proj/.git'
+exec sh -c 'test -d $WORK/CodeB/work/a-proj/.git'
+exec sh -c 'test -d $WORK/CodeB/work/b-proj/.git'

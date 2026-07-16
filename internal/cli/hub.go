@@ -546,8 +546,29 @@ func hubConfigured(opts *options, hubFile string) error {
 	if uri == "" {
 		return fmt.Errorf("no hub configured: pass --hub-file <path> or set 'hub' in config")
 	}
+	return validateHubURI(uri)
+}
+
+// validateHubURI validates a hub URI's shape directly, independent of any
+// configured `hub-file`/`hub-file` fallback. `hubConfigured` short-circuits
+// past this check when a file-backed test hub is already configured (correct
+// for its own purpose — resolving which backend `sync` will actually use),
+// but a caller validating an EXPLICIT candidate URI before persisting it
+// (`devstrap up --hub <uri>`) must not have that unrelated bypass silently
+// let an invalid value through (review finding, PR #202): an invalid --hub
+// would otherwise found the workspace and persist the bad value before
+// anything downstream ever parsed it.
+func validateHubURI(uri string) error {
 	switch {
 	case strings.HasPrefix(uri, "file:"):
+		// An empty path (bare "file:") previously passed unvalidated, letting
+		// a caller like `devstrap up` mint a workspace key epoch before the
+		// empty path failed downstream in the hub backend (review finding,
+		// PR #202) — reject it here instead, before any persistent state
+		// changes.
+		if strings.TrimSpace(strings.TrimPrefix(uri, "file:")) == "" {
+			return fmt.Errorf("file hub uri must include a path (file:<path>)")
+		}
 		return nil
 	case strings.HasPrefix(uri, "r2://"), strings.HasPrefix(uri, "s3://"):
 		if _, err := parseHubURI(uri); err != nil {

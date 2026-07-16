@@ -96,7 +96,9 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 
 	cmd.AddCommand(newVersionCommand(stdout))
 	cmd.AddCommand(newInitCommand(stdout, opts))
+	cmd.AddCommand(newUpCommand(stdout, opts))
 	cmd.AddCommand(newJoinCommand(stdout, opts))
+	cmd.AddCommand(newPairCommand(stdout, opts))
 	cmd.AddCommand(newStatusCommand(stdout, opts))
 	cmd.AddCommand(newDoctorCommand(stdout, opts))
 	cmd.AddCommand(newDBCommand(stdout, opts))

@@ -28,9 +28,20 @@ func TestMain(m *testing.M) {
 }
 
 func executeForTest(args ...string) (string, string, error) {
+	return executeForTestWithStdin(nil, args...)
+}
+
+// executeForTestWithStdin runs the CLI like executeForTest but with a custom
+// stdin, so interactive commands (e.g. the `pair` wizard reading a pasted code
+// and its "yes" confirmation) can be driven in-process. A nil stdin leaves
+// cobra's default (os.Stdin), matching executeForTest's behavior.
+func executeForTestWithStdin(stdin io.Reader, args ...string) (string, string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd := NewRootCommand(&stdout, &stderr)
 	cmd.SetArgs(args)
+	if stdin != nil {
+		cmd.SetIn(stdin)
+	}
 	err := cmd.Execute()
 	if err != nil {
 		ExitCodeWithWriter(err, &stderr)
