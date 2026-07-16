@@ -59,6 +59,10 @@ The full `go test -race ./...` run (not just the new unit tests) surfaced 6 fail
 
 All 6 fixes verified: full suite re-run clean (24/24 packages, 0 FAIL) after each.
 
+### 2026-07-16 — review fixup (P5-CLI-01 part B, sync domain): keyless-joiner deferred-recovery path emitted no JSON document
+
+An independent opus-4.8 review pass (Codex still unavailable this session — reviewed with explicit instruction to evaluate the `run` exemption judgment call, not just check for bugs; verdict: the exemption is sound, `run` is architecturally an exec wrapper with nothing to synthesize, unlike `agent run`'s post-hoc log-file summary) caught one real gap: `runSyncCycle`'s keyless-joiner snapshot-recovery early-return path (`if !imported`) returned bare `nil` under `--json` without ever calling `opts.render` — every OTHER exit path in the function emits exactly one `syncResult` document, but a first-sync joiner deferring at the snapshot gate got **empty stdout** instead, which would fail to parse as JSON for any consumer. Fixed by rendering `syncResult{HubID, Deferred: true}` on that path too (human-mode output is unchanged — `recoverFromSnapshot` already prints its own defer message, now correctly on stderr, and the human callback here is a no-op). New regression test `TestSyncJSONKeylessJoinerDeferredSnapshotRecovery` reproduces the exact scenario (a keyless joiner recovering from a published snapshot) and confirmed red (`unexpected end of JSON input`, empty stdout) without the fix, green with it.
+
 ## 2026-07-16 — feat(cli): db migrate/status/backup/down --json via Renderer seam (P5-CLI-01 part B, db domain)
 
 Changed:

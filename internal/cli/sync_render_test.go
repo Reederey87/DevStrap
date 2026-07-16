@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"path/filepath"
 	"strings"
@@ -154,5 +155,35 @@ func TestSyncJSONStaysPureWhenRotationOwedWarns(t *testing.T) {
 	}
 	if strings.Contains(stdout, "warning:") {
 		t.Fatalf("stdout still contains human warning text: %q", stdout)
+	}
+}
+
+// TestSyncJSONKeylessJoinerDeferredSnapshotRecovery is a review-caught
+// regression: the keyless-joiner snapshot-recovery early-return path
+// (runSyncCycle, "if !imported") returned bare nil under --json without ever
+// calling opts.render, so a first-sync joiner awaiting a grant got EMPTY
+// stdout instead of a syncResult document — the one exit path in runSyncCycle
+// that violated "every --json invocation emits exactly one document."
+func TestSyncJSONKeylessJoinerDeferredSnapshotRecovery(t *testing.T) {
+	env, store, wck := setupRecovery(t, false) // B holds no WCK — keyless joiner
+	defer closeStore(store)
+	snap := recoverySnapshot(env.wsID)
+	publishSnapshot(t, env, snap, wck, 1, env.prodSign.Private)
+
+	env.opts.v.Set("json", true)
+	var stdout, stderr bytes.Buffer
+	if err := runSyncCycle(env.ctx, &stdout, &stderr, env.opts, env.hubPath, false, false); err != nil {
+		t.Fatalf("runSyncCycle (keyless joiner defer): %v (stderr=%q)", err, stderr.String())
+	}
+
+	var got syncResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("sync --json on keyless-joiner defer produced no/invalid document (the exact bug this test guards): %v\nstdout=%q", err, stdout.String())
+	}
+	if !got.Deferred {
+		t.Fatalf("syncResult.Deferred = false, want true (awaiting grant)")
+	}
+	if !strings.Contains(stderr.String(), "Recovering from hub snapshot") {
+		t.Fatalf("expected snapshot-recovery narration on stderr, got %q", stderr.String())
 	}
 }

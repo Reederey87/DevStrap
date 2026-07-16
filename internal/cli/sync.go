@@ -145,7 +145,13 @@ func runSyncCycle(ctx context.Context, stdout, stderr io.Writer, opts *options, 
 		if !imported {
 			// Keyless joiner: awaiting a grant. recoverFromSnapshot already
 			// printed the defer message; nothing to materialize or push yet.
-			return exportHubDurabilityAfterSync(ctx, stderr, opts, store, hub, hubFile, time.Now())
+			// Still render a syncResult under --json (review catch) — every
+			// exit path must emit exactly one document, never empty stdout.
+			if err := exportHubDurabilityAfterSync(ctx, stderr, opts, store, hub, hubFile, time.Now()); err != nil {
+				return err
+			}
+			result.Deferred = true
+			return opts.render(stdout, func(w io.Writer) error { return nil }, result)
 		}
 		pull, err = pullAndApplyEvents(ctx, store, hub, hubID)
 		if errors.Is(err, dssync.ErrSnapshotRequired) {
