@@ -1078,8 +1078,11 @@ func TestWorktreeNewUsesFreshRemoteDefaultSHA(t *testing.T) {
 	if !strings.Contains(stdout, latest) {
 		t.Fatalf("worktree stdout = %q, want latest remote SHA %s", stdout, latest)
 	}
-	if !strings.Contains(stdout, "uses Git LFS") || !strings.Contains(stdout, "lfs_policy=auto") {
-		t.Fatalf("worktree stdout = %q, want LFS pointer warning", stdout)
+	// P5-CLI-01 part B: this advisory warning moved to stderr so `worktree new
+	// --json`'s stdout stays a pure document (same purity fix as `worktree
+	// cleanup`'s base-refresh/branch-delete warnings).
+	if !strings.Contains(stderr, "uses Git LFS") || !strings.Contains(stderr, "lfs_policy=auto") {
+		t.Fatalf("worktree stderr = %q, want LFS pointer warning", stderr)
 	}
 
 	stdout, stderr, err = executeForTest("--home", home, "worktree", "list", "--json")

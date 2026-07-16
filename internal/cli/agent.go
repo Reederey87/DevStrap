@@ -318,7 +318,7 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 					return state.AgentRun{}, state.Worktree{}, err
 				}
 				defer unlock()
-				wt, err := createFreshWorktreeLocked(cmd.Context(), stdout, opts, store, project, taskName, "agent")
+				wt, err := createFreshWorktreeLocked(cmd.Context(), stdout, cmd.ErrOrStderr(), opts, store, project, taskName, "agent")
 				if err != nil {
 					return state.AgentRun{}, state.Worktree{}, err
 				}

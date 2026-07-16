@@ -31,6 +31,30 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-16 — feat(cli): worktree new/finalize/remove/cleanup --json via Renderer seam (P5-CLI-01 part B, worktree domain)
+
+Changed:
+- Wired `worktree new`, `worktree finalize`, `worktree remove`, and `worktree cleanup` through `opts.render` (`internal/cli/render.go`). Part A already had `worktree unlock`/`worktree status`/`worktree list` — left untouched.
+- Result shapes: `worktree new` encodes `state.Worktree` directly; `worktree finalize` uses named `worktreeFinalizeResult` (`id`, `base_ref`, `base_sha`, `current_sha`, `fresh`, `behind`) for both ready and stale-allowed human branches; `worktree remove` uses named `worktreeRemoveResult` (`id`, `pruned`); `worktree cleanup` uses `worktreeCleanupResult` (`removed`, `skipped`, `reaped` omitempty) with `worktreeReapEntry` (`id`, `branch`, `merge_label`, `branch_tip` omitempty).
+- Cleanup refactor: `cleanupOneWorktree` returns `(*worktreeReapEntry, error)` (nil entry = skip) instead of printing success mid-loop; base-refresh and branch-delete warnings go to stderr so `--json` stdout stays pure.
+- Tests: `internal/cli/worktree_render_test.go` (`TestWorktreeNewJSON`, `TestWorktreeFinalizeJSON`, `TestWorktreeRemoveJSON`, `TestWorktreeCleanupJSONStaysPure`).
+- `spec/13_CLI_DAEMON_API.md` gained a "Part B progress: `worktree *` domain wired" note. Ledger not touched (wave-final PR only).
+
+Validated:
+- `gofmt -l cmd internal` — empty (clean).
+- `GOCACHE=/tmp/devstrap-b4-worktree-gocache go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` — clean (after a `cache clean`, the recurring stale-cache issue in this environment).
+- `GOCACHE=/tmp/devstrap-b4-worktree-gocache go run ./cmd/spec-drift --base origin/main --head HEAD` — passed (22 specs, 4 changed files).
+- `GOCACHE=/tmp/devstrap-b4-worktree-gocache go test -race ./...` — passed, zero FAIL lines across all 24 packages, after a test-only fixup (see below).
+
+Follow-ups:
+- None for this batch; remaining `P5-CLI-01` part-B domains tracked as separate PRs in the same wave.
+
+### 2026-07-16 — review fixup (P5-CLI-01 part B, worktree domain): test-only merge-detection interaction bug
+
+`TestWorktreeCleanupJSONStaysPure` originally forced the base-refresh failure by corrupting the DB's `base_ref` column to the malformed string `"not-a-valid-base-ref"`. This broke two things at once: `refreshWorktreeBaseLocked`'s `strings.Cut(baseRef, "/")` check rejects it before ever attempting a fetch (a clean validation error, not a realistic "fetch failed" scenario), and — the real bug — `cleanupOneWorktree`'s merge-detection step (`git branch --merged <baseRef>`) ALSO reads the same corrupted `wt.BaseRef`, so it fails too, causing the worktree to be skipped (`Skipped:1, Removed:0`) instead of reaped. The test could never observe both the warning and a successful reap together. Fixed by removing the origin remote's actual directory (resolved via `git remote get-url origin`, with the `file://` scheme prefix stripped before `os.RemoveAll` — the first fix attempt forgot this and silently no-op'd against a nonexistent literal path) instead of corrupting `base_ref`: `git fetch` then fails for a genuine reason (remote gone) while `wt.BaseRef` stays `origin/main`, which still resolves purely from the already-fetched local `refs/remotes/origin/main` ref (worktrees share the primary clone's ref store, no network needed) — so merge-detection succeeds and the worktree is correctly reaped while the refresh warning still fires. Removed the now-unused `setWorktreeBaseRefForTest` helper and its now-unused `database/sql`/`net/url` imports. Verified both directions: reverting the fix reproduces the original `Removed:0 Skipped:1` failure; the fix passes.
+
+A second, independent opus-4.8 review pass (Codex still unavailable this session) flagged one more latent purity gap in the same family, pre-existing and not introduced by this PR: `createFreshWorktreeLocked` (called by both `worktree new` and `agent run`, the latter already migrated in the prior PR) can emit two advisory warnings — a non-authoritative default-branch resolution notice (`resolveWorktreeDefaultBranch`) and an LFS-pointer-files notice (`applyWorktreeLFSPolicy`) — directly to the `stdout` writer it's handed, on the SAME success path that then emits a `--json` document. Fixed in the same spirit as the `cleanupOneWorktree` fix above: `createFreshWorktree`/`createFreshWorktreeLocked` now take a separate `stderr io.Writer` parameter threaded to both advisory-warning call sites, while `stdout` still flows to `removeOrphanWorktree`'s failure-path cleanup (no `--json` document follows an error return, so that path is unaffected). Both call sites (`worktree.go`'s `newWorktreeNewCommand`, `agent.go`'s `newAgentRunCommand`) now pass `cmd.ErrOrStderr()`. This surfaced one genuine regression against a pre-existing test, `TestWorktreeNewUsesFreshRemoteDefaultSHA` (`internal/cli/root_test.go`), which asserted the LFS-pointer warning on stdout — the exact old (incorrect) contract this fix changes. Updated it to assert the warning on stderr instead, with a comment explaining why. No new dedicated regression test added for the non-authoritative-default-branch-warning edge case specifically (reliably forcing `resolveWorktreeDefaultBranch`'s remote-symref-query failure branch in a hermetic test is nontrivial) — relying on the full `go test -race ./...` run, now green, to confirm no other regression to either command's happy path.
+
 ## 2026-07-16 — feat(cli): agent run/pr + conflicts resolve --json via Renderer seam (P5-CLI-01 part B, agent/conflicts)
 
 Changed:
