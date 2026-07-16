@@ -103,6 +103,13 @@ func newUpCommand(stdout io.Writer, opts *options) *cobra.Command {
 
 			// Closing summary: name the founded workspace so the operator can copy
 			// it and knows exactly what just happened.
+			// `up --json` already emitted its single JSON document from
+			// runSyncCycle above (P5-CLI-01: up inherits its --json contract
+			// "for free" from its terminal sync step — see spec/13), so this
+			// human-only closing summary must stay silent under --json.
+			if opts.v.GetBool("json") {
+				return nil
+			}
 			wsID := ""
 			if store, serr := opts.openState(ctx); serr == nil {
 				if w, ierr := store.WorkspaceID(ctx); ierr == nil {

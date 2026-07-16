@@ -17,6 +17,17 @@ import (
 // open) into a single command. It derives a namespace path from the remote when
 // one is not given, reuses the existing addProject + materializeOne internals,
 // and prints the resulting path so time-to-first-success is one command.
+// cloneResult is the --json shape for `devstrap clone` (P5-CLI-01 part B). It
+// is built incrementally across clone's sequential steps (add, materialize,
+// optional open) and rendered once at the end, mirroring the hubCompactResult/
+// envRotateResult multi-branch-build-then-render-once pattern.
+type cloneResult struct {
+	Path     string `json:"path"`
+	Remote   string `json:"remote"`
+	Editor   string `json:"editor,omitempty"`
+	OpenHint string `json:"open_hint,omitempty"`
+}
+
 func newCloneCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var openCursor bool
 	var openVSCode bool
@@ -47,9 +58,9 @@ func newCloneCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return appError{code: exitInvalidConfig, err: err}
 			}
-			if _, err := fmt.Fprintf(stdout, "added %s -> %s\n", project.Path, remote); err != nil {
-				return err
-			}
+			result := cloneResult{Path: project.Path, Remote: remote}
+			var lines []string
+			lines = append(lines, fmt.Sprintf("added %s -> %s", project.Path, remote))
 			// Fetch the full ProjectStatus (with LocalPath/materialization
 			// state) for the materialization pass; UpsertProject returns the
 			// NamespaceEntry, but materializeOne needs ProjectStatus.
@@ -61,9 +72,7 @@ func newCloneCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := materializeOne(cmd.Context(), store, opts, status, true); err != nil {
 				return appError{code: exitGit, err: fmt.Errorf("clone %s: %w", project.Path, err)}
 			}
-			if _, err := fmt.Fprintf(stdout, "cloned %s\n", project.Path); err != nil {
-				return err
-			}
+			lines = append(lines, fmt.Sprintf("cloned %s", project.Path))
 			if openCursor || openVSCode {
 				editor := "cursor"
 				if openVSCode {
@@ -79,15 +88,20 @@ func newCloneCommand(stdout io.Writer, opts *options) *cobra.Command {
 					}
 					return err
 				}
-				if _, err := fmt.Fprintf(stdout, "opened %s with %s\n", localPath, editor); err != nil {
-					return err
-				}
+				result.Editor = editor
+				lines = append(lines, fmt.Sprintf("opened %s with %s", localPath, editor))
 			} else {
-				if _, err := fmt.Fprintf(stdout, "Open with: devstrap open %s --cursor\n", project.Path); err != nil {
-					return err
-				}
+				result.OpenHint = fmt.Sprintf("devstrap open %s --cursor", project.Path)
+				lines = append(lines, fmt.Sprintf("Open with: devstrap open %s --cursor", project.Path))
 			}
-			return nil
+			return opts.render(stdout, func(w io.Writer) error {
+				for _, line := range lines {
+					if _, err := fmt.Fprintln(w, line); err != nil {
+						return err
+					}
+				}
+				return nil
+			}, result)
 		},
 	}
 	cmd.Flags().BoolVar(&openCursor, "open", false, "open the cloned repo in Cursor after materialization")

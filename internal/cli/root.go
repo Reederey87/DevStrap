@@ -94,7 +94,7 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	_ = opts.v.BindPFlag("root", cmd.PersistentFlags().Lookup("root"))
 	_ = opts.v.BindPFlag("json", cmd.PersistentFlags().Lookup("json"))
 
-	cmd.AddCommand(newVersionCommand(stdout))
+	cmd.AddCommand(newVersionCommand(stdout, opts))
 	cmd.AddCommand(newInitCommand(stdout, opts))
 	cmd.AddCommand(newUpCommand(stdout, opts))
 	cmd.AddCommand(newJoinCommand(stdout, opts))

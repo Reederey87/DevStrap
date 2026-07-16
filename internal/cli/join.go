@@ -29,6 +29,18 @@ import (
 // compromised paste channel. Only remote schemes (r2://, s3://, git+ssh://,
 // git@host:path) are auto-configured; a local-scheme URI is reported but left
 // for the operator to apply by hand via `hub init` if they want it.
+// joinResult is the --json shape for `devstrap join` (P5-CLI-01 part B). Unlike
+// `up`, join does not call any other already-self-rendering command, so it owns
+// its own single render at the end of RunE (after runInit's internal render has
+// been suppressed via initParams.calledFromJoin).
+type joinResult struct {
+	WorkspaceID   string `json:"workspace_id"`
+	FounderPinned bool   `json:"founder_pinned"`
+	HubConfigured bool   `json:"hub_configured,omitempty"`
+	Code          string `json:"code"`
+	Fingerprint   string `json:"fingerprint"`
+}
+
 func newJoinCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var fingerprint string
 	var workspaceName string
@@ -92,21 +104,29 @@ func newJoinCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// The returned code is the essential actionable result of `join`, so
 			// it prints to stdout unconditionally — never fully suppressed by
 			// --quiet (P7-CLI-03). The guidance around it is progress on stderr.
-			if _, err := fmt.Fprintln(stdout, blob); err != nil {
-				return err
+			result := joinResult{
+				WorkspaceID:   code.WorkspaceID,
+				FounderPinned: pinnedFounder,
+				HubConfigured: hubConfigured,
+				Code:          blob,
+				Fingerprint:   fp,
 			}
-			// Report the FOUNDER'S actual trust state, not an assumed success —
-			// a v1 code (or a non-TTY session) can leave it pending.
-			status := "the founder is still pending approval"
-			if pinnedFounder {
-				status = "pinned the founder"
+			human := func(w io.Writer) error {
+				if _, err := fmt.Fprintln(w, blob); err != nil {
+					return err
+				}
+				status := "the founder is still pending approval"
+				if pinnedFounder {
+					status = "pinned the founder"
+				}
+				hubNote := ""
+				if !hubConfigured {
+					hubNote = " Configure a hub before syncing if one wasn't applied above."
+				}
+				opts.progressf(stderr, "Joined workspace %s; %s.%s\nRelay the code above to the founding device and have it run:\n  devstrap devices enroll --code '<paste>' --approve --fingerprint <this device's fingerprint>\nThen run 'devstrap sync' here once the founder has synced the key grant.\nThis device's fingerprint (optional high-assurance; read aloud to the founder):\n  %s\n", code.WorkspaceID, status, hubNote, fp)
+				return nil
 			}
-			hubNote := ""
-			if !hubConfigured {
-				hubNote = " Configure a hub before syncing if one wasn't applied above."
-			}
-			opts.progressf(stderr, "Joined workspace %s; %s.%s\nRelay the code above to the founding device and have it run:\n  devstrap devices enroll --code '<paste>' --approve --fingerprint <this device's fingerprint>\nThen run 'devstrap sync' here once the founder has synced the key grant.\nThis device's fingerprint (optional high-assurance; read aloud to the founder):\n  %s\n", code.WorkspaceID, status, hubNote, fp)
-			return nil
+			return opts.render(stdout, human, result)
 		},
 	}
 	cmd.Flags().StringVar(&fingerprint, "fingerprint", "", "the founder's fingerprint confirmed out-of-band; when set, it must match the code's embedded/derived value (high-assurance — defends a compromised paste channel)")

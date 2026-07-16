@@ -31,6 +31,25 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-16 — feat(cli): final leaf commands --json via Renderer seam; pair exempt — closes P5-CLI-01 (part B, final)
+
+Changed:
+- Wired the last ten leaf commands through `opts.render`: `init` (`initResult` — covers both `--dry-run` and the real-run outcome), `add` (`addResult`), `clone` (`cloneResult`, built incrementally across its sequential add/materialize/open steps and rendered once), `hydrate` (`hydrateResult`), `open` (`openResult`), `version` (`versionResult` — required threading `*options` into `newVersionCommand`, previously `stdout`-only, plus its one call site in `root.go`), `service install`/`service uninstall` (`serviceInstallResult`/`serviceUninstallResult` — existing stderr confirmations, P7-CLI-03, unchanged; a new no-op-human-callback render is purely additive), `up` (no new type — inherits its single JSON document "for free" from its terminal `runSyncCycle` call, same principle as `run-loop --once`), and `join` (`joinResult` — owns its own single render since, unlike `up`, it calls no other self-rendering command).
+- **Nested-render architecture (the reason this PR needed real design, not a mechanical swap):** `runInit` backs `init` standalone AND is called internally by `up`/`join` (`initParams.calledFromUp`/`calledFromJoin`). It must never call `opts.render` on those internal invocations — doing so would emit a second, corrupting JSON document alongside `up`'s inherited `syncResult` / `join`'s own `joinResult`. Fixed by gating `runInit`'s two return points on `calledFromUp || calledFromJoin`: under `--json` it returns silently (the outer caller owns the one document); otherwise it still prints its normal human-mode lines exactly as before, layered underneath `up`/`join`'s own human output.
+- **Stdout-purity bug found and fixed (independent verification, not part of the original design):** `up.go`'s closing summary (`"\nWorkspace up: ... founded, hub ... configured, initial sync complete."` + the pairing hint) was gated only by `--quiet`, not `--json` — meaning `up --json` would append plain text after `runSyncCycle`'s JSON document even with the nested-render fix above in place. Fixed by returning early (`if opts.v.GetBool("json") { return nil }`) before that summary.
+- `internal/cli/leaf_render_test.go`: one test per migrated command, including `TestUpJSONInheritsSyncResult` — the wave's critical regression guard, which decodes `up --json`'s stdout and asserts exactly one JSON document containing a `hub_id` key (proving it's `syncResult`) and no `workspace_name`/`adopted` keys (proving it is not `initResult`).
+- **`pair` documented exemption (second and final judgment call in the wave):** not migrated — an interactive wizard blocking on stdin with no coherent one-shot JSON contract, same reasoning as `run` (PR-B7).
+- **Closes `P5-CLI-01`:** `spec/13_CLI_DAEMON_API.md`'s stale "roughly 25 leaf commands... does not close the finding" sentence is replaced with a completion statement naming both exemptions; a final Part B progress note records this batch. `docs/audits/README.md` moves `P5-CLI-01` to *Recently shipped*, citing all nine PRs of the wave (PR-0 `#204` + PR-B1–B8 `#205`–`#212`), closes the Pass-5 open-table row, and updates the Pass-5 index-row/section-header counts to 36/36 shipped — Pass 5 is now fully closed.
+
+Validated:
+- `gofmt -l cmd internal` — empty.
+- `golangci-lint cache clean` then `golangci-lint run` (pinned v2.12.0) — 0 issues.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` — passed.
+- `go test ./...` and `go test -race ./...` — both fully green, zero FAIL lines, including the pre-existing `TestUpBootstrapsAdoptsAndSyncs` (unaffected by the `up.go` json-gate fix).
+
+Follow-ups:
+- None. This closes the entire 9-PR "P5-CLI-01 part B + ledger" wave (plan `i-need-you-to-misty-whistle.md`).
+
 ## 2026-07-16 — feat(cli): sync/run-loop --json via Renderer seam; run exempt (P5-CLI-01 part B, sync domain)
 
 Changed:
