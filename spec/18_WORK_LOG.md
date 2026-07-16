@@ -31,6 +31,19 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-16 — docs(audits): ledger reconciliation for P4-HUB-16 (documentation-only)
+
+Changed:
+- `docs/audits/README.md`: `P4-HUB-16` (R2 durability replica + doctor checks, PR #199, `fix/p4-hub-16-r2-durability`, 2026-07-14) shipped in the same wave as `P4-GIT-07`/`P4-QUAL-04` but was never reconciled in the ledger — its Pass-4 table row still read as plain open text with no *Shipped* annotation, and it had no row in the *Recently shipped* table. Added a full descriptive row to *Recently shipped* (same style as the `P4-GIT-07`/`P4-QUAL-04`/`P7-HUB-03` rows) and replaced the Pass-4 table row with the short "**Shipped 2026-07-14** ... moved to _Recently shipped_ above." form. Recomputed the Pass-4 index-row summary cell in "## Index of passes": ~40 shipped/narrowed, 4 genuinely open/partial (`P4-SEC-05` partial, `P4-SEC-08`/`P4-HUB-15` deferred commercial, `P4-SYNC-08` P3 future) — the prior "~8 open/partial" text was stale.
+- No code, spec, or behavior change — this is a documentation-only ledger fix.
+
+Validated:
+- `gofmt -l cmd internal` (clean, no Go files touched).
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` passed.
+
+Follow-ups:
+- None.
+
 ## 2026-07-15 — feat(cli): guided pairing wizard `devstrap pair` + founder bootstrap `devstrap up` (P7-PROD-01 slice 2)
 
 Changed:
