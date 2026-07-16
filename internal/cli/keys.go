@@ -16,6 +16,13 @@ func newKeysCommand(stdout io.Writer, opts *options) *cobra.Command {
 	return cmd
 }
 
+// keysRotateResult is the --json shape for `keys rotate` (P5-CLI-01 part B).
+// Epoch and grant count only — no key material.
+type keysRotateResult struct {
+	Epoch  int64 `json:"epoch"`
+	Grants int   `json:"grants"`
+}
+
 // newKeysRotateCommand implements `devstrap keys rotate` (P4-SEC-07 periodic
 // rotation). It calls Keyring.Rotate DIRECTLY — deliberately NOT the `devices
 // revoke` path: a periodic rotation has no excluded device, so it must not
@@ -62,8 +69,11 @@ re-encrypts blobs and flags secrets for source rotation.`,
 			if cerr := clearWCKRotationPending(cmd.Context(), store); cerr != nil {
 				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not clear the owed-rotation marker (%v); sync may rotate once more\n", cerr)
 			}
-			_, err = fmt.Fprintf(stdout, "Rotated workspace key to epoch %d; queued %d grant event(s); run 'devstrap sync' to publish\n", newEpoch, len(grants))
-			return err
+			result := keysRotateResult{Epoch: newEpoch, Grants: len(grants)}
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "Rotated workspace key to epoch %d; queued %d grant event(s); run 'devstrap sync' to publish\n", result.Epoch, result.Grants)
+				return err
+			}, result)
 		},
 	}
 }

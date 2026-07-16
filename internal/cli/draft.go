@@ -31,6 +31,16 @@ func newDraftSnapshotCommand(stdout io.Writer, opts *options) *cobra.Command {
 	return cmd
 }
 
+// draftSnapshotResult is the --json shape for `draft snapshot create`
+// (P5-CLI-01 part B). Metadata only — no bundle ciphertext or file contents.
+type draftSnapshotResult struct {
+	Path       string `json:"path"`
+	BlobRef    string `json:"blob_ref"`
+	FileCount  int64  `json:"file_count"`
+	ByteSize   int64  `json:"byte_size"`
+	Recipients int    `json:"recipients"`
+}
+
 func newDraftSnapshotCreateCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create <path>",
@@ -103,9 +113,18 @@ func newDraftSnapshotCreateCommand(stdout io.Writer, opts *options) *cobra.Comma
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(stdout, "Created draft snapshot for %s: %s (%d files, %d bytes) for %d recipient device(s)\n",
-				project.Path, snap.BlobRef, snap.FileCount, snap.ByteSize, len(recipients))
-			return err
+			result := draftSnapshotResult{
+				Path:       project.Path,
+				BlobRef:    snap.BlobRef,
+				FileCount:  snap.FileCount,
+				ByteSize:   snap.ByteSize,
+				Recipients: len(recipients),
+			}
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "Created draft snapshot for %s: %s (%d files, %d bytes) for %d recipient device(s)\n",
+					result.Path, result.BlobRef, result.FileCount, result.ByteSize, result.Recipients)
+				return err
+			}, result)
 		},
 	}
 	return cmd
