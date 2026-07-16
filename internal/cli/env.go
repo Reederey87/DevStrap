@@ -113,6 +113,43 @@ func captureEnvProfile(ctx context.Context, store *state.Store, opts *options, p
 	return len(bindings), ref, len(recipients), nil
 }
 
+// envCaptureResult is the --json shape for `env capture` (P5-CLI-01 part B).
+// Safe metadata only: path, content-addressed blob ref, binding count, recipient
+// count — never plaintext secret values.
+type envCaptureResult struct {
+	Path       string `json:"path"`
+	Ref        string `json:"ref"`
+	Bindings   int    `json:"bindings"`
+	Recipients int    `json:"recipients"`
+}
+
+// envRotateResult covers all three `env rotate` output shapes with omitempty
+// for the re-capture fields (only populated on the 2-arg path).
+type envRotateResult struct {
+	Path       string `json:"path,omitempty"`
+	Ref        string `json:"ref,omitempty"`
+	Recaptured int    `json:"recaptured,omitempty"`
+	Recipients int    `json:"recipients,omitempty"`
+	Cleared    int    `json:"cleared"`
+}
+
+// envHydrateResult is the --json shape for `env hydrate`. Target is the file
+// path written; decrypted plaintext never enters this payload (it goes only to
+// the target file via writeHydratedEnvFile).
+type envHydrateResult struct {
+	Path      string `json:"path"`
+	Target    string `json:"target"`
+	Variables int    `json:"variables"`
+}
+
+// envBindResult is the --json shape for `env bind`. Refs is a count only —
+// the op:// pointer map itself is not exposed in the JSON payload.
+type envBindResult struct {
+	Path     string `json:"path"`
+	Provider string `json:"provider"`
+	Refs     int    `json:"refs"`
+}
+
 func newEnvRotateCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var literal bool
 	var profileName string
@@ -135,8 +172,11 @@ func newEnvRotateCommand(stdout io.Writer, opts *options) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				_, err = fmt.Fprintf(stdout, "Cleared the needs-rotation flag on %d binding(s). Rotate the secrets at their source first.\n", cleared)
-				return err
+				result := envRotateResult{Cleared: cleared}
+				return opts.render(stdout, func(w io.Writer) error {
+					_, err := fmt.Fprintf(w, "Cleared the needs-rotation flag on %d binding(s). Rotate the secrets at their source first.\n", result.Cleared)
+					return err
+				}, result)
 			}
 			if len(args) == 0 {
 				return appError{code: exitUsage, err: fmt.Errorf("pass a <path> (and optionally an env-file to re-capture) or --all")}
@@ -145,22 +185,31 @@ func newEnvRotateCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			result := envRotateResult{Path: project.Path}
 			if len(args) == 2 {
 				// Re-capture the rotated value to the current recipient set.
 				n, ref, nRecipients, err := captureEnvProfile(cmd.Context(), store, opts, project, args[1], profileName, literal)
 				if err != nil {
 					return err
 				}
-				if _, err := fmt.Fprintf(stdout, "Re-captured %d env variable(s) for %s into %s for %d recipient device(s)\n", n, project.Path, ref, nRecipients); err != nil {
-					return err
-				}
+				result.Ref = ref
+				result.Recaptured = n
+				result.Recipients = nRecipients
 			}
 			cleared, err := store.ClearRotationForProject(cmd.Context(), project.ID)
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(stdout, "Cleared the needs-rotation flag on %d binding(s) for %s\n", cleared, project.Path)
-			return err
+			result.Cleared = cleared
+			return opts.render(stdout, func(w io.Writer) error {
+				if result.Recaptured > 0 || result.Ref != "" {
+					if _, err := fmt.Fprintf(w, "Re-captured %d env variable(s) for %s into %s for %d recipient device(s)\n", result.Recaptured, result.Path, result.Ref, result.Recipients); err != nil {
+						return err
+					}
+				}
+				_, err := fmt.Fprintf(w, "Cleared the needs-rotation flag on %d binding(s) for %s\n", result.Cleared, result.Path)
+				return err
+			}, result)
 		},
 	}
 	cmd.Flags().BoolVar(&literal, "literal", false, "capture interpolation-looking values as literal text")
@@ -193,8 +242,16 @@ func newEnvCaptureCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(stdout, "Captured %d env variables for %s into %s for %d recipient device(s)\n", n, project.Path, ref, nRecipients)
-			return err
+			result := envCaptureResult{
+				Path:       project.Path,
+				Ref:        ref,
+				Bindings:   n,
+				Recipients: nRecipients,
+			}
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "Captured %d env variables for %s into %s for %d recipient device(s)\n", result.Bindings, result.Path, result.Ref, result.Recipients)
+				return err
+			}, result)
 		},
 	}
 
@@ -270,8 +327,15 @@ func newEnvHydrateCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := writeHydratedEnvFile(target, content, force); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(stdout, "Hydrated %d env variables for %s to %s\n", count, project.Path, target)
-			return err
+			result := envHydrateResult{
+				Path:      project.Path,
+				Target:    target,
+				Variables: count,
+			}
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "Hydrated %d env variables for %s to %s\n", result.Variables, result.Path, result.Target)
+				return err
+			}, result)
 		},
 	}
 	cmd.Flags().StringVar(&writePath, "write", "", "write decrypted env values to this file")
@@ -409,8 +473,15 @@ func newEnvBindCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := ensureIgnored(localPath, refsPath); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(stdout, "Bound %d provider refs for %s using %s\n", len(refs), project.Path, provider)
-			return err
+			result := envBindResult{
+				Path:     project.Path,
+				Provider: provider,
+				Refs:     len(refs),
+			}
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "Bound %d provider refs for %s using %s\n", result.Refs, result.Path, result.Provider)
+				return err
+			}, result)
 		},
 	}
 	cmd.Flags().StringVar(&profileName, "profile", "default", "env profile name")

@@ -31,6 +31,28 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-16 — feat(cli): env/draft/keys --json via Renderer seam (P5-CLI-01 part B, env/draft/keys domain)
+
+Changed:
+- Wired `env capture`, `env rotate`, `env hydrate`, `env bind`, `draft snapshot create`, and `keys rotate` through `opts.render` (`internal/cli/render.go`). None of these six had prior `--json` output.
+- Result shapes (safe metadata only — no secret values): `envCaptureResult` (`path`, `ref`, `bindings`, `recipients`); `envRotateResult` (`path`/`ref`/`recaptured`/`recipients` omitempty, `cleared` required) covering `--all`, project-clear, and 2-arg re-capture; `envHydrateResult` (`path`, `target`, `variables`); `envBindResult` (`path`, `provider`, `refs` count — not the op:// map); `draftSnapshotResult` (`path`, `blob_ref`, `file_count` int64, `byte_size` int64, `recipients`); `keysRotateResult` (`epoch` int64, `grants`).
+- `keys rotate`'s `clearWCKRotationPending` warning remains on stderr (not folded into JSON). Hydrate still writes decrypted plaintext only to the target file.
+- Tests: `internal/cli/env_render_test.go` (`TestEnvCaptureJSON`, `TestEnvRotateJSONAll`, `TestEnvRotateJSONRecapture`, `TestEnvHydrateJSON`, `TestEnvBindJSON`, `TestDraftSnapshotCreateJSON`, `TestKeysRotateJSON`) — each asserts known plaintext (`super-secret-value-12345` / draft file content / op:// refs) does not appear in `--json` stdout.
+- `spec/13_CLI_DAEMON_API.md` gained a "Part B progress: `env`/`draft`/`keys` domain wired" note. Ledger not touched (wave-final PR only).
+
+Validated:
+- `gofmt -l cmd internal` — empty (clean).
+- `GOCACHE=/tmp/devstrap-b5-env-gocache go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` — clean (after a `cache clean`).
+- `GOCACHE=/tmp/devstrap-b5-env-gocache go run ./cmd/spec-drift --base origin/main --head HEAD` — passed (22 specs, 6 changed files).
+- `GOCACHE=/tmp/devstrap-b5-env-gocache go test -race ./...` — passed, zero FAIL lines, after a test-only fixup (see below).
+
+Follow-ups:
+- None for this batch; remaining `P5-CLI-01` part-B domains tracked as separate PRs in the same wave.
+
+### 2026-07-16 — review fixup (P5-CLI-01 part B, env/draft/keys): test-only fixture-classification bug
+
+`TestDraftSnapshotCreateJSON` initially left its draft-project fixture directory as a bare non-git folder (comment claimed "no git init → scan classifies as draft_project"), which is wrong: `scan.Walk`'s plain-folder discovery (`looksLikeProject`) only treats a directory as a project candidate if it contains one of `go.mod`/`package.json`/`pyproject.toml`/`Cargo.toml`/`README.md`/`README` — a directory holding only `note.txt` is never discovered at all, so `scan --adopt` silently adopted nothing and the subsequent `draft snapshot create work/local` failed with "unknown namespace path". The correct fixture, per the existing passing precedent `TestDraftSnapshotCreateRecordsOriginSnapshotRow` (`internal/cli/draft_test.go`), is a `git init`-ed directory with NO remote configured — DevStrap's architecture treats a remoteless local git repo as a local-only/draft project (NOVCS-01), not `git_repo` (which `draft snapshot create` explicitly refuses). Fixed by adding `runGit(t, local, "init")` before writing the fixture file, matching the working precedent; confirmed the test now passes.
+
 ## 2026-07-16 — feat(cli): worktree new/finalize/remove/cleanup --json via Renderer seam (P5-CLI-01 part B, worktree domain)
 
 Changed:
