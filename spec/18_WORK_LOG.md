@@ -31,6 +31,34 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-16 — feat(cli): sync/run-loop --json via Renderer seam; run exempt (P5-CLI-01 part B, sync domain)
+
+Changed:
+- Wired `sync` through `opts.render` with one shared `syncResult` covering dry-run and real cycles (`hub_id`, `dry_run`/`would_push`, `pushed`/`pulled`, `deferred`/`namespace_only`/`key_rotated`, `blobs_gcd`, `materialized_*`, `warnings`). Quiet-gated human summaries reconstruct from the struct inside the render callback; missing-blob warnings ride `Warnings` (P7-CLI-01).
+- **Stdout purity (two fixes):** (1) `maybeRotateWorkspaceKey(ctx, stderr, …)` — rotation-owed warnings + rotation narration go to stderr; JSON only gets `key_rotated`. (2) `runSyncCycle`'s call to `pushLocalEventsGated` now passes `stderr` (same class as hub compact's PR-B1 fix). `runSyncCycle` gained a `stderr io.Writer` parameter; callers updated: `newSyncCommand` (`cmd.ErrOrStderr()`), `runLoopTick` (existing stderr), `up`, `pair`, durability tests. Related mid-cycle diagnostics (`resumeRevokeContainment`, snapshot recovery, durability export) also route to stderr so `--json` stdout stays a single document.
+- `run-loop --once --json` reuses `syncResult` with no parallel type — `runLoopTick` already returns `runSyncCycle` directly.
+- **`run` documented exemption (judgment call):** not migrated. `run`'s stdout is the child's transparent stream via `runChildCommand`; wrapping in Renderer would corrupt or discard real child output. Recorded in `spec/13`'s P5-CLI-01 Part B progress note (wire-it-or-reject-it → reject).
+- Tests: `internal/cli/sync_render_test.go` (`TestSyncDryRunJSON`, `TestSyncJSONNamespaceOnly`, `TestRunLoopOnceJSON`, `TestSyncJSONStaysPureWhenRotationOwedWarns`). Updated keys/wck/durability tests for stderr-routed rotation/containment/durability diagnostics.
+- `spec/13_CLI_DAEMON_API.md` gained a "Part B progress: `sync`/`run-loop` wired, `run` documented exempt" note. Ledger not touched (wave-final PR only).
+
+Validated:
+- `gofmt -l cmd internal` — empty (clean).
+- `GOCACHE=/tmp/devstrap-b7-sync-gocache go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` — clean (after a `cache clean`).
+- `GOCACHE=/tmp/devstrap-b7-sync-gocache go run ./cmd/spec-drift --base origin/main --head HEAD` — passed (22 specs, 10 changed files).
+- `GOCACHE=/tmp/devstrap-b7-sync-gocache go test -race ./...` — passed, zero FAIL lines across all 24 packages, after fixing 6 real test failures (see below).
+
+Follow-ups:
+- None for this batch; wave-final PR reconciles the audit ledger for the whole P5-CLI-01 finding. Human reviewer should explicitly evaluate the `run` exemption.
+
+### 2026-07-16 — review fixup (P5-CLI-01 part B, sync domain): 6 test failures from the stdout→stderr moves
+
+The full `go test -race ./...` run (not just the new unit tests) surfaced 6 failures the implementing session's own reported gate results did not catch (the work-log entry above originally carried "(run at end of cycle)" placeholders — never actually run):
+
+- **5 end-to-end `cmd/devstrap` testscript (`.txtar`) failures**, all the same root cause: existing fixtures asserted `stdout '<message>'` on lines that this PR's stdout-purity fixes correctly moved to stderr (`sync_late_push.txtar`, `sync_join_flow.txtar`: "Awaiting workspace key grant…"; `sync_rotate_converge.txtar`: "Rotated workspace key to epoch 2"; `hub_compact_roundtrip.txtar`, `hub_compact_trust_recovery.txtar`: "Recovering from hub snapshot…", plus a second "Awaiting workspace key grant" occurrence later in `hub_compact_trust_recovery.txtar`). These are expected fallout from a deliberate, correct behavior change, not implementation bugs — updated all 6 assertion lines from `stdout` to `stderr` to match the new (correct) message location.
+- **1 unit test assumption bug**: `TestSyncJSONNamespaceOnly` asserted a founder's very first sync (bare `init`, no project ever added) must push at least one local event ("at least device/workspace bootstrap"). That assumption is false — a fresh founder with nothing adopted yet can legitimately have zero local pending events on its first cycle. Relaxed the assertion to check internal consistency (`Deferred` implies `Pushed==0`, `Pushed >= 0`) instead of assuming a push always happens, since the test's real purpose (proving the JSON shape round-trips) doesn't require a nonzero push.
+
+All 6 fixes verified: full suite re-run clean (24/24 packages, 0 FAIL) after each.
+
 ## 2026-07-16 — feat(cli): db migrate/status/backup/down --json via Renderer seam (P5-CLI-01 part B, db domain)
 
 Changed:

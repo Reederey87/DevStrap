@@ -86,7 +86,7 @@ func TestRunSyncCycleExportsDueSnapshot(t *testing.T) {
 	replicaPath := filepath.Join(t.TempDir(), "replica.json")
 	env.opts.v.Set("hub_replica", "file:"+replicaPath)
 	env.opts.v.Set(durabilityExportConfigKey, "24h")
-	if err := runSyncCycle(env.ctx, io.Discard, env.opts, env.hubPath, true, false); err != nil {
+	if err := runSyncCycle(env.ctx, io.Discard, io.Discard, env.opts, env.hubPath, true, false); err != nil {
 		t.Fatalf("runSyncCycle: %v", err)
 	}
 	replica := dssync.FileHub{Path: replicaPath}
@@ -116,12 +116,13 @@ func TestDurabilityReplicaOutageDoesNotFailPrimarySync(t *testing.T) {
 	}
 	env.opts.v.Set("hub_replica", "file:"+filepath.Join(blocker, "replica.json"))
 	env.opts.v.Set(durabilityExportConfigKey, "24h")
-	var out bytes.Buffer
-	if err := runSyncCycle(env.ctx, &out, env.opts, env.hubPath, true, false); err != nil {
+	var stdout, stderr bytes.Buffer
+	if err := runSyncCycle(env.ctx, &stdout, &stderr, env.opts, env.hubPath, true, false); err != nil {
 		t.Fatalf("runSyncCycle with unavailable replica: %v", err)
 	}
-	if !strings.Contains(out.String(), "warning: hub durability export failed after primary sync") {
-		t.Fatalf("sync output = %q, want non-fatal durability warning", out.String())
+	// Durability warnings are process diagnostics on stderr (P5-CLI-01 part B purity).
+	if !strings.Contains(stderr.String(), "warning: hub durability export failed after primary sync") {
+		t.Fatalf("sync stderr = %q, want non-fatal durability warning", stderr.String())
 	}
 }
 
@@ -129,7 +130,7 @@ func TestDurabilityInvalidConfigurationStillFailsSync(t *testing.T) {
 	env, store, _ := setupCompact(t)
 	closeStore(store)
 	env.opts.v.Set("hub_replica", "file:"+env.hubPath)
-	err := runSyncCycle(env.ctx, io.Discard, env.opts, env.hubPath, true, false)
+	err := runSyncCycle(env.ctx, io.Discard, io.Discard, env.opts, env.hubPath, true, false)
 	var appErr appError
 	if !errors.As(err, &appErr) || appErr.code != exitInvalidConfig {
 		t.Fatalf("same primary/replica error = %v, want invalid-config appError", err)

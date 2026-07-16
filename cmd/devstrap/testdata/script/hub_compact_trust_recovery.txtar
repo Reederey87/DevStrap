@@ -61,8 +61,8 @@ stdout 'published snapshot'
 # hold — recovery defers awaiting a grant (fail-closed: nothing imported, B
 # still approved locally, but nothing from B is pulled either).
 exec devstrap --home=$WORK/homeC --root=$WORK/CodeC sync --hub-file=$WORK/hub.json
-stdout 'Recovering from hub snapshot'
-stdout 'Awaiting workspace key grant'
+stderr 'Recovering from hub snapshot'
+stderr 'Awaiting workspace key grant'
 exec sh -c 'devstrap --home=$WORK/homeC --root=$WORK/CodeC devices list | grep devB | grep approved'
 
 # The operator re-approves C from A: approval re-grants every held epoch as
@@ -74,7 +74,7 @@ exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.js
 # trust projection lands: B is REVOKED on C even though the device.revoked
 # event no longer exists anywhere, and C's bindings are flagged for rotation.
 exec devstrap --home=$WORK/homeC --root=$WORK/CodeC sync --hub-file=$WORK/hub.json
-stdout 'Recovering from hub snapshot'
+stderr 'Recovering from hub snapshot'
 exec sh -c 'devstrap --home=$WORK/homeC --root=$WORK/CodeC devices list | grep devB | grep revoked'
 exec sh -c 'devstrap --home=$WORK/homeC --root=$WORK/CodeC doctor; true'
 stdout 'secrets needing rotation [1-9]'
@@ -83,4 +83,4 @@ stdout 'secrets needing rotation [1-9]'
 # at the snapshot gate and pushes nothing — and if it ever crafted events, C's
 # trust state now quarantines them (sync_trust_propagation.txtar pins that).
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
-stdout 'Awaiting workspace key grant'
+stderr 'Awaiting workspace key grant'

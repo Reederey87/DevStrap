@@ -224,11 +224,14 @@ func TestSyncResumesPendingRevokeContainment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sync: %v (stdout=%s stderr=%s)", err, stdout, stderr)
 	}
-	if !strings.Contains(stdout, "Resumed revoke containment for 1 device(s)") {
-		t.Fatalf("sync output = %q, want containment resume", stdout)
+	// Containment resume + rotation narration are process diagnostics on stderr
+	// (P5-CLI-01 part B purity — primary sync summary stays on stdout).
+	combined := stdout + stderr
+	if !strings.Contains(stderr, "Resumed revoke containment for 1 device(s)") {
+		t.Fatalf("sync stderr = %q, want containment resume (stdout=%q)", stderr, stdout)
 	}
-	if !strings.Contains(stdout, "rotation owed since") || strings.Contains(stdout, "0001-01-01") {
-		t.Fatalf("sync output = %q, want the transactional containment timestamp", stdout)
+	if !strings.Contains(combined, "rotation owed since") || strings.Contains(combined, "0001-01-01") {
+		t.Fatalf("sync output stdout=%q stderr=%q, want the transactional containment timestamp", stdout, stderr)
 	}
 	st := openTestStore(t, home)
 	if _, pending, _, err := revokeContainmentPending(ctx, st); err != nil || pending {
@@ -315,8 +318,8 @@ func TestSyncClearsMalformedContainmentMarker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sync: %v (stdout=%s stderr=%s)", err, stdout, stderr)
 	}
-	if !strings.Contains(stdout, "Recovered a malformed revoke-containment marker") {
-		t.Fatalf("sync output = %q, want malformed-marker recovery", stdout)
+	if !strings.Contains(stderr, "Recovered a malformed revoke-containment marker") {
+		t.Fatalf("sync stderr = %q, want malformed-marker recovery (stdout=%q)", stderr, stdout)
 	}
 	st2 := openTestStore(t, home)
 	if _, pending, _, err := revokeContainmentPending(ctx, st2); err != nil || pending {

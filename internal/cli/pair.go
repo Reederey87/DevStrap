@@ -176,7 +176,7 @@ func newPairCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// Step 6: publish the grant. Reads the hub from config (set by
 			// `devstrap up`/`hub init`); surfaces sync's own error unwrapped.
 			opts.progressf(stderr, "Syncing to publish the key grant…\n")
-			if err := runSyncCycle(ctx, stdout, opts, "", false, false); err != nil {
+			if err := runSyncCycle(ctx, stdout, stderr, opts, "", false, false); err != nil {
 				opts.progressf(stderr, "pair: device %s is approved (safe to keep); only the grant-publishing sync failed. Re-run 'devstrap sync' to publish it.\n", code.DeviceID)
 				return err
 			}

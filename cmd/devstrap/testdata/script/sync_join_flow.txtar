@@ -47,7 +47,7 @@ stdout 'approved'
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB add --path work/b-proj $WORK/remoteB.git
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
 # The joiner defers the push — no key yet. Its event is queued, not lost.
-stdout 'Awaiting workspace key grant: 1 local event'
+stderr 'Awaiting workspace key grant: 1 local event'
 stdout 'pushed 0'
 
 # The joiner must NOT have pushed b-proj to the hub (in any form) yet.

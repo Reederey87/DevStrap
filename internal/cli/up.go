@@ -96,7 +96,7 @@ func newUpCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// namespace map. Surface sync's own error UNWRAPPED — a hub-unreachable
 			// failure keeps the exact error and exit class sync already produces;
 			// `up` is a thin wrapper, not a new error-handling layer.
-			if err := runSyncCycle(ctx, stdout, opts, "", false, false); err != nil {
+			if err := runSyncCycle(ctx, stdout, stderr, opts, "", false, false); err != nil {
 				opts.progressf(stderr, "up: init and hub configuration already succeeded and are safe to keep; only the final sync failed. Re-run 'devstrap up' — or just 'devstrap sync' — to finish from here.\n")
 				return err
 			}

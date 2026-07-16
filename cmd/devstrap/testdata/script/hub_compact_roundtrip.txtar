@@ -82,7 +82,7 @@ exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.js
 # C recovers from it, imports the namespace, and materializes both projects it
 # never saw as individual events.
 exec devstrap --home=$WORK/homeC --root=$WORK/CodeC sync --hub-file=$WORK/hub.json
-stdout 'Recovering from hub snapshot'
+stderr 'Recovering from hub snapshot'
 exec test -d $WORK/CodeC/work/api/.git
 exec test -d $WORK/CodeC/work/web/.git
 exec devstrap --home=$WORK/homeC --root=$WORK/CodeC status
