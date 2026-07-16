@@ -46,6 +46,15 @@ Validated:
 Follow-ups:
 - Remaining part B batches for the other leaf commands still without `--json` (`P5-CLI-01` stays open).
 
+### 2026-07-15 — review fixup (P5-CLI-01 part B batch 1/6): Codex + fable-5 dual-review findings
+
+Codex and fable-5 independently converged on the same two real issues (Codex rated the first blocking, fable-5 rated it low-severity/cosmetic but confirmed the same fact; both independently caught the second):
+
+- `hub init`'s newly-configured success path had reordered its stdout confirmation to print AFTER the best-effort `git ls-remote` reachability probe, instead of before as in the original — a slow/hanging probe now delayed the confirmation the user previously saw immediately. Reverted: the `render` call (confirmation, or the `--json` payload) now runs before the probe in both modes, matching the pre-migration order exactly.
+- `hub logout`'s new `removed` field collapsed every `LoadHubS3Credentials` error into `removed:false`, including errors that are NOT "credential absent" (a corrupt stored blob, a fail-closed keychain read) — in those cases a credential existed, the subsequent delete removed it, yet the JSON reported `removed:false`. Fixed using the function's own documented contract ("or an error wrapping os.ErrNotExist when none is stored"): `removed := loadErr == nil || !errors.Is(loadErr, os.ErrNotExist)`.
+- Tightened two flagged test gaps: `TestHubCompactJSON` now asserts `tombstones_gcd`/`revoked_objects_reclaimed`/`snapshots_pruned` are exactly 0 (the fixture's first-ever compact has nothing to GC/reclaim/prune), and `TestHubGCJSON` now asserts `pruned_snapshots`/`removed_blobs` are exactly 0 (empty hub/fresh store) instead of only checking non-negative.
+- Not fixed: a dedicated regression test for `hub logout`'s corrupt-credential-file edge case — both reviewers rated it a minor, non-blocking gap, and reaching the file-fallback credential path from an external test requires touching private `devicekeys` internals not otherwise exposed to this package; the underlying logic fix stands on the function's documented error contract.
+
 ## 2026-07-15 — feat(cli): guided pairing wire format v2 + `devstrap join` (P7-PROD-01 slice 1)
 
 Changed:

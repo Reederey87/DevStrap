@@ -664,17 +664,23 @@ func newHubInitCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			// Terminal confirmation of a completed state change, deliberately not gated by --quiet (P7-CLI-03).
-			// Under --json the payload IS that confirmation (printed once via render).
-			if !noProbe {
-				probeGitHubCarrier(cmd.Context(), cmd.ErrOrStderr(), opts, remote, branch)
-			}
-			return opts.render(stdout, func(w io.Writer) error {
+			// Under --json the payload IS that confirmation (printed once via render). Rendered
+			// BEFORE the probe below to preserve the original ordering: the confirmation must
+			// not wait on a possibly-slow/hanging network reachability check (review finding,
+			// PR #203) — the probe's own warning still lands on stderr afterward either way.
+			if err := opts.render(stdout, func(w io.Writer) error {
 				if _, err := fmt.Fprintf(w, "Configured hub: %s\n", hubURI); err != nil {
 					return err
 				}
 				printHubInitNextSteps(w, opts)
 				return nil
-			}, out)
+			}, out); err != nil {
+				return err
+			}
+			if !noProbe {
+				probeGitHubCarrier(cmd.Context(), cmd.ErrOrStderr(), opts, remote, branch)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing different hub value")
@@ -791,8 +797,14 @@ func newHubLogoutCommand(stdout io.Writer, opts *options) *cobra.Command {
 			keys := hubCredStore(cmd.Context(), opts, store)
 			// Detect whether a credential was present so --json can report removed
 			// vs. already-absent; human mode still always prints the same line.
+			// LoadHubS3Credentials documents that absence is reported as an
+			// os.ErrNotExist-wrapped error — any OTHER error (a corrupt stored
+			// blob, a fail-closed keychain read) means a credential existed but
+			// couldn't be read, and the delete below still removes it, so that
+			// case must also count as removed, not be conflated with absence
+			// (review finding, PR #203).
 			_, loadErr := keys.LoadHubS3Credentials(cmd.Context(), ws)
-			removed := loadErr == nil
+			removed := loadErr == nil || !errors.Is(loadErr, os.ErrNotExist)
 			if err := keys.DeleteHubS3Credentials(cmd.Context(), ws); err != nil {
 				return err
 			}

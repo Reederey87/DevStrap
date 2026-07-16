@@ -144,6 +144,18 @@ func TestHubCompactJSON(t *testing.T) {
 	if got.DryRun {
 		t.Error("dry_run = true on a real compact, want false")
 	}
+	// setupCompact's fixture is a first-ever compact with a single device and
+	// no revoked devices or prior snapshots: these three fields must all be
+	// exactly zero (review finding, PR #203 — previously unasserted).
+	if got.TombstonesGCd != 0 {
+		t.Errorf("tombstones_gcd = %d, want 0 (fixture has no tombstones)", got.TombstonesGCd)
+	}
+	if got.RevokedObjectsReclaimed != 0 {
+		t.Errorf("revoked_objects_reclaimed = %d, want 0 (fixture has no revoked devices)", got.RevokedObjectsReclaimed)
+	}
+	if got.SnapshotsPruned != 0 {
+		t.Errorf("snapshots_pruned = %d, want 0 (fixture's first-ever snapshot has nothing to prune)", got.SnapshotsPruned)
+	}
 	if strings.Contains(out.String(), "published snapshot") {
 		t.Fatalf("hub compact --json leaked human summary: %s", out.String())
 	}

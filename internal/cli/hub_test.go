@@ -383,8 +383,14 @@ func TestHubGCJSON(t *testing.T) {
 	if !got.DryRun {
 		t.Error("dry_run = false, want true")
 	}
-	if got.PrunedSnapshots < 0 || got.RemovedBlobs < 0 {
-		t.Errorf("counts negative: %+v", got)
+	// An empty hub with a freshly-initialized store has nothing to prune or
+	// remove — assert the real expected zero values, not just non-negative
+	// (review finding, PR #203).
+	if got.PrunedSnapshots != 0 {
+		t.Errorf("pruned_snapshots = %d, want 0 (empty hub/fresh store)", got.PrunedSnapshots)
+	}
+	if got.RemovedBlobs != 0 {
+		t.Errorf("removed_blobs = %d, want 0 (empty hub/fresh store)", got.RemovedBlobs)
 	}
 	if strings.Contains(stdout, "hub gc:") {
 		t.Fatalf("hub gc --json leaked human summary: %s", stdout)
