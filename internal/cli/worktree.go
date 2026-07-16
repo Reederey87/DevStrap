@@ -120,7 +120,7 @@ func newWorktreeNewCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			wt, err := createFreshWorktree(cmd.Context(), stdout, opts, store, project, taskName, "agent")
+			wt, err := createFreshWorktree(cmd.Context(), stdout, cmd.ErrOrStderr(), opts, store, project, taskName, "agent")
 			if err != nil {
 				return err
 			}
@@ -135,20 +135,27 @@ func newWorktreeNewCommand(stdout io.Writer, opts *options) *cobra.Command {
 	return cmd
 }
 
-func createFreshWorktree(ctx context.Context, stdout io.Writer, opts *options, store *state.Store, project state.ProjectStatus, taskName, createdBy string) (state.Worktree, error) {
+func createFreshWorktree(ctx context.Context, stdout, stderr io.Writer, opts *options, store *state.Store, project state.ProjectStatus, taskName, createdBy string) (state.Worktree, error) {
 	unlock, err := acquireRepoLock(opts.paths().Home, project.ID)
 	if err != nil {
 		return state.Worktree{}, err
 	}
 	defer unlock()
-	return createFreshWorktreeLocked(ctx, stdout, opts, store, project, taskName, createdBy)
+	return createFreshWorktreeLocked(ctx, stdout, stderr, opts, store, project, taskName, createdBy)
 }
 
 // createFreshWorktreeLocked is createFreshWorktree for callers that already
 // hold the project repo lock — `agent run` keeps it held until the running
 // agent_runs row exists, so `worktree cleanup` can never observe the fresh
 // worktree without its run row (P7-GIT-01 startup window).
-func createFreshWorktreeLocked(ctx context.Context, stdout io.Writer, opts *options, store *state.Store, project state.ProjectStatus, taskName, createdBy string) (state.Worktree, error) {
+//
+// stdout is passed through to removeOrphanWorktree's failure-path cleanup
+// only (no --json success document follows an error return, so writes there
+// cannot corrupt one); the two non-fatal advisory warnings below
+// (resolveWorktreeDefaultBranch, applyWorktreeLFSPolicy) fire on the SUCCESS
+// path that DOES emit a --json document afterward, so they route to stderr
+// instead (P5-CLI-01 part B purity fix).
+func createFreshWorktreeLocked(ctx context.Context, stdout, stderr io.Writer, opts *options, store *state.Store, project state.ProjectStatus, taskName, createdBy string) (state.Worktree, error) {
 	// NOVCS-04: preflight — a remote-less repo cannot produce a fresh-upstream
 	// worktree; fail fast with an actionable message before touching git.
 	if strings.TrimSpace(project.RemoteKey) == "" {
@@ -159,7 +166,7 @@ func createFreshWorktreeLocked(ctx context.Context, stdout io.Writer, opts *opti
 		return state.Worktree{}, err
 	}
 	r := gitRunner(opts)
-	defaultBranch, err := resolveWorktreeDefaultBranch(ctx, stdout, r, localPath, project.DefaultBranch)
+	defaultBranch, err := resolveWorktreeDefaultBranch(ctx, stderr, r, localPath, project.DefaultBranch)
 	if err != nil {
 		return state.Worktree{}, appError{code: exitGit, err: err}
 	}
@@ -183,7 +190,7 @@ func createFreshWorktreeLocked(ctx context.Context, stdout io.Writer, opts *opti
 	cleanupOrphan := func() {
 		removeOrphanWorktree(ctx, stdout, r, localPath, wtPath, branch)
 	}
-	if err := applyWorktreeLFSPolicy(ctx, stdout, r, project, wtPath); err != nil {
+	if err := applyWorktreeLFSPolicy(ctx, stderr, r, project, wtPath); err != nil {
 		cleanupOrphan()
 		return state.Worktree{}, err
 	}
