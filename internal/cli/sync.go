@@ -26,6 +26,24 @@ import (
 // ordering constraints do not apply to this fan-out (P6-HUB-03).
 const blobPushConcurrency = 8
 
+// syncResult is the --json shape for `sync` and `run-loop --once` (P5-CLI-01 part B).
+// One shared type covers dry-run previews and real-cycle outcomes (hubCompactResult precedent).
+type syncResult struct {
+	HubID                 string   `json:"hub_id"`
+	DryRun                bool     `json:"dry_run,omitempty"`
+	WouldPush             int      `json:"would_push,omitempty"`
+	Pushed                int      `json:"pushed,omitempty"`
+	Pulled                int      `json:"pulled,omitempty"`
+	Deferred              bool     `json:"deferred,omitempty"`
+	NamespaceOnly         bool     `json:"namespace_only,omitempty"`
+	KeyRotated            bool     `json:"key_rotated,omitempty"`
+	BlobsGCd              int      `json:"blobs_gcd,omitempty"`
+	MaterializedTotal     int      `json:"materialized_total,omitempty"`
+	MaterializedSucceeded int      `json:"materialized_succeeded,omitempty"`
+	MaterializedSkipped   int      `json:"materialized_skipped,omitempty"`
+	Warnings              []string `json:"warnings,omitempty"`
+}
+
 func newSyncCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var hubFile string
 	var namespaceOnly bool
@@ -51,7 +69,7 @@ func newSyncCommand(stdout io.Writer, opts *options) *cobra.Command {
 				}
 				opts.v.Set("keys.rotate_max_age", strings.TrimSpace(keyMaxAge))
 			}
-			return runSyncCycle(cmd.Context(), stdout, opts, hubFile, namespaceOnly, dryRun)
+			return runSyncCycle(cmd.Context(), stdout, cmd.ErrOrStderr(), opts, hubFile, namespaceOnly, dryRun)
 		},
 	}
 	cmd.Flags().StringVar(&hubFile, "hub-file", "", "file-backed test hub path")
@@ -64,7 +82,11 @@ func newSyncCommand(stdout io.Writer, opts *options) *cobra.Command {
 // runSyncCycle performs one sync + materialize cycle (EAGER-01/02, DRAFT-02).
 // It is the reusable loop body shared by `devstrap sync` and `devstrap run-loop`
 // (XP-02). dryRun prints the plan without writing.
-func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile string, namespaceOnly, dryRun bool) error {
+//
+// stderr carries process diagnostics (rotation narration, push-gate notices,
+// snapshot-recovery progress, durability warnings) so --json stdout stays a
+// single pure syncResult document (P5-CLI-01 part B).
+func runSyncCycle(ctx context.Context, stdout, stderr io.Writer, opts *options, hubFile string, namespaceOnly, dryRun bool) error {
 	store, err := opts.openState(ctx)
 	if err != nil {
 		return err
@@ -90,11 +112,16 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 	if err != nil {
 		return err
 	}
+	result := syncResult{HubID: hubID}
 	if dryRun {
 		// P6-CLI-05: print the resolved hub ID (file:<path> / r2:<ws…>), never
 		// the raw --hub-file flag, which is empty when the hub comes from config.
-		_, err = fmt.Fprintf(stdout, "Would push %d local events to %s and pull namespace events\n", len(localEvents), hubID)
-		return err
+		result.DryRun = true
+		result.WouldPush = len(localEvents)
+		return opts.render(stdout, func(w io.Writer) error {
+			_, err := fmt.Fprintf(w, "Would push %d local events to %s and pull namespace events\n", result.WouldPush, result.HubID)
+			return err
+		}, result)
 	}
 	// P6-SEC-02: pull BEFORE push. A joining device must ingest its grant (and
 	// a founding device must observe an empty hub) before it can decide whether
@@ -108,15 +135,23 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 		// P4-SYNC-02: the pull cursor fell behind the hub's retention floor.
 		// Recover via a full-state snapshot exchange, then resume incremental
 		// pulls (which now succeed because import advanced the cursors).
-		opts.progressf(stdout, "Recovering from hub snapshot (retention floor passed our cursor)…\n")
-		imported, rerr := recoverFromSnapshot(ctx, stdout, store, hub, hubID, opts.paths(), buildKeyring(ctx, opts, store))
+		// Mid-cycle progress is process diagnostics — route to stderr so --json
+		// stdout stays pure (P5-CLI-01 part B).
+		opts.progressf(stderr, "Recovering from hub snapshot (retention floor passed our cursor)…\n")
+		imported, rerr := recoverFromSnapshot(ctx, stderr, store, hub, hubID, opts.paths(), buildKeyring(ctx, opts, store))
 		if rerr != nil {
 			return rerr
 		}
 		if !imported {
 			// Keyless joiner: awaiting a grant. recoverFromSnapshot already
 			// printed the defer message; nothing to materialize or push yet.
-			return exportHubDurabilityAfterSync(ctx, stdout, opts, store, hub, hubFile, time.Now())
+			// Still render a syncResult under --json (review catch) — every
+			// exit path must emit exactly one document, never empty stdout.
+			if err := exportHubDurabilityAfterSync(ctx, stderr, opts, store, hub, hubFile, time.Now()); err != nil {
+				return err
+			}
+			result.Deferred = true
+			return opts.render(stdout, func(w io.Writer) error { return nil }, result)
 		}
 		pull, err = pullAndApplyEvents(ctx, store, hub, hubID)
 		if errors.Is(err, dssync.ErrSnapshotRequired) {
@@ -133,7 +168,9 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 		return appError{code: exitNetwork, err: fmt.Errorf("pull blobs: %w", err)}
 	}
 	if missingBlobs > 0 {
-		_, _ = fmt.Fprintf(stdout, "warning: %d referenced blob(s) missing from hub; materialization may be incomplete\n", missingBlobs)
+		// Non-fatal warning rides syncResult.Warnings under --json (P7-CLI-01 /
+		// P5-CLI-01); human mode still prints via fmt.Fprintln in the render callback.
+		result.Warnings = append(result.Warnings, fmt.Sprintf("warning: %d referenced blob(s) missing from hub; materialization may be incomplete", missingBlobs))
 	}
 
 	// P4-SEC-07: age-triggered periodic WCK rotation. Deliberately AFTER the
@@ -141,10 +178,12 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 	// suppresses fleet-wide rotation storms (whichever device syncs first past
 	// the deadline rotates; everyone else pulls the new epoch and stands down)
 	// — and BEFORE the push, so the mint's grant events ride THIS cycle.
-	rotated, rerr := maybeRotateWorkspaceKey(ctx, stdout, opts, store)
+	// Rotation narration is process diagnostics on stderr — JSON only needs KeyRotated.
+	rotated, rerr := maybeRotateWorkspaceKey(ctx, stderr, opts, store)
 	if rerr != nil {
 		return rerr
 	}
+	result.KeyRotated = rotated
 	if rotated {
 		// The localEvents snapshot above predates the mint; re-read so the
 		// just-minted grant events are pushed in this same cycle.
@@ -165,7 +204,9 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 			rotationAccounted = true
 		}
 	}
-	if err := resumeRevokeContainment(ctx, stdout, opts, store, hub, rotationAccounted); err != nil {
+	// Revoke-containment resume lines are process diagnostics (stderr) so
+	// --json stdout stays a single document.
+	if err := resumeRevokeContainment(ctx, stderr, opts, store, hub, rotationAccounted); err != nil {
 		return err
 	}
 
@@ -177,7 +218,9 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 	if eh, ok := hub.(dssync.EncryptedHub); ok && eh.Stats != nil {
 		rawSeen = eh.Stats.RawSeen
 	}
-	pushed, deferred, ferr := pushLocalEventsGated(ctx, stdout, opts, store, hub, hubID, localEvents, rawSeen)
+	// pushLocalEventsGated can emit awaiting-grant / drain-blob lines; keep them
+	// off the result stream (same purity fix as hub_compact's call site).
+	pushed, deferred, ferr := pushLocalEventsGated(ctx, stderr, opts, store, hub, hubID, localEvents, rawSeen)
 	if ferr != nil {
 		return ferr
 	}
@@ -187,16 +230,27 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 	// consumed. Best-effort — a failure never fails the sync.
 	maybeWriteSyncAck(ctx, store, hub, hubID, opts.paths(), pull, deferred)
 
+	result.Pushed = pushed
+	result.Pulled = len(remoteEvents)
+	result.Deferred = deferred
+	queuedLocal := len(localEvents)
+
 	if namespaceOnly {
-		if err := exportHubDurabilityAfterSync(ctx, stdout, opts, store, hub, hubFile, time.Now()); err != nil {
+		if err := exportHubDurabilityAfterSync(ctx, stderr, opts, store, hub, hubFile, time.Now()); err != nil {
 			return err
 		}
-		if deferred {
-			opts.progressf(stdout, "Synced namespace events: pulled %d; %d local event(s) queued awaiting workspace key grant\n", len(remoteEvents), len(localEvents))
+		result.NamespaceOnly = true
+		return opts.render(stdout, func(w io.Writer) error {
+			for _, warning := range result.Warnings {
+				_, _ = fmt.Fprintln(w, warning)
+			}
+			if result.Deferred {
+				opts.progressf(w, "Synced namespace events: pulled %d; %d local event(s) queued awaiting workspace key grant\n", result.Pulled, queuedLocal)
+				return nil
+			}
+			opts.progressf(w, "Synced namespace events: pushed %d, pulled %d\n", result.Pushed, result.Pulled)
 			return nil
-		}
-		opts.progressf(stdout, "Synced namespace events: pushed %d, pulled %d\n", pushed, len(remoteEvents))
-		return nil
+		}, result)
 	}
 	// EAGER-01: eager materialization.
 	projects, err := store.SkeletonProjects(ctx)
@@ -207,11 +261,25 @@ func runSyncCycle(ctx context.Context, stdout io.Writer, opts *options, hubFile 
 	results := materializePass(ctx, store, opts, projects, true)
 	// HUB-05: reclaim locally-cached blobs no longer referenced.
 	if removed, gcErr := gcUnreferencedBlobs(ctx, store, opts.paths()); gcErr == nil && removed > 0 {
-		opts.progressf(stdout, "GC'd %d unreferenced blob(s)\n", removed)
+		result.BlobsGCd = removed
 	}
-	opts.progressf(stdout, "Synced events: pushed %d, pulled %d; materialized %d/%d projects (%d skipped)\n",
-		pushed, len(remoteEvents), results.succeeded, results.total, results.skipped)
-	return exportHubDurabilityAfterSync(ctx, stdout, opts, store, hub, hubFile, time.Now())
+	result.MaterializedTotal = results.total
+	result.MaterializedSucceeded = results.succeeded
+	result.MaterializedSkipped = results.skipped
+	if err := exportHubDurabilityAfterSync(ctx, stderr, opts, store, hub, hubFile, time.Now()); err != nil {
+		return err
+	}
+	return opts.render(stdout, func(w io.Writer) error {
+		for _, warning := range result.Warnings {
+			_, _ = fmt.Fprintln(w, warning)
+		}
+		if result.BlobsGCd > 0 {
+			opts.progressf(w, "GC'd %d unreferenced blob(s)\n", result.BlobsGCd)
+		}
+		opts.progressf(w, "Synced events: pushed %d, pulled %d; materialized %d/%d projects (%d skipped)\n",
+			result.Pushed, result.Pulled, result.MaterializedSucceeded, result.MaterializedTotal, result.MaterializedSkipped)
+		return nil
+	}, result)
 }
 
 // pullApplyOutcome reports one pull+apply pass: the decrypted events and the
@@ -373,7 +441,7 @@ func keyRotateMaxAge(opts *options) time.Duration {
 // rotation (the wck_rotation_pending marker). The owed retry runs even when
 // keys.rotate_max_age=0 — disabling PERIODIC rotation must not disable the
 // revoke containment a device already committed to.
-func maybeRotateWorkspaceKey(ctx context.Context, stdout io.Writer, opts *options, store *state.Store) (bool, error) {
+func maybeRotateWorkspaceKey(ctx context.Context, stderr io.Writer, opts *options, store *state.Store) (bool, error) {
 	pendingSince, pending, err := wckRotationPendingSince(ctx, store)
 	if err != nil {
 		return false, err
@@ -426,9 +494,9 @@ func maybeRotateWorkspaceKey(ctx context.Context, stdout io.Writer, opts *option
 			// old epoch, which is the already-documented exposure
 			// (adversarial-review finding, issue #134). Warn loudly, keep the
 			// marker, retry next cycle; deliberately NOT progressf-gated.
-			_, _ = fmt.Fprintf(stdout, "warning: workspace key rotation owed since %s still failing (events remain readable by the revoked device until it succeeds): %v\n",
+			_, _ = fmt.Fprintf(stderr, "warning: workspace key rotation owed since %s still failing (events remain readable by the revoked device until it succeeds): %v\n",
 				pendingSince.Format(time.RFC3339), rerr)
-			_, _ = fmt.Fprintf(stdout, "warning: check 'devstrap devices list' for a malformed age recipient, or run 'devstrap keys rotate' after fixing it\n")
+			_, _ = fmt.Fprintf(stderr, "warning: check 'devstrap devices list' for a malformed age recipient, or run 'devstrap keys rotate' after fixing it\n")
 			return false, nil
 		}
 		// Age-triggered early failure keeps the shipped fatal semantics: a
@@ -447,15 +515,15 @@ func maybeRotateWorkspaceKey(ctx context.Context, stdout io.Writer, opts *option
 			}
 		}
 		if pendingSince.IsZero() {
-			opts.progressf(stdout, "Rotated workspace key to epoch %d (rotation owed after a device revoke); %d grant event(s) ride this push\n",
+			opts.progressf(stderr, "Rotated workspace key to epoch %d (rotation owed after a device revoke); %d grant event(s) ride this push\n",
 				newEpoch, len(grants))
 		} else {
-			opts.progressf(stdout, "Rotated workspace key to epoch %d (rotation owed since %s after a device revoke); %d grant event(s) ride this push\n",
+			opts.progressf(stderr, "Rotated workspace key to epoch %d (rotation owed since %s after a device revoke); %d grant event(s) ride this push\n",
 				newEpoch, pendingSince.Format(time.RFC3339), len(grants))
 		}
 		return true, nil
 	}
-	opts.progressf(stdout, "Rotated workspace key to epoch %d (epoch %d exceeded keys.rotate_max_age %s); %d grant event(s) ride this push\n",
+	opts.progressf(stderr, "Rotated workspace key to epoch %d (epoch %d exceeded keys.rotate_max_age %s); %d grant event(s) ride this push\n",
 		newEpoch, epoch, maxAge, len(grants))
 	return true, nil
 }
@@ -477,7 +545,7 @@ func maybeRotateWorkspaceKey(ctx context.Context, stdout io.Writer, opts *option
 //
 // Returns the number of events actually pushed and whether the push was
 // deferred (mutually exclusive: deferred implies pushed == 0).
-func pushLocalEventsGated(ctx context.Context, stdout io.Writer, opts *options, store *state.Store, hub dssync.Hub, hubID string, localEvents []state.Event, rawSeen int) (pushed int, deferred bool, err error) {
+func pushLocalEventsGated(ctx context.Context, stderr io.Writer, opts *options, store *state.Store, hub dssync.Hub, hubID string, localEvents []state.Event, rawSeen int) (pushed int, deferred bool, err error) {
 	kr := buildKeyring(ctx, opts, store)
 	epoch, err := kr.CurrentEpoch(ctx)
 	if err != nil {
@@ -521,7 +589,7 @@ func pushLocalEventsGated(ctx context.Context, stdout io.Writer, opts *options, 
 			// unapproved device otherwise sees a silent no-op — and mirrors the
 			// analogous awaiting-grant message in recoverFromSnapshot
 			// (snapshot_recovery.go), which is likewise always visible.
-			_, _ = fmt.Fprintf(stdout, "Awaiting workspace key grant: %d local event(s) queued. "+
+			_, _ = fmt.Fprintf(stderr, "Awaiting workspace key grant: %d local event(s) queued. "+
 				"On an approved device run 'devstrap devices enroll … --approve' (or 'devices approve <id>'), then re-run sync.\n", len(localEvents))
 			return 0, true, nil
 		}
@@ -559,7 +627,7 @@ func pushLocalEventsGated(ctx context.Context, stdout io.Writer, opts *options, 
 	if drained, derr := drainPendingHubDeletes(ctx, store, hub); derr != nil {
 		logging.Logger(ctx).Warn("sync: pending hub delete drain failed", "err", derr.Error())
 	} else if drained > 0 {
-		opts.progressf(stdout, "Removed %d superseded blob(s) from the hub\n", drained)
+		opts.progressf(stderr, "Removed %d superseded blob(s) from the hub\n", drained)
 	}
 	return len(localEvents), false, nil
 }

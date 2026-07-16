@@ -36,7 +36,7 @@ exec sh -c 'test -d $WORK/CodeB/work/a-proj/.git'
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/a2-proj $WORK/remoteA2.git
 env DEVSTRAP_KEYS_ROTATE_MAX_AGE=1ms
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
-stdout 'Rotated workspace key to epoch 2'
+stderr 'Rotated workspace key to epoch 2'
 env DEVSTRAP_KEYS_ROTATE_MAX_AGE=
 
 # B converges in ONE pull: the grant ingests first, then the epoch-2 event

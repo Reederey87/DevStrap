@@ -171,8 +171,9 @@ func TestSyncAutoRotatesStaleEpochAndPushesGrantsSameCycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rotating sync: %v (%s)", err, stderr)
 	}
-	if !strings.Contains(stdout, "Rotated workspace key to epoch 2") {
-		t.Fatalf("stdout = %q, want the auto-rotation banner", stdout)
+	// Rotation narration is process diagnostics on stderr (P5-CLI-01 part B).
+	if !strings.Contains(stderr, "Rotated workspace key to epoch 2") {
+		t.Fatalf("stderr = %q, want the auto-rotation banner (stdout=%q)", stderr, stdout)
 	}
 	// The re-read assertion: the freshly minted grant events must ride THIS
 	// cycle's push — the hub file already contains the epoch-2 grant.
@@ -211,8 +212,8 @@ func TestSyncAutoRotateDisabledAtZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sync --key-max-age 0: %v (%s)", err, stderr)
 	}
-	if strings.Contains(stdout, "Rotated workspace key") {
-		t.Fatalf("stdout = %q, want NO rotation with --key-max-age 0", stdout)
+	if strings.Contains(stdout, "Rotated workspace key") || strings.Contains(stderr, "Rotated workspace key") {
+		t.Fatalf("stdout=%q stderr=%q, want NO rotation with --key-max-age 0", stdout, stderr)
 	}
 	opts := &options{v: viper.New()}
 	opts.v.Set("home", home)
@@ -239,8 +240,8 @@ func TestSyncAutoRotateSkipsKeylessDevice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("joiner sync: %v (%s)", err, stderr)
 	}
-	if strings.Contains(stdout, "Rotated workspace key") {
-		t.Fatalf("stdout = %q, keyless joiner must never rotate", stdout)
+	if strings.Contains(stdout, "Rotated workspace key") || strings.Contains(stderr, "Rotated workspace key") {
+		t.Fatalf("stdout=%q stderr=%q, keyless joiner must never rotate", stdout, stderr)
 	}
 }
 

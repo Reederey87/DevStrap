@@ -107,7 +107,7 @@ func runLoopTick(ctx context.Context, stdout, stderr io.Writer, opts *options, h
 	if err := runLoopScanAdopt(ctx, stderr, opts); err != nil {
 		return err
 	}
-	return runSyncCycle(ctx, stdout, opts, hubFile, namespaceOnly, false)
+	return runSyncCycle(ctx, stdout, stderr, opts, hubFile, namespaceOnly, false)
 }
 
 // runLoopScanAdopt walks the workspace root and idempotently adopts any newly

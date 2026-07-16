@@ -43,7 +43,7 @@ stdout 'pushed 1'
 exec sh -c 'CODE=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices pairing-code 2>/dev/null); AFP=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices recipient --fingerprint); devstrap --home=$WORK/homeB --root=$WORK/CodeB init --join --code "$CODE" --fingerprint "$AFP"'
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB add --path work/b-proj $WORK/remoteB.git
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
-stdout 'Awaiting workspace key grant: 1 local event'
+stderr 'Awaiting workspace key grant: 1 local event'
 stdout 'pushed 0'
 
 # Device C (joiner): adopt the workspace, get approved FIRST, and push c-proj —
