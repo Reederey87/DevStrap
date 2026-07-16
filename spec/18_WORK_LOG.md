@@ -31,6 +31,23 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-16 — feat(cli): db migrate/status/backup/down --json via Renderer seam (P5-CLI-01 part B, db domain)
+
+Changed:
+- Wired plain `db migrate`, `db status`, `db backup` (non-`--full`), and `db down` through `opts.render` (`internal/cli/render.go`). None of these four had prior `--json` output. Left `runFullBackup` / `runRestore` / `restoreRecoveryResult` untouched (part A).
+- Result shapes: `dbMigrateResult` (`version` int64); `dbStatusResult` (`version`, `quick_check`, `foreign_key_check`); `dbBackupResult` (`path`); `dbDownResult` (`version` int64) — separate type from `dbMigrateResult` despite identical shape (one-struct-per-command).
+- Tests: `internal/cli/db_render_test.go` (`TestDBMigrateJSON`, `TestDBStatusJSON`, `TestDBBackupJSON`, `TestDBDownJSON`).
+- `spec/13_CLI_DAEMON_API.md` gained a "Part B progress: `db *` domain wired" note. Ledger not touched (wave-final PR only).
+
+Validated:
+- `gofmt -l cmd internal` — empty (clean).
+- `GOCACHE=/tmp/devstrap-b6-db-gocache go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` — clean (after a `cache clean`).
+- `GOCACHE=/tmp/devstrap-b6-db-gocache go run ./cmd/spec-drift --base origin/main --head HEAD` — passed.
+- `GOCACHE=/tmp/devstrap-b6-db-gocache go test -race ./...` — passed, zero FAIL lines.
+
+Follow-ups:
+- None for this batch; remaining `P5-CLI-01` part-B domains tracked as separate PRs in the same wave.
+
 ## 2026-07-16 — feat(cli): env/draft/keys --json via Renderer seam (P5-CLI-01 part B, env/draft/keys domain)
 
 Changed:

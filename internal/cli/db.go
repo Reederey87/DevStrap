@@ -15,6 +15,25 @@ type restoreRecoveryResult struct {
 	RolledBack bool `json:"rolled_back"`
 }
 
+// P5-CLI-01 part B: plain db leaf --json shapes (not backup --full / restore).
+type dbMigrateResult struct {
+	Version int64 `json:"version"`
+}
+
+type dbStatusResult struct {
+	Version         int64  `json:"version"`
+	QuickCheck      string `json:"quick_check"`
+	ForeignKeyCheck string `json:"foreign_key_check"`
+}
+
+type dbBackupResult struct {
+	Path string `json:"path"`
+}
+
+type dbDownResult struct {
+	Version int64 `json:"version"`
+}
+
 func newDBCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "db",
@@ -37,8 +56,11 @@ func newDBCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(stdout, "schema version: %d\n", version)
-			return err
+			result := dbMigrateResult{Version: version}
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "schema version: %d\n", version)
+				return err
+			}, result)
 		},
 	})
 
@@ -63,8 +85,15 @@ func newDBCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(stdout, "schema version: %d\nsqlite quick_check: %s\nsqlite foreign_key_check: %s\n", version, check, fkCheck)
-			return err
+			result := dbStatusResult{
+				Version:         version,
+				QuickCheck:      check,
+				ForeignKeyCheck: fkCheck,
+			}
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "schema version: %d\nsqlite quick_check: %s\nsqlite foreign_key_check: %s\n", version, check, fkCheck)
+				return err
+			}, result)
 		},
 	})
 
@@ -103,8 +132,11 @@ func newDBCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := store.Backup(cmd.Context(), out); err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(stdout, "backup written: %s\n", out)
-			return err
+			result := dbBackupResult{Path: out}
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "backup written: %s\n", out)
+				return err
+			}, result)
 		},
 	}
 	backupCmd.Flags().BoolVar(&fullBackup, "full", false, "write a tar archive with the database, encrypted blobs, and key material")
@@ -194,8 +226,11 @@ func newDBCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(stdout, "schema version: %d\n", version)
-			return err
+			result := dbDownResult{Version: version}
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "schema version: %d\n", version)
+				return err
+			}, result)
 		},
 	})
 
