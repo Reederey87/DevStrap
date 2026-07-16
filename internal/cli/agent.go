@@ -403,16 +403,32 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err := store.UpdateAgentRunResult(cmd.Context(), run.ID, status, diffSummary, testSummary); err != nil {
 				return err
 			}
-			_, _ = fmt.Fprintf(stdout, "\nAgent run %s %s\nworktree: %s\nlog: %s\ndiff:\n%s\n", run.ID, status, wt.Path, run.LogPath, emptySummary(diffSummary))
+			// UpdateAgentRunResult only persists — refresh the local copy so the
+			// --json payload matches the final status/summaries (not the INSERT-
+			// time "running"/empty values). Same fields the human line uses.
+			run.Status = status
+			run.DiffSummary = diffSummary
+			run.TestSummary = testSummary
 			if commandErr != nil {
-				// CLI-03: propagate the child's real exit code.
+				// Failure path: no --json success payload (command still exits
+				// non-zero either way). Keep the existing human summary + child
+				// exit-code propagation (CLI-03).
+				_, _ = fmt.Fprintf(stdout, "\nAgent run %s %s\nworktree: %s\nlog: %s\ndiff:\n%s\n", run.ID, status, wt.Path, run.LogPath, emptySummary(diffSummary))
 				var ee *exec.ExitError
 				if errors.As(commandErr, &ee) {
 					return appError{code: childExitBase + ee.ExitCode(), err: fmt.Errorf("agent run %s failed: command exited %d", run.ID, ee.ExitCode())}
 				}
 				return fmt.Errorf("agent run %s failed: %w", run.ID, commandErr)
 			}
-			return nil
+			// Success: embed state.AgentRun (+ worktree path, not on the store type).
+			payload := struct {
+				state.AgentRun
+				Worktree string `json:"worktree"`
+			}{AgentRun: run, Worktree: wt.Path}
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "\nAgent run %s %s\nworktree: %s\nlog: %s\ndiff:\n%s\n", run.ID, status, wt.Path, run.LogPath, emptySummary(diffSummary))
+				return err
+			}, payload)
 		},
 	}
 	cmd.Flags().StringVar(&engine, "engine", "generic", "agent engine")
@@ -594,8 +610,10 @@ func newAgentPRCommand(stdout io.Writer, opts *options) *cobra.Command {
 				body = agentPRBody(run)
 			}
 			if dryRun {
-				_, err = fmt.Fprintf(stdout, "Would create PR for %s with base %s and head %s\n", run.ID, baseBranch, wt.Branch)
-				return err
+				return opts.render(stdout, func(w io.Writer) error {
+					_, err := fmt.Fprintf(w, "Would create PR for %s with base %s and head %s\n", run.ID, baseBranch, wt.Branch)
+					return err
+				}, agentPRResult{RunID: run.ID, Base: baseBranch, Head: wt.Branch, DryRun: true})
 			}
 			if err := pushAgentBranch(cmd.Context(), opts, wt.Path, wt.Branch); err != nil {
 				return err
@@ -604,8 +622,10 @@ func newAgentPRCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintf(stdout, "Created PR for %s: %s\n", run.ID, url)
-			return err
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "Created PR for %s: %s\n", run.ID, url)
+				return err
+			}, agentPRResult{RunID: run.ID, Base: baseBranch, Head: wt.Branch, URL: url})
 		},
 	}
 	cmd.Flags().BoolVar(&allowStaleBase, "allow-stale-base", false, "allow PR creation even when the recorded base moved")
@@ -615,6 +635,16 @@ func newAgentPRCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&body, "body", "", "PR body")
 	cmd.Flags().StringVar(&forgeFlag, "forge", "", "forge kind override (github|gitlab|gitea|bitbucket|azure) for self-hosted instances (GIT-05)")
 	return cmd
+}
+
+// agentPRResult is the --json payload for `agent pr` (P5-CLI-01 part B).
+// URL is empty on --dry-run; DryRun is false on the real create path (both omitempty).
+type agentPRResult struct {
+	RunID  string `json:"run_id"`
+	Base   string `json:"base"`
+	Head   string `json:"head"`
+	URL    string `json:"url,omitempty"`
+	DryRun bool   `json:"dry_run,omitempty"`
 }
 
 func agentCommandArgs(args []string, commandFlag string) []string {

@@ -31,6 +31,25 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-16 — feat(cli): agent run/pr + conflicts resolve --json via Renderer seam (P5-CLI-01 part B, agent/conflicts)
+
+Changed:
+- Wired `agent run`, `agent pr`, and `conflicts resolve` through `opts.render` (`internal/cli/render.go`). Part A already had `agent list`/`agent show` and `conflicts list`/`conflicts show` — left untouched.
+- Result shapes: `agent run` embeds `state.AgentRun` in an anonymous struct plus `worktree` (path from the worktree, not on the store type); before render, copies final `status`/`diff_summary`/`test_summary` onto the local `run` because `UpdateAgentRunResult` does not return the updated row. Failure path keeps human summary + child-exit `appError` and does not emit a JSON success document. `agent pr` uses named `agentPRResult` (`run_id`, `base`, `head`, `url` omitempty, `dry_run` omitempty) for both dry-run and real create. `conflicts resolve` uses named `conflictResolveResult` (`conflict_id`, `action`, `note` omitempty); the event-log `resolution` map for `tx.ResolveConflict` is unchanged.
+- Tests: `internal/cli/agent_render_test.go` (`TestAgentRunJSON`, `TestAgentPRJSON`, `TestConflictsResolveJSON`).
+- `spec/13_CLI_DAEMON_API.md` gained a "Part B progress: `agent`/`conflicts` commands wired" note. Ledger not touched (wave-final PR only).
+
+Validated:
+- `gofmt -l cmd internal` — empty (clean).
+- `GOCACHE=/tmp/devstrap-b3-agent-gocache go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` — clean (after a `cache clean`, the recurring stale-cache issue in this environment).
+- `GOCACHE=/tmp/devstrap-b3-agent-gocache go run ./cmd/spec-drift --base origin/main --head HEAD` — passed (22 specs, 5 changed files).
+- `GOCACHE=/tmp/devstrap-b3-agent-gocache go test -race ./...` — passed, zero FAIL lines across all 24 packages.
+
+Follow-ups:
+- None for this batch; remaining `P5-CLI-01` part-B domains tracked as separate PRs in the same wave.
+
+Note: this PR's implementing session stopped early before actually running the four validation gates (the entry above originally carried "(filled after gates)" placeholders); the orchestrating session ran all four itself and confirmed clean before merge.
+
 ## 2026-07-16 — feat(cli): devices * --json via Renderer seam (P5-CLI-01 part B, devices domain)
 
 Changed:
