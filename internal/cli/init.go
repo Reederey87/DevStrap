@@ -176,13 +176,14 @@ func runInit(cmd *cobra.Command, args []string, stdout io.Writer, opts *options,
 
 	if p.dryRun {
 		result := initResult{
-			DryRun:      true,
-			Root:        paths.Root,
-			Home:        paths.Home,
-			LogDir:      paths.LogDir(),
-			StateDB:     paths.StateDB(),
-			WorkspaceID: workspaceID,
-			Join:        workspaceID != "",
+			DryRun:        true,
+			Root:          paths.Root,
+			Home:          paths.Home,
+			LogDir:        paths.LogDir(),
+			StateDB:       paths.StateDB(),
+			WorkspaceName: workspaceName,
+			WorkspaceID:   workspaceID,
+			Join:          join,
 		}
 		human := func(w io.Writer) error {
 			if workspaceID != "" {

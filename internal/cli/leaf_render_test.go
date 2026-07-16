@@ -71,6 +71,28 @@ func TestInitJSONDryRun(t *testing.T) {
 	}
 }
 
+// TestInitJSONDryRunJoin is a CodeRabbit-review regression: the dry-run
+// result must reflect --join even without a --workspace-id, and must still
+// carry the resolved workspace name.
+func TestInitJSONDryRunJoin(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "--json", "init", "--dry-run", "--join", "--workspace-name", "acme")
+	if err != nil {
+		t.Fatalf("init --dry-run --join --json: %v\nstderr=%s", err, stderr)
+	}
+	var got initResult
+	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
+		t.Fatalf("init --dry-run --join --json is not initResult: %v\n%s", err, stdout)
+	}
+	if !got.Join {
+		t.Errorf("got = %+v, want join true even without --workspace-id", got)
+	}
+	if got.WorkspaceName != "acme" {
+		t.Errorf("workspace_name = %q, want acme", got.WorkspaceName)
+	}
+}
+
 func TestAddJSON(t *testing.T) {
 	home := filepath.Join(t.TempDir(), ".devstrap")
 	root := filepath.Join(t.TempDir(), "Code")
