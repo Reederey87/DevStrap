@@ -142,6 +142,14 @@ func runInit(cmd *cobra.Command, args []string, stdout io.Writer, opts *options,
 		return appError{code: exitInvalidConfig, err: fmt.Errorf("resolve home: %w", err)}
 	}
 	paths = config.Paths{Home: cleanHome, Root: cleanRoot}
+	// Propagate the resolved root back into the shared viper config so any
+	// LATER step in this same process invocation that calls opts.paths()
+	// (e.g. devstrap up's rewriteConfigHub/runSyncCycle, which each call
+	// opts.paths() fresh rather than reusing this function's local variable)
+	// sees the positional [root] argument too, not just --root/env/config
+	// (review finding, PR #202: "devstrap up /custom/root --hub …" could
+	// initialize one root but sync/materialize a different, stale default).
+	opts.v.Set("root", cleanRoot)
 
 	if p.dryRun {
 		if workspaceID != "" {

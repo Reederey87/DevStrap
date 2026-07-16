@@ -94,13 +94,23 @@ func TestPairApprovesPastedJoinerCodeAndSyncs(t *testing.T) {
 	ctx := context.Background()
 
 	home, root, hubPath, ws := upFounder(t)
-	joinerCode, _ := joinerPairCode(t, ws)
+	joinerCode, joinerFP := joinerPairCode(t, ws)
+	joinerDecoded, err := pairing.Decode(joinerCode)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// stdin: the pasted joiner code, then "yes" for the fingerprint confirmation.
 	stdin := strings.NewReader(joinerCode + "\nyes\n")
 	stdout, stderr, err := executeForTestWithStdin(stdin, "--home", home, "--root", root, "pair")
 	if err != nil {
 		t.Fatalf("pair: %v\nstderr=%s", err, stderr)
+	}
+	// The confirmation prompt must show the JOINER's actual fingerprint (not a
+	// blank/wrong one that would still pass on a blind "yes" — review finding,
+	// PR #202).
+	if !strings.Contains(stderr, joinerFP) {
+		t.Fatalf("stderr = %q, want it to display the joiner's fingerprint %q before the confirmation prompt", stderr, joinerFP)
 	}
 
 	// The joiner is approved.
@@ -137,14 +147,24 @@ func TestPairApprovesPastedJoinerCodeAndSyncs(t *testing.T) {
 	if err := json.Unmarshal(raw, &hubEvents); err != nil {
 		t.Fatal(err)
 	}
+	// Match the grant to THIS joiner specifically (its recipient), not just any
+	// device.key.granted event — proves pair published the RIGHT grant, not
+	// merely that some prior grant already existed (review finding, PR #202).
 	grantFound := false
 	for _, e := range hubEvents {
-		if e.Type == dssync.EventDeviceKeyGranted {
+		if e.Type != dssync.EventDeviceKeyGranted {
+			continue
+		}
+		var grant dssync.DeviceKeyGrant
+		if err := json.Unmarshal([]byte(e.PayloadJSON), &grant); err != nil {
+			continue
+		}
+		if grant.Recipient == joinerDecoded.AgeRecipient {
 			grantFound = true
 		}
 	}
 	if !grantFound {
-		t.Fatalf("hub carries no device.key.granted after pair's sync (%d events)", len(hubEvents))
+		t.Fatalf("hub carries no device.key.granted for the joiner's recipient %q after pair's sync (%d events)", joinerDecoded.AgeRecipient, len(hubEvents))
 	}
 }
 

@@ -46,16 +46,18 @@ func newUpCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return appError{code: exitUsage, err: fmt.Errorf("--hub is required: the hub to configure (a git carrier git@host:path.git / git+ssh://…, or r2://<bucket> / s3://<bucket>)")}
 			}
 			// Preflight the hub URI shape BEFORE founding anything so a typo fails
-			// fast with no half-initialized workspace. Setting it in viper both
-			// drives the shared hubConfigured validator (which reads opts.v — the
-			// same validation the manual `hub init` / `hub:` config path uses,
-			// including rejecting a git carrier's embedded credentials) and makes
-			// the value visible to the in-process sync step below; rewriteConfigHub
-			// persists it to config.yaml afterward for later standalone runs.
-			opts.v.Set("hub", hub)
-			if err := hubConfigured(opts, ""); err != nil {
+			// fast with no half-initialized workspace. validateHubURI (not
+			// hubConfigured) validates this EXPLICIT candidate directly — going
+			// through hubConfigured would let an already-configured `hub-file`
+			// (an unrelated pre-existing test-hub setting) silently bypass
+			// validation of this --hub value entirely (review finding, PR #202).
+			// Setting it in viper makes the value visible to the in-process sync
+			// step below; rewriteConfigHub persists it to config.yaml afterward
+			// for later standalone runs.
+			if err := validateHubURI(hub); err != nil {
 				return appError{code: exitUsage, err: fmt.Errorf("invalid --hub %q: %w", hub, err)}
 			}
+			opts.v.Set("hub", hub)
 
 			// Step 1 (init only — no scan yet): found the workspace and this
 			// device's key identity. Idempotent — a re-run over an initialized

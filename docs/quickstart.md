@@ -128,7 +128,7 @@ devstrap devices pairing-code                       # stdout: devstrap-pair2:…
 
 # Joiner
 devstrap init ~/Code --join --code '<founder-code>' --fingerprint <founder-fingerprint>
-devstrap hub init <url>                             # only if the code carried no remote hub
+devstrap hub init <url>                             # required if the code carried no remote hub, or only a local file:/folder: hub
 devstrap devices pairing-code                       # this device's own code + fingerprint
 
 # Founder — approve the joiner, then push the key grants

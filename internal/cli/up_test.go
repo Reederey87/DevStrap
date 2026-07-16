@@ -203,6 +203,7 @@ func TestUpRefusesExistingJoiner(t *testing.T) {
 	if _, stderr, err := executeForTest("--home", home, "--root", root, "join", pairingLine(t, code)); err != nil {
 		t.Fatalf("join: %v\nstderr=%s", err, stderr)
 	}
+	beforeConfig := readConfig(t, home)
 
 	_, stderr, err := executeForTest("--home", home, "--root", root, "up", "--hub", "file:"+filepath.Join(t.TempDir(), "other-hub.json"))
 	if err == nil {
@@ -211,10 +212,13 @@ func TestUpRefusesExistingJoiner(t *testing.T) {
 	if !strings.Contains(stderr, "already joined") || !strings.Contains(stderr, "joiner") {
 		t.Fatalf("stderr = %q, want a clear already-joined refusal", stderr)
 	}
-	// The joiner's original hub must be untouched by the refused `up`.
-	cfg := readConfig(t, home)
-	if strings.Contains(cfg, "other-hub.json") {
-		t.Fatalf("config = %q, a refused `up` must not rewrite the hub", cfg)
+	// The joiner's config must be byte-identical after the refused `up` — a
+	// substring check for the rejected hub value alone would miss a refused
+	// `up` that cleared or otherwise rewrote unrelated config (review
+	// finding, PR #202).
+	afterConfig := readConfig(t, home)
+	if afterConfig != beforeConfig {
+		t.Fatalf("config changed after refused `up`:\nbefore=%q\nafter=%q", beforeConfig, afterConfig)
 	}
 }
 
@@ -235,8 +239,68 @@ func TestUpRejectsEmptyFileHub(t *testing.T) {
 	if !strings.Contains(stderr, "must include a path") {
 		t.Fatalf("stderr = %q, want the file-hub-needs-a-path message", stderr)
 	}
-	if _, statErr := os.Stat(filepath.Join(home, "state.db")); statErr == nil {
-		t.Fatalf("up --hub file: was refused but still initialized the state db")
+	// The "nothing written before validation" contract covers config.yaml too,
+	// not just state.db, and any unexpected Stat error must fail the test
+	// rather than being silently treated as "absent" (review finding, PR #202).
+	for _, path := range []string{
+		filepath.Join(home, "state.db"),
+		filepath.Join(home, "config.yaml"),
+	} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("up --hub file: was refused but wrote %s (stat error: %v)", path, statErr)
+		}
+	}
+}
+
+// TestUpPositionalRootPropagatesToScanAndSync proves the fix for a review
+// finding (PR #202): runInit resolved a positional [root] argument only in
+// its own local variable, never writing it back into the shared viper config
+// — so `devstrap up /custom/root --hub …` could initialize one root but scan
+// and sync a different, stale default root, since up's later steps
+// (runLoopScanAdopt, rewriteConfigHub, runSyncCycle) each call opts.paths()
+// fresh rather than reusing runInit's local value. This test passes the root
+// ONLY as a positional argument (no --root flag) and a pre-populated repo
+// under it, so a broken propagation would scan/adopt nothing.
+func TestUpPositionalRootPropagatesToScanAndSync(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	ctx := context.Background()
+
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	hubPath := filepath.Join(t.TempDir(), "hub.json")
+	hubURI := "file:" + hubPath
+
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	mustGit(t, "", "init", "--bare", "-b", "main", remote)
+	proj := filepath.Join(root, "work", "proj")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, proj, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(proj, "README.md"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, proj, "add", "README.md")
+	mustGit(t, proj, "commit", "-m", "init")
+	mustGit(t, proj, "remote", "add", "origin", remote)
+	mustGit(t, proj, "push", "origin", "main")
+
+	// No --root flag: root comes ONLY from the positional argument.
+	if _, stderr, err := executeForTest("--home", home, "up", root, "--hub", hubURI); err != nil {
+		t.Fatalf("up: %v\nstderr=%s", err, stderr)
+	}
+
+	store, err := state.Open(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(store)
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(projects) != 1 {
+		t.Fatalf("adopted %d project(s), want 1 — the positional root was not propagated from runInit to the later scan step (both read opts.paths(), the same mechanism runSyncCycle/rewriteConfigHub rely on)", len(projects))
 	}
 }
 
