@@ -162,17 +162,33 @@ func newConflictsResolveCommand(stdout io.Writer, opts *options) *cobra.Command 
 			}); err != nil {
 				return err
 			}
-			_, _ = fmt.Fprintf(stdout, "Conflict %s resolved (%s).\n", c.ID, action)
-			if note != "" {
-				_, _ = fmt.Fprintln(stdout, note)
-			}
-			return nil
+			return opts.render(stdout, func(w io.Writer) error {
+				if _, err := fmt.Fprintf(w, "Conflict %s resolved (%s).\n", c.ID, action); err != nil {
+					return err
+				}
+				if note != "" {
+					if _, err := fmt.Fprintln(w, note); err != nil {
+						return err
+					}
+				}
+				return nil
+			}, conflictResolveResult{ConflictID: c.ID, Action: action, Note: note})
 		},
 	}
 	cmd.Flags().BoolVar(&keepLocal, "keep-local", false, "keep the local version, discard the remote variant")
 	cmd.Flags().BoolVar(&keepRemote, "keep-remote", false, "keep the remote version, discard the local variant")
 	cmd.Flags().BoolVar(&keepBoth, "keep-both", false, "keep both (dual-copy): local stays, remote re-added under a sibling path")
 	return cmd
+}
+
+// conflictResolveResult is the --json payload for `conflicts resolve` (P5-CLI-01 part B).
+// Note is the optional enactment note (empty for most conflict types); omitempty covers that.
+// This is the CLI command's own output shape — distinct from the event-log resolution
+// map marshaled into details_json for tx.ResolveConflict earlier in the same command.
+type conflictResolveResult struct {
+	ConflictID string `json:"conflict_id"`
+	Action     string `json:"action"`
+	Note       string `json:"note,omitempty"`
 }
 
 // resolveAction validates that exactly one keep-* flag is set and returns the
