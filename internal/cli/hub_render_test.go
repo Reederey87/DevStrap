@@ -134,6 +134,49 @@ func TestHubCompactJSON(t *testing.T) {
 	}
 }
 
+// TestHubCompactJSONStaysPureWhenDrainingBlobs is a reviewer-caught regression:
+// pushLocalEventsGated (called from hubCompact's push phase) can write an
+// informational "Removed N superseded blob(s) from the hub" line when a
+// prior local-only revoke's queued delete finally drains. Before this test,
+// hubCompact routed that call through `stdout`, so under --json a human line
+// would precede the JSON object and corrupt the parseable-single-document
+// contract. Verify stdout is ONLY the JSON object and the informational line
+// (if it fires) lands on stderr instead.
+func TestHubCompactJSONStaysPureWhenDrainingBlobs(t *testing.T) {
+	env, store, _ := setupCompact(t)
+	defer closeStore(store)
+
+	hub := env.hub(t, store)
+	// Seed a blob under the hub's real content-address naming, then queue it
+	// for deletion the way a local-only revoke's rewrap path does (P5-PROD-02).
+	// This ref is not referenced by any env binding or draft snapshot, so
+	// drainPendingHubDeletes will delete it and report deleted=1 — pushed
+	// through hubCompact's push phase as pushLocalEventsGated's "Removed 1
+	// superseded blob(s)…" line.
+	if err := hub.PutBlob(env.ctx, hex64a, strings.NewReader("old-ciphertext")); err != nil {
+		t.Fatalf("PutBlob: %v", err)
+	}
+	if err := store.QueuePendingHubDelete(env.ctx, "age_blob:"+hex64a); err != nil {
+		t.Fatalf("QueuePendingHubDelete: %v", err)
+	}
+
+	env.opts.v.Set("json", true)
+	var stdout, stderr bytes.Buffer
+	if err := hubCompact(env.ctx, &stdout, &stderr, env.opts, store, hub, env.hubID, env.paths, 2, 0, true, false); err != nil {
+		t.Fatalf("hubCompact --json: %v", err)
+	}
+	var got hubCompactResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("hub compact --json stdout is not a single pure hubCompactResult document (drain-blob message likely leaked onto stdout): %v\nstdout=%q", err, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "Removed 1 superseded blob(s) from the hub") {
+		t.Fatalf("expected the drain notice on stderr, got stderr=%q", stderr.String())
+	}
+	if refs, _ := store.PendingHubDeletes(env.ctx); len(refs) != 0 {
+		t.Fatalf("pending hub delete queue not drained: %v", refs)
+	}
+}
+
 func TestHubCompactDryRunJSON(t *testing.T) {
 	env, store, _ := setupCompact(t)
 	defer closeStore(store)

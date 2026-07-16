@@ -125,7 +125,12 @@ func hubCompact(ctx context.Context, stdout, stderr io.Writer, opts *options, st
 		if eh, ok := hub.(dssync.EncryptedHub); ok && eh.Stats != nil {
 			rawSeen = eh.Stats.RawSeen
 		}
-		_, deferred, ferr := pushLocalEventsGated(ctx, stdout, opts, store, hub, hubID, localEvents, rawSeen)
+		// P5-CLI-01 part B: pushLocalEventsGated's two possible messages
+		// ("Awaiting workspace key grant…" / "Removed N superseded blob(s)…")
+		// are informational status, not this command's structured result —
+		// route them to stderr so `--json` stdout stays a single parseable
+		// hubCompactResult document.
+		_, deferred, ferr := pushLocalEventsGated(ctx, stderr, opts, store, hub, hubID, localEvents, rawSeen)
 		if ferr != nil {
 			return ferr
 		}

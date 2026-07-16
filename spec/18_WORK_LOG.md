@@ -37,7 +37,7 @@ Changed:
 - Wired `hub init`, `hub login`, `hub logout`, `hub gc`, `hub compact` (incl. `--dry-run`), and `hub migrate-events` through `opts.render` (`internal/cli/render.go`) so `--json` emits typed, indented JSON instead of being ignored.
 - Named result structs (snake_case tags, value+`omitempty` optionals): `hubInitResult` (hub, scheme, already_configured), `hubLoginResult` (workspace_id, location, action — no secret material), `hubLogoutResult` (workspace_id, action), `hubGCResult` (pruned_snapshots, blobs_deleted, blobs_retained, dry_run, grace_window, keep), `hubCompactResult` (dry_run, snapshot_sha, floors, cold_events_deleted/estimate, tombstones_gc, revoked_stream_objects, superseded_snapshots_pruned, keep_snapshots, dry-run snapshot size fields, tombstone GC metadata), `hubMigrateEventsResult` (migrated, already_migrated, unparseable_kept, dry_run). `hubGC` now also returns a retained-blob count for the JSON payload.
 - Human paths unchanged: `hub init`'s "Configured hub:" / already-configured lines still use direct `fmt.Fprintf` (P7-CLI-03, survive `--quiet`); login/logout/gc summaries stay on `progressf`; compact/migrate-events keep their prior human summaries.
-- Tests: `internal/cli/hub_render_test.go` (`TestHubInitJSON`, `TestHubLoginLogoutJSON`, `TestHubGCJSON`, `TestHubCompactJSON`, `TestHubCompactDryRunJSON`, `TestHubMigrateEventsJSON`) — executeForTest / hubCompact + json.Unmarshal into the exact result types.
+- Tests: `internal/cli/hub_render_test.go` (`TestHubInitJSON`, `TestHubLoginLogoutJSON`, `TestHubGCJSON`, `TestHubCompactJSON`, `TestHubCompactJSONStaysPureWhenDrainingBlobs`, `TestHubCompactDryRunJSON`, `TestHubMigrateEventsJSON`) — executeForTest / hubCompact + json.Unmarshal into the exact result types.
 - Call sites of `hubGC` updated for the extra return value. Ledger (`docs/audits/README.md`) not touched (last PR of the wave). `spec/13_CLI_DAEMON_API.md` gained a "Part B progress: `hub *` domain wired" note (and its `last_reviewed` bumped) — required by the spec-drift gate for touching `internal/cli/hub*.go`, and the honest place to record which part-B domains are done vs. still outstanding.
 
 Validated:
@@ -45,6 +45,15 @@ Validated:
 - `GOCACHE=/tmp/devstrap-b1-hub-gocache go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` — caught one real `staticcheck` S1009 nit in the new test file (redundant nil-check before `len()`), fixed; clean on re-run.
 - `GOCACHE=/tmp/devstrap-b1-hub-gocache go run ./cmd/spec-drift --base origin/main --head HEAD` passed (22 specs, 9 changed files) after adding the spec/13 note above.
 - `GOCACHE=/tmp/devstrap-b1-hub-gocache go test -race ./...` passed, zero FAIL lines.
+
+Follow-ups:
+- None for this batch; remaining `P5-CLI-01` part-B domains tracked as separate PRs in the same wave.
+
+### 2026-07-16 — review fixup (P5-CLI-01 part B, hub domain): stdout/JSON purity finding
+
+Codex was unavailable this session (auth/config resolution error in the shared broker — `loggedIn: false`), so this PR's review ran as opus-4.8 only rather than the standard Codex + Claude dual pass; note this as a review-coverage gap to close (re-run a Codex pass once the broker is healthy) rather than a silent substitution.
+
+The opus-4.8 pass found one real bug: `hubCompact`'s push phase calls the shared `pushLocalEventsGated` (`internal/cli/sync.go`), which can write an informational "Removed N superseded blob(s) from the hub" line (P5-PROD-02, when a prior local-only revoke's queued delete finally drains) directly to whatever `io.Writer` it's given. `hub_compact.go` was passing the real `stdout` — under `--json` this human line would land BEFORE the `hubCompactResult` JSON object, breaking the single-parseable-document contract this PR introduces for `hub compact`. Fixed by passing `stderr` instead (the message is informational status, not the command's structured result; `hub gc` was already unaffected — its own progress line already routes through `progressf` on `stdout` but is separate from this shared helper). New regression test `TestHubCompactJSONStaysPureWhenDrainingBlobs` seeds a queued pending-hub-delete, runs `hubCompact` under `--json`, and asserts stdout unmarshals as a single pure `hubCompactResult` (would fail with `invalid character 'R' looking for beginning of value` pre-fix — verified by reverting the fix locally and confirming the exact failure) while the drain notice lands on stderr.
 
 Follow-ups:
 - Remaining non-hub leaf commands still without `--json` (rest of P5-CLI-01 part B); ledger reconciliation for this finding in the final wave PR.
