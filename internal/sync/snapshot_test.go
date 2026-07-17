@@ -216,22 +216,24 @@ func TestRetentionManifestSignVerifyRoundTrip(t *testing.T) {
 func TestRetentionManifestTamperFailsVerification(t *testing.T) {
 	private, public := testSigningKeys(t)
 	base := RetentionManifest{
-		WorkspaceID: "ws_test",
-		Floors:      map[string]int64{"dev_a": 5},
-		Snapshot:    RetentionSnapshotRef{SHA256: "abc", Epoch: 3, KID: "kid", HLC: 1000, ProducedBy: "dev_a"},
-		ProducedBy:  "dev_a",
-		ProducedAt:  1000,
+		WorkspaceID:      "ws_test",
+		Floors:           map[string]int64{"dev_a": 5},
+		Snapshot:         RetentionSnapshotRef{SHA256: "abc", Epoch: 3, KID: "kid", HLC: 1000, ProducedBy: "dev_a"},
+		ProducedBy:       "dev_a",
+		ProducedAt:       1000,
+		MinReaderVersion: snapshotVersion,
 	}
 	if err := SignRetentionManifest(&base, private); err != nil {
 		t.Fatal(err)
 	}
 	mutations := map[string]func(m *RetentionManifest){
-		"floor raised":     func(m *RetentionManifest) { m.Floors["dev_a"] = 99 },
-		"floor added":      func(m *RetentionManifest) { m.Floors["dev_evil"] = 1 },
-		"snapshot swapped": func(m *RetentionManifest) { m.Snapshot.SHA256 = "evil" },
-		"producer swapped": func(m *RetentionManifest) { m.ProducedBy = "dev_evil" },
-		"prev unlinked":    func(m *RetentionManifest) { m.PrevSHA256 = "evil" },
-		"sig stripped":     func(m *RetentionManifest) { m.Sig = "" },
+		"floor raised":               func(m *RetentionManifest) { m.Floors["dev_a"] = 99 },
+		"floor added":                func(m *RetentionManifest) { m.Floors["dev_evil"] = 1 },
+		"snapshot swapped":           func(m *RetentionManifest) { m.Snapshot.SHA256 = "evil" },
+		"producer swapped":           func(m *RetentionManifest) { m.ProducedBy = "dev_evil" },
+		"prev unlinked":              func(m *RetentionManifest) { m.PrevSHA256 = "evil" },
+		"sig stripped":               func(m *RetentionManifest) { m.Sig = "" },
+		"min reader version dropped": func(m *RetentionManifest) { m.MinReaderVersion = 0 },
 	}
 	for name, f := range mutations {
 		m := base
