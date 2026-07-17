@@ -294,6 +294,7 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 			results = append(results, checkSandboxViolations(ctx, store)...)
 			results = append(results, checkFailedMaterializations(ctx, store)...)
 			results = append(results, checkGitstateFreshness(ctx, store)...)
+			results = append(results, checkPendingWip(ctx, store)...)
 			results = append(results, checkBloblessCaveat(ctx, store)...)
 		}
 	} else if os.IsNotExist(err) {
@@ -621,6 +622,58 @@ func checkGitstateFreshness(ctx context.Context, store *state.Store) []checkResu
 			continue
 		}
 		out = append(out, checkResult{Name: "gitstate: " + p.Path, Status: checkOK, Detail: detail})
+	}
+	return out
+}
+
+// wipStaleAfter is the staleness threshold for a device's pending WIP
+// recovery ref (working-state validation plane Layer B) before doctor treats
+// it as likely-forgotten uncommitted work. It is deliberately shorter than
+// gitstateStaleAfter's 7 days: gitstate freshness answers "has ANY device
+// reported in at all recently" — a low-frequency heartbeat where a week of
+// quiet is still unremarkable — while a WIP ref is a snapshot of specific
+// uncommitted changes a person is expected to either apply or discard within
+// a working session or two, so a WIP ref still pending after two days is much
+// more likely to be forgotten than merely quiet.
+const wipStaleAfter = 48 * time.Hour
+
+// checkPendingWip surfaces, per local project, any device's pending WIP
+// recovery ref (working-state validation plane Layer B) old enough to look
+// forgotten. Semantic difference from checkGitstateFreshness: a project with
+// ZERO pending WIP renders NOTHING — no outstanding WIP is the normal,
+// healthy state for most projects most of the time, not an unproven state
+// the way "no device has ever reported gitstate" is, so it must not be forced
+// visible. A recently-captured WIP ref is likewise silent (an active,
+// expected-to-be-resolved-soon snapshot is not something doctor needs to
+// interrupt about); only a ref older than wipStaleAfter produces a row, naming
+// the device and age with a remedy pointing at `wip show` (the read/inspect
+// command this PR adds — `apply`/`drop` do not exist yet, so the remedy is
+// deliberately forward-looking guidance rather than a runnable one-liner).
+func checkPendingWip(ctx context.Context, store *state.Store) []checkResult {
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return []checkResult{{Name: "pending wip", Status: checkWarn, Detail: err.Error()}}
+	}
+	var out []checkResult
+	now := time.Now()
+	for _, p := range projects {
+		rows, err := store.DeviceWipForProject(ctx, p.PathKey)
+		if err != nil {
+			out = append(out, checkResult{Name: "wip: " + p.Path, Status: checkWarn, Detail: err.Error()})
+			continue
+		}
+		for _, row := range rows {
+			age := now.Sub(state.HLCPhysicalTime(row.ObservedAtHLC))
+			if age <= wipStaleAfter {
+				continue
+			}
+			out = append(out, checkResult{
+				Name:   fmt.Sprintf("wip: %s (%s)", p.Path, row.DeviceID),
+				Status: checkWarn,
+				Detail: fmt.Sprintf("pending WIP %s old (device %s)", age.Round(time.Second), row.DeviceID),
+				Remedy: fmt.Sprintf("review with `devstrap wip show %s --device %s` and apply or discard it", p.Path, row.DeviceID),
+			})
+		}
 	}
 	return out
 }

@@ -134,3 +134,72 @@ func TestGitstateRowsForProject(t *testing.T) {
 }
 
 var errFakeGitstateRead = errors.New("boom")
+
+// TestStatusAllDevicesPendingWip pins that `status --all-devices` renders a
+// compact pending-WIP summary (working-state validation plane Layer B)
+// alongside the existing Layer A gitstate columns for a project with pending
+// WIP, while a project with none stays completely silent — unlike gitstate's
+// forced "never synced" row, an absent WIP section is the correct rendering
+// for the normal, healthy zero-pending case.
+func TestStatusAllDevicesPendingWip(t *testing.T) {
+	ctx := context.Background()
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init", "--workspace-name", "personal"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+
+	store, err := state.Open(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertProject(ctx, state.UpsertProjectParams{Path: "work/acme/pending", Type: "git_repo"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertProject(ctx, state.UpsertProjectParams{Path: "work/acme/clean", Type: "git_repo"}); err != nil {
+		t.Fatal(err)
+	}
+	observedHLC := state.HLCFromPhysicalTime(time.Now().Add(-30 * time.Minute))
+	if err := store.WithTx(ctx, func(tx *state.Tx) error {
+		return tx.UpsertDeviceWipTx(ctx, "dev_peer", "work/acme/pending", "work/acme/pending", state.WipParams{
+			Ref: "refs/devstrap/wip/dev_peer/work/acme/pending", SHA: "deadbeef", BaseSHA: "cafef00d",
+		}, state.Event{ID: "evt_wip_status", HLC: observedHLC})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "status", "--all-devices")
+	if err != nil {
+		t.Fatalf("status --all-devices stderr = %q err = %v", stderr, err)
+	}
+	if !strings.Contains(stdout, "pending WIP for work/acme/pending") || !strings.Contains(stdout, "dev_peer") {
+		t.Fatalf("status --all-devices missing pending WIP summary:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "pending WIP for work/acme/clean") {
+		t.Fatalf("status --all-devices must stay silent for a project with zero pending WIP, not render an empty/placeholder entry:\n%s", stdout)
+	}
+
+	stdout, stderr, err = executeForTest("--home", home, "--root", root, "--json", "status", "--all-devices")
+	if err != nil {
+		t.Fatalf("status --all-devices --json stderr = %q err = %v", stderr, err)
+	}
+	var out []projectGitstateStatus
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("status --all-devices --json is not a bare array: %v\n%s", err, stdout)
+	}
+	byPath := make(map[string]projectGitstateStatus, len(out))
+	for _, p := range out {
+		byPath[p.Path] = p
+	}
+	pending, ok := byPath["work/acme/pending"]
+	if !ok || len(pending.WIP) != 1 || pending.WIP[0].DeviceID != "dev_peer" {
+		t.Fatalf("pending project wip = %+v, want one dev_peer WIP row", pending)
+	}
+	clean, ok := byPath["work/acme/clean"]
+	if !ok || len(clean.WIP) != 0 {
+		t.Fatalf("clean project wip = %+v, want no WIP rows, not an empty/placeholder entry", clean)
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/Reederey87/DevStrap/internal/state"
@@ -154,6 +155,12 @@ type deviceGitstateRow struct {
 type projectGitstateStatus struct {
 	Path    string              `json:"path"`
 	Devices []deviceGitstateRow `json:"devices"`
+	// WIP is the compact pending-WIP summary (working-state validation plane
+	// Layer B) alongside the Layer A gitstate columns above. Unlike Devices,
+	// it has no forced empty-state row: zero pending WIP is the normal,
+	// healthy case for most projects most of the time, so it is simply
+	// omitted rather than rendered as an explicit "none" entry.
+	WIP []wipStatusRow `json:"wip,omitempty"`
 }
 
 // gitstateRowsForProject maps one project's DeviceGitstateForProject result
@@ -212,7 +219,11 @@ func renderAllDevicesStatus(ctx context.Context, stdout io.Writer, opts *options
 	out := make([]projectGitstateStatus, 0, len(projects))
 	for _, project := range projects {
 		rows, err := store.DeviceGitstateForProject(ctx, project.PathKey)
-		out = append(out, projectGitstateStatus{Path: project.Path, Devices: gitstateRowsForProject(rows, err, now)})
+		var wip []wipStatusRow
+		if wipRows, werr := store.DeviceWipForProject(ctx, project.PathKey); werr == nil {
+			wip = wipRowsForProject(wipRows, now)
+		}
+		out = append(out, projectGitstateStatus{Path: project.Path, Devices: gitstateRowsForProject(rows, err, now), WIP: wip})
 	}
 
 	return opts.render(stdout, func(w io.Writer) error {
@@ -233,6 +244,13 @@ func renderAllDevicesStatus(ctx context.Context, stdout io.Writer, opts *options
 				}
 				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%s\n",
 					p.Path, device, branch, d.DirtyCount, d.UntrackedCount, d.UnmergedCount, d.AheadCount, d.BehindCount, d.StashCount, d.Observed)
+			}
+			if len(p.WIP) > 0 {
+				parts := make([]string, 0, len(p.WIP))
+				for _, wip := range p.WIP {
+					parts = append(parts, fmt.Sprintf("%s (%s)", wip.DeviceID, wip.Observed))
+				}
+				_, _ = fmt.Fprintf(w, "  pending WIP for %s: %s\n", p.Path, strings.Join(parts, ", "))
 			}
 		}
 		return nil
