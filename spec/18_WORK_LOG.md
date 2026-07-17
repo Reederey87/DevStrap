@@ -31,6 +31,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-17 — chore(docs): post-Pass-7 reliability & substrate wave-close reconciliation
+
+Changed:
+- `docs/audits/README.md`: moved `P7-PROD-03` from the Pass 7 open table to *Recently shipped* (citing PR #215, its fable-5-caught tamper-test fixup, and the deliberately-untouched P7-SYNC-01 trust boundary). Pass 7's open header dropped from "5 open of 47" to "4 open of 47" (P1=0, P2=2, P3=2) — hand-verified: the open table has exactly 4 rows (`P7-PROD-02/04/05/06`), matching the header arithmetic. Added a one-sentence framing note that all 4 remaining open findings are the commercial/hosted-tier cluster, gated on a business decision, not blocked on engineering — `P7-PROD-03` was the sole exception, now closed.
+- `spec/00_START_HERE.md`: removed the stale "forge hardening... leaving broader hermetic test coverage (`FORGE-05`) as the remaining gap" bullet from "Not implemented yet" (nothing left unbuilt in that area after PR #214); folded a one-clause FORGE-05 note into the existing "now built" agent-runner bullet instead.
+- `spec/08_GIT_MATERIALIZATION_AND_WORKTREES.md`: same fix — replaced the "Remaining work:... broader hermetic fake-CLI tests (`FORGE-05`...)" sentence with a shipped-state sentence, keeping only the genuinely-still-open Bitbucket/Azure native-client note.
+- `spec/14_MVP_ROADMAP_AND_BACKLOG.md`: appended a new DIRECTION bullet naming this wave (six PRs, #213–#218) and its rationale — the Pass 7 backlog reduces to the commercial-tier cluster once `P7-PROD-03` ships, so the wave pulled in three additional non-business-gated gaps from `00_START_HERE.md`'s not-implemented list (git-state Layer A backend+CLI, project-env allowlists) plus the FORGE-05 test-coverage close, and explicitly did NOT build a new agent-engine adapter since `spec/10`'s own AD-5 direction already argues against that path.
+
+Validated:
+- `gofmt -w cmd internal` (no Go files touched, no-op)
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- Hand-verified the Pass 7 open-table row count against the header arithmetic (per `AGENTS.md`'s explicit ledger-count invariant) rather than trusting either side by inspection alone.
+
+Follow-ups:
+- None. The remaining Pass 7 backlog (`P7-PROD-02/04/05/06`) needs a product decision on a hosted tier before it's actionable as engineering work.
+
 ## 2026-07-17 — feat(cli): status --all-devices + doctor git-state freshness check (Layer A CLI surfacing)
 
 Changed:
