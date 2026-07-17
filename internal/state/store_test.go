@@ -239,8 +239,8 @@ func TestMigrateEnsureSummaryAndVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 28 {
-		t.Fatalf("schema version = %d, want 28", version)
+	if version != 29 {
+		t.Fatalf("schema version = %d, want 29", version)
 	}
 
 	var tableCount int
@@ -462,8 +462,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 27 {
-		t.Fatalf("schema version after down = %d, want 27", version)
+	if version != 28 {
+		t.Fatalf("schema version after down = %d, want 28", version)
 	}
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
@@ -472,9 +472,82 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 28 {
-		t.Fatalf("schema version after re-migrate = %d, want 28", version)
+	if version != 29 {
+		t.Fatalf("schema version after re-migrate = %d, want 29", version)
 	}
+}
+
+// TestMigration00029RoundTripsDeviceGitstateTable pins that migration 00029
+// creates device_gitstate on up, drops it cleanly on down (no orphaned rows or
+// leftover schema), and recreates a usable table on re-migrate.
+func TestMigration00029RoundTripsDeviceGitstateTable(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if !tableExists(t, st, "device_gitstate") {
+		t.Fatal("device_gitstate table missing after migrate")
+	}
+	if err := st.EnsureWorkspace(ctx, "personal", "/tmp/Code"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WithTx(ctx, func(tx *Tx) error {
+		return tx.UpsertDeviceGitstateTx(ctx, "dev_peer", "work/acme/api", "work/acme/api", GitstateParams{
+			Branch: "main", HeadSHA: "abc123", DirtyCount: 1,
+		}, Event{ID: "evt_gs_roundtrip", HLC: 1000})
+	}); err != nil {
+		t.Fatalf("upsert device gitstate before down: %v", err)
+	}
+
+	if err := st.Down(); err != nil {
+		t.Fatal(err)
+	}
+	if tableExists(t, st, "device_gitstate") {
+		t.Fatal("device_gitstate table remains after migration 00029 down")
+	}
+
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if !tableExists(t, st, "device_gitstate") {
+		t.Fatal("device_gitstate table missing after re-migrate")
+	}
+	rows, err := st.DeviceGitstateForProject(ctx, "work/acme/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("rows=%#v, want the down migration to have dropped prior data", rows)
+	}
+	if err := st.WithTx(ctx, func(tx *Tx) error {
+		return tx.UpsertDeviceGitstateTx(ctx, "dev_peer", "work/acme/api", "work/acme/api", GitstateParams{
+			Branch: "main", HeadSHA: "def456",
+		}, Event{ID: "evt_gs_after_remigrate", HLC: 2000})
+	}); err != nil {
+		t.Fatalf("upsert device gitstate after re-migrate: %v", err)
+	}
+	rows, err = st.DeviceGitstateForProject(ctx, "work/acme/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].HeadSHA != "def456" {
+		t.Fatalf("rows=%#v, want one row from the post-remigrate insert", rows)
+	}
+}
+
+func tableExists(t *testing.T, st *Store, name string) bool {
+	t.Helper()
+	var count int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?;`, name).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count > 0
 }
 
 func TestMigration00023DownRefusesPopulatedCoordinates(t *testing.T) {
@@ -504,7 +577,10 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
-	// Steps from 28 down to 23 are unrelated and must remain unaffected.
+	// Steps from 29 down to 23 are unrelated and must remain unaffected.
+	if err := st.Down(); err != nil { // 29 -> 28
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 28 -> 27
 		t.Fatal(err)
 	}
@@ -576,6 +652,9 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
+	if err := st.Down(); err != nil { // 29 -> 28
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 28 -> 27
 		t.Fatal(err)
 	}

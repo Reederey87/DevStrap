@@ -34,6 +34,12 @@ const (
 	// fingerprint ceremony.
 	EventDeviceRevoked = "device.revoked"
 	EventDeviceLost    = "device.lost"
+	// EventGitstateObserved is a signed, read-only git-state snapshot (working-
+	// state validation plane Layer A, spec/07): branch, HEAD sha, upstream sha,
+	// and dirty/untracked/unmerged/ahead/behind/stash counts. Strictly separate
+	// from agent worktree-base resolution (fresh worktrees always base from
+	// origin/<default_branch>, never from anything in this plane).
+	EventGitstateObserved = "repo.gitstate.observed"
 )
 
 // Conflict type identifiers, exported so the CLI resolver can branch on them
@@ -140,6 +146,27 @@ type EnvProfilePayload struct {
 type DeviceTrustPayload struct {
 	DeviceID string `json:"device_id"`
 	Reason   string `json:"reason,omitempty"`
+}
+
+// GitstatePayload carries a repo.gitstate.observed event (working-state
+// validation plane Layer A): a read-only snapshot of one project's git
+// working state as observed on the emitting device. The observing device is
+// the event's own DeviceID and the observation instant is the event's own
+// HLC — neither is duplicated in the payload. Captured with
+// `git --no-optional-locks status --porcelain=v2 --branch`, which never
+// writes .git/index.
+type GitstatePayload struct {
+	Path           string `json:"path"`
+	Branch         string `json:"branch"`
+	HeadSHA        string `json:"head_sha"`
+	UpstreamBranch string `json:"upstream_branch,omitempty"`
+	UpstreamSHA    string `json:"upstream_sha,omitempty"`
+	DirtyCount     int    `json:"dirty_count"`
+	UntrackedCount int    `json:"untracked_count"`
+	UnmergedCount  int    `json:"unmerged_count"`
+	AheadCount     int    `json:"ahead_count"`
+	BehindCount    int    `json:"behind_count"`
+	StashCount     int    `json:"stash_count"`
 }
 
 // DeviceKeyGrant carries a device.key.granted event (P4-SEC-07): a Workspace
@@ -315,6 +342,18 @@ func NewEnvProfileEvent(payloadJSON string) state.Event {
 func NewDeviceTrustEvent(typ, payloadJSON string) state.Event {
 	return state.Event{
 		Type:        typ,
+		PayloadJSON: payloadJSON,
+		ContentHash: state.ContentHash(payloadJSON),
+	}
+}
+
+// NewGitstateEvent builds an unsigned repo.gitstate.observed event from a
+// pre-marshaled GitstatePayload (working-state validation plane Layer A). The
+// store stamps HLC, seq, device id, and the device signature on
+// InsertLocalEvent.
+func NewGitstateEvent(payloadJSON string) state.Event {
+	return state.Event{
+		Type:        EventGitstateObserved,
 		PayloadJSON: payloadJSON,
 		ContentHash: state.ContentHash(payloadJSON),
 	}
@@ -925,6 +964,33 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 			return fmt.Errorf("apply env profile for %q: %w", payload.Path, err)
 		}
 		return nil
+	case EventGitstateObserved:
+		// Working-state validation plane Layer A: a mirror-only, read-only
+		// snapshot. Unlike env.profile.updated/draft.snapshot.created, this does
+		// NOT resolve through tx.ProjectByPath — the mirror is keyed on the
+		// event's own normalized path, so a peer's gitstate observation applies
+		// even when the local project row has not arrived yet (no pending-project
+		// quarantine class exists for this event type; see migration 00029).
+		var payload GitstatePayload
+		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+			return fmt.Errorf("%w: decode gitstate event %s: %w", state.ErrEventVerification, event.ID, err)
+		}
+		pk, err := pathkey.Clean(payload.Path)
+		if err != nil {
+			return fmt.Errorf("%w: gitstate path %q: %w", state.ErrEventVerification, payload.Path, err)
+		}
+		return tx.UpsertDeviceGitstateTx(ctx, event.DeviceID, pk.Key, pk.Display, state.GitstateParams{
+			Branch:         payload.Branch,
+			HeadSHA:        payload.HeadSHA,
+			UpstreamBranch: payload.UpstreamBranch,
+			UpstreamSHA:    payload.UpstreamSHA,
+			DirtyCount:     payload.DirtyCount,
+			UntrackedCount: payload.UntrackedCount,
+			UnmergedCount:  payload.UnmergedCount,
+			AheadCount:     payload.AheadCount,
+			BehindCount:    payload.BehindCount,
+			StashCount:     payload.StashCount,
+		}, event)
 	case EventDeviceRevoked, EventDeviceLost:
 		// TRUST-01: a synced trust flip. Signature verification already ran
 		// (mustVerifyEvent), so the SIGNER is a locally-approved device; the

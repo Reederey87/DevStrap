@@ -31,6 +31,28 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-17 — feat(sync): git-state validation plane Layer A (repo.gitstate.observed)
+
+Changed:
+- `internal/git/gitstate.go` (new): `Runner.CaptureGitstate` runs `git --no-optional-locks status --porcelain=v2 --branch` (never writes `.git/index`) and parses branch, HEAD sha, upstream branch, dirty/untracked/unmerged/ahead/behind counts; two cheap follow-up calls (`rev-parse --verify -q <upstream>`, `stash list`) fill in upstream sha and stash count, degrading to the zero value instead of failing the whole capture when either is unavailable (no upstream, no stash).
+- `internal/sync/events.go`: new `repo.gitstate.observed` event type — `GitstatePayload`, `NewGitstateEvent` (unsigned constructor, mirrors `NewDraftSnapshotEvent`/`NewEnvProfileEvent`), and an `applyEventTx` case. Unlike `env.profile.updated`/`draft.snapshot.created`, the apply handler does **not** resolve through `tx.ProjectByPath` — there is no pending-project quarantine class for this event type, so a peer's gitstate observation applies even before the local project row exists.
+- `internal/state/migrations/00029_device_gitstate.sql` (new, schema version 28 → 29): sidecar `device_gitstate` table, mirror-only (`UpsertDeviceGitstateTx` `INSERT ... ON CONFLICT DO UPDATE`, guarded by `WHERE excluded.observed_at_hlc >= device_gitstate.observed_at_hlc` so an out-of-order redelivery cannot regress the mirror). No FK to `devices` (mirrors `device_heads`, `00028` — remote devices are not enrolled locally until Phase 2) and, by design choice for this PR, no FK to `namespace_entries` either (path/path_key stored verbatim; avoids introducing a new pending-project quarantine class for a read-only mirror).
+- `internal/state/device_gitstate.go` (new): `GitstateParams`, `Tx.UpsertDeviceGitstateTx`, `Store.DeviceGitstateForProject` (read side for the follow-up CLI surfacing).
+- Bumped hardcoded schema-version test constants: `internal/state/store_test.go` (`TestMigrateEnsureSummaryAndVersion` → 29, `TestMigrationDownAndUp` → 28/29, plus one added `st.Down()` step each in `TestMigration00023DownRefusesPopulatedCoordinates`/`TestMigration00023DownEmptyCoordinatesSucceeds` now that the tip is one migration further from 00023) and `internal/cli/root_test.go` (`"schema version: 29"`).
+- Spec: `spec/07_NAMESPACE_AND_SYNC_MODEL.md` moves `repo.gitstate.observed` from the Planned list to Shipped and marks the Layer A bullet SHIPPED (`repo.wip.pushed`/Layer B stays Planned); `spec/12_DATA_MODEL_SQLITE.md` documents the new table and bumps the schema-version count to 29; `spec/08_GIT_MATERIALIZATION_AND_WORKTREES.md` documents `CaptureGitstate`; `spec/13_CLI_DAEMON_API.md` fixes an already-stale `status` schema-version claim (was "26", corrected to 29 while touched for this PR) and cites `00029`; `spec/00_START_HERE.md`'s "Not implemented yet" bullet is reworded so Layer A's backend reads SHIPPED while Layer B (WIP refs) stays unbuilt. All five bump `last_reviewed` to 2026-07-17.
+- Out of scope for this PR (explicitly deferred, backend left usable for it): `status --all-devices`, any `doctor` gitstate check, and wiring the capture call into `devstrap sync`'s runtime flow.
+- Did **not** touch agent worktree-base resolution (`worktree new --fresh-upstream` / `ResolveDefaultBranch` / `internal/cli/worktree.go`) anywhere — this plane stays strictly separate from fresh-worktree base provenance per spec/07.
+
+Validated:
+- `gofmt -w cmd internal`
+- `golangci-lint run` (via `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run`) — 0 issues
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `GOCACHE=/tmp/wave-gitstate-a-gocache go test -race ./...`
+
+Follow-ups:
+- Wire `CaptureGitstate` + `NewGitstateEvent` into `devstrap sync`'s runtime flow.
+- `status --all-devices` and `doctor` surfacing (must always render snapshot age — "never synced" / "last seen N ago" — never a silent all-clear, per spec/07).
+
 ## 2026-07-17 — feat(sync): N-1 retention-manifest version-skew policy + doctor warning (P7-PROD-03)
 
 Changed:
