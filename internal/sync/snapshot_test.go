@@ -276,3 +276,114 @@ func TestParseRetentionManifestStructuralFailClosed(t *testing.T) {
 		t.Errorf("empty floors map must parse: %v", err)
 	}
 }
+
+// TestParseSnapshotEnvelopeVersionExactEqualityUnchanged pins the P7-PROD-03
+// hard constraint: widening the RETENTION MANIFEST read window must never
+// widen the snapshot ENVELOPE/DOCUMENT check, which stays exact-equality
+// fail-closed (P7-SYNC-01 — an old-version snapshot document silently lacks
+// the terminal device-trust projection). Both an older AND a newer envelope
+// version are refused; only the exact current snapshotVersion is accepted.
+func TestParseSnapshotEnvelopeVersionExactEqualityUnchanged(t *testing.T) {
+	mk := func(v int) []byte {
+		env := snapshotEnvelope{V: v, WorkspaceID: "ws_test", ProducedBy: "dev_a", HLC: 1000, Epoch: 3, KID: "kid", CT: base64.StdEncoding.EncodeToString([]byte("junk"))}
+		raw, err := json.Marshal(env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	for _, v := range []int{snapshotVersion - 1, snapshotVersion + 1} {
+		if _, err := ParseSnapshotEnvelope(mk(v)); !errors.Is(err, ErrSnapshotVerification) {
+			t.Errorf("envelope v%d: got %v, want ErrSnapshotVerification (exact-equality must reject both directions)", v, err)
+		}
+	}
+	if _, err := ParseSnapshotEnvelope(mk(snapshotVersion)); err != nil {
+		// The CT is junk, so this fails at decode/decrypt elsewhere, not here;
+		// ParseSnapshotEnvelope itself only checks the carrier, so this must pass.
+		t.Fatalf("envelope v%d (current): ParseSnapshotEnvelope should accept the carrier, got %v", snapshotVersion, err)
+	}
+}
+
+// TestRetentionManifestVersionRange exercises the P7-PROD-03 N-1 window
+// directly against the named constants: the read window is
+// [minReadableRetentionManifestVersion, snapshotVersion] inclusive, both
+// endpoints accepted, one step outside either endpoint rejected.
+func TestRetentionManifestVersionRange(t *testing.T) {
+	cases := []struct {
+		v    int
+		want bool
+	}{
+		{minReadableRetentionManifestVersion - 1, false},
+		{minReadableRetentionManifestVersion, true},
+		{snapshotVersion, true},
+		{snapshotVersion + 1, false},
+	}
+	for _, c := range cases {
+		if got := retentionManifestVersionOK(c.v); got != c.want {
+			t.Errorf("retentionManifestVersionOK(%d) = %v, want %v", c.v, got, c.want)
+		}
+	}
+}
+
+// TestRetentionManifestMinReaderVersionFailsClosed pins the producer-stamped
+// floor (P7-PROD-03): a manifest that declares itself unreadable by a reader
+// below MinReaderVersion is refused by both ParseRetentionManifest (no
+// device registry needed — this is a structural check) and
+// VerifyRetentionManifest, even though its own V is within the normal range.
+func TestRetentionManifestMinReaderVersionFailsClosed(t *testing.T) {
+	private, public := testSigningKeys(t)
+	m := RetentionManifest{
+		WorkspaceID:      "ws_test",
+		Floors:           map[string]int64{"dev_a": 5},
+		Snapshot:         RetentionSnapshotRef{SHA256: "abc", Epoch: 3, KID: "kid", HLC: 1000, ProducedBy: "dev_a"},
+		ProducedBy:       "dev_a",
+		ProducedAt:       1000,
+		MinReaderVersion: snapshotVersion + 1,
+	}
+	if err := SignRetentionManifest(&m, private); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyRetentionManifest(m, public); !errors.Is(err, ErrSnapshotVerification) {
+		t.Fatalf("verify: got %v, want ErrSnapshotVerification (declared min reader version exceeds what this binary reads)", err)
+	}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseRetentionManifest(raw); err == nil {
+		t.Fatal("parse succeeded despite MinReaderVersion exceeding snapshotVersion, want fail-closed refusal")
+	}
+
+	// MinReaderVersion at or below the current version is fine.
+	m.MinReaderVersion = snapshotVersion
+	if err := SignRetentionManifest(&m, private); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyRetentionManifest(m, public); err != nil {
+		t.Fatalf("verify with MinReaderVersion == snapshotVersion: %v, want accepted", err)
+	}
+}
+
+// TestRetentionManifestVersionStampBypassesStructuralValidation pins the
+// diagnostic-only helper (P7-PROD-03): it reads the version fields even from
+// a manifest ParseRetentionManifest would refuse outright, so `doctor
+// --remote` can explain a version-skew wedge instead of just hitting it.
+func TestRetentionManifestVersionStampBypassesStructuralValidation(t *testing.T) {
+	raw := []byte(`{"v":99,"min_reader_version":42,"workspace_id":"ws_test","floors":null}`)
+	if _, err := ParseRetentionManifest(raw); err == nil {
+		t.Fatal("sanity: ParseRetentionManifest should refuse this manifest")
+	}
+	v, minReader, err := RetentionManifestVersionStamp(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v != 99 || minReader != 42 {
+		t.Fatalf("RetentionManifestVersionStamp = (%d, %d), want (99, 42)", v, minReader)
+	}
+	if _, _, err := RetentionManifestVersionStamp([]byte("not json")); err == nil {
+		t.Fatal("garbled bytes must still error")
+	}
+	if got := CurrentSnapshotVersion(); got != snapshotVersion {
+		t.Fatalf("CurrentSnapshotVersion() = %d, want %d", got, snapshotVersion)
+	}
+}

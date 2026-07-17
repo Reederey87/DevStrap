@@ -43,20 +43,38 @@ import (
 // would let a snapshot-recovering device keep a revoked device approved — so
 // the envelope/document checks stay exact-equality fail-closed and an old
 // binary refuses v2 rather than silently ignoring the projection. Retention
-// MANIFESTS are trust-neutral (floors only) and stay readable at v1 via
-// retentionManifestVersionOK, so an upgraded compactor can still reconcile a
-// pre-existing v1 hub and publish v2 over it.
+// MANIFESTS are trust-neutral (floors only) and stay readable across an N-1
+// window via retentionManifestVersionOK, so an upgraded compactor can still
+// reconcile a pre-existing older-version hub and publish the current version
+// over it.
 const snapshotVersion = 2
 
+// minReadableRetentionManifestVersion is the OLDEST retention-manifest
+// version this binary still reads (P7-PROD-03: a mixed-version fleet — e.g.
+// a `brew upgrade` that lands on some machines before others — must not wedge
+// on a retention manifest one version behind). Retention manifests are
+// trust-neutral (floors only; the P7-SYNC-01 revocation projection lives
+// exclusively in the snapshot DOCUMENT, never the manifest), so widening this
+// window can never reopen that hole. To move the read window forward on a
+// future version bump, change ONLY this constant (drop support for the
+// oldest version) and snapshotVersion (add the new one) — the range check in
+// retentionManifestVersionOK itself never needs to change. If a manifest
+// format change is ever genuinely breaking (not just an additive version
+// stamp), ship an in-place migrator instead of forcing a re-found/rebuild —
+// see `devstrap hub migrate-events` (internal/cli/hub_migrate.go) for this
+// repo's existing precedent of that shape.
+const minReadableRetentionManifestVersion = 1
+
 // retentionManifestVersionOK reports whether a retention manifest version is
-// readable by this binary. v1 manifests differ from v2 only by the version
-// stamp (the floors map is trust-neutral — reading one can never reintroduce
+// readable by this binary: the inclusive range
+// [minReadableRetentionManifestVersion, snapshotVersion]. Manifests are
+// trust-neutral (floors only — reading an older one can never reintroduce
 // the P7-SYNC-01 revocation hole, which lives exclusively in the snapshot
-// DOCUMENT), so accepting them keeps upgrade deployable: the first upgraded
-// compactor must parse the pre-existing v1 manifest before it can publish v2.
-// This is the seam where a future min-reader version range (P7-PROD-03) lands.
+// DOCUMENT), so accepting the whole window keeps upgrade deployable: the
+// first upgraded compactor must parse the pre-existing older manifest before
+// it can publish the current version.
 func retentionManifestVersionOK(v int) bool {
-	return v == 1 || v == snapshotVersion
+	return v >= minReadableRetentionManifestVersion && v <= snapshotVersion
 }
 
 // Signature domains for the snapshot-exchange plane. devstrap:snapshot:v1 is
@@ -419,33 +437,47 @@ type RetentionManifest struct {
 	ProducedBy  string               `json:"produced_by"`
 	ProducedAt  int64                `json:"produced_at_hlc"`
 	PrevSHA256  string               `json:"prev_sha256"`
-	Sig         string               `json:"sig"`
+	// MinReaderVersion is a producer-stamped floor (P7-PROD-03): "a reader
+	// below this version cannot safely read this manifest." Zero/absent
+	// (omitempty) means the producer declares no constraint beyond this
+	// binary's own minReadableRetentionManifestVersion/snapshotVersion range.
+	// It exists so a FUTURE producer that makes a genuinely breaking manifest
+	// change can explicitly reject old readers instead of relying solely on
+	// readers pre-emptively widening their own hardcoded range. It is part of
+	// the SIGNED payload, not advisory metadata: an unsigned "you must
+	// upgrade" field would let an attacker who can write hub objects (but not
+	// forge signatures) manufacture a denial-of-service by forcing every
+	// reader to self-reject a legitimately-readable manifest.
+	MinReaderVersion int    `json:"min_reader_version,omitempty"`
+	Sig              string `json:"sig"`
 }
 
 // retentionSignaturePayload is the canonical signed form of a manifest:
 // every field except Sig, declared in alphabetical json-tag order (Go
 // marshals maps with sorted keys, so Floors is canonical too).
 type retentionSignaturePayload struct {
-	Floors      map[string]int64     `json:"floors"`
-	PrevSHA256  string               `json:"prev_sha256"`
-	ProducedAt  int64                `json:"produced_at_hlc"`
-	ProducedBy  string               `json:"produced_by"`
-	Snapshot    RetentionSnapshotRef `json:"snapshot"`
-	V           int                  `json:"v"`
-	WorkspaceID string               `json:"workspace_id"`
+	Floors           map[string]int64     `json:"floors"`
+	MinReaderVersion int                  `json:"min_reader_version,omitempty"`
+	PrevSHA256       string               `json:"prev_sha256"`
+	ProducedAt       int64                `json:"produced_at_hlc"`
+	ProducedBy       string               `json:"produced_by"`
+	Snapshot         RetentionSnapshotRef `json:"snapshot"`
+	V                int                  `json:"v"`
+	WorkspaceID      string               `json:"workspace_id"`
 }
 
 // RetentionSignaturePayload returns the canonical bytes a manifest signature
 // covers.
 func RetentionSignaturePayload(m RetentionManifest) []byte {
 	raw, err := json.Marshal(retentionSignaturePayload{
-		Floors:      m.Floors,
-		PrevSHA256:  m.PrevSHA256,
-		ProducedAt:  m.ProducedAt,
-		ProducedBy:  m.ProducedBy,
-		Snapshot:    m.Snapshot,
-		V:           m.V,
-		WorkspaceID: m.WorkspaceID,
+		Floors:           m.Floors,
+		MinReaderVersion: m.MinReaderVersion,
+		PrevSHA256:       m.PrevSHA256,
+		ProducedAt:       m.ProducedAt,
+		ProducedBy:       m.ProducedBy,
+		Snapshot:         m.Snapshot,
+		V:                m.V,
+		WorkspaceID:      m.WorkspaceID,
 	})
 	if err != nil {
 		// Marshaling a struct of strings/ints/maps cannot fail.
@@ -472,7 +504,10 @@ func SignRetentionManifest(m *RetentionManifest, privateSigningKey string) error
 // this only proves the manifest bytes were signed by that key.
 func VerifyRetentionManifest(m RetentionManifest, publicSigningKey string) error {
 	if !retentionManifestVersionOK(m.V) {
-		return fmt.Errorf("%w: retention manifest version %d, want 1 or %d", ErrSnapshotVerification, m.V, snapshotVersion)
+		return fmt.Errorf("%w: retention manifest version %d, want %d-%d", ErrSnapshotVerification, m.V, minReadableRetentionManifestVersion, snapshotVersion)
+	}
+	if m.MinReaderVersion > snapshotVersion {
+		return fmt.Errorf("%w: retention manifest declares min reader version %d, this binary reads up to %d", ErrSnapshotVerification, m.MinReaderVersion, snapshotVersion)
 	}
 	if m.Sig == "" {
 		return fmt.Errorf("%w: retention manifest is unsigned", ErrSnapshotVerification)
@@ -497,7 +532,10 @@ func ParseRetentionManifest(raw []byte) (RetentionManifest, error) {
 		return RetentionManifest{}, fmt.Errorf("parse retention manifest: %w", err)
 	}
 	if !retentionManifestVersionOK(m.V) {
-		return RetentionManifest{}, fmt.Errorf("parse retention manifest: version %d, want 1 or %d", m.V, snapshotVersion)
+		return RetentionManifest{}, fmt.Errorf("parse retention manifest: version %d, want %d-%d", m.V, minReadableRetentionManifestVersion, snapshotVersion)
+	}
+	if m.MinReaderVersion > snapshotVersion {
+		return RetentionManifest{}, fmt.Errorf("parse retention manifest: declares min reader version %d, this binary reads up to %d", m.MinReaderVersion, snapshotVersion)
 	}
 	if m.Floors == nil {
 		return RetentionManifest{}, errors.New("parse retention manifest: missing floors map")
@@ -523,4 +561,31 @@ func ParseRetentionFloors(raw []byte) (map[string]int64, error) {
 		return nil, err
 	}
 	return m.Floors, nil
+}
+
+// CurrentSnapshotVersion returns the snapshot/retention-manifest version this
+// binary produces, so a diagnostic caller (`doctor --remote`, P7-PROD-03) can
+// warn when a fetched manifest is behind (or declares itself unreadable by)
+// what this binary writes — a live signal of a mixed-version fleet — without
+// duplicating the version policy.
+func CurrentSnapshotVersion() int {
+	return snapshotVersion
+}
+
+// RetentionManifestVersionStamp reads only the version fields (v,
+// min_reader_version) from raw retention-manifest bytes, WITHOUT the
+// structural/range validation ParseRetentionManifest performs. It exists so
+// a diagnostic caller can report a version-skew warning even for a manifest
+// this binary's normal read path would refuse outright (P7-PROD-03) —
+// ParseRetentionManifest's fail-closed refusal is correct for the sync/pull
+// path, but a health probe should surface "why", not just error out.
+func RetentionManifestVersionStamp(raw []byte) (version, minReaderVersion int, err error) {
+	var stamp struct {
+		V                int `json:"v"`
+		MinReaderVersion int `json:"min_reader_version,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &stamp); err != nil {
+		return 0, 0, fmt.Errorf("read retention manifest version stamp: %w", err)
+	}
+	return stamp.V, stamp.MinReaderVersion, nil
 }

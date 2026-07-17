@@ -121,6 +121,38 @@ func checkHubHealth(ctx context.Context, opts *options, hubFile string) []checkR
 	}
 	out = append(out, checkResult{Name: "hub reachable", Status: checkOK, Detail: hubID})
 
+	// P7-PROD-03: warn (never fail) on retention-manifest version skew — a
+	// mixed-version fleet (e.g. a `brew upgrade` landing on some machines
+	// before others) must be visible, not silently wedged. GetRetention
+	// returning ErrRetentionNotFound just means no compaction has run yet,
+	// which is not a skew signal. The version stamp is read WITHOUT going
+	// through ParseRetentionManifest's fail-closed range check, so this warns
+	// even for a manifest this binary's normal read path would refuse
+	// outright — the whole point is to explain a wedge, not just hit it too.
+	if retRaw, _, rerr := hub.GetRetention(ctx); rerr == nil {
+		if v, minReader, verr := dssync.RetentionManifestVersionStamp(retRaw); verr == nil {
+			cur := dssync.CurrentSnapshotVersion()
+			switch {
+			case minReader > cur:
+				out = append(out, checkResult{
+					Name:   "retention manifest version",
+					Status: checkWarn,
+					Detail: fmt.Sprintf("hub retention manifest declares min reader version %d; this binary reads up to %d", minReader, cur),
+					Remedy: "upgrade devstrap on this device",
+				})
+			case v != cur:
+				out = append(out, checkResult{
+					Name:   "retention manifest version",
+					Status: checkWarn,
+					Detail: fmt.Sprintf("hub retention manifest is v%d; this binary produces v%d", v, cur),
+					Remedy: "upgrade the device that last ran `devstrap hub compact` (or this device, if it is the one behind)",
+				})
+			}
+		}
+	} else if !errors.Is(rerr, dssync.ErrRetentionNotFound) {
+		out = append(out, checkResult{Name: "retention manifest version", Status: checkWarn, Detail: rerr.Error()})
+	}
+
 	// P5-SYNC-01: the push watermark is the Seq-keyed row (with its one-time
 	// legacy-HLC backfill), so doctor counts the same pending set sync pushes.
 	pushCursor, _ := store.PushSeqCursor(ctx, hubID)

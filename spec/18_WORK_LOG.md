@@ -31,6 +31,23 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-17 — feat(sync): N-1 retention-manifest version-skew policy + doctor warning (P7-PROD-03)
+
+Changed:
+- `internal/sync/snapshot.go`: replaced the hardcoded `v == 1 || v == snapshotVersion` in `retentionManifestVersionOK` with a real inclusive-range check against two named constants, `minReadableRetentionManifestVersion` (=1) and the existing `snapshotVersion` (=2) — a future version bump now only moves one constant, never re-derives the comparison. Added an optional, **signed** `RetentionManifest.MinReaderVersion` field (`min_reader_version`, omitempty, wired into `retentionSignaturePayload`'s alphabetical field order) so a future producer can explicitly declare "readers below N must upgrade"; `ParseRetentionManifest`/`VerifyRetentionManifest` fail closed if this binary's `snapshotVersion` is below a manifest's declared floor. Added two small exported diagnostic helpers, `CurrentSnapshotVersion()` and `RetentionManifestVersionStamp(raw)` (reads only the version fields, bypassing the normal fail-closed structural parse), for the doctor check below. **Deliberately untouched:** `ParseSnapshotEnvelope`'s and `UnsealSnapshot`'s exact-equality snapshot-document/envelope version check (`env.V != snapshotVersion` / `snap.V != snapshotVersion`) — that is the P7-SYNC-01 trust boundary (an old snapshot document silently lacks the terminal device-trust projection) and stays exact-equality fail-closed; only the trust-neutral retention MANIFEST's read window widened.
+- `internal/cli/doctor.go` (`checkHubHealth`, P5-PROD-05's `--remote` probe): added a "retention manifest version" check, WARNING severity only, that fetches the hub's retention manifest, reads its version stamp via the new bypass helper, and flags either skew direction — the hub's manifest is behind what this binary produces, or the manifest declares a `min_reader_version` this binary cannot satisfy. `ErrRetentionNotFound` (no compaction has ever run) is not a skew signal and stays silent.
+- `spec/07_NAMESPACE_AND_SYNC_MODEL.md` (`last_reviewed` bumped 2026-07-17): new "Version-skew policy (`P7-PROD-03`)" paragraph in the snapshot-exchange section, explaining the N-1 manifest window, the signed `min_reader_version` stamp and why it is signed (an unsigned version-floor field would be a DoS lever for a hub that can write objects but not forge signatures), the explicit non-widening of the snapshot-document exact-equality check, and citing `devstrap hub migrate-events` (`internal/cli/hub_migrate.go`) as this repo's existing in-place-migrator precedent for a hypothetical future genuinely-breaking manifest change.
+
+Validated:
+- `gofmt -w cmd internal`
+- `golangci-lint run` — 0 issues.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `GOCACHE=/tmp/wave-version-skew-gocache go test -race ./...`
+- New tests: `internal/sync/snapshot_test.go` — `TestParseSnapshotEnvelopeVersionExactEqualityUnchanged` (the regression guard: both an older and a newer envelope version are still refused), `TestRetentionManifestVersionRange`, `TestRetentionManifestMinReaderVersionFailsClosed`, `TestRetentionManifestVersionStampBypassesStructuralValidation`; `internal/cli/doctor_test.go` — `TestCheckHubHealthWarnsOnRetentionManifestVersionSkew`, `TestCheckHubHealthWarnsWhenManifestRequiresNewerReader`.
+
+Follow-ups:
+- None. `hub compact` does not yet stamp `MinReaderVersion` on manifests it produces — it stays 0/absent (no declared floor beyond this binary's own range) until a future manifest change is genuinely breaking and needs it.
+
 ## 2026-07-17 — test(cli): hermetic forge PR-routing test coverage (FORGE-05)
 
 Changed:
