@@ -31,6 +31,24 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-17 — test(cli): hermetic forge PR-routing test coverage (FORGE-05)
+
+Changed:
+- `internal/cli/forge_pr_test.go` (new, test-only — `internal/cli/forge.go` and `internal/cli/doctor.go` are untouched): closes FORGE-05, the audit finding that the actual `gh`/`glab`/`tea` invocation paths had zero dedicated hermetic coverage (only the SSH-alias-resolution half of forge routing was tested, `P6-QUAL-04`). Added `stubForgeCLI(t, binName, exitCode, stdout, stderrMsg)`, generalizing the existing `stubSSH`/`stubOp` PATH-shim pattern to gh/glab/tea: the stub records its full invoked argv to `invoked_args.txt` so tests assert the exact command shape, then emits the given stdout/stderr and exit code.
+- New tests against `createForgePR`: `TestCreateForgePRGitHub`, `TestCreateForgePRGitLab` (stub succeeds, asserts returned stdout and the exact `forgePRCommand` argv), `TestCreateForgePRGitea` (exercises the self-hosted-override precedence path — `git.example.com` is confirmed un-detectable by `DetectForge` first, then `forgeOverride="gitea"` forces routing to `tea`), `TestCreateForgePRCLINotFound` (PATH replaced with an empty dir so no real gh/glab/tea can leak in; asserts the graceful-degradation message plus a compare URL, no error), and `TestCreateForgePRCommandFails` (stub exits nonzero; asserts the stderr is wrapped in an `appError{code: exitGit}`).
+- New tests against `checkForgeCLIs` (`doctor.go`): `TestCheckForgeCLIsPresent` (gh+glab stubbed on PATH against adopted GitHub/GitLab projects, expects zero warnings) and `TestCheckForgeCLIsAbsent` (PATH replaced with an empty dir, expects one `checkWarn` row per missing CLI naming the host).
+- `spec/13_CLI_DAEMON_API.md`: extended the existing PR-creation paragraph to state that the `gh`/`glab`/`tea` invocation itself, its self-hosted-override precedence, its missing-CLI degradation, and its failure wrapping are now exercised hermetically (`FORGE-05`), alongside the pre-existing SSH-alias hermetic coverage note (`P6-QUAL-04`); bumped `last_reviewed`.
+- **CodeRabbit review fixups:** `TestCreateForgePRGitHub/GitLab/Gitea` now assert against independently hardcoded expected argv rather than calling `forgePRCommand` as their own oracle — the original shape couldn't have caught a bug inside `forgePRCommand`'s flag mapping, since the test and the code under test would drift together. `spec/13_CLI_DAEMON_API.md` also drops a pre-existing inaccuracy unrelated to this PR's own addition: `--read-confine`'s values are `auto|on|off` (confirmed against `internal/cli/agent.go`'s flag help text); the `(or `require`)` aside was conflating it with `--sandbox require`, a different flag.
+
+Validated:
+- `gofmt -w cmd internal` (no changes).
+- `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run ./...` — 0 issues (after clearing a stale cache holding gosec/staticcheck ghosts from an unrelated, already-deleted sibling worktree).
+- `go run ./cmd/spec-drift --base origin/main --head HEAD` — passes.
+- `GOCACHE=/tmp/wave-forge-05-gocache go test -race ./...` — passes, including the new tests.
+
+Follow-ups:
+- None. The `spec/00_START_HERE.md` "FORGE-05 remaining gap" sentence and the audit ledger's FORGE-05 row are deliberately left untouched here; reconciling both is deferred to a separate wave-close PR (matching this repo's own precedent for multi-PR waves, e.g. PR #196's part-A note deferring to PR #204's reconciliation).
+
 ## 2026-07-17 — feat(cli): project-env allowlists for agent run (P4-GIT-06)
 
 Changed:
