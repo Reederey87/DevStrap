@@ -65,9 +65,11 @@ stdout 'enrolled as approved'
 # A syncs to publish the grant events.
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync
 
-# B syncs: ingests its grant, then pushes the previously-queued b-proj event.
+# B syncs: ingests its grant, then pushes the previously-queued b-proj event
+# plus its first P7-GITSTATE-01 capture (b-proj materialized locally on B's
+# earlier, deferred-push sync; this cycle is the first where capture observes it).
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
-stdout 'pushed 1'
+stdout 'pushed 2'
 
 # A syncs: pulls B's project and materializes it.
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync

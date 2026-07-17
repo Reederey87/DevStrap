@@ -31,6 +31,30 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-17 — feat(sync): wire Layer A gitstate capture into devstrap sync (P7-GITSTATE-01)
+
+Changed:
+- `internal/cli/sync.go`: new `captureAndRecordGitstates`, called from `runSyncCycle` right after the WCK-rotation accounting resolves and before `resumeRevokeContainment`/the push (runs in both the `--namespace-only` and full-materialize paths). For every project whose type is `git_repo`, has a local path, and whose materialization state is not `""`/`skeleton`/`failed`, it runs `internal/git.Runner.CaptureGitstate`, and — unless the result is unchanged from this device's own last-recorded `device_gitstate` row (`gitstateUnchangedSinceLastCapture`, new) — inserts a `repo.gitstate.observed` local event and mirrors it into `device_gitstate` in the SAME transaction (`store.WithTx` + `InsertLocalEventTx` + `tx.UpsertDeviceGitstateTx`, mirroring `env.profile.updated`'s `InsertLocalEventTx`+`UpsertEnvProfileTx` pattern in `env.go`). The explicit local mirror write is required: a remote peer's `ApplyEvents` dedups an event ID already present locally and skips re-applying it, so without this a device's own observation would never appear in its own `status --all-devices`/`doctor` output, only in a peer's once it pulls the event. Local pending events are re-read after the capture step so freshly-queued gitstate events ride this cycle's push (same re-read pattern `maybeRotateWorkspaceKey` already uses for grant events). A capture or mirror-write failure for one project is recorded via `store.RecordProjectWarning` (scrubbed, `P4-GIT-07` precedent) and never fails the cycle or blocks other projects. The capture step runs before eager materialization (`materializePass`), so a project materialized for the first time THIS cycle is captured starting the *next* sync, not this one — and the dedup check means a project's gitstate is otherwise captured/pushed at most once per actual working-state change, not once per sync cycle.
+- `internal/cli/sync_test.go`: `TestSyncCapturesGitstate` (a real materialized `git_repo` project's first sync captures its gitstate into `device_gitstate` with the right device id/branch/head sha; a second sync is a no-op — dedup holds), `TestSyncGitstateCaptureFailureWarnsWithoutFailingCycle` (a project whose local path is not a git repository still lets the sync cycle succeed, recording a `gitstate capture: ` prefixed warning and mirroring nothing).
+- Six testscripts under `cmd/devstrap/testdata/script/` had hardcoded exact `pushed N` / open-conflict counts that shifted now that a materialized project's sync cycle can carry an extra `repo.gitstate.observed` event: `sync_push_cursor.txtar` (added a third sync cycle so the SYNC-04 "idle sync pushes zero" invariant is asserted against a cycle where gitstate has already stabilized, not the cycle that takes the first-ever capture), `sync_join_flow.txtar`, `sync_late_push.txtar`, `pair_and_up_flow.txtar` (a joiner's post-approval sync now also pushes its own project's first-ever gitstate capture alongside the previously-queued project-added event), `sync_revoked_quarantine.txtar` (same shape, plus a pulled peer project's first capture), and `sync_never_granted_epoch_wedge.txtar` (an extra epoch-2-sealed gitstate carrier changed the never-granted device's exact undecryptable-conflict count from 4 to 5). `hub_compact_roundtrip.txtar` additionally needed device C to pin device B (not just the founder) before its post-compaction sync, matching this repo's existing "fleets >2 pin every device" convention (`sync_never_granted_epoch_wedge.txtar`'s precedent) — B's first post-compaction sync now authors its own signed gitstate event, which C could not previously verify since it had never learned B's signing key.
+- `spec/07_NAMESPACE_AND_SYNC_MODEL.md`: Layer A paragraph now describes the runtime wiring (capture-before-materialize ordering, the same-transaction local mirror write, the change-dedup skip) instead of listing it as not-yet-wired.
+- `spec/00_START_HERE.md`: Layer A moves fully into "now built" (backend through runtime wiring); the "Not implemented yet" cross-machine working-state bullet now names only Layer B (WIP refs) as remaining.
+- `spec/13_CLI_DAEMON_API.md`: `### sync` documents the new pre-push capture step, its ordering relative to materialization, the dedup/no-op-on-idle behavior, and its best-effort failure handling.
+
+- Post-review (coordinator, golangci-lint `ineffassign`): the new unconditional post-capture `localEvents` re-read made the pre-existing `if rotated { localEvents, err = ... }` re-read dead — its result was always overwritten before being read. Removed the now-redundant conditional re-read; the single unconditional re-read after `captureAndRecordGitstates` already covers both a just-minted grant (rotation) and a freshly captured gitstate event, since it runs after both steps.
+
+Validated:
+- `gofmt -l cmd internal` (clean)
+- `go build ./...`
+- `go vet ./...`
+- `GOCACHE=/tmp/pr0-gitstate-gocache go test ./internal/cli/... ./internal/sync/... ./internal/state/... ./internal/git/...`
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `GOCACHE=/tmp/pr0-gitstate-gocache go test ./...`
+- `GOCACHE=/tmp/pr0-gitstate-gocache go test -race ./...`
+
+Follow-ups:
+- Layer B (WIP refs, `refs/devstrap/wip/*`) remains genuinely unbuilt — tracked as later PRs in this same wave.
+
 ## 2026-07-17 — chore(docs): post-Pass-7 reliability & substrate wave-close reconciliation
 
 Changed:

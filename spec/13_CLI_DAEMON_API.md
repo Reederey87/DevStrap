@@ -241,6 +241,8 @@ devstrap sync   # hub: git@github.com:you/devstrap-hub.git (zero-infra git carri
 
 Current implementation pushes local events past the Seq push watermark, pulls hub events from the stored per-origin-device Seq cursors (`P5-SYNC-01`), applies namespace events idempotently, then eagerly materializes the tree (blobless clone, draft-bundle extract, env hydrate) unless `--namespace-only` is set; dirty worktrees are never overwritten. `--dry-run` reports the plan without writing.
 
+Before the push (in both the `--namespace-only` and full-materialize paths), each cycle also runs the working-state validation plane's Layer A capture (`P7-GITSTATE-01`): every already-materialized `git_repo` project gets a `repo.gitstate.observed` snapshot (`git status --porcelain=v2 --branch`), mirrored into this device's own `device_gitstate` row (so `status --all-devices`/`doctor` reflect it immediately, not only once a peer pulls the event) and queued as a signed event so it rides this cycle's push. A capture identical to the device's last-recorded mirror is not re-emitted, so an otherwise-idle sync still pushes zero events (`SYNC-04`). The capture step runs before eager materialization, so a project materialized for the first time in this same cycle is captured starting the *next* sync, not this one. A capture or mirror-write failure for one project records a non-fatal warning on that project (surfaced the same way as a materialize failure, `P4-GIT-07`) and never fails the cycle.
+
 Options:
 
 ```bash
