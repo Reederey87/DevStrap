@@ -108,6 +108,7 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newHydrateCommand(stdout, opts))
 	cmd.AddCommand(newOpenCommand(stdout, opts))
 	cmd.AddCommand(newWorktreeCommand(stdout, opts))
+	cmd.AddCommand(newWipCommand(stdout, opts))
 	cmd.AddCommand(newSyncCommand(stdout, opts))
 	cmd.AddCommand(newHubCommand(stdout, opts))
 	cmd.AddCommand(newKeysCommand(stdout, opts))
