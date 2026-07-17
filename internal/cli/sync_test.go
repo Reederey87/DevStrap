@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/Reederey87/DevStrap/internal/config"
+	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
 )
@@ -175,5 +176,143 @@ func draftSnapshotEvent(t *testing.T, id, ref string) state.Event {
 		Type:        dssync.EventDraftSnapshotCreated,
 		PayloadJSON: string(payload),
 		ContentHash: state.ContentHash(string(payload)),
+	}
+}
+
+// TestSyncCapturesGitstate pins P7-GITSTATE-01: `devstrap sync` captures this
+// device's working-state observation for an already-materialized git_repo
+// project and mirrors it into device_gitstate (the read side status
+// --all-devices/doctor use), not just onto the outbound event log.
+func TestSyncCapturesGitstate(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init: %v (%s)", err, stderr)
+	}
+
+	nsPath := "work/acme/api"
+	repoPath := filepath.Join(root, filepath.FromSlash(nsPath))
+	runGit(t, repoPath, "init", "-b", "main")
+	runGit(t, repoPath, "config", "user.email", "devstrap@example.test")
+	runGit(t, repoPath, "config", "user.name", "DevStrap Test")
+	runGit(t, repoPath, "commit", "--allow-empty", "-m", "init")
+
+	opts := testOptions(home, root)
+	ctx := context.Background()
+	store, err := opts.openState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertProject(ctx, state.UpsertProjectParams{
+		Path:                 nsPath,
+		Type:                 "git_repo",
+		RemoteURL:            "https://github.com/acme/api.git",
+		RemoteKey:            "github.com/acme/api",
+		LocalPath:            repoPath,
+		MaterializationState: "available",
+		DirtyState:           "clean",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	device, err := store.CurrentDevice(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeStore(store)
+
+	hubPath := filepath.Join(t.TempDir(), "hub.json")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "sync", "--hub-file", hubPath, "--namespace-only"); err != nil {
+		t.Fatalf("sync: %v (%s)", err, stderr)
+	}
+
+	store = openTestStore(t, home)
+	rows, err := store.DeviceGitstateForProject(ctx, nsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("DeviceGitstateForProject(%q) = %d rows, want 1 (rows=%+v)", nsPath, len(rows), rows)
+	}
+	got := rows[0]
+	if got.DeviceID != device.ID {
+		t.Fatalf("device_id = %q, want %q (this device's own observation)", got.DeviceID, device.ID)
+	}
+	if got.Branch != "main" {
+		t.Fatalf("branch = %q, want main", got.Branch)
+	}
+	if got.HeadSHA == "" {
+		t.Fatal("head_sha empty, want the commit's SHA")
+	}
+
+	// A second sync cycle must not error — UpsertDeviceGitstateTx's
+	// HLC-guarded upsert must stay idempotent on repeated capture.
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "sync", "--hub-file", hubPath, "--namespace-only"); err != nil {
+		t.Fatalf("second sync: %v (%s)", err, stderr)
+	}
+	rows, err = store.DeviceGitstateForProject(ctx, nsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("after second sync: DeviceGitstateForProject(%q) = %d rows, want 1", nsPath, len(rows))
+	}
+}
+
+// TestSyncGitstateCaptureFailureWarnsWithoutFailingCycle pins the P4-GIT-07
+// best-effort contract: a project whose local path is not (or no longer) a
+// git repository must not fail the sync cycle — it records a scrubbed
+// warning on the project's device_project_state row instead.
+func TestSyncGitstateCaptureFailureWarnsWithoutFailingCycle(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init: %v (%s)", err, stderr)
+	}
+
+	nsPath := "work/acme/broken"
+	// A real directory that is NOT a git repository: CaptureGitstate's
+	// `git status` fails deterministically without a .git.
+	notARepo := t.TempDir()
+
+	opts := testOptions(home, root)
+	ctx := context.Background()
+	store, err := opts.openState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertProject(ctx, state.UpsertProjectParams{
+		Path:                 nsPath,
+		Type:                 "git_repo",
+		RemoteURL:            "https://github.com/acme/broken.git",
+		RemoteKey:            "github.com/acme/broken",
+		LocalPath:            notARepo,
+		MaterializationState: "available",
+		DirtyState:           "clean",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	closeStore(store)
+
+	hubPath := filepath.Join(t.TempDir(), "hub.json")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "sync", "--hub-file", hubPath, "--namespace-only"); err != nil {
+		t.Fatalf("sync with a broken gitstate capture must still succeed: %v (%s)", err, stderr)
+	}
+
+	store = openTestStore(t, home)
+	project, err := store.ProjectByPath(ctx, nsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(project.LastError, "gitstate capture: ") {
+		t.Fatalf("last_error = %q, want a gitstate capture: warning", project.LastError)
+	}
+	rows, err := store.DeviceGitstateForProject(ctx, nsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("DeviceGitstateForProject(%q) = %d rows, want 0 (capture failed, nothing to mirror)", nsPath, len(rows))
 	}
 }

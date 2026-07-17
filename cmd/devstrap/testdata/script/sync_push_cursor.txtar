@@ -1,5 +1,5 @@
 # SYNC-04: the push side has a per-hub cursor so a sync cycle re-uploads only
-# new local-origin events. A second sync with no new local activity pushes zero.
+# new local-origin events. A repeat sync with no new local activity pushes zero.
 
 env DEVSTRAP_NO_KEYCHAIN=1
 env GIT_AUTHOR_NAME=devstrap-test
@@ -12,10 +12,20 @@ exec git init --bare -b main $WORK/remote.git
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA init
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/proj $WORK/remote.git
 
-# First sync: one local-origin event is pushed.
+# First sync: one local-origin event (project.added) is pushed. work/proj
+# materializes during THIS same cycle, and P7-GITSTATE-01's capture step runs
+# before materialization, so it has nothing to observe yet.
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
 stdout 'pushed 1'
 
-# Second sync: no new local events — the push cursor bounds it to zero.
+# Second sync: work/proj is materialized now, so this cycle's capture takes
+# its FIRST working-state observation and pushes it (P7-GITSTATE-01) — one
+# new event, even though nothing else changed locally.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+stdout 'pushed 1'
+
+# Third sync: the working state is unchanged since that capture, so the
+# gitstate dedup skips emitting again — no new local events at all, and the
+# push cursor bounds this cycle to zero (the actual SYNC-04 invariant).
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
 stdout 'pushed 0'

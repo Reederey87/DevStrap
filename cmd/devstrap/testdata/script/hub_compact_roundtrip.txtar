@@ -76,6 +76,13 @@ exec sh -c 'CODE=$(devstrap --home=$WORK/homeA --root=$WORK/CodeA devices pairin
 stdout 'Adopted workspace id ws_'
 exec sh -c 'CCODE=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices pairing-code 2>/dev/null); CFP=$(devstrap --home=$WORK/homeC --root=$WORK/CodeC devices recipient --fingerprint); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll --code "$CCODE" --approve --fingerprint "$CFP"'
 stdout 'enrolled as approved'
+
+# C also pins B (fleets >2 pin every device — same convention as
+# sync_never_granted_epoch_wedge.txtar): B's line-69 sync took its first
+# P7-GITSTATE-01 capture of api/web, so B now has signed events on the hub
+# too, and C must hold B's signing key to verify them.
+exec sh -c 'B_ID=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices list | awk "NR==1{print \$1}"); BREC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); BSIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); BFP=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --fingerprint); devstrap --home=$WORK/homeC --root=$WORK/CodeC devices enroll "$B_ID" --name b --os linux --arch arm64 --age-recipient "$BREC" --signing-public-key "$BSIG" --approve --fingerprint "$BFP"'
+
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
 
 # C's first sync: its cursor is below the floor, so the hub demands a snapshot;
