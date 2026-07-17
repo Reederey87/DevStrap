@@ -65,7 +65,7 @@ func TestCreateForgePRGitHub(t *testing.T) {
 		t.Fatalf("createForgePR output = %q, want the stub's stdout", out)
 	}
 
-	want := forgePRCommand(ForgeGitHub, "main", "agent/route-tests", "Add route tests", "Body text")[1:]
+	want := []string{"pr", "create", "--base", "main", "--head", "agent/route-tests", "--title", "Add route tests", "--body", "Body text"}
 	got := stubbedInvokedArgs(t, dir)
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("invoked gh argv = %v, want %v", got, want)
@@ -84,7 +84,7 @@ func TestCreateForgePRGitLab(t *testing.T) {
 		t.Fatalf("createForgePR output = %q, want the stub's stdout", out)
 	}
 
-	want := forgePRCommand(ForgeGitLab, "main", "agent/route-tests", "Add route tests", "Body text")[1:]
+	want := []string{"mr", "create", "--target-branch", "main", "--source-branch", "agent/route-tests", "--title", "Add route tests", "--description", "Body text"}
 	got := stubbedInvokedArgs(t, dir)
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("invoked glab argv = %v, want %v", got, want)
@@ -113,7 +113,7 @@ func TestCreateForgePRGitea(t *testing.T) {
 		t.Fatalf("createForgePR output = %q, want the stub's stdout", out)
 	}
 
-	want := forgePRCommand(ForgeGitea, "main", "agent/route-tests", "Add route tests", "Body text")[1:]
+	want := []string{"pr", "create", "--base", "main", "--head", "agent/route-tests", "--title", "Add route tests", "--description", "Body text"}
 	got := stubbedInvokedArgs(t, dir)
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("invoked tea argv = %v, want %v", got, want)
