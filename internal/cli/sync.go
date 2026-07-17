@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/Reederey87/DevStrap/internal/config"
+	dsgit "github.com/Reederey87/DevStrap/internal/git"
 	"github.com/Reederey87/DevStrap/internal/logging"
+	"github.com/Reederey87/DevStrap/internal/redact"
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
 	"github.com/spf13/cobra"
@@ -184,14 +186,6 @@ func runSyncCycle(ctx context.Context, stdout, stderr io.Writer, opts *options, 
 		return rerr
 	}
 	result.KeyRotated = rotated
-	if rotated {
-		// The localEvents snapshot above predates the mint; re-read so the
-		// just-minted grant events are pushed in this same cycle.
-		localEvents, err = store.LocalPendingEventsBySeq(ctx, pushCursor)
-		if err != nil {
-			return err
-		}
-	}
 	rotationAccounted := rotated
 	if !rotationAccounted {
 		if _, owed, oerr := wckRotationPendingSince(ctx, store); oerr != nil {
@@ -204,6 +198,19 @@ func runSyncCycle(ctx context.Context, stdout, stderr io.Writer, opts *options, 
 			rotationAccounted = true
 		}
 	}
+	// P7-GITSTATE-01: capture and emit this device's working-state observation
+	// for every already-materialized project so this cycle's push carries it.
+	captureAndRecordGitstates(ctx, store, opts)
+	// Re-read so any just-minted grant events (rotated above) and freshly
+	// captured gitstate events both ride this cycle's push. This single
+	// unconditional re-read covers both cases, superseding the narrower
+	// rotated-only re-read the rotation block used before this capture step
+	// existed.
+	localEvents, err = store.LocalPendingEventsBySeq(ctx, pushCursor)
+	if err != nil {
+		return err
+	}
+
 	// Revoke-containment resume lines are process diagnostics (stderr) so
 	// --json stdout stays a single document.
 	if err := resumeRevokeContainment(ctx, stderr, opts, store, hub, rotationAccounted); err != nil {
@@ -280,6 +287,118 @@ func runSyncCycle(ctx context.Context, stdout, stderr io.Writer, opts *options, 
 			result.Pushed, result.Pulled, result.MaterializedSucceeded, result.MaterializedTotal, result.MaterializedSkipped)
 		return nil
 	}, result)
+}
+
+// captureAndRecordGitstates runs Layer A's repo.gitstate.observed capture
+// (P7-GITSTATE-01) for every already-materialized git_repo project. For each
+// one it captures the working-state snapshot, mirrors it into this device's
+// own device_gitstate row, and queues a signed event so it propagates to
+// peers on this cycle's push. The local mirror write is explicit (mirroring
+// env.profile.updated's InsertLocalEventTx + UpsertEnvProfileTx pattern in
+// env.go) because a remote apply dedups an event ID already present locally
+// and skips re-applying it — without this, a device's own observation would
+// never appear in its own mirror, only in peers' once they pull it.
+//
+// A capture that matches this device's own last-recorded mirror row is
+// skipped entirely (no new event, no mirror write): SYNC-04 guarantees an
+// idle sync cycle with no new local activity pushes zero events, and an
+// unconditional per-cycle emit would turn every sync of a materialized repo
+// into perpetual event-log churn even when nothing about its working state
+// changed.
+//
+// Best-effort: a capture or write failure for one project records a
+// non-fatal RecordProjectWarning (P4-GIT-07 precedent) and must never fail
+// the sync cycle or block other projects.
+func captureAndRecordGitstates(ctx context.Context, store *state.Store, opts *options) {
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return
+	}
+	device, err := store.CurrentDevice(ctx)
+	if err != nil {
+		return
+	}
+	runner := gitRunner(opts)
+	for _, p := range projects {
+		if p.Type != "git_repo" || p.LocalPath == "" {
+			continue
+		}
+		if p.MaterializationState == "" || p.MaterializationState == "skeleton" || p.MaterializationState == "failed" {
+			continue // not actually materialized on disk yet
+		}
+		gs, gerr := runner.CaptureGitstate(ctx, p.LocalPath)
+		if gerr != nil {
+			_ = store.RecordProjectWarning(ctx, p.ID, redact.Scrub(fmt.Sprintf("gitstate capture: %v", gerr)))
+			continue
+		}
+		if unchanged, cerr := gitstateUnchangedSinceLastCapture(ctx, store, device.ID, p.PathKey, gs); cerr == nil && unchanged {
+			continue
+		}
+		payload := dssync.GitstatePayload{
+			Path:           p.Path,
+			Branch:         gs.Branch,
+			HeadSHA:        gs.HeadSHA,
+			UpstreamBranch: gs.UpstreamBranch,
+			UpstreamSHA:    gs.UpstreamSHA,
+			DirtyCount:     gs.DirtyCount,
+			UntrackedCount: gs.UntrackedCount,
+			UnmergedCount:  gs.UnmergedCount,
+			AheadCount:     gs.AheadCount,
+			BehindCount:    gs.BehindCount,
+			StashCount:     gs.StashCount,
+		}
+		raw, merr := json.Marshal(payload)
+		if merr != nil {
+			continue // cannot happen for this struct; skip defensively
+		}
+		params := state.GitstateParams{
+			Branch:         gs.Branch,
+			HeadSHA:        gs.HeadSHA,
+			UpstreamBranch: gs.UpstreamBranch,
+			UpstreamSHA:    gs.UpstreamSHA,
+			DirtyCount:     gs.DirtyCount,
+			UntrackedCount: gs.UntrackedCount,
+			UnmergedCount:  gs.UnmergedCount,
+			AheadCount:     gs.AheadCount,
+			BehindCount:    gs.BehindCount,
+			StashCount:     gs.StashCount,
+		}
+		if txErr := store.WithTx(ctx, func(tx *state.Tx) error {
+			ev, err := store.InsertLocalEventTx(ctx, tx, dssync.NewGitstateEvent(string(raw)))
+			if err != nil {
+				return err
+			}
+			return tx.UpsertDeviceGitstateTx(ctx, device.ID, p.PathKey, p.Path, params, ev)
+		}); txErr != nil {
+			_ = store.RecordProjectWarning(ctx, p.ID, redact.Scrub(fmt.Sprintf("gitstate emit: %v", txErr)))
+		}
+	}
+}
+
+// gitstateUnchangedSinceLastCapture reports whether gs matches this device's
+// own last-recorded device_gitstate row for the project at pathKey. Absence
+// of a row (never captured before) is reported as changed.
+func gitstateUnchangedSinceLastCapture(ctx context.Context, store *state.Store, deviceID, pathKey string, gs dsgit.Gitstate) (bool, error) {
+	rows, err := store.DeviceGitstateForProject(ctx, pathKey)
+	if err != nil {
+		return false, err
+	}
+	for _, row := range rows {
+		if row.DeviceID != deviceID {
+			continue
+		}
+		return row.Branch == gs.Branch &&
+			row.HeadSHA == gs.HeadSHA &&
+			row.UpstreamBranch == gs.UpstreamBranch &&
+			row.UpstreamSHA == gs.UpstreamSHA &&
+			row.DirtyCount == gs.DirtyCount &&
+			row.UntrackedCount == gs.UntrackedCount &&
+			row.UnmergedCount == gs.UnmergedCount &&
+			row.AheadCount == gs.AheadCount &&
+			row.BehindCount == gs.BehindCount &&
+			row.StashCount == gs.StashCount, nil
+	}
+	return false, nil
 }
 
 // pullApplyOutcome reports one pull+apply pass: the decrypted events and the

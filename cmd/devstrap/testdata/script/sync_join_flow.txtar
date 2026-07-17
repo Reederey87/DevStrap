@@ -63,9 +63,11 @@ stdout 'enrolled as approved'
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
 
 # B syncs: pulls + ingests its grant (now holds epoch 1), then pushes the
-# previously-queued b-proj event under the fleet key.
+# previously-queued b-proj event under the fleet key, plus b-proj's first
+# P7-GITSTATE-01 working-state capture (b-proj materialized back on B's line-48
+# sync, so this is the first cycle where the capture step observes it).
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
-stdout 'pushed 1'
+stdout 'pushed 2'
 
 # The hub still stores only ciphertext — b-proj never leaks in plaintext.
 ! grep 'b-proj' $WORK/hub.json

@@ -54,8 +54,11 @@ stdout 'enrolled as approved'
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
 exec devstrap --home=$WORK/homeC --root=$WORK/CodeC sync --hub-file=$WORK/hub.json
 exec devstrap --home=$WORK/homeC --root=$WORK/CodeC add --path work/c-proj $WORK/remoteC.git
+# c-proj's own project.added event, plus a-proj's first P7-GITSTATE-01 capture
+# on C (a-proj materialized locally on C's prior sync when it pulled A's
+# namespace; this cycle is the first where the capture step observes it).
 exec devstrap --home=$WORK/homeC --root=$WORK/CodeC sync --hub-file=$WORK/hub.json
-stdout 'pushed 1'
+stdout 'pushed 2'
 
 # A applies C's newer event: A's view is now PAST t_B. Under the HLC-watermark
 # cursor this is the poisoned step — the next pull would start above t_B and
@@ -68,8 +71,11 @@ exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.js
 exec sh -c 'BCODE=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices pairing-code 2>/dev/null); BFP=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --fingerprint); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll --code "$BCODE" --approve --fingerprint "$BFP"'
 stdout 'enrolled as approved'
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+# b-proj's previously-queued, now-unblocked project.added event, plus its
+# first P7-GITSTATE-01 capture (b-proj materialized locally on B's very first,
+# deferred-push sync; this cycle is the first where capture observes it).
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
-stdout 'pushed 1'
+stdout 'pushed 2'
 
 # THE ASSERTION: A's next sync must deliver and materialize B's late-pushed,
 # old-HLC project. Fails on the HLC-watermark cursor; passes with per-device
