@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -58,7 +59,7 @@ func TestStatusAllDevices(t *testing.T) {
 	if _, err := store.UpsertProject(ctx, state.UpsertProjectParams{Path: "work/acme/never", Type: "plain_folder"}); err != nil {
 		t.Fatal(err)
 	}
-	observedHLC := time.Now().Add(-2*time.Hour).UnixMilli() << gitstateHLCLogicalBits
+	observedHLC := state.HLCFromPhysicalTime(time.Now().Add(-2 * time.Hour))
 	if err := store.WithTx(ctx, func(tx *state.Tx) error {
 		return tx.UpsertDeviceGitstateTx(ctx, "dev_peer", "work/acme/api", "work/acme/api", state.GitstateParams{
 			Branch: "main", HeadSHA: "abc123", DirtyCount: 2, UntrackedCount: 1,
@@ -102,3 +103,34 @@ func TestStatusAllDevices(t *testing.T) {
 		t.Fatalf("never-synced project gitstate = %+v, want an explicit never-synced row — spec/07 forbids a silent all-clear", never)
 	}
 }
+
+// TestGitstateRowsForProject pins the fix for a bug where a single project's
+// DeviceGitstateForProject error aborted renderAllDevicesStatus entirely
+// (`return err`), blacking out visibility into every other, already
+// successfully-read project. gitstateRowsForProject is the per-project
+// mapping renderAllDevicesStatus's loop now always appends to `out` for —
+// never returning early — so a failure on one project can only ever produce
+// a visible "error: ..." row for that project, not lose the rest of the
+// render.
+func TestGitstateRowsForProject(t *testing.T) {
+	now := time.Now()
+
+	if got := gitstateRowsForProject(nil, errFakeGitstateRead, now); len(got) != 1 || got[0].Observed != "error: boom" {
+		t.Fatalf("error-path rows = %+v, want one visible error row, not an empty/aborted result", got)
+	}
+
+	if got := gitstateRowsForProject(nil, nil, now); len(got) != 1 || got[0].Observed != "never synced" {
+		t.Fatalf("zero-row rows = %+v, want one never-synced row", got)
+	}
+
+	rows := []state.DeviceGitstate{{
+		DeviceID: "dev_peer", Branch: "main", DirtyCount: 2,
+		ObservedAtHLC: state.HLCFromPhysicalTime(now.Add(-90 * time.Minute)),
+	}}
+	got := gitstateRowsForProject(rows, nil, now)
+	if len(got) != 1 || got[0].DeviceID != "dev_peer" || !strings.Contains(got[0].Observed, "last seen") {
+		t.Fatalf("populated rows = %+v, want one dev_peer row with an observed age", got)
+	}
+}
+
+var errFakeGitstateRead = errors.New("boom")

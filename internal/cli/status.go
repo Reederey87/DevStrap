@@ -134,22 +134,11 @@ func renderStatus(ctx context.Context, stdout io.Writer, opts *options) error {
 	}, summary)
 }
 
-// gitstateHLCLogicalBits mirrors the 16-bit logical-counter width that
-// internal/state and internal/sync each pack into the low bits of an HLC
-// value (see hlcLogicalBits in internal/state/store.go and internal/sync/hlc.go)
-// so a stored observed_at_hlc can be read back as wall-clock time here without
-// an import cycle into either package's unexported constant.
-const gitstateHLCLogicalBits = 16
-
-func hlcToTime(hlc int64) time.Time {
-	return time.UnixMilli(hlc >> gitstateHLCLogicalBits)
-}
-
-// deviceGitstateRow is one device's observed working-state for a project, or
-// the synthetic "never synced" row for a project with zero device_gitstate
-// rows. spec/07 Layer A requires `status --all-devices` to always render an
-// observed column — a project with no observations must never be silently
-// omitted.
+// deviceGitstateRow is one device's observed working-state for a project, the
+// synthetic "never synced" row for a project with zero device_gitstate rows,
+// or an "error: ..." row when reading that one project's gitstate failed.
+// spec/07 Layer A requires `status --all-devices` to always render an
+// observed column — a project must never be silently omitted.
 type deviceGitstateRow struct {
 	DeviceID       string `json:"device_id,omitempty"`
 	Branch         string `json:"branch,omitempty"`
@@ -167,11 +156,46 @@ type projectGitstateStatus struct {
 	Devices []deviceGitstateRow `json:"devices"`
 }
 
+// gitstateRowsForProject maps one project's DeviceGitstateForProject result
+// to its rendered rows: an "error: ..." row when the read itself failed, an
+// explicit "never synced" row when it succeeded with zero observations, or
+// one row per device otherwise. Extracted as a pure function (no store, no
+// I/O) so the error branch — which must never abort the surrounding
+// per-project loop in renderAllDevicesStatus and blank out every other,
+// already-successfully-read project — is directly unit-testable.
+func gitstateRowsForProject(rows []state.DeviceGitstate, err error, now time.Time) []deviceGitstateRow {
+	switch {
+	case err != nil:
+		return []deviceGitstateRow{{Observed: "error: " + err.Error()}}
+	case len(rows) == 0:
+		return []deviceGitstateRow{{Observed: "never synced"}}
+	default:
+		out := make([]deviceGitstateRow, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, deviceGitstateRow{
+				DeviceID:       r.DeviceID,
+				Branch:         r.Branch,
+				DirtyCount:     r.DirtyCount,
+				UntrackedCount: r.UntrackedCount,
+				UnmergedCount:  r.UnmergedCount,
+				AheadCount:     r.AheadCount,
+				BehindCount:    r.BehindCount,
+				StashCount:     r.StashCount,
+				Observed:       fmt.Sprintf("last seen %s ago", now.Sub(state.HLCPhysicalTime(r.ObservedAtHLC)).Round(time.Second)),
+			})
+		}
+		return out
+	}
+}
+
 // renderAllDevicesStatus implements `status --all-devices` (P7-GITSTATE-01
 // CLI surfacing): for every local project it renders each device's
 // last-observed git working-state, newest first, from the mirror-only
 // device_gitstate table. A project no device has ever reported on gets one
-// explicit "never synced" row instead of being left out of the output.
+// explicit "never synced" row instead of being left out of the output, and a
+// project whose own gitstate read fails gets a visible "error: ..." row
+// instead of aborting the whole render and blacking out every other,
+// already-successfully-read project.
 func renderAllDevicesStatus(ctx context.Context, stdout io.Writer, opts *options) error {
 	store, err := opts.openState(ctx)
 	if err != nil {
@@ -188,28 +212,7 @@ func renderAllDevicesStatus(ctx context.Context, stdout io.Writer, opts *options
 	out := make([]projectGitstateStatus, 0, len(projects))
 	for _, project := range projects {
 		rows, err := store.DeviceGitstateForProject(ctx, project.PathKey)
-		if err != nil {
-			return err
-		}
-		p := projectGitstateStatus{Path: project.Path}
-		if len(rows) == 0 {
-			p.Devices = []deviceGitstateRow{{Observed: "never synced"}}
-		} else {
-			for _, r := range rows {
-				p.Devices = append(p.Devices, deviceGitstateRow{
-					DeviceID:       r.DeviceID,
-					Branch:         r.Branch,
-					DirtyCount:     r.DirtyCount,
-					UntrackedCount: r.UntrackedCount,
-					UnmergedCount:  r.UnmergedCount,
-					AheadCount:     r.AheadCount,
-					BehindCount:    r.BehindCount,
-					StashCount:     r.StashCount,
-					Observed:       fmt.Sprintf("last seen %s ago", now.Sub(hlcToTime(r.ObservedAtHLC)).Round(time.Second)),
-				})
-			}
-		}
-		out = append(out, p)
+		out = append(out, projectGitstateStatus{Path: project.Path, Devices: gitstateRowsForProject(rows, err, now)})
 	}
 
 	return opts.render(stdout, func(w io.Writer) error {

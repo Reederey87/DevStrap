@@ -591,7 +591,7 @@ const gitstateStaleAfter = 7 * 24 * time.Hour
 func checkGitstateFreshness(ctx context.Context, store *state.Store) []checkResult {
 	projects, err := store.ListProjects(ctx)
 	if err != nil {
-		return nil
+		return []checkResult{{Name: "gitstate", Status: checkWarn, Detail: err.Error()}}
 	}
 	var out []checkResult
 	for _, p := range projects {
@@ -609,7 +609,7 @@ func checkGitstateFreshness(ctx context.Context, store *state.Store) []checkResu
 			})
 			continue
 		}
-		age := time.Since(hlcToTime(rows[0].ObservedAtHLC))
+		age := time.Since(state.HLCPhysicalTime(rows[0].ObservedAtHLC))
 		detail := fmt.Sprintf("newest observation %s old (device %s)", age.Round(time.Second), rows[0].DeviceID)
 		if age > gitstateStaleAfter {
 			out = append(out, checkResult{

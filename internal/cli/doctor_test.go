@@ -488,8 +488,8 @@ func TestCheckGitstateFreshness(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	staleHLC := time.Now().Add(-8*24*time.Hour).UnixMilli() << gitstateHLCLogicalBits
-	freshHLC := time.Now().Add(-1*time.Hour).UnixMilli() << gitstateHLCLogicalBits
+	staleHLC := state.HLCFromPhysicalTime(time.Now().Add(-8 * 24 * time.Hour))
+	freshHLC := state.HLCFromPhysicalTime(time.Now().Add(-1 * time.Hour))
 	if err := store.WithTx(ctx, func(tx *state.Tx) error {
 		if err := tx.UpsertDeviceGitstateTx(ctx, "dev_peer", "work/acme/stale", "work/acme/stale", state.GitstateParams{
 			Branch: "main", HeadSHA: "abc123",
@@ -520,5 +520,26 @@ func TestCheckGitstateFreshness(t *testing.T) {
 	fresh, ok := byName["gitstate: work/acme/fresh"]
 	if !ok || fresh.Status != checkOK {
 		t.Fatalf("fresh result = %+v, want ok", fresh)
+	}
+}
+
+// TestCheckGitstateFreshnessSurfacesListProjectsError pins the fix for a bug
+// where checkGitstateFreshness returned nil on a store.ListProjects error,
+// making the entire check silently vanish from `doctor` output — exactly the
+// silent all-clear spec/07 forbids. An un-migrated store (no
+// namespace_entries table) reliably forces ListProjects to fail, the same
+// technique TestSummaryBeforeMigrateIsFriendly (internal/state/store_test.go)
+// uses.
+func TestCheckGitstateFreshnessSurfacesListProjectsError(t *testing.T) {
+	ctx := context.Background()
+	store, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	results := checkGitstateFreshness(ctx, store)
+	if len(results) != 1 || results[0].Name != "gitstate" || results[0].Status != checkWarn {
+		t.Fatalf("results = %+v, want exactly one visible gitstate warning row, not a silently empty result", results)
 	}
 }
