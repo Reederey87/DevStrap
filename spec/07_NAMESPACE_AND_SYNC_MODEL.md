@@ -248,6 +248,7 @@ env.profile.updated           # encrypted/provider env profile metadata; blob pl
 device.key.granted            # age-wrapped Workspace Content Key for a recipient+(epoch, kid) (P4-SEC-07/P6-SEC-02)
 device.revoked                # synced trust flip: sticky/monotonic apply, local device exempt (TRUST-01)
 device.lost                   # same plane as device.revoked; revoked <-> lost churn is a no-op
+repo.gitstate.observed        # signed read-only git-state snapshot (working-state validation plane — Layer A, P7-GITSTATE-01)
 conflict.created
 conflict.resolved
 ```
@@ -266,7 +267,6 @@ repo.remote.changed
 env.profile.bound             # superseded by shipped env.profile.updated (ENV-SYNC-01)
 tooling.profile.bound
 agent.policy.bound
-repo.gitstate.observed        # signed read-only git-state snapshot (working-state validation plane — Layer A)
 repo.wip.pushed               # a WIP commit pushed to refs/devstrap/wip/<device>/<path_key> (recovery — Layer B)
 ```
 
@@ -274,7 +274,7 @@ repo.wip.pushed               # a WIP commit pushed to refs/devstrap/wip/<device
 
 The human-convenience plane that answers "I forgot to push and I'm now on another machine." It is **strictly separate from the agent plane** — agents always base from `origin/<default_branch>` and the fresh-worktree resolver must never read `refs/devstrap/wip/*`. Three layers (see `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md` Section 5):
 
-- **Layer A — validation (Phase 0):** each device emits `repo.gitstate.observed` (branch, HEAD sha, upstream sha, dirty/untracked/unmerged/ahead/behind/stash counts), captured with `git --no-optional-locks status --porcelain=v2 --branch` so capture never writes `.git/index`. Apply is mirror-only into a sidecar `device_gitstate` table (opaque `device_id`, **no FK** to `devices` since remote devices are not enrolled until Phase 2). `status --all-devices`/`doctor` warn on un-backed-up work and **always render snapshot age** ("never synced / last seen N ago"), never silent all-clear.
+- **Layer A — validation (Phase 0, SHIPPED `P7-GITSTATE-01`):** each device emits `repo.gitstate.observed` (branch, HEAD sha, upstream sha, dirty/untracked/unmerged/ahead/behind/stash counts), captured with `git --no-optional-locks status --porcelain=v2 --branch` so capture never writes `.git/index` (`internal/git.Runner.CaptureGitstate`; upstream SHA and stash count are two cheap follow-up calls). Apply is mirror-only into a sidecar `device_gitstate` table (migration `00029`; opaque `device_id`, **no FK** to `devices` since remote devices are not enrolled until Phase 2 — mirrors `device_heads`; also no FK to `namespace_entries`, since this mirror does not need the observed project to exist locally to apply). Shipped: the capture routine, the `repo.gitstate.observed` constructor/apply handler, and the `device_gitstate` storage. Not yet wired: calling capture during `devstrap sync`, and the `status --all-devices`/`doctor` CLI surfacing that must warn on un-backed-up work and **always render snapshot age** ("never synced / last seen N ago"), never silent all-clear — both are tracked as a follow-up change.
 - **Layer B — WIP recovery (Phase 1):** `git stash create` (no worktree/index mutation) → `git push origin <sha>:refs/devstrap/wip/<device_id>/<path_key>` over git's integrity-checked transport → emit `repo.wip.pushed`. Forge-agnostic. Machine B fetches into the same ref namespace; `wip apply` materializes into the worktree only on explicit command, never as a branch or base.
 - **Layer C — encrypted bundle (Phase 3, narrow):** only for `draft_project`/`local_git`/untracked-only where there is no remote to push a ref to — `draft.snapshot.created` with `internal/envbundle` age encryption.
 
