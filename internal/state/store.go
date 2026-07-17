@@ -3294,6 +3294,24 @@ func unpackHLC(value int64) (physical int64, logical int64) {
 	return value >> hlcLogicalBits, value & hlcLogicalMask
 }
 
+// HLCPhysicalTime returns the wall-clock time encoded in an HLC value's
+// physical component (see packHLC/unpackHLC). It lets callers outside this
+// package — e.g. rendering a stored device_gitstate.observed_at_hlc — recover
+// an approximate timestamp from a stored HLC without duplicating the
+// bit-packing width themselves.
+func HLCPhysicalTime(hlc int64) time.Time {
+	physical, _ := unpackHLC(hlc)
+	return time.UnixMilli(physical)
+}
+
+// HLCFromPhysicalTime is the inverse of HLCPhysicalTime: it packs a wall-clock
+// time into an HLC value with a zero logical counter. Primarily useful for
+// constructing fixture HLC values (e.g. a backdated device_gitstate
+// observation in a test) without callers re-deriving the bit-packing width.
+func HLCFromPhysicalTime(t time.Time) int64 {
+	return packHLC(t.UnixMilli(), 0)
+}
+
 func insertEvent(ctx context.Context, exec sqlExecutor, workspaceID string, event Event) (bool, error) {
 	if event.ID == "" {
 		var err error
