@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-15
+last_reviewed: 2026-07-17
 tracks_code: [cmd/**, internal/**, .github/**, AGENTS.md, README.md, go.mod, go.sum, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # DevStrap — Start Here
@@ -156,7 +156,6 @@ Implemented in this repository:
 Not implemented yet (genuinely unbuilt — features that are partly shipped are listed under "now built" below, never here):
 
 - the bespoke **HTTP/SSE relay** (full-state snapshot exchange is now SHIPPED — sealed snapshots, signed retention manifest, `hub compact`, fail-closed import; the live R2/S3 backend is shipped: the `aws-sdk-go-v2` S3 adapter is wired behind the `hubFromOptions` `r2://` seam, with the `Hub` interface, R2 keying/retry/conditional-put logic, blob GC, retention floor, and content-hash verification all shipped and unit-tested, and the same conformance contract proven against MinIO via an env-gated integration test);
-- production **remote device registration** (out-of-band fingerprint confirmation, the local trust plane, synced encrypted env/draft bundle exchange, device-revoke rewrap, and synced `device.revoked`/`device.lost` trust propagation — TRUST-01 — are shipped);
 - daemon, local socket API, FSEvents-specific Mac watcher (the LaunchAgent/systemd installers are now shipped as `devstrap service`, wrapping `run-loop`);
 - project-env allowlists and non-generic engine adapters;
 - cross-machine working-state sync — git-state validation plane (`repo.gitstate.observed`) and WIP refs (`refs/devstrap/wip/*`); the encrypted draft-bundle layer (Layer C) is shipped;

@@ -31,6 +31,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-17 — docs(spec): remove stale remote-device-registration bullet from spec/00 (now-closed by P7-PROD-01)
+
+Changed:
+- `spec/00_START_HERE.md`: removed the "Not implemented yet" bullet for "production **remote device registration**" — everything it named (out-of-band fingerprint confirmation, local trust plane, synced encrypted env/draft bundle exchange, device-revoke rewrap, synced `device.revoked`/`device.lost` propagation, TRUST-01) was already marked shipped in its own parenthetical, and the guided pairing UX gap it implicitly gestured at (P7-PROD-01, `devstrap pair`/`up`/`join`) shipped 2026-07-15/16 (PRs #200–#202). No replacement bullet added — the shipped facts are already covered under "Implemented in this repository" and in `docs/audits/README.md`. Bumped `last_reviewed` to 2026-07-17 per `AGENTS.md` PR-cycle step 1 (substantive status-claim correction).
+
+Validated:
+- `gofmt -w cmd internal`
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `GOCACHE=/tmp/wave-doc-fix-gocache go test -race ./...`
+- `golangci-lint run`
+
+Follow-ups:
+- None
+
 ## 2026-07-16 — feat(cli): final leaf commands --json via Renderer seam; pair exempt — closes P5-CLI-01 (part B, final)
 
 Changed:
