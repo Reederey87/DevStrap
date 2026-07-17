@@ -31,6 +31,30 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-17 — feat(sync): working-state validation plane Layer B foundation (P7-WIP-01)
+
+Changed:
+- `internal/git/git.go`: new `Runner.StashCreate` (`git stash create`; empty stdout → `ok=false`, not an error, since a clean tree has nothing to stash) and `Runner.PushRef` (`git push <remote> <sha>:<ref>`, a raw refspec push distinct from `PushBranch`'s tracking-branch push, run under the same `longTransferContext` deadline class as other network pushes). `PushRef` validates its ref with a new `safeRefPath` rather than reusing `safeBranchName` unchanged: `safeBranchName` already tolerates multi-segment strings and has no notion of a required prefix, so passing it a `refs/devstrap/wip/...` string would validate fine but leave `PushRef` able to push to ANY branch-shaped ref (e.g. `refs/heads/main`) on a bad caller/bug, and its leading-`-` check only looks at the very start of the whole string, not per inner segment — a gap that matters here because `device_id`/`path_key` are peer-influenced, unlike a locally-typed branch name. `safeRefPath` requires the literal `refs/devstrap/wip/` prefix plus ≥2 more segments, delegates the character-class bulk to one `safeBranchName(ref)` call (no duplicated regex), and adds an explicit per-segment leading-`-` check. `safeBranchName` itself is untouched.
+- `internal/sync/events.go`: new `EventRepoWipPushed = "repo.wip.pushed"` const, `WipPayload{Path, Ref, SHA, BaseSHA, CapturedAt}`, `NewWipPushedEvent` (unsigned constructor mirroring `NewGitstateEvent`), and a mirror-only `applyEventTx` case — no `tx.ProjectByPath` resolution, no pending-project quarantine class, exactly like `EventGitstateObserved`. Deliberately NOT added to `mustVerifyEvent` or `isTimeScopedContentEvent` (`internal/state/store.go`): `repo.wip.pushed` sits at the same attributed-but-unverified trust tier as `repo.gitstate.observed` until Phase-2 device enrollment.
+- `internal/state/migrations/00030_device_wip.sql` (schema 29→30) + `internal/state/device_wip.go` (`DeviceWip`, `WipParams`, `Tx.UpsertDeviceWipTx` guarded upsert, `Store.DeviceWipForProject` read side): sidecar `device_wip` table mirroring `device_gitstate`'s (00029) no-FK rationale exactly (opaque `device_id`, no FK to `devices` or `namespace_entries`).
+- Bumped hardcoded schema-version test constants: `internal/state/store_test.go` (`TestMigrateEnsureSummaryAndVersion` → 30, `TestMigrationDownAndUp` → 29/30, an extra `Down()` step added to the two 00023-down chains and to `TestMigration00029RoundTripsDeviceGitstateTable` now that the tip sits one migration higher, plus a new `TestMigration00030RoundTripsDeviceWipTable`) and `internal/cli/root_test.go` (`"schema version: 30"`).
+- This is the git-plumbing/event/storage FOUNDATION only (no CLI yet) for Layer B of the working-state sync plane (spec/07 § *Working-state plane*) — `devstrap wip push|fetch|status|show|apply|drop` and the non-negotiable agent-isolation invariant guard are follow-up PRs. `StashCreate`/`PushRef` currently have no caller.
+- Spec: `spec/07_NAMESPACE_AND_SYNC_MODEL.md`'s Layer B bullet now reads "foundation SHIPPED" (git plumbing/event/storage) with the CLI surface listed as the next slice; `spec/08_GIT_MATERIALIZATION_AND_WORKTREES.md` gains a "WIP-ref git plumbing" section documenting `StashCreate`/`PushRef`/`safeRefPath`; `spec/12_DATA_MODEL_SQLITE.md` documents `device_wip` and bumps the schema-version count to 30; `spec/13_CLI_DAEMON_API.md`'s `status` schema-version line corrected 29→30. All bump `last_reviewed` to 2026-07-17 (already current from the prior same-day wave).
+
+Validated:
+- `gofmt -l cmd internal` (empty)
+- `go build ./...`
+- `go vet ./...`
+- `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` (0 issues, after a `cache clean` to drop phantom gosec findings left over from an unrelated sibling worktree)
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `GOCACHE=/tmp/pr1-verify-gocache go test -race ./...`
+
+Follow-ups:
+- `devstrap wip push|fetch` (the write/transport half of Layer B).
+- `devstrap wip status|show` + `status --all-devices`/`doctor` surfacing (the read/inspect half).
+- `devstrap wip apply|drop` (the mutate half).
+- The non-negotiable invariant guard: a test proving the fresh-worktree resolver never reads `refs/devstrap/wip/*`, plus a testscript e2e proving a fresh agent worktree never sees pushed WIP content.
+
 ## 2026-07-17 — chore(docs): post-Pass-7 reliability & substrate wave-close reconciliation
 
 Changed:
