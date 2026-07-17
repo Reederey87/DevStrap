@@ -31,6 +31,25 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-17 — feat(cli): project-env allowlists for agent run (P4-GIT-06)
+
+Changed:
+- New `internal/agentsecrets` package: parses a project-root `.devstrapagent.yml` (`agent_secrets: {allow, deny}`, mirroring the `.devstrapignore` project-root-dotfile convention rather than a DB column, since this is a local wrapper-security policy with no cross-device sync requirement) via a scoped `viper.New()` instance matching the existing `~/.devstrap/config.yaml` read pattern in `internal/cli/root.go`. `LoadFromDir` returns `(nil, nil)` for a missing file; a present file always yields a non-nil `*Policy` (an empty/absent `agent_secrets` key denies everything — presence is an explicit opt-in). `Policy.Filter` returns only `allow` keys not also in `deny` (deny wins on conflict).
+- `internal/cli/agent.go`: added `resolveAgentSecrets`, called from `agent run` right after worktree creation. It loads the policy from the **fresh worktree** (`wt.Path`, fetched from `origin/<default_branch>`, never local/synced state — same base-resolution rule as everything else in `agent run`), and when present, looks up the project's captured env profile (`store.EnvProfileForProject`; a "not found" error — the same `strings.Contains(err.Error(), "not found")` idiom already used in `materialize.go`'s `hydrateProjectEnv` — is treated as "nothing to inject," not a failure), decrypts `devstrap_encrypted`-provider profiles via the existing `decryptEnvProfile` (shared with `devstrap run`), and filters through the policy. `1password`-provider profiles print an advisory warning and inject nothing (their refs resolve at runtime through `op run`, not wired to per-key filtering here). `runAgentProcess` now takes the filtered map and applies it to `envOverrides` BEFORE the reserved `DEVSTRAP_AGENT_RUN_ID`/`DEVSTRAP_WORKTREE_ID`/`HOME` keys, so a captured secret can never shadow them.
+- `spec/10_AGENT_WORKSPACES_AND_POLICIES.md`: reworded "Secret policy" to document the shipped mechanism (file location/format, fresh-worktree read point, no-config-file/empty-policy semantics, deny-wins rule, 1Password scope boundary); fixed the "project-env allowlists ... remain future work" line in the sandboxing summary; added `internal/agentsecrets/**` to `tracks_code`; bumped `last_reviewed`.
+- `spec/00_START_HERE.md`: moved "project-env allowlists" out of "Not implemented yet" into the "Implemented in this repository" agent-runner bullet; reworded the remaining "non-generic engine adapters" bullet to point at spec/10's AD-5 substrate/provisioning-primitive direction instead of implying a new per-harness adapter is coming.
+- `spec/15_SECURITY_THREAT_MODEL.md`: updated the "malicious or compromised agent reads secrets" mitigation narrative (the "env-profile-scoped secret injection remains future work" sentence was the load-bearing gap this PR closes); added `internal/agentsecrets/**` to `tracks_code`; bumped `last_reviewed`.
+- Tests: `internal/agentsecrets/agentsecrets_test.go` (missing file, valid allow+deny parse, malformed YAML errors, present-but-empty denies everything, deny-wins-on-conflict, nil policy, allowed-name-never-captured); `internal/cli/agent_secrets_test.go` — three full `agent run` CLI round trips proving (a) an allowed var reaches the child's `printenv` output while a simultaneously-allowed-and-denied var never does (the security-critical no-leak assertion), (b) a project with no `.devstrapagent.yml` injects nothing, matching pre-existing behavior exactly, (c) a present-but-empty config injects nothing despite a captured profile existing.
+
+Validated:
+- `gofmt -w cmd internal`
+- `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` (0 issues; ran `... cache clean` first to drop phantom entries from an already-removed sibling worktree)
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `GOCACHE=/tmp/wave-env-allowlists-gocache go test -race ./...`
+
+Follow-ups:
+- 1Password-provider profiles are not yet filtered into agent secret injection (advisory warning only) — would need per-key `op run --env-file` wrapping analogous to `runtimeEnvCommand`'s provider branch in `internal/cli/run.go`.
+
 ## 2026-07-17 — docs(spec): remove stale remote-device-registration bullet from spec/00 (now-closed by P7-PROD-01)
 
 Changed:

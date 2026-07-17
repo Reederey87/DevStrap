@@ -1,6 +1,6 @@
 ---
-last_reviewed: 2026-07-14
-tracks_code: [internal/childenv/**, internal/cli/**, internal/devicekeys/**, internal/envbundle/**, internal/git/**, internal/hub/**, internal/redact/**, internal/state/**, internal/sync/**, internal/logging/**, internal/workspacekeys/**]
+last_reviewed: 2026-07-17
+tracks_code: [internal/agentsecrets/**, internal/childenv/**, internal/cli/**, internal/devicekeys/**, internal/envbundle/**, internal/git/**, internal/hub/**, internal/redact/**, internal/state/**, internal/sync/**, internal/logging/**, internal/workspacekeys/**]
 ---
 # Security Threat Model
 
@@ -278,7 +278,7 @@ PYTHONPATH
 GIT_SSH_COMMAND
 ```
 
-Current implementation centralizes this in `internal/childenv` and wires it into Git subprocesses, editor launches, and generic agent commands. Generic agent runs receive no project secrets by default and apply wrapper-level command and file path policies that deny obvious destructive commands, secret-reading commands, explicit sensitive paths, and explicit outside-worktree paths unless `--policy yolo-local` is selected. macOS Seatbelt and Linux bubblewrap now provide default-on OS confinement where available; env-profile-scoped secret injection remains future work.
+Current implementation centralizes this in `internal/childenv` and wires it into Git subprocesses, editor launches, and generic agent commands. Generic agent runs receive no project secrets by default and apply wrapper-level command and file path policies that deny obvious destructive commands, secret-reading commands, explicit sensitive paths, and explicit outside-worktree paths unless `--policy yolo-local` is selected. macOS Seatbelt and Linux bubblewrap now provide default-on OS confinement where available. **Env-profile-scoped secret injection is shipped** (`P4-GIT-06`, see spec/10 "Secret policy"): `agent run` only exposes captured/hydrated env-profile values when the project's fresh worktree carries a `.devstrapagent.yml` opt-in (`internal/agentsecrets`), and even then only the `agent_secrets.allow` keys that are not also on `agent_secrets.deny` (deny wins on conflict) reach the child process — a project with no config file still receives zero captured secrets, matching the pre-existing default.
 
 ### Threat: daemon privilege escalation
 
