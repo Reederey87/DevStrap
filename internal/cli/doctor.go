@@ -293,6 +293,7 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 			results = append(results, checkAgentRunSweep(ctx, opts, store)...)
 			results = append(results, checkSandboxViolations(ctx, store)...)
 			results = append(results, checkFailedMaterializations(ctx, store)...)
+			results = append(results, checkGitstateFreshness(ctx, store)...)
 			results = append(results, checkBloblessCaveat(ctx, store)...)
 		}
 	} else if os.IsNotExist(err) {
@@ -569,6 +570,57 @@ func checkFailedMaterializations(ctx context.Context, store *state.Store) []chec
 	}
 	if len(out) == 0 {
 		return []checkResult{{Name: "failed materializations", Status: checkOK, Detail: "0"}}
+	}
+	return out
+}
+
+// gitstateStaleAfter is the default staleness threshold for a project's
+// newest repo.gitstate.observed report (working-state validation plane Layer
+// A). It is a plain constant rather than a config knob (unlike
+// keys.rotate_max_age/durability.export_interval) because P7-GITSTATE-01 has
+// no wired producer yet (nothing calls capture during `devstrap sync`), so
+// there is no real-world cadence to tune against.
+const gitstateStaleAfter = 7 * 24 * time.Hour
+
+// checkGitstateFreshness surfaces, per local project, whether any device has
+// ever reported its git working-state and how stale the newest report is
+// (spec/07 Layer A: "status --all-devices/doctor ... must warn on
+// un-backed-up work and always render snapshot age ... never silent
+// all-clear"). A project with zero device_gitstate rows always gets a
+// visible warning rather than being silently omitted.
+func checkGitstateFreshness(ctx context.Context, store *state.Store) []checkResult {
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return nil
+	}
+	var out []checkResult
+	for _, p := range projects {
+		rows, err := store.DeviceGitstateForProject(ctx, p.PathKey)
+		if err != nil {
+			out = append(out, checkResult{Name: "gitstate: " + p.Path, Status: checkWarn, Detail: err.Error()})
+			continue
+		}
+		if len(rows) == 0 {
+			out = append(out, checkResult{
+				Name:   "gitstate: " + p.Path,
+				Status: checkWarn,
+				Detail: "no device has reported git state for this project yet",
+				Remedy: "run `devstrap sync` to publish this device's observed git state",
+			})
+			continue
+		}
+		age := time.Since(hlcToTime(rows[0].ObservedAtHLC))
+		detail := fmt.Sprintf("newest observation %s old (device %s)", age.Round(time.Second), rows[0].DeviceID)
+		if age > gitstateStaleAfter {
+			out = append(out, checkResult{
+				Name:   "gitstate: " + p.Path,
+				Status: checkWarn,
+				Detail: detail,
+				Remedy: "run `devstrap sync` on an active device to refresh the observed git state",
+			})
+			continue
+		}
+		out = append(out, checkResult{Name: "gitstate: " + p.Path, Status: checkOK, Detail: detail})
 	}
 	return out
 }

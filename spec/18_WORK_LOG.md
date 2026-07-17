@@ -31,6 +31,25 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-17 — feat(cli): status --all-devices + doctor git-state freshness check (Layer A CLI surfacing)
+
+Changed:
+- `internal/cli/status.go`: new `--all-devices` flag on `status`. `renderAllDevicesStatus` lists every local project (`Store.ListProjects`), reads `Store.DeviceGitstateForProject` per project, and renders one row per device with branch and dirty/untracked/unmerged/ahead/behind/stash counts plus an `Observed` column (`last seen <duration> ago`, derived from the stored HLC via a new local `hlcToTime`/`gitstateHLCLogicalBits` — mirrors the unexported 16-bit logical-counter width `internal/state`/`internal/sync` already duplicate between themselves, no import cycle available to share it). A project with zero `device_gitstate` rows gets one explicit `never synced` row instead of being omitted, per spec/07's "never a silent all-clear" requirement. Routed through the `opts.render` seam (`[]projectGitstateStatus` typed JSON). Does not compose with `--watch`.
+- `internal/cli/doctor.go`: new `checkGitstateFreshness` check, registered in `runDoctorChecks` after `checkFailedMaterializations`. One `gitstate: <path>` row per local project: warning "no device has reported git state for this project yet" at zero rows, warning naming the observing device when the newest observation is older than the new `gitstateStaleAfter` constant (7 days, a plain constant rather than a `keys.rotate_max_age`-style config knob since there is no wired producer yet to tune a cadence against), ok otherwise.
+- This is the CLI-surfacing follow-up to PR #217 (backend: `repo.gitstate.observed` capture/apply + the mirror-only `device_gitstate` table). Out of scope here too: wiring `CaptureGitstate`/`NewGitstateEvent` into `devstrap sync`'s runtime flow — until that lands, every project legitimately reads `never synced`.
+- Spec: `spec/07_NAMESPACE_AND_SYNC_MODEL.md`'s Layer A paragraph now says the CLI surfacing is shipped (only the sync-wiring remains not-wired); `spec/08_GIT_MATERIALIZATION_AND_WORKTREES.md`'s "Working-state capture" section documents `renderAllDevicesStatus`/`checkGitstateFreshness` as shipped; `spec/13_CLI_DAEMON_API.md` documents the `--all-devices` flag and JSON shape under `### status`, folds the new doctor check into the `doctor` paragraph, and drops the now-stale `devstrap status --all-devices` line from the "Planned commands" list (`devstrap gitstate capture` there is a distinct, still-unbuilt standalone subcommand and stays); `spec/00_START_HERE.md` moves the Layer A bullet from "Not implemented yet" to "Implemented" (only the sync-wiring gap stays listed as not-yet-built, per that section's own "partly shipped features are never listed here" rule). All four bump `last_reviewed` to 2026-07-17.
+
+Validated:
+- `gofmt -w cmd internal`
+- `golangci-lint run` (via `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run`, after a `cache clean` to drop phantom gosec findings left over from sibling worktrees) — 0 issues.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `GOCACHE=/tmp/wave-gitstate-cli-gocache go test -race ./...`
+- New tests: `internal/cli/status_test.go` — `TestStatusAllDevices` (end-to-end through the real binary: a project with a `device_gitstate` row renders `last seen`/the device id in both human and `--json` output; a project with zero rows renders an explicit `never synced` row in both — the never-silent-all-clear assertion is `never.Devices[0].Observed != "never synced"`); `internal/cli/doctor_test.go` — `TestCheckGitstateFreshness` (zero-row project produces `checkWarn` containing "no device has reported"; a stale 8-day-old observation produces `checkWarn` naming the device; a fresh 1-hour-old observation produces `checkOK`).
+
+Follow-ups:
+- Wire `CaptureGitstate` + `NewGitstateEvent` into `devstrap sync`'s runtime flow — the last unshipped piece of `P7-GITSTATE-01`.
+- Layer B (WIP refs, `refs/devstrap/wip/*`) remains genuinely unbuilt.
+
 ## 2026-07-17 — feat(sync): git-state validation plane Layer A (repo.gitstate.observed)
 
 Changed:

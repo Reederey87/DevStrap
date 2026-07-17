@@ -462,3 +462,63 @@ func TestDoctorThreadsCustodyStoreIntoServiceCheck(t *testing.T) {
 	}
 	t.Fatalf("results = %+v, want custody warning from the command-level doctor checks", results)
 }
+
+// TestCheckGitstateFreshness pins the spec/07 Layer A requirement that a
+// project with no device_gitstate observation ("no device has reported yet")
+// and one with only a stale observation both produce a visible warning —
+// never a silent all-clear — while a fresh observation grades ok.
+func TestCheckGitstateFreshness(t *testing.T) {
+	ctx := context.Background()
+	store, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureWorkspace(ctx, "test", "/tmp/Code"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnsureDevice(ctx, "test-device"); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"work/acme/never", "work/acme/stale", "work/acme/fresh"} {
+		if _, err := store.UpsertProject(ctx, state.UpsertProjectParams{Path: path, Type: "plain_folder"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	staleHLC := time.Now().Add(-8*24*time.Hour).UnixMilli() << gitstateHLCLogicalBits
+	freshHLC := time.Now().Add(-1*time.Hour).UnixMilli() << gitstateHLCLogicalBits
+	if err := store.WithTx(ctx, func(tx *state.Tx) error {
+		if err := tx.UpsertDeviceGitstateTx(ctx, "dev_peer", "work/acme/stale", "work/acme/stale", state.GitstateParams{
+			Branch: "main", HeadSHA: "abc123",
+		}, state.Event{ID: "evt_gs_stale", HLC: staleHLC}); err != nil {
+			return err
+		}
+		return tx.UpsertDeviceGitstateTx(ctx, "dev_peer", "work/acme/fresh", "work/acme/fresh", state.GitstateParams{
+			Branch: "main", HeadSHA: "def456",
+		}, state.Event{ID: "evt_gs_fresh", HLC: freshHLC})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	results := checkGitstateFreshness(ctx, store)
+	byName := make(map[string]checkResult, len(results))
+	for _, r := range results {
+		byName[r.Name] = r
+	}
+
+	never, ok := byName["gitstate: work/acme/never"]
+	if !ok || never.Status != checkWarn || !strings.Contains(never.Detail, "no device has reported") {
+		t.Fatalf("never-reported result = %+v, want a visible warning — spec/07 forbids a silent all-clear", never)
+	}
+	stale, ok := byName["gitstate: work/acme/stale"]
+	if !ok || stale.Status != checkWarn || !strings.Contains(stale.Detail, "dev_peer") {
+		t.Fatalf("stale result = %+v, want a visible warning naming the observing device", stale)
+	}
+	fresh, ok := byName["gitstate: work/acme/fresh"]
+	if !ok || fresh.Status != checkOK {
+		t.Fatalf("fresh result = %+v, want ok", fresh)
+	}
+}

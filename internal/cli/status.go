@@ -15,6 +15,7 @@ import (
 func newStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var watch bool
 	var interval time.Duration
+	var allDevices bool
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show local workspace status",
@@ -24,6 +25,12 @@ func newStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// sqlite "unable to open database file" error.
 			if _, err := os.Stat(opts.paths().StateDB()); errors.Is(err, os.ErrNotExist) {
 				return appError{code: exitInvalidConfig, err: state.ErrNotInitialized}
+			}
+			// P7-GITSTATE-01 CLI surfacing: --all-devices renders the
+			// working-state validation plane Layer A mirror instead of the
+			// regular snapshot; it does not compose with --watch.
+			if allDevices {
+				return renderAllDevicesStatus(cmd.Context(), stdout, opts)
 			}
 			if !watch {
 				return renderStatus(cmd.Context(), stdout, opts)
@@ -57,6 +64,7 @@ func newStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&watch, "watch", false, "re-render status on an interval until interrupted (live convergence view)")
 	cmd.Flags().DurationVar(&interval, "interval", 2*time.Second, "refresh interval for --watch")
+	cmd.Flags().BoolVar(&allDevices, "all-devices", false, "show every device's last-observed git working-state per project (working-state validation plane Layer A)")
 	return cmd
 }
 
@@ -124,6 +132,108 @@ func renderStatus(ctx context.Context, stdout io.Writer, opts *options) error {
 		}
 		return nil
 	}, summary)
+}
+
+// gitstateHLCLogicalBits mirrors the 16-bit logical-counter width that
+// internal/state and internal/sync each pack into the low bits of an HLC
+// value (see hlcLogicalBits in internal/state/store.go and internal/sync/hlc.go)
+// so a stored observed_at_hlc can be read back as wall-clock time here without
+// an import cycle into either package's unexported constant.
+const gitstateHLCLogicalBits = 16
+
+func hlcToTime(hlc int64) time.Time {
+	return time.UnixMilli(hlc >> gitstateHLCLogicalBits)
+}
+
+// deviceGitstateRow is one device's observed working-state for a project, or
+// the synthetic "never synced" row for a project with zero device_gitstate
+// rows. spec/07 Layer A requires `status --all-devices` to always render an
+// observed column — a project with no observations must never be silently
+// omitted.
+type deviceGitstateRow struct {
+	DeviceID       string `json:"device_id,omitempty"`
+	Branch         string `json:"branch,omitempty"`
+	DirtyCount     int    `json:"dirty_count"`
+	UntrackedCount int    `json:"untracked_count"`
+	UnmergedCount  int    `json:"unmerged_count"`
+	AheadCount     int    `json:"ahead_count"`
+	BehindCount    int    `json:"behind_count"`
+	StashCount     int    `json:"stash_count"`
+	Observed       string `json:"observed"`
+}
+
+type projectGitstateStatus struct {
+	Path    string              `json:"path"`
+	Devices []deviceGitstateRow `json:"devices"`
+}
+
+// renderAllDevicesStatus implements `status --all-devices` (P7-GITSTATE-01
+// CLI surfacing): for every local project it renders each device's
+// last-observed git working-state, newest first, from the mirror-only
+// device_gitstate table. A project no device has ever reported on gets one
+// explicit "never synced" row instead of being left out of the output.
+func renderAllDevicesStatus(ctx context.Context, stdout io.Writer, opts *options) error {
+	store, err := opts.openState(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeStore(store)
+
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	out := make([]projectGitstateStatus, 0, len(projects))
+	for _, project := range projects {
+		rows, err := store.DeviceGitstateForProject(ctx, project.PathKey)
+		if err != nil {
+			return err
+		}
+		p := projectGitstateStatus{Path: project.Path}
+		if len(rows) == 0 {
+			p.Devices = []deviceGitstateRow{{Observed: "never synced"}}
+		} else {
+			for _, r := range rows {
+				p.Devices = append(p.Devices, deviceGitstateRow{
+					DeviceID:       r.DeviceID,
+					Branch:         r.Branch,
+					DirtyCount:     r.DirtyCount,
+					UntrackedCount: r.UntrackedCount,
+					UnmergedCount:  r.UnmergedCount,
+					AheadCount:     r.AheadCount,
+					BehindCount:    r.BehindCount,
+					StashCount:     r.StashCount,
+					Observed:       fmt.Sprintf("last seen %s ago", now.Sub(hlcToTime(r.ObservedAtHLC)).Round(time.Second)),
+				})
+			}
+		}
+		out = append(out, p)
+	}
+
+	return opts.render(stdout, func(w io.Writer) error {
+		if len(out) == 0 {
+			_, _ = fmt.Fprintln(w, "No projects.")
+			return nil
+		}
+		_, _ = fmt.Fprintln(w, "Project\tDevice\tBranch\tDirty\tUntracked\tUnmerged\tAhead\tBehind\tStash\tObserved")
+		for _, p := range out {
+			for _, d := range p.Devices {
+				device := d.DeviceID
+				if device == "" {
+					device = "-"
+				}
+				branch := d.Branch
+				if branch == "" {
+					branch = "-"
+				}
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%s\n",
+					p.Path, device, branch, d.DirtyCount, d.UntrackedCount, d.UnmergedCount, d.AheadCount, d.BehindCount, d.StashCount, d.Observed)
+			}
+		}
+		return nil
+	}, out)
 }
 
 // deriveDisplayStatus maps the raw materialization and dirty states to a
