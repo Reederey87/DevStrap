@@ -574,7 +574,7 @@ while [ $# -gt 0 ]; do
 done
 case "$sub" in
   symbolic-ref)
-    if [ -f %[1]q ]; then echo "origin/develop"; exit 0; fi
+    if [ -f %[1]q ]; then echo "refs/remotes/origin/develop"; exit 0; fi
     echo "fatal: ref refs/remotes/origin/HEAD is not a symbolic ref" >&2; exit 128;;
   remote)
     : > %[1]q; exit 0;;
@@ -672,6 +672,307 @@ func TestRemoteDefaultBranchParsesSymref(t *testing.T) {
 	}
 	if branch != "develop" {
 		t.Fatalf("branch = %q, want develop", branch)
+	}
+}
+
+// TestRemoteDefaultBranchRejectsNonBranchSymref pins a real production fix
+// found by adversarial review of the P7-WIP invariant guard suite: a HEAD
+// symref target is only ever safe to treat as a "default branch" when it is
+// actually under refs/heads/ — the old code did strings.TrimPrefix(target,
+// "refs/heads/"), which is a no-op passthrough for anything else (a
+// misconfigured or hostile remote's `ls-remote --symref origin HEAD` could
+// report `ref: refs/devstrap/wip/<device>/<path_key> HEAD` while
+// refs/heads/main ALSO still exists), and safeBranchName tolerates slashes
+// (by design, for real branch names), so the WIP ref path validated as a
+// "branch name" and was returned with a nil error. RemoteDefaultBranch must
+// now error instead.
+func TestRemoteDefaultBranchRejectsNonBranchSymref(t *testing.T) {
+	script := writeFakeGit(t, "#!/bin/sh\nprintf 'ref: refs/devstrap/wip/dev_evil/work/proj\\tHEAD\\nabc123\\tHEAD\\n'\nexit 0\n")
+	r := Runner{Bin: script, Timeout: 5 * time.Second}
+	branch, err := r.RemoteDefaultBranch(context.Background(), "", "origin")
+	if err == nil {
+		t.Fatalf("RemoteDefaultBranch = (%q, nil), want an error — HEAD points at a non-branch ref", branch)
+	}
+	if strings.Contains(branch, "wip") || strings.Contains(branch, "devstrap") {
+		t.Fatalf("RemoteDefaultBranch leaked a WIP-derived branch %q", branch)
+	}
+}
+
+// TestSymbolicOriginHeadRejectsNonRemoteTrackingTarget pins the sibling fix
+// in symbolicOriginHead (the LocalDefaultBranch/ResolveDefaultBranch fallback
+// path, reached in production via `git remote set-head origin --auto` writing
+// refs/remotes/origin/HEAD from whatever a remote reports — not only local
+// tampering). The old code read `symbolic-ref --short refs/remotes/origin/HEAD`:
+// --short generically strips any leading well-known-looking ref segment for
+// ANY target shape, not only a legitimate refs/remotes/origin/<branch>
+// target, so a HEAD symref repointed at refs/devstrap/wip/<device>/<path_key>
+// came back as "devstrap/wip/<device>/<path_key>" (empirically confirmed)
+// and the old strings.TrimPrefix(out, "origin/") left it unchanged — passing
+// straight through as a "branch name". symbolicOriginHead must now report
+// false instead.
+func TestSymbolicOriginHeadRejectsNonRemoteTrackingTarget(t *testing.T) {
+	repo, r := initLocalDefaultBranchRepo(t)
+	runRealGit(t, r.Bin, repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/devstrap/wip/dev_evil/work/proj")
+
+	if branch, ok := r.symbolicOriginHead(context.Background(), repo); ok {
+		t.Fatalf("symbolicOriginHead = (%q, true), want (_, false) — HEAD points at a non-remote-tracking ref", branch)
+	}
+
+	// The full LocalDefaultBranch/ResolveDefaultBranch stack must fall through
+	// to the stored fallback (or error, absent one) rather than resolving to
+	// anything WIP-derived.
+	if branch, source, err := r.LocalDefaultBranch(context.Background(), repo, ""); err == nil {
+		t.Fatalf("LocalDefaultBranch(fallback=\"\") = (%q,%q,nil), want an error", branch, source)
+	}
+}
+
+// TestResolveDefaultBranchAdversarialHeadSymrefWithRealMainAlsoPresent is the
+// exact end-to-end scenario adversarial review constructed: a real remote
+// where refs/heads/main genuinely exists (so this is not merely the
+// "remote's only ref is WIP-shaped" case already covered above) AND the
+// remote's HEAD symref is separately repointed at a WIP ref — the case where
+// naive HEAD-trusting resolution would silently prefer the WIP ref over the
+// real, perfectly good default branch sitting right next to it.
+// ResolveDefaultBranch must still refuse to resolve to anything WIP-derived;
+// with no stored fallback it errors rather than guessing.
+func TestResolveDefaultBranchAdversarialHeadSymrefWithRealMainAlsoPresent(t *testing.T) {
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "remote.git")
+	runRealGit(t, gitBin, tmp, "init", "--bare", "-b", "main", remote)
+
+	src := filepath.Join(tmp, "src")
+	runRealGit(t, gitBin, tmp, "clone", remote, src)
+	runRealGit(t, gitBin, src, "config", "user.name", "t")
+	runRealGit(t, gitBin, src, "config", "user.email", "t@example.com")
+	if err := os.WriteFile(filepath.Join(src, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runRealGit(t, gitBin, src, "add", "README.md")
+	runRealGit(t, gitBin, src, "commit", "-m", "init")
+	runRealGit(t, gitBin, src, "push", "origin", "main")
+
+	r := Runner{Bin: gitBin, Timeout: 5 * time.Second}
+	ctx := context.Background()
+	sha, err := r.Run(ctx, src, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha = strings.TrimSpace(sha)
+	wipRef := "refs/devstrap/wip/dev_evil/work/proj"
+	if err := r.PushRef(ctx, src, "origin", sha, wipRef); err != nil {
+		t.Fatalf("PushRef err = %v", err)
+	}
+	// Repoint the REMOTE's HEAD at the WIP ref (a hostile/misconfigured
+	// remote-side operation), leaving refs/heads/main fully intact.
+	runRealGit(t, gitBin, remote, "symbolic-ref", "HEAD", wipRef)
+
+	repo := filepath.Join(tmp, "repo")
+	runRealGit(t, gitBin, tmp, "clone", "--no-checkout", remote, repo)
+
+	// Confirm the fixture: the clone's advertised HEAD really is the WIP ref,
+	// and refs/heads/main genuinely still exists on the remote.
+	lsOut, err := r.Run(ctx, repo, "ls-remote", "--symref", "origin", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(lsOut, wipRef) {
+		t.Fatalf("fixture invalid: origin HEAD does not advertise the WIP ref:\n%s", lsOut)
+	}
+	headsOut, err := r.Run(ctx, repo, "ls-remote", "origin", "refs/heads/main")
+	if err != nil || strings.TrimSpace(headsOut) == "" {
+		t.Fatalf("fixture invalid: refs/heads/main missing on remote: out=%q err=%v", headsOut, err)
+	}
+
+	if branch, err := r.RemoteDefaultBranch(ctx, repo, "origin"); err == nil {
+		t.Fatalf("RemoteDefaultBranch = (%q, nil), want an error even with refs/heads/main present", branch)
+	}
+	if branch, source, err := r.ResolveDefaultBranch(ctx, repo, ""); err == nil {
+		t.Fatalf("ResolveDefaultBranch(fallback=\"\") = (%q,%q,nil), want an error", branch, source)
+	}
+	// A caller-supplied "main" fallback still resolves correctly once the
+	// hostile HEAD symref is rejected — proving this fix does not turn a
+	// perfectly good repo into an unusable one, it just refuses to trust the
+	// poisoned HEAD pointer.
+	if branch, source, err := r.ResolveDefaultBranch(ctx, repo, "main"); err != nil || branch != "main" {
+		t.Fatalf("ResolveDefaultBranch(fallback=%q) = (%q,%q,%v), want (main,stored,nil)", "main", branch, source, err)
+	} else if source != DefaultBranchStored {
+		t.Fatalf("source = %q, want stored (HEAD symref was rejected, not trusted)", source)
+	}
+}
+
+// TestDefaultBranchResolutionErrorsWhenRemoteOnlyHasWipRef is the P7-WIP
+// invariant guard's adversarial-remote fixture (spec/07 § Working-state
+// plane, INVARIANT INTERLOCK): a bare remote where the ONLY ref ever pushed
+// is a WIP-shaped ref (refs/devstrap/wip/<device>/<path_key>) — nothing was
+// ever pushed to refs/heads/*, so origin's HEAD stays the unborn symbolic ref
+// `git init --bare` creates by default and is never advertised by
+// ls-remote. Both the authoritative, ls-remote-based RemoteDefaultBranch and
+// the local-clone-based ResolveDefaultBranch (including its `remote set-head
+// --auto` repair attempt and its stored-fallback verification step) must
+// error out — never resolve to anything derived from the WIP ref, even when
+// a caller passes a WIP-shaped string as the stored fallback (simulating a
+// stray/corrupted stored default-branch value).
+func TestDefaultBranchResolutionErrorsWhenRemoteOnlyHasWipRef(t *testing.T) {
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "remote.git")
+	runRealGit(t, gitBin, tmp, "init", "--bare", "-b", "main", remote)
+
+	repo := filepath.Join(tmp, "repo")
+	runRealGit(t, gitBin, tmp, "clone", remote, repo)
+	runRealGit(t, gitBin, repo, "config", "user.name", "t")
+	runRealGit(t, gitBin, repo, "config", "user.email", "t@example.com")
+	// A branch distinct from "main": refs/heads/main must never be created on
+	// the remote by this fixture, so the remote's only ref ends up WIP-shaped.
+	runRealGit(t, gitBin, repo, "checkout", "-b", "scratch")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runRealGit(t, gitBin, repo, "add", "README.md")
+	runRealGit(t, gitBin, repo, "commit", "-m", "init")
+
+	r := Runner{Bin: gitBin, Timeout: 5 * time.Second}
+	ctx := context.Background()
+
+	sha, err := r.Run(ctx, repo, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha = strings.TrimSpace(sha)
+	ref := "refs/devstrap/wip/dev_test/work/acme/api-server"
+	if err := r.PushRef(ctx, repo, "origin", sha, ref); err != nil {
+		t.Fatalf("PushRef err = %v", err)
+	}
+
+	// Confirm the fixture: the remote's only ref really is the WIP ref, never
+	// a refs/heads/* branch.
+	refsOut, err := r.Run(ctx, repo, "ls-remote", "origin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(refsOut, "refs/heads/") {
+		t.Fatalf("fixture invalid: remote unexpectedly has a refs/heads/* ref:\n%s", refsOut)
+	}
+	if !strings.Contains(refsOut, "refs/devstrap/wip/") {
+		t.Fatalf("fixture invalid: remote does not carry the pushed WIP ref:\n%s", refsOut)
+	}
+
+	if branch, err := r.RemoteDefaultBranch(ctx, repo, "origin"); err == nil {
+		t.Fatalf("RemoteDefaultBranch = (%q, nil), want an error — the remote's only ref is WIP-shaped", branch)
+	} else if strings.Contains(branch, "wip") || strings.Contains(branch, "devstrap") {
+		t.Fatalf("RemoteDefaultBranch leaked a WIP-derived branch %q", branch)
+	}
+
+	if branch, source, err := r.ResolveDefaultBranch(ctx, repo, ""); err == nil {
+		t.Fatalf("ResolveDefaultBranch(fallback=\"\") = (%q,%q,nil), want an error", branch, source)
+	}
+
+	// Even a caller-supplied fallback that happens to look WIP-shaped (e.g. a
+	// stray stored value) must not be trusted without verification against a
+	// real origin/<fallback> ref, which never exists here.
+	for _, fallback := range []string{"main", "devstrap/wip/dev_test/work/acme/api-server"} {
+		if branch, source, err := r.ResolveDefaultBranch(ctx, repo, fallback); err == nil {
+			t.Fatalf("ResolveDefaultBranch(fallback=%q) = (%q,%q,nil), want an error — no such branch was ever pushed to origin", fallback, branch, source)
+		}
+	}
+}
+
+// wrapGitWithArgLog builds a thin shell wrapper around the real git binary
+// that appends every invoked argv line to logPath before delegating to real
+// git, so a test can assert on the exact subprocess calls a flow issues —
+// e.g. that a fetch step never mentions refs/devstrap/wip/*.
+func wrapGitWithArgLog(t *testing.T, realGit, logPath string) string {
+	t.Helper()
+	return writeFakeGit(t, fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %[1]q
+exec %[2]q "$@"
+`, logPath, realGit))
+}
+
+// TestDefaultBranchResolutionIgnoresLocalWipRefAlongsideDefaultBranch is the
+// P7-WIP invariant guard's second fixture: a normal repo with a real default
+// branch (main) AND a WIP ref already sitting in the SAME local repo's
+// refs — exactly the state left behind by an earlier `wip fetch` against
+// this project (per the invariant's own wording: "even if a WIP ref already
+// exists locally"). The default-branch resolvers — local-only, the
+// authoritative remote query, and the full repair path — must all still
+// resolve to "main", never to anything derived from the WIP ref's
+// device-id/path-key segments. It also inspects the actual git subprocess
+// argv of the resolution step and the fetch step that createFreshWorktreeLocked
+// runs immediately afterward (internal/cli/worktree.go), confirming neither
+// ever mentions refs/devstrap/wip/* — proving today's implementation
+// resolves and fetches exactly one named branch rather than enumerating or
+// wildcarding refs.
+func TestDefaultBranchResolutionIgnoresLocalWipRefAlongsideDefaultBranch(t *testing.T) {
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	repo, r := initSquashMergeRepo(t) // "main" branch, one commit, no remote yet
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "remote.git")
+	runRealGit(t, gitBin, tmp, "init", "--bare", "-b", "main", remote)
+	runRealGit(t, gitBin, repo, "remote", "add", "origin", remote)
+	runRealGit(t, gitBin, repo, "push", "-u", "origin", "main")
+
+	ctx := context.Background()
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sha, ok, err := r.StashCreate(ctx, repo)
+	if err != nil || !ok {
+		t.Fatalf("StashCreate = (%q,%v,%v), want a dirty-tree stash", sha, ok, err)
+	}
+	ref := "refs/devstrap/wip/dev_test/work/acme/api-server"
+	if err := r.PushRef(ctx, repo, "origin", sha, ref); err != nil {
+		t.Fatalf("PushRef err = %v", err)
+	}
+	// Simulate `wip fetch` mirroring the ref into THIS SAME local repo before
+	// the fresh-worktree resolver ever runs.
+	if err := r.FetchRef(ctx, repo, "origin", ref); err != nil {
+		t.Fatalf("FetchRef err = %v", err)
+	}
+	// Confirm the fixture: the WIP ref really is present locally now.
+	if _, err := r.Run(ctx, repo, "show-ref", "--verify", "--quiet", ref); err != nil {
+		t.Fatalf("fixture invalid: local WIP ref missing after FetchRef: %v", err)
+	}
+
+	if branch, source, err := r.LocalDefaultBranch(ctx, repo, "main"); err != nil || branch != "main" {
+		t.Fatalf("LocalDefaultBranch = (%q,%q,%v), want (main, _, nil)", branch, source, err)
+	}
+	if branch, source, err := r.ResolveDefaultBranch(ctx, repo, "main"); err != nil || branch != "main" {
+		t.Fatalf("ResolveDefaultBranch = (%q,%q,%v), want (main, _, nil)", branch, source, err)
+	}
+	if branch, err := r.RemoteDefaultBranch(ctx, repo, "origin"); err != nil || branch != "main" {
+		t.Fatalf("RemoteDefaultBranch = (%q,%v), want (main, nil)", branch, err)
+	}
+
+	// Now inspect the actual subprocess argv of resolution + the immediately
+	// following fetch (mirroring createFreshWorktreeLocked's exact next step)
+	// through a wrapped git binary that logs every invocation.
+	logPath := filepath.Join(t.TempDir(), "git-args.log")
+	wrapped := wrapGitWithArgLog(t, gitBin, logPath)
+	wr := Runner{Bin: wrapped, Timeout: 5 * time.Second}
+	branch, err := wr.RemoteDefaultBranch(ctx, repo, "origin")
+	if err != nil || branch != "main" {
+		t.Fatalf("RemoteDefaultBranch (wrapped) = (%q,%v), want (main, nil)", branch, err)
+	}
+	if err := wr.Fetch(ctx, repo, "origin", branch); err != nil {
+		t.Fatalf("Fetch(%q) err = %v", branch, err)
+	}
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logged), "devstrap/wip") {
+		t.Fatalf("resolution+fetch flow invoked git with a WIP-ref argument:\n%s", logged)
 	}
 }
 
