@@ -31,6 +31,27 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-17 — feat(cli): wip push + wip fetch commands (P7-WIP-02)
+
+Changed:
+- `internal/git/git.go`: new `Runner.FetchRef` (`git fetch <remote> <ref>:<ref>`, mirroring a remote ref into the identical local ref path, validated by `safeRefPath` — the one place a peer-supplied ref string, read from the `device_wip` mirror, is ever handed to a git subprocess, so this is the actual trust boundary, not merely a storage nicety).
+- `internal/cli/wip.go` (new), registered in `root.go`: `devstrap wip push <project>` runs `StashCreate`, `PushRef`s the result to `refs/devstrap/wip/<device_id>/<path_key>` (derived by a new `wipRefFor` helper — always from device id + path_key, never from a stored ref string), and inserts+mirrors the `repo.wip.pushed` event in the SAME transaction (`store.WithTx` + `InsertLocalEventTx` + `tx.UpsertDeviceWipTx`) so the pushing device sees its own state immediately — the pull-apply dedup path (an already-known event ID skips re-applying) would otherwise leave the emitting device blind to its own push, exactly the rationale the sibling gitstate-sync-wiring PR established. A clean working tree renders "Nothing to push...(working tree is clean)" with no event and no push. `devstrap wip fetch <project> [--device <id>]` always derives the fetch target canonically via `wipRefFor` (device id + path_key) — never from a stored/peer-supplied `Ref` string, per the independent review finding on the Layer-B-foundation PR — and, absent `--device`, discovers candidate devices from the local `device_wip` mirror (populated by synced events) rather than probing the network; a ref missing on the remote (`git.ErrBranchNotFound`, git's existing "couldn't find remote ref" classification, reused rather than re-invented) renders a clear message instead of an error, and an empty mirror renders "No pending WIP known for `<path>`" — never silent, matching the never-a-silent-all-clear convention `status --all-devices`/`doctor` already follow.
+- `wip push` deliberately has no dedup/debounce against a previous push in this PR (unlike the automatic per-sync-cycle gitstate capture): it is an explicit, single-shot user command, so repeated no-op pushes producing ref churn (a new stash-create commit each time, even with identical content) is an accepted simplification, not a bug.
+- Spec: `spec/00_START_HERE.md`'s command inventory adds `wip push`/`wip fetch` and moves the Layer B bullet from foundation-only to describing the shipped CLI; `spec/13_CLI_DAEMON_API.md` gains a "WIP commands" section (full contract) and drops `wip` from the "Planned commands" list; `spec/07_NAMESPACE_AND_SYNC_MODEL.md`'s Layer B paragraph now describes the shipped push/fetch CLI, with `status|show|apply|drop` named as the remaining gap.
+
+Validated:
+- `gofmt -l cmd internal` (clean)
+- `go build ./...`, `go vet ./...`
+- `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` (0 issues, after a cache clean)
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `GOCACHE=/tmp/pr2-verify-gocache go test -race ./...`
+- New testscript `cmd/devstrap/testdata/script/wip_push_fetch.txtar`: two devices, a clean-tree no-op push, a real dirty-tree push+sync+pull+fetch round trip (asserting the ref lands in B's local git storage via `git show-ref`), and B's working tree staying untouched by fetch.
+
+Follow-ups:
+- `devstrap wip status|show` + `status --all-devices`/`doctor` surfacing (the read/inspect half).
+- `devstrap wip apply|drop` (the mutate half).
+- The non-negotiable invariant guard: a test proving the fresh-worktree resolver never reads `refs/devstrap/wip/*`, plus a testscript e2e proving a fresh agent worktree never sees pushed WIP content.
+
 ## 2026-07-17 — feat(sync): working-state validation plane Layer B foundation (P7-WIP-01)
 
 Changed:

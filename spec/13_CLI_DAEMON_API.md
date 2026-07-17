@@ -72,6 +72,7 @@ devstrap clone
 devstrap env
 devstrap run
 devstrap worktree
+devstrap wip
 devstrap agent
 devstrap devices
 devstrap conflicts
@@ -89,7 +90,6 @@ devstrap daemon
 devstrap export
 devstrap promote
 devstrap gitstate
-devstrap wip
 ```
 
 ## Initial commands
@@ -97,8 +97,8 @@ devstrap wip
 Current repository status as of `2026-07-01`:
 
 ```text
-Implemented: devstrap init, up, join, pair, version, scan, add, clone, hydrate, open, sync --hub-file, sync (hub: git+ssh://…/git@host:path.git zero-infrastructure git carrier — the documented default — and hub: r2://<bucket> production R2/S3 SDK wiring), hub init, hub compact, hub gc, hub login, hub logout, hub migrate-events, keys rotate, materialize, draft snapshot create, run-loop, service install, service uninstall, service status, status, doctor, conflicts list, conflicts show, conflicts resolve, db migrate, db status, db backup, db backup --full, db restore, db down, env capture, env hydrate, env bind, env rotate, run, worktree new, worktree status, worktree finalize, worktree list, worktree remove, worktree cleanup, worktree unlock, agent run, agent list, agent show, agent pr, devices enroll, devices list, devices approve, devices revoke, devices lost, devices rename, devices recipient, devices pairing-code
-Planned: env check, automatic remote device enrollment/fingerprint confirmation, daemon/socket API, export, promote, gitstate, wip
+Implemented: devstrap init, up, join, pair, version, scan, add, clone, hydrate, open, sync --hub-file, sync (hub: git+ssh://…/git@host:path.git zero-infrastructure git carrier — the documented default — and hub: r2://<bucket> production R2/S3 SDK wiring), hub init, hub compact, hub gc, hub login, hub logout, hub migrate-events, keys rotate, materialize, draft snapshot create, run-loop, service install, service uninstall, service status, status, doctor, conflicts list, conflicts show, conflicts resolve, db migrate, db status, db backup, db backup --full, db restore, db down, env capture, env hydrate, env bind, env rotate, run, worktree new, worktree status, worktree finalize, worktree list, worktree remove, worktree cleanup, worktree unlock, wip push, wip fetch, agent run, agent list, agent show, agent pr, devices enroll, devices list, devices approve, devices revoke, devices lost, devices rename, devices recipient, devices pairing-code
+Planned: env check, automatic remote device enrollment/fingerprint confirmation, daemon/socket API, export, promote, gitstate
 ```
 
 `TestEveryCommandIsDocumented` path-anchors this inventory against the live Cobra tree: every visible command path must appear as a contiguous substring here and in `spec/00_START_HERE.md`.
@@ -424,6 +424,15 @@ devstrap worktree unlock work/acme/api [--force]
 ```
 
 Current implementation requires `--fresh-upstream` for `worktree new`, fetches `origin/<default_branch>` before resolving the base SHA, writes a per-repo lock under `~/.devstrap/locks`, records worktree metadata, honors the stored LFS policy by either running `git lfs pull` or warning about pointer files, and refuses dirty worktree removal unless `--force` is explicit. `worktree remove --force` handles manually deleted worktree paths by running `git worktree prune` from the main checkout and marking the DB row removed. `worktree status <id>` re-fetches the recorded base ref and reports whether the worktree is fresh or stale. `worktree finalize <id>` reuses the same stale-base check and exits non-zero if the base moved unless `--allow-stale-base` is set. `cleanup --merged` takes no positional args (`cobra.NoArgs`); removes clean, merged worktrees under the project repo lock (with a dirty re-check immediately before remove); skips any worktree that still has a running `agent_runs` row after a stale-PID sweep; prunes stale missing paths; reports a skipped count for unreadable, dirty, lock-contended, or live-agent worktrees; and only removes a merged-but-dirty worktree when `--force` is set. Merged-ness is ancestry OR content-equivalence (`P4-GIT-04`): the `git branch --merged` ancestry check runs first, and its misses consult `git.Runner.IsSquashMerged` — a current-tree merge probe (`git merge-tree --write-tree <base> <branch>`, git ≥ 2.38) that reports merged only when the simulated merge's tree is identical to the current base tree, catching GitHub "Squash and merge", rebase-, and cherry-pick-merges while correctly treating a merged-then-reverted change as NOT merged — with the conservative rule that a conflicting merge, an older git, or any error means NOT merged (a false positive would delete a real worktree and its branch). Reaps are labeled `merged` vs `merged (squash)`, the recorded `remote/branch` base is best-effort fetched under the repo lock first (warn + continue offline), reaped worktrees also get `git branch -D` (warn-only on failure), and forge-API (`gh pr list`) cross-checks are an explicit non-goal so cleanup works offline. `worktree unlock <path>` reports the holder of a project's repo operation lock and clears it when the holder is dead/stale (or when `--force` is set), providing a recovery path after a crash; `doctor` also lists held locks. The default-branch resolution for `worktree new` confirms the remote default authoritatively via `git ls-remote --symref origin HEAD`, repairing a missing `origin/HEAD` with `git remote set-head origin --auto` and warning if the result is not authoritative.
+
+## WIP commands
+
+```bash
+devstrap wip push work/acme/api
+devstrap wip fetch work/acme/api [--device <device_id>]
+```
+
+`wip push` is the write half of the working-state validation plane's Layer B (`spec/07`, `repo.wip.pushed`): it runs `git stash create` to capture the working tree's uncommitted state as a commit object without touching the worktree or index, pushes that object to this device's own `refs/devstrap/wip/<device_id>/<path_key>` ref via a raw refspec (`git.Runner.PushRef`), and emits a signed `repo.wip.pushed` event carrying the ref, sha, base sha, and capture time — mirrored into the local `device_wip` table in the SAME transaction as the event insert, so the pushing device sees its own state immediately without waiting on a sync round-trip (`ApplyEvents` dedups a device's own events on pull-back, so relying on that path alone would leave the emitting device blind to its own push). A clean working tree renders "Nothing to push...(working tree is clean)" and exits successfully with no event and no push; repeated pushes with no intervening commit are accepted ref churn (a new stash-create commit each time, even when content is identical) rather than deduplicated, since `wip push` is an explicit, single-shot user command. `wip fetch` is the read/transport half (`git.Runner.FetchRef`): with `--device <id>` it fetches exactly that device's canonically-derived ref (`refs/devstrap/wip/<device_id>/<path_key>` — a stored `Ref` string from a peer's mirror row is never trusted as the fetch target, only the device id + path_key derivation is); without `--device` it discovers candidate devices from the local `device_wip` mirror (populated by synced `repo.wip.pushed` events, never by network probing) and fetches each one's canonically-derived ref in turn. Both forms mirror refs into local git storage only — they never materialize, apply, or touch the working tree, and this plane is never read by the fresh-worktree resolver (`worktree new`'s base is always the fetched `origin/<default_branch>`). A ref missing on the remote (git's "couldn't find remote ref" class, `git.ErrBranchNotFound`) renders a clear "no WIP ref found" message instead of an error; an empty mirror renders "No pending WIP known for `<path>`" and still exits successfully — the same never-a-silent-all-clear convention as `worktree unlock`/`doctor`.
 
 ## Agent commands
 
