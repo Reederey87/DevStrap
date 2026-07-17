@@ -252,6 +252,109 @@ func TestCheckHubHealthWorkspaceIDRowFileHub(t *testing.T) {
 	}
 }
 
+// TestCheckHubHealthWarnsOnRetentionManifestVersionSkew pins the P7-PROD-03
+// doctor surface: a retention manifest behind what this binary produces is a
+// WARNING (a live signal of a mixed-version fleet), never a failure —
+// `doctor --remote` must not wedge on it.
+func TestCheckHubHealthWarnsOnRetentionManifestVersionSkew(t *testing.T) {
+	ctx := context.Background()
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init", "--join"); err != nil {
+		t.Fatalf("init --join stderr = %q err = %v", stderr, err)
+	}
+	v := viper.New()
+	v.Set("home", home)
+	v.Set("root", root)
+	opts := &options{v: v}
+
+	hubPath := filepath.Join(t.TempDir(), "hub.json")
+	old := dssync.RetentionManifest{
+		V:           1,
+		WorkspaceID: "ws_test",
+		Floors:      map[string]int64{"dev_a": 5},
+		Snapshot: dssync.RetentionSnapshotRef{
+			Epoch: 1, HLC: 1, KID: "kid", ProducedBy: "dev_a", SHA256: strings.Repeat("a", 64),
+		},
+		ProducedBy: "dev_a",
+		ProducedAt: 1,
+		Sig:        "not-verified-by-this-diagnostic",
+	}
+	raw, err := json.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (dssync.FileHub{Path: hubPath}).PutRetention(ctx, raw, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	results := checkHubHealth(ctx, opts, hubPath)
+	var found bool
+	for _, result := range results {
+		if result.Name == "retention manifest version" {
+			found = true
+			if result.Status != checkWarn || !strings.Contains(result.Detail, "v1") || !strings.Contains(result.Detail, "v2") {
+				t.Fatalf("retention manifest version result = %+v, want warning mentioning v1/v2", result)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("checkHubHealth results = %+v, want retention manifest version warning", results)
+	}
+}
+
+// TestCheckHubHealthWarnsWhenManifestRequiresNewerReader covers the other
+// skew direction (P7-PROD-03): a manifest that stamps a MinReaderVersion
+// above what this binary reads is a warning telling the operator to upgrade
+// THIS device, distinct from the "hub is behind" message above.
+func TestCheckHubHealthWarnsWhenManifestRequiresNewerReader(t *testing.T) {
+	ctx := context.Background()
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init", "--join"); err != nil {
+		t.Fatalf("init --join stderr = %q err = %v", stderr, err)
+	}
+	v := viper.New()
+	v.Set("home", home)
+	v.Set("root", root)
+	opts := &options{v: v}
+
+	hubPath := filepath.Join(t.TempDir(), "hub.json")
+	future := dssync.RetentionManifest{
+		V:           dssync.CurrentSnapshotVersion(),
+		WorkspaceID: "ws_test",
+		Floors:      map[string]int64{"dev_a": 5},
+		Snapshot: dssync.RetentionSnapshotRef{
+			Epoch: 1, HLC: 1, KID: "kid", ProducedBy: "dev_a", SHA256: strings.Repeat("a", 64),
+		},
+		ProducedBy:       "dev_a",
+		ProducedAt:       1,
+		MinReaderVersion: dssync.CurrentSnapshotVersion() + 1,
+		Sig:              "not-verified-by-this-diagnostic",
+	}
+	raw, err := json.Marshal(future)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := (dssync.FileHub{Path: hubPath}).PutRetention(ctx, raw, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	results := checkHubHealth(ctx, opts, hubPath)
+	var found bool
+	for _, result := range results {
+		if result.Name == "retention manifest version" {
+			found = true
+			if result.Status != checkWarn || !strings.Contains(result.Detail, "min reader version") {
+				t.Fatalf("retention manifest version result = %+v, want warning mentioning min reader version", result)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("checkHubHealth results = %+v, want retention manifest version warning", results)
+	}
+}
+
 func TestDoctorWarnsWhenServiceInstalledButStopped(t *testing.T) {
 	f := &fakeServiceManager{
 		labelVal:  "fake.run-loop",
