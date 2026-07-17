@@ -544,11 +544,27 @@ func (r Runner) LocalDefaultBranch(ctx context.Context, dir, fallback string) (s
 }
 
 func (r Runner) symbolicOriginHead(ctx context.Context, dir string) (string, bool) {
-	out, err := r.Run(ctx, dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+	// Read the FULL symbolic-ref target, not --short: --short generically
+	// strips any leading well-known-looking segment for ANY ref shape, not
+	// only a legitimate refs/remotes/origin/<branch> target — a HEAD symref
+	// repointed at a non-remote-tracking ref (e.g. refs/devstrap/wip/<device>/
+	// <path_key>, working-state validation plane Layer B; empirically
+	// confirmed: `git symbolic-ref --short` on such a target returns
+	// "devstrap/wip/..." verbatim, which the old origin/-prefix trim below
+	// would then pass straight through unchanged) would otherwise validate as
+	// if it were a legitimate branch name. `git remote set-head origin --auto`
+	// writes this ref from whatever the remote reports, so a hostile or
+	// misconfigured remote can reach this path, not only local tampering.
+	out, err := r.Run(ctx, dir, "symbolic-ref", "refs/remotes/origin/HEAD")
 	if err != nil {
 		return "", false
 	}
-	branch := strings.TrimPrefix(strings.TrimSpace(out), "origin/")
+	const originPrefix = "refs/remotes/origin/"
+	target := strings.TrimSpace(out)
+	if !strings.HasPrefix(target, originPrefix) {
+		return "", false
+	}
+	branch := strings.TrimPrefix(target, originPrefix)
 	if branch == "" {
 		return "", false
 	}
@@ -576,7 +592,21 @@ func (r Runner) RemoteDefaultBranch(ctx context.Context, dir, remote string) (st
 		if len(fields) < 2 || fields[1] != "HEAD" {
 			continue
 		}
-		branch := strings.TrimPrefix(fields[0], "refs/heads/")
+		// The symref target MUST be under refs/heads/ — TrimPrefix alone is a
+		// no-op passthrough for anything else (refs/tags/*, refs/devstrap/wip/*,
+		// ...), and safeBranchName tolerates slashes (by design, for real
+		// branch names like "feature/foo"), so a HEAD symref repointed at a
+		// non-branch ref would otherwise validate and be returned as if it
+		// were a legitimate default branch name. A hostile or misconfigured
+		// remote repointing HEAD at refs/devstrap/wip/<device>/<path_key>
+		// (working-state validation plane Layer B, spec/10's agent-isolation
+		// invariant) must fail here, not merely fail later by accident of
+		// whatever local fetch refspec happens to be configured.
+		const headsPrefix = "refs/heads/"
+		if !strings.HasPrefix(fields[0], headsPrefix) {
+			return "", fmt.Errorf("remote %q HEAD points at non-branch ref %q", remote, fields[0])
+		}
+		branch := strings.TrimPrefix(fields[0], headsPrefix)
 		if branch == "" || !safeBranchName(branch) {
 			return "", fmt.Errorf("invalid remote HEAD ref %q", fields[0])
 		}
