@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Reederey87/DevStrap/internal/agentsecrets"
 	"github.com/Reederey87/DevStrap/internal/childenv"
 	dsgit "github.com/Reederey87/DevStrap/internal/git"
 	"github.com/Reederey87/DevStrap/internal/id"
@@ -240,6 +241,55 @@ func sandboxViolationTag(runID string) string {
 	return "devstrap-sb-" + runID
 }
 
+// resolveAgentSecrets implements the project-env allowlist opt-in
+// (spec/10 "Secret policy"): it loads FileName from the fresh worktree --
+// fetched from origin/<default_branch>, per the AD-8 "agents never base from
+// synced/local state" rule, so the policy an agent runs under is always the
+// one committed at its base SHA -- and, only when that file is present,
+// filters the project's captured/hydrated env profile down to the allowed
+// (non-denied) keys for injection into the agent subprocess env.
+//
+// A missing config file returns (nil, nil): resolveAgentSecrets is not
+// called for such projects prior to P4-GIT-06 either, and the pre-existing
+// behavior (no captured-profile secrets reach the agent subprocess) is
+// preserved exactly. A present config file with no matching captured profile
+// also returns (nil, nil) -- there is nothing to inject, not an error.
+func resolveAgentSecrets(ctx context.Context, store *state.Store, opts *options, project state.ProjectStatus, wt state.Worktree, stderr io.Writer) (map[string]string, error) {
+	policy, err := agentsecrets.LoadFromDir(wt.Path)
+	if err != nil {
+		return nil, appError{code: exitInvalidConfig, err: err}
+	}
+	if policy == nil {
+		return nil, nil
+	}
+	profile, bindings, err := store.EnvProfileForProject(ctx, project.ID)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if profile.Provider != "devstrap_encrypted" {
+		// 1Password-provider profiles resolve refs at runtime via `op run` and
+		// are not yet wired into agent secret injection (the refs, not the
+		// plaintext, would need per-key filtering through a second op-run
+		// wrapping path). Warn rather than silently exposing nothing without
+		// explanation, and rather than failing a run whose command may not
+		// even need secrets.
+		_, _ = fmt.Fprintf(stderr, "warning: %s found but env profile provider %q is not yet supported for agent secret injection; no captured secrets were exposed\n", agentsecrets.FileName, profile.Provider)
+		return nil, nil
+	}
+	device, err := store.CurrentDevice(ctx)
+	if err != nil {
+		return nil, err
+	}
+	set, err := decryptEnvProfile(ctx, opts, store, device.ID, bindings)
+	if err != nil {
+		return nil, err
+	}
+	return policy.Filter(set), nil
+}
+
 func marshalLimitations(limitations []string) string {
 	if len(limitations) == 0 {
 		return ""
@@ -391,7 +441,11 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 					_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "warning: could not resolve the worktree's git dirs for the sandbox; git commits inside the run may be blocked (use --sandbox off if the agent must commit)")
 				}
 			}
-			commandErr := runAgentProcess(cmd.Context(), wt, run, agentCommand, stdout, sandboxLaunch, sandboxGitDirs)
+			agentSecrets, err := resolveAgentSecrets(cmd.Context(), store, opts, project, wt, cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			commandErr := runAgentProcess(cmd.Context(), wt, run, agentCommand, stdout, sandboxLaunch, sandboxGitDirs, agentSecrets)
 			collectSandboxViolations(cmd.Context(), cmd.ErrOrStderr(), store, run, sandboxLaunch, runStart)
 			diffSummary := agentDiffSummary(cmd.Context(), wt.Path, wt.BaseSHA)
 			status := "complete"
@@ -831,7 +885,7 @@ func pathWithin(root, path string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
-func runAgentProcess(ctx context.Context, wt state.Worktree, run state.AgentRun, args []string, stdout io.Writer, sandboxLaunch agentSandboxLaunch, gitDirs []string) error {
+func runAgentProcess(ctx context.Context, wt state.Worktree, run state.AgentRun, args []string, stdout io.Writer, sandboxLaunch agentSandboxLaunch, gitDirs []string, agentSecrets map[string]string) error {
 	if err := os.MkdirAll(filepath.Dir(run.LogPath), 0o700); err != nil {
 		return fmt.Errorf("create agent log dir: %w", err)
 	}
@@ -840,11 +894,15 @@ func runAgentProcess(ctx context.Context, wt state.Worktree, run state.AgentRun,
 		return fmt.Errorf("create agent log: %w", err)
 	}
 	defer func() { _ = logFile.Close() }()
-	envOverrides := map[string]string{
-		"DEVSTRAP_AGENT_RUN_ID": run.ID,
-		"DEVSTRAP_WORKTREE_ID":  wt.ID,
-		"HOME":                  wt.Path, // SECU-02: repoint HOME to worktree so agent tooling cannot reach user dotfiles.
+	envOverrides := make(map[string]string, len(agentSecrets)+3)
+	for name, value := range agentSecrets {
+		envOverrides[name] = value
 	}
+	// Reserved DevStrap overrides are applied last so an allowlisted secret can
+	// never shadow them (e.g. a captured var literally named HOME).
+	envOverrides["DEVSTRAP_AGENT_RUN_ID"] = run.ID
+	envOverrides["DEVSTRAP_WORKTREE_ID"] = wt.ID
+	envOverrides["HOME"] = wt.Path // SECU-02: repoint HOME to worktree so agent tooling cannot reach user dotfiles.
 	var extraFiles []*os.File
 	if sandboxLaunch.enabled {
 		// The write allow-list must not include the machine-wide shared
