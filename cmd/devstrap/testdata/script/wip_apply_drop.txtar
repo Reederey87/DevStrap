@@ -1,0 +1,151 @@
+# P7-WIP-05: `wip apply`/`wip drop` are the mutating half of the
+# working-state validation plane Layer B (spec/07). apply fetches a device's
+# pending WIP recovery ref and runs `git stash apply` against it — a clean
+# apply succeeds and leaves the working tree dirty with the WIP's changes; a
+# genuine content conflict is git's own per-file conflict detection refusing
+# safely (real `<<<<<<<`-style merge markers), never a devstrap pre-emptive
+# dirty-tree gate. drop deletes the remote ref (idempotent — deleting an
+# already-gone ref is not an error) and clears only the LOCAL device's own
+# device_wip mirror row, never propagating to other devices' mirrors. Both
+# commands share `wip show`'s device-resolution helper, so an ambiguous
+# multi-device selection with no --device refuses with the identical
+# usage-error shape.
+
+env DEVSTRAP_NO_KEYCHAIN=1
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+# Three bare remotes, one per project under test: proj1 (clean apply, then
+# drop + idempotent drop), proj2 (conflicting apply), proj3 (ambiguous
+# multi-device apply/drop).
+exec git init --bare -b main $WORK/rem1.git
+exec git clone $WORK/rem1.git $WORK/src1
+exec sh -c 'echo hello > $WORK/src1/README.md'
+exec sh -c 'cd $WORK/src1 && git add README.md && git commit -m init && git branch -M main && git push origin main'
+
+exec git init --bare -b main $WORK/rem2.git
+exec git clone $WORK/rem2.git $WORK/src2
+exec sh -c 'echo hello > $WORK/src2/README.md'
+exec sh -c 'cd $WORK/src2 && git add README.md && git commit -m init && git branch -M main && git push origin main'
+
+exec git init --bare -b main $WORK/rem3.git
+exec git clone $WORK/rem3.git $WORK/src3
+exec sh -c 'echo hello > $WORK/src3/README.md'
+exec sh -c 'cd $WORK/src3 && git add README.md && git commit -m init && git branch -M main && git push origin main'
+
+# Device A: init, add all three projects, sync (materializes real clones).
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA init
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/proj1 $WORK/rem1.git
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/proj2 $WORK/rem2.git
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/proj3 $WORK/rem3.git
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+
+# Device B: init, enroll under its OWN real device id (multi-device
+# testscript convention, spec/16 — never an arbitrary hardcoded label), sync
+# (materializes its own clones of the same three projects).
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB init
+exec sh -c 'devstrap --home=$WORK/homeB --root=$WORK/CodeB devices list | awk "NR==1{print \$1}" > $WORK/dev-b-id.txt'
+exec sh -c 'test -s $WORK/dev-b-id.txt'
+exec sh -c 'B_ID=$(cat $WORK/dev-b-id.txt); REC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); SIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); FP=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --fingerprint); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll "$B_ID" --name b --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve --fingerprint "$FP"'
+stdout 'enrolled as approved'
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
+stdout 'materialized'
+
+# --- Case 1: clean apply on an unambiguous single candidate ---
+# Device A changes proj1's README to a distinctive marker and pushes its WIP.
+exec sh -c 'echo A_MARKER > $WORK/CodeA/work/proj1/README.md'
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA wip push work/proj1
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
+
+# Device B's checkout of proj1 is clean; apply resolves the single candidate
+# (A's row) with no --device needed, fetches the ref, and applies it as an
+# unstaged working-tree change.
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB wip apply work/proj1
+stdout 'Applied WIP for work/proj1 from device'
+exec sh -c 'grep -q A_MARKER $WORK/CodeB/work/proj1/README.md'
+
+# `wip status` on B afterward still shows the mirror entry unaffected — apply
+# does not drop it, only `drop` does.
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB wip status work/proj1
+stdout 'refs/devstrap/wip/'
+
+# --- Case 2: a genuine content conflict is git's own refusal, not devstrap's ---
+# Device A changes proj2's README (the SAME single line) to a conflicting
+# marker and pushes its WIP.
+exec sh -c 'echo A_CONFLICT_MARKER > $WORK/CodeA/work/proj2/README.md'
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA wip push work/proj2
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
+
+# Device B independently makes its OWN conflicting edit to that same line and
+# STAGES it (empirically, git's stash-apply safety net takes the "your local
+# changes would be overwritten" whole-file abort path for an unstaged dirty
+# edit to the same line; only a STAGED conflicting edit reaches git's
+# recursive content merge and produces real inline conflict markers — both
+# are legitimate git-native refusals this command must not paper over).
+# `wip apply` must not add a pre-emptive dirty-tree gate — it calls `git
+# stash apply` directly and lets git's own per-file conflict detection
+# refuse, leaving standard conflict markers.
+exec sh -c 'echo B_LOCAL_MARKER > $WORK/CodeB/work/proj2/README.md'
+exec git -C $WORK/CodeB/work/proj2 add README.md
+! exec devstrap --home=$WORK/homeB --root=$WORK/CodeB wip apply work/proj2
+stderr 'unresolved merge conflicts'
+exec sh -c 'grep -q "<<<<<<<" $WORK/CodeB/work/proj2/README.md'
+exec sh -c 'grep -q "=======" $WORK/CodeB/work/proj2/README.md'
+exec sh -c 'grep -q ">>>>>>>" $WORK/CodeB/work/proj2/README.md'
+
+# --- Cases 3 & 4: drop, then idempotent drop of the same already-gone ref ---
+# Device B drops proj1's WIP ref (A's row from case 1, still present since
+# apply never removes it): the remote ref is deleted and B's OWN local
+# mirror row is cleared immediately.
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB wip drop work/proj1
+stdout 'Dropped WIP ref for work/proj1'
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB wip status work/proj1
+stdout 'No pending WIP for work/proj1'
+
+# The ref is verifiably gone on the shared remote.
+exec sh -c '! git ls-remote --exit-code $WORK/rem1.git "refs/devstrap/wip/*"'
+
+# Device A's OWN local mirror row for its own push was never touched by B's
+# drop (no propagation to other devices' mirrors) — A still sees it pending.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA wip status work/proj1
+stdout 'refs/devstrap/wip/'
+
+# A drops its own already-gone ref (deleted by B above): this exercises the
+# true already-gone-ref idempotency at the git level, not merely devstrap's
+# own zero-rows fast path, and must not error.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA wip drop work/proj1
+stdout 'Dropped WIP ref for work/proj1'
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA wip status work/proj1
+stdout 'No pending WIP for work/proj1'
+
+# --- Case 5: ambiguous apply/drop refuses without --device ---
+# Both devices push their OWN independent WIP for proj3, then A learns about
+# B's via sync — A's mirror now has two candidate rows for the same project.
+exec sh -c 'echo A_V3 > $WORK/CodeA/work/proj3/README.md'
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA wip push work/proj3
+exec sh -c 'echo B_V3 > $WORK/CodeB/work/proj3/README.md'
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB wip push work/proj3
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+exec sh -c 'devstrap --home=$WORK/homeA --root=$WORK/CodeA wip status work/proj3 > $WORK/status-proj3.txt'
+exec sh -c 'grep -qf $WORK/dev-b-id.txt $WORK/status-proj3.txt'
+
+# `wip apply` with no --device and multiple candidates is a usage error
+# naming the candidates, proving the shared resolveWipTarget helper actually
+# unified `wip show`'s existing behavior with the new commands.
+exec sh -c '! devstrap --home=$WORK/homeA --root=$WORK/CodeA wip apply work/proj3 2> $WORK/apply-multi.err'
+exec sh -c 'grep -q "multiple devices have pending WIP for work/proj3" $WORK/apply-multi.err'
+exec sh -c 'grep -qf $WORK/dev-b-id.txt $WORK/apply-multi.err'
+exec sh -c 'grep -q -- --device $WORK/apply-multi.err'
+
+# `wip drop` with no --device and multiple candidates is the identical usage
+# error, not a silent pick.
+exec sh -c '! devstrap --home=$WORK/homeA --root=$WORK/CodeA wip drop work/proj3 2> $WORK/drop-multi.err'
+exec sh -c 'grep -q "multiple devices have pending WIP for work/proj3" $WORK/drop-multi.err'
+exec sh -c 'grep -qf $WORK/dev-b-id.txt $WORK/drop-multi.err'
+exec sh -c 'grep -q -- --device $WORK/drop-multi.err'
