@@ -1101,6 +1101,114 @@ func TestPushRefForcesNonFastForwardUpdate(t *testing.T) {
 	}
 }
 
+// TestFetchRef pins the basic contract: FetchRef mirrors a remote ref into
+// the identical local ref path without creating a local branch or touching
+// the working tree.
+func TestFetchRef(t *testing.T) {
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "remote.git")
+	runRealGit(t, gitBin, tmp, "init", "--bare", remote)
+
+	src, r := initSquashMergeRepo(t)
+	runRealGit(t, gitBin, src, "remote", "add", "origin", remote)
+	ctx := context.Background()
+	sha, err := r.Run(ctx, src, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha = strings.TrimSpace(sha)
+	ref := "refs/devstrap/wip/dev_test123/work/acme/api-server"
+	if err := r.PushRef(ctx, src, "origin", sha, ref); err != nil {
+		t.Fatalf("PushRef err = %v", err)
+	}
+
+	repo2 := filepath.Join(tmp, "repo2")
+	runRealGit(t, gitBin, tmp, "clone", remote, repo2)
+	if err := r.FetchRef(ctx, repo2, "origin", ref); err != nil {
+		t.Fatalf("FetchRef err = %v", err)
+	}
+	got, err := r.Run(ctx, repo2, "rev-parse", ref)
+	if err != nil {
+		t.Fatalf("rev-parse %s locally: %v", ref, err)
+	}
+	if strings.TrimSpace(got) != sha {
+		t.Fatalf("local ref %s = %q, want the fetched sha %q", ref, got, sha)
+	}
+}
+
+// TestFetchRefForcesNonFastForwardLocalUpdate pins the mirror-image of
+// TestPushRefForcesNonFastForwardUpdate: ref is force-pushed by its owning
+// device on every wip push (each fresh stash-create commit is a sibling of
+// the last, never its descendant), so a SECOND local fetch of an
+// already-once-fetched ref is a non-fast-forward update on the fetch side
+// too — without forcing it, this reproduced as a raw "! [rejected] ...
+// (non-fast-forward)" failure, silently leaving a stale local copy in place.
+func TestFetchRefForcesNonFastForwardLocalUpdate(t *testing.T) {
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "remote.git")
+	runRealGit(t, gitBin, tmp, "init", "--bare", remote)
+
+	src, r := initSquashMergeRepo(t)
+	runRealGit(t, gitBin, src, "remote", "add", "origin", remote)
+	ctx := context.Background()
+	base, err := r.Run(ctx, src, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base = strings.TrimSpace(base)
+	ref := "refs/devstrap/wip/dev_test123/work/acme/api-server"
+
+	// Two independent, sibling commits (neither a descendant of the other),
+	// mirroring two distinct git stash create snapshots from the same base.
+	tree, err := r.Run(ctx, src, "write-tree")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha1, err := r.Run(ctx, src, "commit-tree", strings.TrimSpace(tree), "-p", base, "-m", "stash1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha2, err := r.Run(ctx, src, "commit-tree", strings.TrimSpace(tree), "-p", base, "-m", "stash2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sha1, sha2 = strings.TrimSpace(sha1), strings.TrimSpace(sha2)
+	if sha1 == sha2 {
+		t.Fatal("test setup produced identical commit shas; commit-tree with distinct messages must differ")
+	}
+
+	if err := r.PushRef(ctx, src, "origin", sha1, ref); err != nil {
+		t.Fatalf("first PushRef err = %v", err)
+	}
+	repo2 := filepath.Join(tmp, "repo2")
+	runRealGit(t, gitBin, tmp, "clone", remote, repo2)
+	if err := r.FetchRef(ctx, repo2, "origin", ref); err != nil {
+		t.Fatalf("first FetchRef err = %v", err)
+	}
+
+	if err := r.PushRef(ctx, src, "origin", sha2, ref); err != nil {
+		t.Fatalf("second PushRef (sibling commit) err = %v", err)
+	}
+	if err := r.FetchRef(ctx, repo2, "origin", ref); err != nil {
+		t.Fatalf("second FetchRef of the SAME ref err = %v (must force, not reject as non-fast-forward)", err)
+	}
+	got, err := r.Run(ctx, repo2, "rev-parse", ref)
+	if err != nil {
+		t.Fatalf("rev-parse %s locally: %v", ref, err)
+	}
+	if strings.TrimSpace(got) != sha2 {
+		t.Fatalf("local ref %s = %q, want it to have moved to the SECOND sha %q, not stayed pinned to the first", ref, got, sha2)
+	}
+}
+
 // TestPushRefRejectsRefOutsideWipNamespace pins that PushRef refuses to push
 // to a ref outside refs/devstrap/wip/*, never falling through to actually
 // invoke git — the caller-supplied ref for this primitive must never be able

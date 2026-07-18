@@ -360,7 +360,15 @@ func (r Runner) FetchRef(ctx context.Context, dir, remote, ref string) error {
 	if !safeRefPath(ref) {
 		return fmt.Errorf("invalid git ref %q", ref)
 	}
-	return r.runWithNetworkRetry(ctx, dir, "fetch", remote, ref+":"+ref)
+	// The `+` prefix forces the local ref update, mirroring PushRef's own
+	// force-push. Empirically confirmed necessary: ref is force-pushed by its
+	// owning device on every wip push (each fresh git stash create commit is
+	// a sibling of the previous one, never its descendant), so a SECOND local
+	// fetch of an already-once-fetched ref is a non-fast-forward update on
+	// the fetch side too and would otherwise be rejected outright with a raw
+	// "! [rejected] ... (non-fast-forward)" error — exactly the same bug
+	// class PushRef had, just on the pull side.
+	return r.runWithNetworkRetry(ctx, dir, "fetch", remote, "+"+ref+":"+ref)
 }
 
 // MaintenanceRun runs a one-time `git maintenance run --auto` (commit-graph +
