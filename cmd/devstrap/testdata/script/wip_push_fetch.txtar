@@ -61,3 +61,13 @@ exec sh -c 'REF=$(sed -n "s#.*\\(refs/devstrap/wip/[^ ]*\\).*#\\1#p" $WORK/push.
 
 # B's working tree is untouched — fetch never materializes or applies.
 ! grep 'dirty' $WORK/CodeB/work/proj/README.md
+
+# A second `wip push` for the SAME project on the SAME device — the common
+# case as work continues, not an edge case — must succeed and move the ref
+# forward, never fail as a non-fast-forward update (PushRef force-pushes its
+# own exclusive ref namespace; a real production bug here was found and
+# fixed by adversarial review during a later PR in this same wave).
+exec sh -c 'echo dirty2 >> $WORK/CodeA/work/proj/README.md'
+exec sh -c 'devstrap --home=$WORK/homeA --root=$WORK/CodeA wip push work/proj > $WORK/push2.out'
+exec grep 'Pushed WIP for work/proj to refs/devstrap/wip/' $WORK/push2.out
+exec sh -c '! diff -q $WORK/push.out $WORK/push2.out >/dev/null'

@@ -39,6 +39,8 @@ Changed:
 - `wip push` deliberately has no dedup/debounce against a previous push in this PR (unlike the automatic per-sync-cycle gitstate capture): it is an explicit, single-shot user command, so repeated no-op pushes producing ref churn (a new stash-create commit each time, even with identical content) is an accepted simplification, not a bug.
 - Spec: `spec/00_START_HERE.md`'s command inventory adds `wip push`/`wip fetch` and moves the Layer B bullet from foundation-only to describing the shipped CLI; `spec/13_CLI_DAEMON_API.md` gains a "WIP commands" section (full contract) and drops `wip` from the "Planned commands" list; `spec/07_NAMESPACE_AND_SYNC_MODEL.md`'s Layer B paragraph now describes the shipped push/fetch CLI, with `status|show|apply|drop` named as the remaining gap.
 
+Post-review (opus-4.8, escalated during the final PR of this wave): the "repeated no-op pushes ... accepted simplification, not a bug" framing above stayed correct about the DEBOUNCE design, but review found that a second push actually FAILED outright — `PushRef` (defined in the Layer-B-foundation PR) pushed without a force refspec, so any second `wip push` for the same project, not merely a no-op one, was rejected as a non-fast-forward update. Fixed upstream in `PushRef` itself (a `+` force-refspec prefix, safe here since the ref is this device's own exclusive namespace); this PR's own testscript (`wip_push_fetch.txtar`) now additionally proves a SECOND real push (with new content) succeeds and moves the ref, not merely that a clean-tree no-op is silent.
+
 Validated:
 - `gofmt -l cmd internal` (clean)
 - `go build ./...`, `go vet ./...`
