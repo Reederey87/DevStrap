@@ -1040,6 +1040,67 @@ func TestPushRef(t *testing.T) {
 	}
 }
 
+// TestPushRefForcesNonFastForwardUpdate pins a real production bug found by
+// adversarial review: ref is this device's OWN exclusive namespace segment
+// (safeRefPath's device-id/path-key structure guarantees no other device
+// ever writes to it), so a device pushing a SECOND wip-recovery snapshot for
+// the same project is the common case, not an edge case — but each fresh
+// `git stash create` commit is never a descendant of the previous one, so an
+// unforced push is a non-fast-forward update git refuses outright. Without
+// the `+` refspec prefix, this reproduced as a raw "! [rejected] ...
+// (non-fast-forward)" failure on every second push for the same project.
+func TestPushRefForcesNonFastForwardUpdate(t *testing.T) {
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "remote.git")
+	runRealGit(t, gitBin, tmp, "init", "--bare", remote)
+
+	repo, r := initSquashMergeRepo(t)
+	runRealGit(t, gitBin, repo, "remote", "add", "origin", remote)
+	ctx := context.Background()
+	ref := "refs/devstrap/wip/dev_test123/work/acme/api-server"
+
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sha1, ok, err := r.StashCreate(ctx, repo)
+	if err != nil || !ok {
+		t.Fatalf("first StashCreate = (%q,%v,%v)", sha1, ok, err)
+	}
+	if err := r.PushRef(ctx, repo, "origin", sha1, ref); err != nil {
+		t.Fatalf("first PushRef err = %v", err)
+	}
+
+	// A clean checkout between stashes (StashCreate never touches the
+	// worktree, but the test itself must revert its own edit before making a
+	// second, distinct one).
+	runRealGit(t, gitBin, repo, "checkout", "--", "README.md")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("second\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sha2, ok, err := r.StashCreate(ctx, repo)
+	if err != nil || !ok {
+		t.Fatalf("second StashCreate = (%q,%v,%v)", sha2, ok, err)
+	}
+	if sha1 == sha2 {
+		t.Fatal("test setup produced identical stash shas; the two edits must differ")
+	}
+	if err := r.PushRef(ctx, repo, "origin", sha2, ref); err != nil {
+		t.Fatalf("second PushRef to the SAME ref err = %v (must force, not reject as non-fast-forward)", err)
+	}
+
+	got, err := r.Run(ctx, remote, "show-ref", "--hash", ref)
+	if err != nil {
+		t.Fatalf("show-ref on remote: %v", err)
+	}
+	if strings.TrimSpace(got) != sha2 {
+		t.Fatalf("remote ref %s = %q, want the SECOND pushed sha %q (the ref must move forward, not stay pinned to the first push)", ref, got, sha2)
+	}
+}
+
 // TestPushRefRejectsRefOutsideWipNamespace pins that PushRef refuses to push
 // to a ref outside refs/devstrap/wip/*, never falling through to actually
 // invoke git — the caller-supplied ref for this primitive must never be able
