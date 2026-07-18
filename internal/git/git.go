@@ -345,6 +345,32 @@ func (r Runner) PushRef(ctx context.Context, dir, remote, sha, ref string) error
 	return err
 }
 
+// FetchRef fetches ref from remote into the identical local ref path
+// (`git fetch <remote> <ref>:<ref>`), used by the working-state WIP-ref plane
+// (Layer B) to mirror a peer's refs/devstrap/wip/<device_id>/<path_key> ref
+// locally under the exact same name. ref is validated with safeRefPath (the
+// same WIP-namespace-scoped check PushRef uses) — this is the one place a
+// peer-supplied ref string (read from the device_wip mirror) is ever handed
+// to a git subprocess, so validating it here is the caller's actual trust
+// boundary, not merely a mirror-storage nicety.
+func (r Runner) FetchRef(ctx context.Context, dir, remote, ref string) error {
+	if !safeRemoteName(remote) {
+		return fmt.Errorf("invalid git remote name %q", remote)
+	}
+	if !safeRefPath(ref) {
+		return fmt.Errorf("invalid git ref %q", ref)
+	}
+	// The `+` prefix forces the local ref update, mirroring PushRef's own
+	// force-push. Empirically confirmed necessary: ref is force-pushed by its
+	// owning device on every wip push (each fresh git stash create commit is
+	// a sibling of the previous one, never its descendant), so a SECOND local
+	// fetch of an already-once-fetched ref is a non-fast-forward update on
+	// the fetch side too and would otherwise be rejected outright with a raw
+	// "! [rejected] ... (non-fast-forward)" error — exactly the same bug
+	// class PushRef had, just on the pull side.
+	return r.runWithNetworkRetry(ctx, dir, "fetch", remote, "+"+ref+":"+ref)
+}
+
 // MaintenanceRun runs a one-time `git maintenance run --auto` (commit-graph +
 // prefetch) so common history ops (blame, log -p) do not trigger per-object
 // lazy fetches on a blobless clone (GIT-06). It is best-effort: older git or a

@@ -1,0 +1,73 @@
+# P7-WIP-02: `wip push`/`wip fetch` are the write/transport half of the
+# working-state validation plane Layer B (spec/07). Device A stashes its
+# uncommitted change to its own refs/devstrap/wip/<device_id>/<path_key> ref
+# and pushes it to the shared remote; device B discovers and mirrors that ref
+# locally via the synced repo.wip.pushed event (the device_wip mirror), never
+# by probing the network for a ref it doesn't yet know exists.
+
+env DEVSTRAP_NO_KEYCHAIN=1
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+# Bare remote with one commit, shared by both devices.
+exec git init --bare -b main $WORK/remote.git
+exec git clone $WORK/remote.git $WORK/src
+exec sh -c 'echo hello > $WORK/src/README.md'
+exec sh -c 'cd $WORK/src && git add README.md && git commit -m init && git branch -M main && git push origin main'
+
+# Device A: init, add the project, sync (materializes a real clone).
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA init
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA add --path work/proj $WORK/remote.git
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+stdout 'pushed 1'
+
+# `wip push` on a clean working tree is a no-op: no event, no push, no error.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA wip push work/proj
+stdout 'Nothing to push for work/proj \(working tree is clean\)'
+
+# Device B: init, enroll+approve (so it can decrypt A's events), sync
+# (materializes its own clone of the same project).
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB init
+exec sh -c 'REC=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient); SIG=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --signing); FP=$(devstrap --home=$WORK/homeB --root=$WORK/CodeB devices recipient --fingerprint); devstrap --home=$WORK/homeA --root=$WORK/CodeA devices enroll dev_b --name b --os linux --arch arm64 --age-recipient "$REC" --signing-public-key "$SIG" --approve --fingerprint "$FP"'
+stdout 'enrolled as approved'
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
+stdout 'materialized'
+
+# `wip fetch` before anything is known is a clean no-op, not an error.
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB wip fetch work/proj
+stdout 'No pending WIP known for work/proj'
+
+# Device A: make an uncommitted change and push its WIP ref.
+exec sh -c 'echo dirty >> $WORK/CodeA/work/proj/README.md'
+exec sh -c 'devstrap --home=$WORK/homeA --root=$WORK/CodeA wip push work/proj > $WORK/push.out'
+exec grep 'Pushed WIP for work/proj to refs/devstrap/wip/' $WORK/push.out
+
+# Publish the repo.wip.pushed event, then have B pull it into its local
+# device_wip mirror — this is what `wip fetch` discovers from, never a direct
+# network probe for a ref B doesn't yet know exists.
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+stdout 'pushed 1'
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
+stdout 'pulled 1'
+
+# Device B: `wip fetch` with no --device discovers A's ref from the mirror and
+# fetches it into local git storage.
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB wip fetch work/proj
+stdout 'Fetched refs/devstrap/wip/'
+exec sh -c 'REF=$(sed -n "s#.*\\(refs/devstrap/wip/[^ ]*\\).*#\\1#p" $WORK/push.out); git -C $WORK/CodeB/work/proj show-ref --verify --quiet "$REF"'
+
+# B's working tree is untouched — fetch never materializes or applies.
+! grep 'dirty' $WORK/CodeB/work/proj/README.md
+
+# A second `wip push` for the SAME project on the SAME device — the common
+# case as work continues, not an edge case — must succeed and move the ref
+# forward, never fail as a non-fast-forward update (PushRef force-pushes its
+# own exclusive ref namespace; a real production bug here was found and
+# fixed by adversarial review during a later PR in this same wave).
+exec sh -c 'echo dirty2 >> $WORK/CodeA/work/proj/README.md'
+exec sh -c 'devstrap --home=$WORK/homeA --root=$WORK/CodeA wip push work/proj > $WORK/push2.out'
+exec grep 'Pushed WIP for work/proj to refs/devstrap/wip/' $WORK/push2.out
+exec sh -c '! diff -q $WORK/push.out $WORK/push2.out >/dev/null'
