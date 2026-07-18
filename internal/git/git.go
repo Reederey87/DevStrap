@@ -371,6 +371,23 @@ func (r Runner) FetchRef(ctx context.Context, dir, remote, ref string) error {
 	return r.runWithNetworkRetry(ctx, dir, "fetch", remote, "+"+ref+":"+ref)
 }
 
+// DeleteRef deletes ref from remote via a raw refspec push with an empty
+// source (`git push <remote> :<ref>`), used by the working-state WIP-ref
+// plane (Layer B, spec/07) for `wip drop`. Deleting an already-nonexistent
+// ref is NOT an error — git prints a stderr warning ("deleting a
+// non-existent ref") but still exits 0 — empirically confirmed; do not treat
+// that warning as a failure.
+func (r Runner) DeleteRef(ctx context.Context, dir, remote, ref string) error {
+	if !safeRemoteName(remote) {
+		return fmt.Errorf("invalid git remote name %q", remote)
+	}
+	if !safeRefPath(ref) {
+		return fmt.Errorf("invalid git ref %q", ref)
+	}
+	_, err := r.Run(ctx, dir, "push", remote, ":"+ref)
+	return err
+}
+
 // MaintenanceRun runs a one-time `git maintenance run --auto` (commit-graph +
 // prefetch) so common history ops (blame, log -p) do not trigger per-object
 // lazy fetches on a blobless clone (GIT-06). It is best-effort: older git or a

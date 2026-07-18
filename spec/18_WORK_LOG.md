@@ -31,6 +31,24 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-17 — feat(cli): wip apply + wip drop, wave close (P7-WIP-05)
+
+Changed:
+- `internal/git/git.go`: new `Runner.DeleteRef` (`git push <remote> :<ref>`, validated by `safeRefPath`) — deleting an already-nonexistent ref is not an error (git warns on stderr but still exits 0, empirically confirmed).
+- `internal/state/device_wip.go`: new `Store.DeleteDeviceWip(ctx, deviceID, pathKey)` clears one device's own `device_wip` mirror row after a successful drop; no-op if no matching row exists.
+- `internal/cli/wip.go`: extracted the device-resolution logic `wip show` already had (unknown explicit `--device` errors naming it; empty `--device` with one candidate auto-selects; empty `--device` with 2+ candidates is an ambiguous usage error listing them) into a shared `resolveWipTarget` helper, refactoring `wip show` to call it (behavior-preserving — its existing tests/testscript pass unchanged) so `wip apply`/`wip drop` reuse the identical selection contract rather than a third/fourth copy. `devstrap wip apply <project> [--device <id>]` fetches the resolved device's canonically-derived ref and runs `git stash apply <ref>` directly against the working tree — deliberately with no pre-emptive dirty-tree gate and no `--force` escape hatch, since empirical testing showed git's own per-file conflict detection is more precise than any blanket refusal (an unrelated dirty file must not block a clean apply). A clean apply succeeds, leaving the WIP's changes as unstaged modifications; a real conflict is git refusing safely on its own in one of two distinguishable shapes (checked via `Runner.DirtyState` after a failed apply): an outright abort with no changes (git's own stderr surfaced directly) or a partial merge left with standard `<<<<<<</=======/>>>>>>>` markers (`DirtyConflicted`), reported as requiring manual resolution — never an automatic resolve, abort, or reset. `devstrap wip drop <project> [--device <id>]` deletes the resolved device's remote ref and clears only that device's own local mirror row (no propagation to other devices' mirrors — an accepted limitation, not a bug, per this feature's design).
+- Spec: `spec/00_START_HERE.md`/`spec/13_CLI_DAEMON_API.md` document the two new commands and drop the now-fully-shipped `wip apply|drop` line from `13`'s "Planned commands" list; `spec/07_NAMESPACE_AND_SYNC_MODEL.md`'s Layer B paragraph now reads fully SHIPPED (`P7-WIP-01`–`P7-WIP-05` collapsed into one shipped range) describing the complete `push/fetch/status/show/apply/drop` CLI surface.
+
+Validated:
+- `gofmt -l cmd internal` (clean)
+- `go build ./...`, `go vet ./...`
+- `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.0 run` (0 issues, after a cache clean)
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- `GOCACHE=/tmp/pr5-final-gocache go test -race ./...` — full suite green, including the unchanged `wip_status_show.txtar` (proving the `resolveWipTarget` refactor is behavior-preserving) and the new `wip_apply_drop.txtar` (clean apply, a genuine staged-conflict case with real `<<<<<<<` markers — empirically verified beforehand that an UNSTAGED conflicting edit instead produces git's outright "would be overwritten" abort with no markers, so the test stages its conflicting edit to reach the real-conflict path — idempotent drop, cross-device mirror-isolation on drop, and ambiguous-selection refusal shared identically by `apply`/`drop`/`show`)
+
+Follow-ups:
+- None outstanding for Layer B (`push`/`fetch`/`status`/`show`/`apply`/`drop` all shipped). Automatic fleet-wide WIP-ref TTL/GC remains explicitly out of scope, as originally scoped for this wave.
+
 ## 2026-07-17 — feat(cli): wip status + wip show + status/doctor surfacing (P7-WIP-04)
 
 Changed:
