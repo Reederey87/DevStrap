@@ -318,12 +318,20 @@ func (r Runner) StashCreate(ctx context.Context, dir string) (sha string, ok boo
 	return out, true, nil
 }
 
-// PushRef pushes the exact object sha to ref on remote via a raw refspec
-// (`git push <remote> <sha>:<ref>`), distinct from PushBranch's tracking
-// branch push. Used by the working-state WIP-ref plane (Layer B, spec/07) to
-// push a stash-create commit to refs/devstrap/wip/<device_id>/<path_key>
-// without creating or touching any local branch. Runs under the same
-// long-transfer deadline class as other network pushes.
+// PushRef force-pushes the exact object sha to ref on remote via a raw
+// refspec (`git push <remote> +<sha>:<ref>`), distinct from PushBranch's
+// tracking branch push. Used by the working-state WIP-ref plane (Layer B,
+// spec/07) to push a stash-create commit to
+// refs/devstrap/wip/<device_id>/<path_key> without creating or touching any
+// local branch. The `+` prefix (a per-refspec force, not a blanket --force)
+// is required, not merely a safety margin: ref is this device's OWN
+// exclusive namespace segment (safeRefPath's device-id/path-key structure
+// guarantees no other device ever writes to it), so a second wip push for
+// the same project is expected and common — without it, git refuses every
+// non-fast-forward update (a fresh git stash create commit is never a
+// descendant of the previous one) with a raw "hint: use git pull" error that
+// makes no sense for a ref no one ever pulls into a branch. Runs under the
+// same long-transfer deadline class as other network pushes.
 func (r Runner) PushRef(ctx context.Context, dir, remote, sha, ref string) error {
 	if !safeRemoteName(remote) {
 		return fmt.Errorf("invalid git remote name %q", remote)
@@ -333,7 +341,7 @@ func (r Runner) PushRef(ctx context.Context, dir, remote, sha, ref string) error
 	}
 	ctx, cancel := r.longTransferContext(ctx)
 	defer cancel()
-	_, err := r.Run(ctx, dir, "push", remote, sha+":"+ref)
+	_, err := r.Run(ctx, dir, "push", remote, "+"+sha+":"+ref)
 	return err
 }
 
