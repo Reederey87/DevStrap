@@ -302,6 +302,49 @@ func (r Runner) PushBranch(ctx context.Context, dir, remote, branch string) erro
 	return err
 }
 
+// StashCreate runs `git stash create`, producing a commit object WITHOUT
+// touching the worktree or index (unlike `git stash push`). Empty stdout
+// means there is nothing to stash (a clean working tree) — this is NOT an
+// error, ok is simply false.
+func (r Runner) StashCreate(ctx context.Context, dir string) (sha string, ok bool, err error) {
+	out, err := r.Run(ctx, dir, "stash", "create")
+	if err != nil {
+		return "", false, err
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return "", false, nil
+	}
+	return out, true, nil
+}
+
+// PushRef force-pushes the exact object sha to ref on remote via a raw
+// refspec (`git push <remote> +<sha>:<ref>`), distinct from PushBranch's
+// tracking branch push. Used by the working-state WIP-ref plane (Layer B,
+// spec/07) to push a stash-create commit to
+// refs/devstrap/wip/<device_id>/<path_key> without creating or touching any
+// local branch. The `+` prefix (a per-refspec force, not a blanket --force)
+// is required, not merely a safety margin: ref is this device's OWN
+// exclusive namespace segment (safeRefPath's device-id/path-key structure
+// guarantees no other device ever writes to it), so a second wip push for
+// the same project is expected and common — without it, git refuses every
+// non-fast-forward update (a fresh git stash create commit is never a
+// descendant of the previous one) with a raw "hint: use git pull" error that
+// makes no sense for a ref no one ever pulls into a branch. Runs under the
+// same long-transfer deadline class as other network pushes.
+func (r Runner) PushRef(ctx context.Context, dir, remote, sha, ref string) error {
+	if !safeRemoteName(remote) {
+		return fmt.Errorf("invalid git remote name %q", remote)
+	}
+	if !safeRefPath(ref) {
+		return fmt.Errorf("invalid git ref %q", ref)
+	}
+	ctx, cancel := r.longTransferContext(ctx)
+	defer cancel()
+	_, err := r.Run(ctx, dir, "push", remote, "+"+sha+":"+ref)
+	return err
+}
+
 // MaintenanceRun runs a one-time `git maintenance run --auto` (commit-graph +
 // prefetch) so common history ops (blame, log -p) do not trigger per-object
 // lazy fetches on a blobless clone (GIT-06). It is best-effort: older git or a
@@ -969,6 +1012,47 @@ func safeBranchName(branch string) bool {
 	}
 	for _, part := range strings.Split(branch, "/") {
 		if part == "" || strings.HasPrefix(part, ".") || strings.HasSuffix(part, ".lock") {
+			return false
+		}
+	}
+	return true
+}
+
+// safeRefPath reports whether ref is a safe, option-injection-free full ref
+// under the devstrap WIP-ref namespace: refs/devstrap/wip/<device-id
+// segment>/<path_key segment(s)>. PushRef is documented as the primitive
+// backing that one namespace (Layer B, spec/07) and pushes to a REMOTE, so
+// this is intentionally a NARROWER check than safeBranchName's generic
+// multi-segment support — safeBranchName already tolerates internal slashes
+// and would happily accept a "refs/devstrap/wip/..." string (it has no
+// notion of a required prefix), which is fine for its actual call sites
+// (real branch names) but would let a mistaken or miscomputed ref land
+// anywhere PushBranch's targets can (e.g. refs/heads/main) if reused
+// unchanged here. Loosening safeBranchName itself is deliberately avoided —
+// it is still used to validate real branch names elsewhere, and broadening
+// its character class would weaken those call sites too. The bulk of the
+// character-class work (no "..", no whitespace/control/~^:?*[\ chars, no
+// leading "." or trailing ".lock" per segment, no trailing "." or "/") is
+// reused via a single safeBranchName(ref) call rather than duplicated as a
+// new regex; the one gap safeBranchName leaves is its leading-"-" check,
+// which only looks at the very start of the whole ref, so a dash-prefixed
+// INNER segment (device_id and path_key are peer/attacker-influenced here,
+// unlike a locally-typed branch name) would slip through — closed below with
+// an explicit per-segment check.
+func safeRefPath(ref string) bool {
+	const prefix = "refs/devstrap/wip/"
+	rest := strings.TrimPrefix(ref, prefix)
+	if rest == ref { // prefix missing
+		return false
+	}
+	if !strings.Contains(rest, "/") { // need a device-id segment AND >=1 path segment
+		return false
+	}
+	if !safeBranchName(ref) {
+		return false
+	}
+	for _, part := range strings.Split(rest, "/") {
+		if strings.HasPrefix(part, "-") {
 			return false
 		}
 	}

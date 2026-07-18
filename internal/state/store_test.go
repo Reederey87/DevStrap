@@ -239,8 +239,8 @@ func TestMigrateEnsureSummaryAndVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 29 {
-		t.Fatalf("schema version = %d, want 29", version)
+	if version != 30 {
+		t.Fatalf("schema version = %d, want 30", version)
 	}
 
 	var tableCount int
@@ -462,8 +462,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 28 {
-		t.Fatalf("schema version after down = %d, want 28", version)
+	if version != 29 {
+		t.Fatalf("schema version after down = %d, want 29", version)
 	}
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
@@ -472,8 +472,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 29 {
-		t.Fatalf("schema version after re-migrate = %d, want 29", version)
+	if version != 30 {
+		t.Fatalf("schema version after re-migrate = %d, want 30", version)
 	}
 }
 
@@ -505,7 +505,10 @@ func TestMigration00029RoundTripsDeviceGitstateTable(t *testing.T) {
 		t.Fatalf("upsert device gitstate before down: %v", err)
 	}
 
-	if err := st.Down(); err != nil {
+	if err := st.Down(); err != nil { // 30 -> 29 (drops device_wip, unrelated here)
+		t.Fatal(err)
+	}
+	if err := st.Down(); err != nil { // 29 -> 28 (drops device_gitstate)
 		t.Fatal(err)
 	}
 	if tableExists(t, st, "device_gitstate") {
@@ -537,6 +540,71 @@ func TestMigration00029RoundTripsDeviceGitstateTable(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(rows) != 1 || rows[0].HeadSHA != "def456" {
+		t.Fatalf("rows=%#v, want one row from the post-remigrate insert", rows)
+	}
+}
+
+// TestMigration00030RoundTripsDeviceWipTable mirrors
+// TestMigration00029RoundTripsDeviceGitstateTable: pins that migration 00030
+// creates device_wip on up, drops it cleanly on down (no orphaned rows or
+// leftover schema), and recreates a usable table on re-migrate.
+func TestMigration00030RoundTripsDeviceWipTable(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if !tableExists(t, st, "device_wip") {
+		t.Fatal("device_wip table missing after migrate")
+	}
+	if err := st.EnsureWorkspace(ctx, "personal", "/tmp/Code"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.WithTx(ctx, func(tx *Tx) error {
+		return tx.UpsertDeviceWipTx(ctx, "dev_peer", "work/acme/api", "work/acme/api", WipParams{
+			Ref: "refs/devstrap/wip/dev_peer/work/acme/api", SHA: "abc123", BaseSHA: "base123",
+		}, Event{ID: "evt_wip_roundtrip", HLC: 1000})
+	}); err != nil {
+		t.Fatalf("upsert device wip before down: %v", err)
+	}
+
+	if err := st.Down(); err != nil { // 30 -> 29 (drops device_wip)
+		t.Fatal(err)
+	}
+	if tableExists(t, st, "device_wip") {
+		t.Fatal("device_wip table remains after migration 00030 down")
+	}
+
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if !tableExists(t, st, "device_wip") {
+		t.Fatal("device_wip table missing after re-migrate")
+	}
+	rows, err := st.DeviceWipForProject(ctx, "work/acme/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("rows=%#v, want the down migration to have dropped prior data", rows)
+	}
+	if err := st.WithTx(ctx, func(tx *Tx) error {
+		return tx.UpsertDeviceWipTx(ctx, "dev_peer", "work/acme/api", "work/acme/api", WipParams{
+			Ref: "refs/devstrap/wip/dev_peer/work/acme/api", SHA: "def456", BaseSHA: "base456",
+		}, Event{ID: "evt_wip_after_remigrate", HLC: 2000})
+	}); err != nil {
+		t.Fatalf("upsert device wip after re-migrate: %v", err)
+	}
+	rows, err = st.DeviceWipForProject(ctx, "work/acme/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].SHA != "def456" {
 		t.Fatalf("rows=%#v, want one row from the post-remigrate insert", rows)
 	}
 }
@@ -577,7 +645,10 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
-	// Steps from 29 down to 23 are unrelated and must remain unaffected.
+	// Steps from 30 down to 23 are unrelated and must remain unaffected.
+	if err := st.Down(); err != nil { // 30 -> 29
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 29 -> 28
 		t.Fatal(err)
 	}
@@ -652,6 +723,9 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
+	if err := st.Down(); err != nil { // 30 -> 29
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 29 -> 28
 		t.Fatal(err)
 	}

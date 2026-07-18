@@ -40,6 +40,14 @@ const (
 	// from agent worktree-base resolution (fresh worktrees always base from
 	// origin/<default_branch>, never from anything in this plane).
 	EventGitstateObserved = "repo.gitstate.observed"
+	// EventRepoWipPushed is a signed record of a working-state validation
+	// plane Layer B (spec/07) WIP push: `git stash create` produced a commit
+	// object without touching the worktree or index, and that object was
+	// pushed to refs/devstrap/wip/<device_id>/<path_key> via a raw refspec.
+	// Strictly separate from agent worktree-base resolution — refs/devstrap/wip/*
+	// must NEVER be read by the fresh-worktree resolver (spec/07's
+	// non-negotiable invariant).
+	EventRepoWipPushed = "repo.wip.pushed"
 )
 
 // Conflict type identifiers, exported so the CLI resolver can branch on them
@@ -167,6 +175,19 @@ type GitstatePayload struct {
 	AheadCount     int    `json:"ahead_count"`
 	BehindCount    int    `json:"behind_count"`
 	StashCount     int    `json:"stash_count"`
+}
+
+// WipPayload carries a repo.wip.pushed event (working-state validation plane
+// Layer B): the ref and sha a `git stash create` commit was pushed to via a
+// raw refspec, plus the base sha it was created from. The observing device is
+// the event's own DeviceID and the observation instant is the event's own
+// HLC — neither is duplicated in the payload, exactly like GitstatePayload.
+type WipPayload struct {
+	Path       string `json:"path"`
+	Ref        string `json:"ref"`
+	SHA        string `json:"sha"`
+	BaseSHA    string `json:"base_sha"`
+	CapturedAt string `json:"captured_at"`
 }
 
 // DeviceKeyGrant carries a device.key.granted event (P4-SEC-07): a Workspace
@@ -354,6 +375,18 @@ func NewDeviceTrustEvent(typ, payloadJSON string) state.Event {
 func NewGitstateEvent(payloadJSON string) state.Event {
 	return state.Event{
 		Type:        EventGitstateObserved,
+		PayloadJSON: payloadJSON,
+		ContentHash: state.ContentHash(payloadJSON),
+	}
+}
+
+// NewWipPushedEvent builds an unsigned repo.wip.pushed event from a
+// pre-marshaled WipPayload (working-state validation plane Layer B). The
+// store stamps HLC, seq, device id, and the device signature on
+// InsertLocalEvent.
+func NewWipPushedEvent(payloadJSON string) state.Event {
+	return state.Event{
+		Type:        EventRepoWipPushed,
 		PayloadJSON: payloadJSON,
 		ContentHash: state.ContentHash(payloadJSON),
 	}
@@ -990,6 +1023,27 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 			AheadCount:     payload.AheadCount,
 			BehindCount:    payload.BehindCount,
 			StashCount:     payload.StashCount,
+		}, event)
+	case EventRepoWipPushed:
+		// Working-state validation plane Layer B: a mirror-only, read-only
+		// record of a pushed WIP ref. Like EventGitstateObserved, this does NOT
+		// resolve through tx.ProjectByPath — the mirror is keyed on the event's
+		// own normalized path, so a peer's WIP push applies even when the local
+		// project row has not arrived yet (no pending-project quarantine class
+		// exists for this event type; see migration 00030).
+		var payload WipPayload
+		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+			return fmt.Errorf("%w: decode wip event %s: %w", state.ErrEventVerification, event.ID, err)
+		}
+		pk, err := pathkey.Clean(payload.Path)
+		if err != nil {
+			return fmt.Errorf("%w: wip path %q: %w", state.ErrEventVerification, payload.Path, err)
+		}
+		return tx.UpsertDeviceWipTx(ctx, event.DeviceID, pk.Key, pk.Display, state.WipParams{
+			Ref:        payload.Ref,
+			SHA:        payload.SHA,
+			BaseSHA:    payload.BaseSHA,
+			CapturedAt: payload.CapturedAt,
 		}, event)
 	case EventDeviceRevoked, EventDeviceLost:
 		// TRUST-01: a synced trust flip. Signature verification already ran

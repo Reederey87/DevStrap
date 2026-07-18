@@ -948,3 +948,191 @@ func TestZeroLongTimeoutMeansUnboundedTransfer(t *testing.T) {
 		t.Fatalf("CloneWithOptions err = %v, want success with unbounded transfer class", err)
 	}
 }
+
+// TestStashCreate: a clean tree yields ok=false and no error; a dirty tree
+// yields a non-empty commit sha, and — the property that distinguishes
+// `git stash create` from `git stash push` — leaves the worktree and index
+// completely untouched.
+func TestStashCreate(t *testing.T) {
+	repo, r := initSquashMergeRepo(t)
+	ctx := context.Background()
+
+	if sha, ok, err := r.StashCreate(ctx, repo); err != nil {
+		t.Fatalf("StashCreate on a clean tree err = %v", err)
+	} else if ok {
+		t.Fatalf("StashCreate on a clean tree = (%q, true), want ok=false", sha)
+	}
+
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sha, ok, err := r.StashCreate(ctx, repo)
+	if err != nil {
+		t.Fatalf("StashCreate on a dirty tree err = %v", err)
+	}
+	if !ok || sha == "" {
+		t.Fatalf("StashCreate on a dirty tree = (%q, %v), want a non-empty sha and ok=true", sha, ok)
+	}
+
+	dirty, err := r.DirtyState(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirty != DirtyDirty {
+		t.Fatalf("DirtyState after StashCreate = %q, want the working tree to remain dirty (untouched)", dirty)
+	}
+	content, err := os.ReadFile(filepath.Join(repo, "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "dirty\n" {
+		t.Fatalf("README.md = %q after StashCreate, want the working tree left untouched", content)
+	}
+}
+
+// TestPushRef pushes a StashCreate commit straight to a WIP ref on a bare
+// remote via a raw refspec (Layer B, spec/07), then verifies the ref lands at
+// the pushed sha on the remote without ever creating or touching a local
+// branch.
+func TestPushRef(t *testing.T) {
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "remote.git")
+	runRealGit(t, gitBin, tmp, "init", "--bare", remote)
+
+	repo, r := initSquashMergeRepo(t)
+	runRealGit(t, gitBin, repo, "remote", "add", "origin", remote)
+
+	ctx := context.Background()
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("dirty\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sha, ok, err := r.StashCreate(ctx, repo)
+	if err != nil {
+		t.Fatalf("StashCreate err = %v", err)
+	}
+	if !ok {
+		t.Fatal("StashCreate returned ok=false on a dirty tree")
+	}
+
+	ref := "refs/devstrap/wip/dev_test123/work/acme/api-server"
+	if err := r.PushRef(ctx, repo, "origin", sha, ref); err != nil {
+		t.Fatalf("PushRef err = %v", err)
+	}
+
+	got, err := r.Run(ctx, remote, "show-ref", "--hash", ref)
+	if err != nil {
+		t.Fatalf("show-ref on remote: %v", err)
+	}
+	if strings.TrimSpace(got) != sha {
+		t.Fatalf("remote ref %s = %q, want the pushed sha %q", ref, got, sha)
+	}
+
+	branches, err := r.Run(ctx, repo, "branch", "--list")
+	if err != nil {
+		t.Fatalf("branch --list: %v", err)
+	}
+	if strings.Contains(branches, "wip") {
+		t.Fatalf("PushRef must not create a local branch: %q", branches)
+	}
+}
+
+// TestPushRefForcesNonFastForwardUpdate pins a real production bug found by
+// adversarial review: ref is this device's OWN exclusive namespace segment
+// (safeRefPath's device-id/path-key structure guarantees no other device
+// ever writes to it), so a device pushing a SECOND wip-recovery snapshot for
+// the same project is the common case, not an edge case — but each fresh
+// `git stash create` commit is never a descendant of the previous one, so an
+// unforced push is a non-fast-forward update git refuses outright. Without
+// the `+` refspec prefix, this reproduced as a raw "! [rejected] ...
+// (non-fast-forward)" failure on every second push for the same project.
+func TestPushRefForcesNonFastForwardUpdate(t *testing.T) {
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "remote.git")
+	runRealGit(t, gitBin, tmp, "init", "--bare", remote)
+
+	repo, r := initSquashMergeRepo(t)
+	runRealGit(t, gitBin, repo, "remote", "add", "origin", remote)
+	ctx := context.Background()
+	ref := "refs/devstrap/wip/dev_test123/work/acme/api-server"
+
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sha1, ok, err := r.StashCreate(ctx, repo)
+	if err != nil || !ok {
+		t.Fatalf("first StashCreate = (%q,%v,%v)", sha1, ok, err)
+	}
+	if err := r.PushRef(ctx, repo, "origin", sha1, ref); err != nil {
+		t.Fatalf("first PushRef err = %v", err)
+	}
+
+	// A clean checkout between stashes (StashCreate never touches the
+	// worktree, but the test itself must revert its own edit before making a
+	// second, distinct one).
+	runRealGit(t, gitBin, repo, "checkout", "--", "README.md")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("second\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sha2, ok, err := r.StashCreate(ctx, repo)
+	if err != nil || !ok {
+		t.Fatalf("second StashCreate = (%q,%v,%v)", sha2, ok, err)
+	}
+	if sha1 == sha2 {
+		t.Fatal("test setup produced identical stash shas; the two edits must differ")
+	}
+	if err := r.PushRef(ctx, repo, "origin", sha2, ref); err != nil {
+		t.Fatalf("second PushRef to the SAME ref err = %v (must force, not reject as non-fast-forward)", err)
+	}
+
+	got, err := r.Run(ctx, remote, "show-ref", "--hash", ref)
+	if err != nil {
+		t.Fatalf("show-ref on remote: %v", err)
+	}
+	if strings.TrimSpace(got) != sha2 {
+		t.Fatalf("remote ref %s = %q, want the SECOND pushed sha %q (the ref must move forward, not stay pinned to the first push)", ref, got, sha2)
+	}
+}
+
+// TestPushRefRejectsRefOutsideWipNamespace pins that PushRef refuses to push
+// to a ref outside refs/devstrap/wip/*, never falling through to actually
+// invoke git — the caller-supplied ref for this primitive must never be able
+// to land on, say, refs/heads/main.
+func TestPushRefRejectsRefOutsideWipNamespace(t *testing.T) {
+	r := Runner{Bin: "git", Timeout: 5 * time.Second}
+	if err := r.PushRef(context.Background(), "", "origin", "deadbeef", "refs/heads/main"); err == nil {
+		t.Fatal("PushRef succeeded pushing to refs/heads/main, want a rejected ref error")
+	}
+}
+
+func TestSafeRefPath(t *testing.T) {
+	valid := []string{
+		"refs/devstrap/wip/dev_01912e3d/work/acme/api-server",
+		"refs/devstrap/wip/dev_x/path",
+	}
+	for _, ref := range valid {
+		if !safeRefPath(ref) {
+			t.Errorf("safeRefPath(%q) = false, want true", ref)
+		}
+	}
+	invalid := []string{
+		"refs/heads/main",
+		"refs/devstrap/wip/dev_x", // missing path segment
+		"refs/devstrap/wip/../escape/path",
+		"refs/devstrap/wip/-dev/path",
+		"refs/devstrap/wip/dev x/path", // whitespace
+		"",
+	}
+	for _, ref := range invalid {
+		if safeRefPath(ref) {
+			t.Errorf("safeRefPath(%q) = true, want false", ref)
+		}
+	}
+}
