@@ -48,10 +48,14 @@ exec grep 'Pushed WIP for work/proj to refs/devstrap/wip/' $WORK/push.out
 # Publish the repo.wip.pushed event, then have B pull it into its local
 # device_wip mirror — this is what `wip fetch` discovers from, never a direct
 # network probe for a ref B doesn't yet know exists.
+# Two events ride this push: the queued repo.wip.pushed plus work/proj's
+# FIRST repo.gitstate.observed capture (P7-GITSTATE-01 — the project
+# materialized on the earlier sync, so this is the first cycle whose capture
+# step observes it).
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
-stdout 'pushed 1'
+stdout 'pushed 2'
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
-stdout 'pulled 1'
+stdout 'pulled 2'
 
 # Device B: `wip fetch` with no --device discovers A's ref from the mirror and
 # fetches it into local git storage.
