@@ -165,6 +165,10 @@ Cases:
 
 ## Integration tests
 
+### WIP-ref resolver-exclusion invariant (P7-WIP-03, non-negotiable)
+
+`cmd/devstrap/testdata/script/worktree_never_bases_off_wip_ref.txtar` pins spec/07's agent-plane invariant end-to-end through the real binary: device A pushes a WIP ref carrying a unique marker; device B mirrors it locally via `wip fetch` so the ref genuinely exists in the SAME repo that will host a fresh worktree; `worktree new --fresh-upstream` must then base off `origin/<default_branch>` — the marker absent from the checkout, the recorded base sha distinct from the WIP sha, and the WIP ref itself untouched. The unit half (`internal/git`) additionally pins that a `refs/remotes/origin/HEAD` symref or `ls-remote` HEAD advertisement pointing outside `refs/heads/*` (e.g. at `refs/devstrap/wip/*`) is rejected by the default-branch resolvers rather than passed through.
+
 ### Phase 0 CLI scaffold
 
 ```bash
