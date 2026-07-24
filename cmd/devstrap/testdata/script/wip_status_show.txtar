@@ -76,8 +76,10 @@ stdout 'materialized'
 # publish it so A's mirror learns about it too.
 exec sh -c 'echo B_MARKER >> $WORK/CodeB/work/proj/README.md'
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB wip push work/proj
+# Two events ride this push: B's queued repo.wip.pushed plus B's first
+# repo.gitstate.observed capture of its own clone (P7-GITSTATE-01).
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
-stdout 'pushed 1'
+stdout 'pushed 2'
 # A still has its own earlier (step 6) wip-pushed event queued alongside the
 # device-enroll event, both flushed in one push at the "materializes" sync
 # above — so this final pull count is not pinned to a fixed number here; the
