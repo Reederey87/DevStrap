@@ -51,10 +51,13 @@ exec sh -c 'test -s $WORK/wip-ref.txt'
 # ref into its OWN local repo — the WIP ref now genuinely exists as a local
 # ref in the SAME repo that will host the fresh worktree, not merely absent
 # because nobody happened to fetch it.
+# Two events ride this push: the queued repo.wip.pushed plus a fresh
+# repo.gitstate.observed (the README edit above changed A's dirty count, so
+# the P7-GITSTATE-01 capture re-emits this cycle).
 exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
-stdout 'pushed 1'
+stdout 'pushed 2'
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
-stdout 'pulled 1'
+stdout 'pulled 2'
 exec devstrap --home=$WORK/homeB --root=$WORK/CodeB wip fetch work/proj
 stdout 'Fetched refs/devstrap/wip/'
 exec sh -c 'git -C $WORK/CodeB/work/proj show-ref --verify --quiet "$(cat $WORK/wip-ref.txt)"'
