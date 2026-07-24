@@ -1112,6 +1112,28 @@ func TestPushRefRejectsRefOutsideWipNamespace(t *testing.T) {
 	}
 }
 
+// TestPushRefRejectsNonObjectIDSHA (CodeRabbit, PR #220): an EMPTY sha would
+// turn PushRef's refspec into "+:<ref>" — git's DELETE syntax — so the sha
+// must be a full hex object id, nothing else.
+func TestPushRefRejectsNonObjectIDSHA(t *testing.T) {
+	r := Runner{Bin: "git", Timeout: 5 * time.Second}
+	ref := "refs/devstrap/wip/dev_x/path"
+	for _, sha := range []string{
+		"",                      // the delete-refspec footgun itself
+		"deadbeef",              // abbreviated
+		"HEAD",                  // revision expression
+		"--upload-pack=evil",    // option-shaped
+		strings.Repeat("g", 40), // right length, not hex
+	} {
+		if err := r.PushRef(context.Background(), "", "origin", sha, ref); err == nil {
+			t.Errorf("PushRef accepted sha %q, want an invalid object id error", sha)
+		}
+	}
+	if !isHexObjectID(strings.Repeat("a", 40)) || !isHexObjectID(strings.Repeat("0", 64)) {
+		t.Error("isHexObjectID rejected a full-length hex id")
+	}
+}
+
 func TestSafeRefPath(t *testing.T) {
 	valid := []string{
 		"refs/devstrap/wip/dev_01912e3d/work/acme/api-server",

@@ -339,6 +339,14 @@ func (r Runner) PushRef(ctx context.Context, dir, remote, sha, ref string) error
 	if !safeRefPath(ref) {
 		return fmt.Errorf("invalid git ref %q", ref)
 	}
+	// A full hex object id only (CodeRabbit, PR #220): an EMPTY sha would
+	// turn the refspec into "+:<ref>" — git's DELETE syntax — silently
+	// destroying the remote WIP state if a caller ever ignored StashCreate's
+	// ok==false; anything non-hex (option-shaped, a ref name, a revision
+	// expression) is equally not what this primitive is documented to push.
+	if !isHexObjectID(sha) {
+		return fmt.Errorf("invalid git object id %q", sha)
+	}
 	ctx, cancel := r.longTransferContext(ctx)
 	defer cancel()
 	_, err := r.Run(ctx, dir, "push", remote, "+"+sha+":"+ref)
@@ -1039,6 +1047,22 @@ func safeBranchName(branch string) bool {
 // INNER segment (device_id and path_key are peer/attacker-influenced here,
 // unlike a locally-typed branch name) would slip through — closed below with
 // an explicit per-segment check.
+// isHexObjectID reports whether s looks like a full git object id: 40
+// (SHA-1) or 64 (SHA-256 repo format) lowercase hex characters. Deliberately
+// full-length only — PushRef's callers always hold a full id (StashCreate
+// output), and abbreviations/revision expressions are not object ids.
+func isHexObjectID(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 func safeRefPath(ref string) bool {
 	const prefix = "refs/devstrap/wip/"
 	rest := strings.TrimPrefix(ref, prefix)
