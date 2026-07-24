@@ -332,6 +332,10 @@ func captureAndRecordGitstates(ctx context.Context, store *state.Store, opts *op
 			continue
 		}
 		if unchanged, cerr := gitstateUnchangedSinceLastCapture(ctx, store, device.ID, p.PathKey, gs); cerr == nil && unchanged {
+			// Capture succeeded — a stale warning from an earlier failed
+			// cycle must clear on this path too (the repo may have recovered
+			// into exactly the state the mirror already records).
+			_ = store.ClearProjectWarningPrefix(ctx, p.ID, "gitstate ")
 			continue
 		}
 		payload := dssync.GitstatePayload{
@@ -371,7 +375,13 @@ func captureAndRecordGitstates(ctx context.Context, store *state.Store, opts *op
 			return tx.UpsertDeviceGitstateTx(ctx, device.ID, p.PathKey, p.Path, params, ev)
 		}); txErr != nil {
 			_ = store.RecordProjectWarning(ctx, p.ID, redact.Scrub(fmt.Sprintf("gitstate emit: %v", txErr)))
+			continue
 		}
+		// A transient failure on an earlier cycle must not read as failed
+		// forever: a successful capture+emit clears a previously recorded
+		// gitstate warning. Prefix-scoped so an unrelated warning class
+		// (materialize failure record, env-hydrate warning) is never wiped.
+		_ = store.ClearProjectWarningPrefix(ctx, p.ID, "gitstate ")
 	}
 }
 

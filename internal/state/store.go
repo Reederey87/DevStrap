@@ -1807,6 +1807,29 @@ WHERE device_id = ? AND namespace_id = ?;
 	return nil
 }
 
+// ClearProjectWarningPrefix clears a previously-recorded non-fatal project
+// warning (RecordProjectWarning), but ONLY when the currently-stored
+// last_error begins with prefix — a recovered best-effort sub-step must not
+// wipe an unrelated warning class (e.g. a persisted materialize failure
+// record, P4-GIT-07, or an env-hydrate warning) that some other step still
+// owns. No-op when the row does not exist or the stored warning belongs to
+// another class.
+func (s *Store) ClearProjectWarningPrefix(ctx context.Context, namespaceID, prefix string) error {
+	device, err := s.CurrentDevice(ctx)
+	if err != nil {
+		return err
+	}
+	now := timestampNow()
+	_, err = s.db.ExecContext(ctx, `
+UPDATE device_project_state SET last_error = '', updated_at = ?
+WHERE device_id = ? AND namespace_id = ? AND substr(last_error, 1, ?) = ?;
+`, now, device.ID, namespaceID, len(prefix), prefix)
+	if err != nil {
+		return fmt.Errorf("clear project warning: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) UpdateGitDefaultBranch(ctx context.Context, namespaceID, branch string) error {
 	now := timestampNow()
 	if _, err := s.db.ExecContext(ctx, `

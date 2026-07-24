@@ -83,6 +83,8 @@ Changed:
 
 - Post-review (coordinator, golangci-lint `ineffassign`): the new unconditional post-capture `localEvents` re-read made the pre-existing `if rotated { localEvents, err = ... }` re-read dead — its result was always overwritten before being read. Removed the now-redundant conditional re-read; the single unconditional re-read after `captureAndRecordGitstates` already covers both a just-minted grant (rotation) and a freshly captured gitstate event, since it runs after both steps.
 
+- Post-review (dual review, Codex gpt-5.6 + fable-5; P2 CONFIRMED and fixed pre-merge): a transient capture/emit failure recorded a `gitstate capture:`/`gitstate emit:` warning via `RecordProjectWarning`, but a later SUCCESSFUL capture never cleared it — the project read as failed forever after recovery. Fixed with a new prefix-scoped `Store.ClearProjectWarningPrefix(ctx, namespaceID, prefix)` (clears `last_error` only when it currently begins with the given prefix, so a recovered gitstate step can never wipe an unrelated warning class — a P4-GIT-07 materialize failure record or an env-hydrate warning survives untouched), called from BOTH success paths of `captureAndRecordGitstates`: the changed-state emit path and the unchanged-skip path (the repo may recover into exactly the state the mirror already records). Pinned by `TestSyncGitstateCaptureRecoveryClearsWarning` (failing cycle records the warning → repo recovers → next sync clears it → an unrelated `env hydrate:` warning subsequently survives a successful gitstate cycle).
+
 Validated:
 - `gofmt -l cmd internal` (clean)
 - `go build ./...`
