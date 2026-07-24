@@ -31,6 +31,20 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-24 — chore(deps): bump golang.org/x/text v0.38.0 → v0.40.0 (GO-2026-5970)
+
+Changed:
+- `go.mod`/`go.sum`: `golang.org/x/text` v0.38.0 → v0.40.0 (with `golang.org/x/tools` v0.45.0 → v0.47.0 transitively). A newly published advisory, GO-2026-5970 (infinite loop on invalid input in `golang.org/x/text`), turned the required CI Vulnerability check red on every open branch — this unblocks the in-flight working-state wave's merge cascade (PRs #220–#225). No code changes.
+
+Validated:
+- `go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...` — "Your code is affected by 0 vulnerabilities."
+- `go build ./...`
+- `GOCACHE=/tmp/wave-hotfix-gocache go test -race ./...`
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+
+Follow-ups:
+- None.
+
 ## 2026-07-17 — chore(docs): post-Pass-7 reliability & substrate wave-close reconciliation
 
 Changed:
