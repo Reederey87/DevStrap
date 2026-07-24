@@ -543,3 +543,65 @@ func TestCheckGitstateFreshnessSurfacesListProjectsError(t *testing.T) {
 		t.Fatalf("results = %+v, want exactly one visible gitstate warning row, not a silently empty result", results)
 	}
 }
+
+// TestCheckPendingWip pins checkPendingWip's deliberate asymmetry with
+// checkGitstateFreshness: a project with no pending WIP produces NO row at
+// all (not a forced ok row), a recently-captured WIP is likewise silent, and
+// only a WIP ref older than wipStaleAfter produces a visible warning naming
+// the device and age.
+func TestCheckPendingWip(t *testing.T) {
+	ctx := context.Background()
+	store, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureWorkspace(ctx, "test", "/tmp/Code"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnsureDevice(ctx, "test-device"); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"work/acme/none", "work/acme/stale", "work/acme/fresh"} {
+		if _, err := store.UpsertProject(ctx, state.UpsertProjectParams{Path: path, Type: "plain_folder"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	staleHLC := state.HLCFromPhysicalTime(time.Now().Add(-72 * time.Hour))
+	freshHLC := state.HLCFromPhysicalTime(time.Now().Add(-1 * time.Hour))
+	if err := store.WithTx(ctx, func(tx *state.Tx) error {
+		if err := tx.UpsertDeviceWipTx(ctx, "dev_peer", "work/acme/stale", "work/acme/stale", state.WipParams{
+			Ref: "refs/devstrap/wip/dev_peer/stale", SHA: "abc123",
+		}, state.Event{ID: "evt_wip_stale", HLC: staleHLC}); err != nil {
+			return err
+		}
+		return tx.UpsertDeviceWipTx(ctx, "dev_peer", "work/acme/fresh", "work/acme/fresh", state.WipParams{
+			Ref: "refs/devstrap/wip/dev_peer/fresh", SHA: "def456",
+		}, state.Event{ID: "evt_wip_fresh", HLC: freshHLC})
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	results := checkPendingWip(ctx, store)
+	byName := make(map[string]checkResult, len(results))
+	for _, r := range results {
+		byName[r.Name] = r
+	}
+
+	if _, ok := byName["wip: work/acme/none"]; ok {
+		t.Fatalf("checkPendingWip must render nothing for a project with no pending WIP, got: %+v", results)
+	}
+	if _, ok := byName["wip: work/acme/fresh"]; ok {
+		t.Fatalf("checkPendingWip must render nothing for a recently-captured WIP, got: %+v", results)
+	}
+	stale, ok := byName["wip: work/acme/stale (dev_peer)"]
+	if !ok || stale.Status != checkWarn || !strings.Contains(stale.Detail, "dev_peer") {
+		t.Fatalf("stale result = %+v, want a visible warning naming the device", stale)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results = %+v, want exactly one row (the stale project)", results)
+	}
+}

@@ -8,6 +8,10 @@ tracks_code: [cmd/**, internal/**, internal/specdrift/**, .github/**, go.mod, go
 
 This project can destroy trust if it loses code, leaks secrets, or creates stale agent branches. Tests must focus on safety invariants.
 
+### Multi-device testscript convention: enroll a peer under its OWN real device id
+
+`devices enroll <device-id> --name ... --age-recipient ... --signing-public-key ... --approve --fingerprint ...` accepts any string as `<device-id>` — nothing rejects a founder enrolling a peer under an arbitrary chosen label. But every event a device authors is signed with its OWN self-generated id (from that device's own `init`), never the label a peer chose for it. A testscript that only ever exercises founder→joiner event flow (the joiner just pulls the founder's already-approved events) never notices a label mismatch. A testscript that needs joiner→founder flow (the enrolled peer authors an event the OTHER side must verify and apply — e.g. `wip_status_show.txtar`, `env_exchange.txtar`, `sync_trust_propagation.txtar`) will hit it immediately: the peer's event lands as a permanent `event_verification_failure` conflict and silently never applies, with no hash-chain break or skipped-events row to point at it. Always capture the peer's real id first — `devstrap --home=$WORK/homeB --root=$WORK/CodeB devices list | awk 'NR==1{print $1}'` on that device's own freshly-`init`'d store — and enroll under that captured id, never a hardcoded label like `dev_b`.
+
 ## Current coverage gate
 
 Phase 0 currently implements `cmd/devstrap`, `cmd/spec-drift`, and `internal/{childenv, cli, config, devicekeys, draftbundle, envbundle, envfile, git, hub, id, ignore, logging, pathkey, platform, redact, scan, specdrift, state, sync, workspacekeys}`. Every package under `cmd/` and `internal/` must have executable tests before handoff (the former `internal/id` exemption ended when `id.Valid` began gating `--workspace-id` input).
