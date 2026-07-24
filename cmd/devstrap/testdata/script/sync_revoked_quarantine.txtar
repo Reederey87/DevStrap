@@ -62,8 +62,12 @@ exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.js
 stdout 'pushed 1'
 
 exec devstrap --home=$WORK/homeC --root=$WORK/CodeC add --path work/revoked-c $WORK/remote-c.git
+# revoked-c's own project.added event, plus work/initial's first
+# P7-GITSTATE-01 capture (work/initial materialized locally on C's earlier
+# sync when it pulled A's namespace; this cycle is the first where the
+# capture step observes it).
 exec devstrap --home=$WORK/homeC --root=$WORK/CodeC sync --hub-file=$WORK/hub.json --namespace-only
-stdout 'pushed 1'
+stdout 'pushed 2'
 
 # A syncs both events. The revoked C event must not abort the batch; B's valid
 # event applies and materializes, and C's event is visible as an open conflict.
