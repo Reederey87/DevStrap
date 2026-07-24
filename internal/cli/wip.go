@@ -32,6 +32,8 @@ func newWipCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.AddCommand(newWipFetchCommand(stdout, opts))
 	cmd.AddCommand(newWipStatusCommand(stdout, opts))
 	cmd.AddCommand(newWipShowCommand(stdout, opts))
+	cmd.AddCommand(newWipApplyCommand(stdout, opts))
+	cmd.AddCommand(newWipDropCommand(stdout, opts))
 	return cmd
 }
 
@@ -327,6 +329,60 @@ func newWipStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 	}
 }
 
+// resolveWipTarget resolves rows (from Store.DeviceWipForProject, already
+// known by the caller to be non-empty) plus an optional --device flag to
+// exactly one target row: an explicit --device must name a row that exists;
+// with no --device, a single row is picked automatically, but 2+ rows is an
+// ambiguous usage error naming every candidate rather than a silent guess.
+// Shared by `wip show`, `wip apply`, and `wip drop` so all three commands
+// refuse an ambiguous selection with the identical error shape.
+func resolveWipTarget(rows []state.DeviceWip, deviceID, projectPath string) (state.DeviceWip, error) {
+	switch {
+	case deviceID != "":
+		for _, r := range rows {
+			if r.DeviceID == deviceID {
+				return r, nil
+			}
+		}
+		return state.DeviceWip{}, appError{code: exitUsage, err: fmt.Errorf("no pending WIP for device %s on %s", deviceID, projectPath)}
+	case len(rows) == 1:
+		return rows[0], nil
+	default:
+		ids := make([]string, 0, len(rows))
+		for _, r := range rows {
+			ids = append(ids, r.DeviceID)
+		}
+		return state.DeviceWip{}, appError{code: exitUsage, err: fmt.Errorf("multiple devices have pending WIP for %s (%s); pick one with --device", projectPath, strings.Join(ids, ", "))}
+	}
+}
+
+// fetchVerifiedWip fetches row's WIP ref and verifies the fetched object is
+// EXACTLY the sha row's synced repo.wip.pushed record promised. The ref is
+// mutable (its owning device force-pushes it on every wip push), so the
+// remote can have advanced past what this device's mirror knows; without
+// this check, `wip show`/`wip apply` would fetch the newer object and then
+// show/apply it while still labeling the output with the mirror row's stale
+// sha — materializing content no locally-synced, signed event ever
+// described. Fail closed instead: the fix for a mismatch is `devstrap sync`
+// (pull the newer repo.wip.pushed record), then retry. ErrBranchNotFound
+// passes through untouched for the callers' ref-gone informational cases.
+func fetchVerifiedWip(ctx context.Context, r dsgit.Runner, localPath, pathKey string, row state.DeviceWip) (string, error) {
+	ref := wipRefFor(row.DeviceID, pathKey)
+	if err := r.FetchRef(ctx, localPath, "origin", ref); err != nil {
+		return ref, err
+	}
+	got, err := r.RevParse(ctx, localPath, ref)
+	if err != nil {
+		return ref, appError{code: exitGit, err: err}
+	}
+	if got != row.SHA {
+		return ref, appError{code: exitGit, err: fmt.Errorf(
+			"remote WIP ref for device %s has moved past the last synced record (expected %s, found %s); run `devstrap sync` to pull the newer record, then retry",
+			row.DeviceID, shortSHA(row.SHA), shortSHA(got))}
+	}
+	return ref, nil
+}
+
 // wipShowResult carries `wip show`'s output: the plain path (zero-pending or
 // ref-gone informational cases) or the full resolved device/ref/diff content.
 type wipShowResult struct {
@@ -366,40 +422,26 @@ func newWipShowCommand(stdout io.Writer, opts *options) *cobra.Command {
 					return err
 				}, out)
 			}
-			var row state.DeviceWip
-			switch {
-			case deviceID != "":
-				found := false
-				for _, r := range rows {
-					if r.DeviceID == deviceID {
-						row, found = r, true
-						break
-					}
-				}
-				if !found {
-					return appError{code: exitUsage, err: fmt.Errorf("no pending WIP for device %s on %s", deviceID, project.Path)}
-				}
-			case len(rows) == 1:
-				row = rows[0]
-			default:
-				ids := make([]string, 0, len(rows))
-				for _, r := range rows {
-					ids = append(ids, r.DeviceID)
-				}
-				return appError{code: exitUsage, err: fmt.Errorf("multiple devices have pending WIP for %s (%s); pick one with --device", project.Path, strings.Join(ids, ", "))}
+			row, err := resolveWipTarget(rows, deviceID, project.Path)
+			if err != nil {
+				return err
 			}
 			if project.Type != "git_repo" || project.LocalPath == "" {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("%s has no local git working tree to show WIP in", project.Path)}
 			}
 			r := gitRunner(opts)
-			ref := wipRefFor(row.DeviceID, project.PathKey)
-			if err := r.FetchRef(cmd.Context(), project.LocalPath, "origin", ref); err != nil {
+			ref, err := fetchVerifiedWip(cmd.Context(), r, project.LocalPath, project.PathKey, row)
+			if err != nil {
 				if errors.Is(err, dsgit.ErrBranchNotFound) {
 					out := wipShowResult{Path: project.Path, DeviceID: row.DeviceID, Ref: ref}
 					return opts.render(stdout, func(w io.Writer) error {
 						_, err := fmt.Fprintf(w, "WIP ref for device %s no longer exists on origin for %s\n", row.DeviceID, project.Path)
 						return err
 					}, out)
+				}
+				var app appError
+				if errors.As(err, &app) {
+					return err
 				}
 				return appError{code: exitGit, err: err}
 			}
@@ -415,11 +457,14 @@ func newWipShowCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// by — both staged and unstaged changes combined — which is
 			// exactly "what's different in the working tree" and reads the
 			// same way `git diff`/`git show` on an ordinary commit would.
-			stat, err := r.Run(cmd.Context(), project.LocalPath, "diff", "--stat", ref+"^", ref)
+			// Diff by the VERIFIED sha rather than the mutable ref name so the
+			// rendered content is exactly the object the synced record (and
+			// this output's own sha label) describe.
+			stat, err := r.Run(cmd.Context(), project.LocalPath, "diff", "--stat", row.SHA+"^", row.SHA)
 			if err != nil {
 				return appError{code: exitGit, err: err}
 			}
-			patch, err := r.Run(cmd.Context(), project.LocalPath, "diff", ref+"^", ref)
+			patch, err := r.Run(cmd.Context(), project.LocalPath, "diff", row.SHA+"^", row.SHA)
 			if err != nil {
 				return appError{code: exitGit, err: err}
 			}
@@ -431,6 +476,188 @@ func newWipShowCommand(stdout io.Writer, opts *options) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&deviceID, "device", "", "show only this device's pending WIP")
+	return cmd
+}
+
+// wipApplyResult carries `wip apply`'s output: the plain path (zero-pending
+// or ref-gone informational cases) or the applied device/ref/sha.
+type wipApplyResult struct {
+	Path     string `json:"path"`
+	DeviceID string `json:"device_id,omitempty"`
+	Ref      string `json:"ref,omitempty"`
+	SHA      string `json:"sha,omitempty"`
+	Applied  bool   `json:"applied"`
+}
+
+func newWipApplyCommand(stdout io.Writer, opts *options) *cobra.Command {
+	var deviceID string
+	cmd := &cobra.Command{
+		Use:   "apply <project>",
+		Short: "Apply a device's pending WIP recovery ref to the working tree",
+		Args:  usageArgs(cobra.ExactArgs(1)),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := opts.openState(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer closeStore(store)
+			project, err := store.ProjectByPath(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			rows, err := store.DeviceWipForProject(cmd.Context(), project.PathKey)
+			if err != nil {
+				return err
+			}
+			if len(rows) == 0 {
+				out := wipApplyResult{Path: project.Path}
+				return opts.render(stdout, func(w io.Writer) error {
+					_, err := fmt.Fprintf(w, "No pending WIP for %s\n", project.Path)
+					return err
+				}, out)
+			}
+			row, err := resolveWipTarget(rows, deviceID, project.Path)
+			if err != nil {
+				return err
+			}
+			if project.Type != "git_repo" || project.LocalPath == "" {
+				return appError{code: exitInvalidConfig, err: fmt.Errorf("%s has no local git working tree to apply WIP to", project.Path)}
+			}
+			r := gitRunner(opts)
+			ref, err := fetchVerifiedWip(cmd.Context(), r, project.LocalPath, project.PathKey, row)
+			if err != nil {
+				if errors.Is(err, dsgit.ErrBranchNotFound) {
+					out := wipApplyResult{Path: project.Path, DeviceID: row.DeviceID, Ref: ref}
+					return opts.render(stdout, func(w io.Writer) error {
+						_, err := fmt.Fprintf(w, "WIP ref for device %s no longer exists on origin for %s\n", row.DeviceID, project.Path)
+						return err
+					}, out)
+				}
+				var app appError
+				if errors.As(err, &app) {
+					return err
+				}
+				return appError{code: exitGit, err: err}
+			}
+			// git's own per-file conflict detection is more precise than any
+			// pre-emptive "refuse on any dirty tree" gate this command could add
+			// (an unrelated dirty file must not block a clean apply) — so `git
+			// stash apply` is called directly, with no --force escape hatch,
+			// and its outcome is only DISTINGUISHED afterward, never gated
+			// beforehand. Applied by the VERIFIED sha, not the mutable ref
+			// name, so what materializes is exactly the object the synced
+			// record promised.
+			if _, err := r.Run(cmd.Context(), project.LocalPath, "stash", "apply", row.SHA); err != nil {
+				dirty, dirtyErr := r.DirtyState(cmd.Context(), project.LocalPath)
+				if dirtyErr == nil && dirty == dsgit.DirtyConflicted {
+					// A partial merge already left standard <<<<<<</=======/>>>>>>>
+					// conflict markers in the affected files, exactly like an
+					// ordinary `git stash apply` conflict. Leave the tree exactly
+					// as git left it — no automatic resolution, no abort/reset.
+					return appError{code: exitGit, err: fmt.Errorf("applying WIP for %s from device %s left unresolved merge conflicts in the working tree; resolve them manually, the same as any other git stash apply conflict", project.Path, row.DeviceID)}
+				}
+				// git refused outright and made no changes (e.g. "Your local
+				// changes ... would be overwritten by merge"); its own stderr is
+				// already clear and actionable, so surface it directly.
+				return appError{code: exitGit, err: err}
+			}
+			out := wipApplyResult{Path: project.Path, DeviceID: row.DeviceID, Ref: ref, SHA: row.SHA, Applied: true}
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "Applied WIP for %s from device %s (%s)\n", project.Path, row.DeviceID, shortSHA(row.SHA))
+				return err
+			}, out)
+		},
+	}
+	cmd.Flags().StringVar(&deviceID, "device", "", "apply only this device's pending WIP")
+	return cmd
+}
+
+// wipDropResult carries `wip drop`'s output: the plain path (zero-pending
+// informational case) or the dropped device/ref.
+type wipDropResult struct {
+	Path     string `json:"path"`
+	DeviceID string `json:"device_id,omitempty"`
+	Ref      string `json:"ref,omitempty"`
+	Dropped  bool   `json:"dropped"`
+}
+
+func newWipDropCommand(stdout io.Writer, opts *options) *cobra.Command {
+	var deviceID string
+	cmd := &cobra.Command{
+		Use:   "drop <project>",
+		Short: "Delete a device's pending WIP recovery ref",
+		Args:  usageArgs(cobra.ExactArgs(1)),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := opts.openState(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer closeStore(store)
+			project, err := store.ProjectByPath(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			rows, err := store.DeviceWipForProject(cmd.Context(), project.PathKey)
+			if err != nil {
+				return err
+			}
+			if len(rows) == 0 {
+				out := wipDropResult{Path: project.Path}
+				return opts.render(stdout, func(w io.Writer) error {
+					_, err := fmt.Fprintf(w, "No pending WIP for %s\n", project.Path)
+					return err
+				}, out)
+			}
+			row, err := resolveWipTarget(rows, deviceID, project.Path)
+			if err != nil {
+				return err
+			}
+			if project.Type != "git_repo" || project.LocalPath == "" {
+				return appError{code: exitInvalidConfig, err: fmt.Errorf("%s has no local git working tree to drop WIP from", project.Path)}
+			}
+			r := gitRunner(opts)
+			ref := wipRefFor(row.DeviceID, project.PathKey)
+			// COMPARE-AND-DELETE against the sha the synced record promised
+			// (explicit-value --force-with-lease): the ref is mutable and its
+			// owning device may have force-pushed a NEWER snapshot whose
+			// repo.wip.pushed event has not reached this device yet — an
+			// unconditional delete would permanently destroy that newer
+			// recovery data. A lease rejection has two causes, disambiguated
+			// by asking the remote what it actually advertises now: the ref is
+			// already gone (idempotent success — report dropped, clear the
+			// mirror) vs. the ref moved to an unknown sha (refuse; `devstrap
+			// sync` pulls the newer record, then retry).
+			if err := r.DeleteRef(cmd.Context(), project.LocalPath, "origin", ref, row.SHA); err != nil {
+				if !errors.Is(err, dsgit.ErrNonFastForward) {
+					return appError{code: exitGit, err: err}
+				}
+				got, lsErr := r.LsRemoteRef(cmd.Context(), project.LocalPath, "origin", ref)
+				if lsErr != nil && !errors.Is(lsErr, dsgit.ErrBranchNotFound) {
+					return appError{code: exitGit, err: lsErr}
+				}
+				if lsErr == nil {
+					return appError{code: exitGit, err: fmt.Errorf(
+						"remote WIP ref for device %s has moved past the last synced record (expected %s, found %s); run `devstrap sync` to pull the newer record, then retry",
+						row.DeviceID, shortSHA(row.SHA), shortSHA(got))}
+				}
+				// Already gone: fall through to clear the mirror row.
+			}
+			// Clears only THIS device's own local device_wip mirror row. This
+			// does NOT propagate to other devices' mirrors — there is no
+			// repo.wip.dropped event, and fleet-wide WIP-ref GC is explicitly
+			// out of scope for this feature (spec/07); other devices learn the
+			// ref is gone only the next time they try to fetch it.
+			if err := store.DeleteDeviceWip(cmd.Context(), row.DeviceID, project.PathKey); err != nil {
+				return err
+			}
+			out := wipDropResult{Path: project.Path, DeviceID: row.DeviceID, Ref: ref, Dropped: true}
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "Dropped WIP ref for %s (device %s)\n", project.Path, row.DeviceID)
+				return err
+			}, out)
+		},
+	}
+	cmd.Flags().StringVar(&deviceID, "device", "", "drop only this device's pending WIP")
 	return cmd
 }
 

@@ -38,3 +38,56 @@ func TestWipRowsForProject(t *testing.T) {
 		t.Fatalf("row.Observed = %q, want a captured-ago age string", row.Observed)
 	}
 }
+
+// TestResolveWipTarget pins the shared device-resolution helper `wip
+// show`/`wip apply`/`wip drop` all call: an unknown explicit --device is a
+// usage error naming it; an empty --device with exactly one row picks it
+// automatically; an empty --device with 2+ rows is an ambiguous usage error
+// listing every candidate.
+func TestResolveWipTarget(t *testing.T) {
+	rowA := state.DeviceWip{DeviceID: "dev_a", Ref: "refs/devstrap/wip/dev_a/work/proj", SHA: "aaa"}
+	rowB := state.DeviceWip{DeviceID: "dev_b", Ref: "refs/devstrap/wip/dev_b/work/proj", SHA: "bbb"}
+
+	t.Run("unknown device", func(t *testing.T) {
+		_, err := resolveWipTarget([]state.DeviceWip{rowA}, "dev_nope", "work/proj")
+		if err == nil {
+			t.Fatal("want error for unknown --device, got nil")
+		}
+		if !strings.Contains(err.Error(), "no pending WIP for device dev_nope on work/proj") {
+			t.Fatalf("err = %q, want it to name the unknown device and project", err.Error())
+		}
+	})
+
+	t.Run("single row no device flag", func(t *testing.T) {
+		got, err := resolveWipTarget([]state.DeviceWip{rowA}, "", "work/proj")
+		if err != nil {
+			t.Fatalf("resolveWipTarget with a single candidate returned error: %v", err)
+		}
+		if got.DeviceID != "dev_a" {
+			t.Fatalf("got.DeviceID = %q, want dev_a", got.DeviceID)
+		}
+	})
+
+	t.Run("ambiguous multiple rows no device flag", func(t *testing.T) {
+		_, err := resolveWipTarget([]state.DeviceWip{rowA, rowB}, "", "work/proj")
+		if err == nil {
+			t.Fatal("want ambiguous usage error for multiple candidates with no --device, got nil")
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "multiple devices have pending WIP for work/proj") ||
+			!strings.Contains(msg, "dev_a") || !strings.Contains(msg, "dev_b") ||
+			!strings.Contains(msg, "--device") {
+			t.Fatalf("err = %q, want it to name every candidate and point at --device", msg)
+		}
+	})
+
+	t.Run("explicit device among multiple rows", func(t *testing.T) {
+		got, err := resolveWipTarget([]state.DeviceWip{rowA, rowB}, "dev_b", "work/proj")
+		if err != nil {
+			t.Fatalf("resolveWipTarget with explicit --device returned error: %v", err)
+		}
+		if got.DeviceID != "dev_b" {
+			t.Fatalf("got.DeviceID = %q, want dev_b", got.DeviceID)
+		}
+	})
+}

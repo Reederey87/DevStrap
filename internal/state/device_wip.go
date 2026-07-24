@@ -64,6 +64,24 @@ WHERE excluded.observed_at_hlc >= device_wip.observed_at_hlc;
 	return nil
 }
 
+// DeleteDeviceWip removes one device's pending-WIP mirror row for a project
+// after `wip drop` deletes the corresponding remote ref. This clears only the
+// LOCAL mirror on the device that ran the drop — it does not propagate to
+// other devices' mirrors (no repo.wip.dropped event exists; automatic
+// fleet-wide WIP-ref GC is explicitly out of scope for this feature, see
+// spec/07). No-op (no error) if no matching row exists.
+func (s *Store) DeleteDeviceWip(ctx context.Context, deviceID, pathKey string) error {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `DELETE FROM device_wip WHERE workspace_id = ? AND device_id = ? AND path_key = ?;`, workspaceID, deviceID, pathKey)
+	if err != nil {
+		return fmt.Errorf("delete device wip: %w", err)
+	}
+	return nil
+}
+
 // DeviceWipForProject reads every device's last-pushed WIP ref for a project,
 // newest push first. This is the read side backing a future `wip status` CLI
 // surfacing (out of scope for this change).
