@@ -331,7 +331,7 @@ func captureAndRecordGitstates(ctx context.Context, store *state.Store, opts *op
 			_ = store.RecordProjectWarning(ctx, p.ID, redact.Scrub(fmt.Sprintf("gitstate capture: %v", gerr)))
 			continue
 		}
-		if unchanged, cerr := gitstateUnchangedSinceLastCapture(ctx, store, device.ID, p.PathKey, gs); cerr == nil && unchanged {
+		if unchanged, cerr := gitstateUnchangedSinceLastCapture(ctx, store, device.ID, p.PathKey, p.Path, gs); cerr == nil && unchanged {
 			// Capture succeeded — a stale warning from an earlier failed
 			// cycle must clear on this path too (the repo may have recovered
 			// into exactly the state the mirror already records).
@@ -387,8 +387,12 @@ func captureAndRecordGitstates(ctx context.Context, store *state.Store, opts *op
 
 // gitstateUnchangedSinceLastCapture reports whether gs matches this device's
 // own last-recorded device_gitstate row for the project at pathKey. Absence
-// of a row (never captured before) is reported as changed.
-func gitstateUnchangedSinceLastCapture(ctx context.Context, store *state.Store, deviceID, pathKey string, gs dsgit.Gitstate) (bool, error) {
+// of a row (never captured before) is reported as changed. The display path
+// participates in the comparison (CodeRabbit): a path-only change — an NFC/
+// display normalization or rename that leaves the case-folded path_key and
+// the git state identical — must still emit, or the mirror's stored path
+// stays silently stale until the next real git-state change.
+func gitstateUnchangedSinceLastCapture(ctx context.Context, store *state.Store, deviceID, pathKey, path string, gs dsgit.Gitstate) (bool, error) {
 	rows, err := store.DeviceGitstateForProject(ctx, pathKey)
 	if err != nil {
 		return false, err
@@ -397,7 +401,8 @@ func gitstateUnchangedSinceLastCapture(ctx context.Context, store *state.Store, 
 		if row.DeviceID != deviceID {
 			continue
 		}
-		return row.Branch == gs.Branch &&
+		return row.Path == path &&
+			row.Branch == gs.Branch &&
 			row.HeadSHA == gs.HeadSHA &&
 			row.UpstreamBranch == gs.UpstreamBranch &&
 			row.UpstreamSHA == gs.UpstreamSHA &&
