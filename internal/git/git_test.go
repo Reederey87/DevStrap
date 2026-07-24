@@ -1510,6 +1510,83 @@ func TestFetchRefForcesNonFastForwardLocalUpdate(t *testing.T) {
 	}
 }
 
+// TestDeleteRefCompareAndDelete pins DeleteRef's lease semantics (found by
+// adversarial review): with expectedSHA set, the delete succeeds only while
+// the remote ref still points exactly at that sha — a newer force-pushed
+// snapshot whose repo.wip.pushed event has not synced yet must survive a
+// stale drop (ErrNonFastForward), and an already-deleted ref is ALSO a lease
+// rejection (absent != expected), disambiguated via LsRemoteRef.
+func TestDeleteRefCompareAndDelete(t *testing.T) {
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "remote.git")
+	runRealGit(t, gitBin, tmp, "init", "--bare", remote)
+
+	repo, r := initSquashMergeRepo(t)
+	runRealGit(t, gitBin, repo, "remote", "add", "origin", remote)
+
+	ctx := context.Background()
+	ref := "refs/devstrap/wip/dev_test123/work/acme/api-server"
+
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sha1, ok, err := r.StashCreate(ctx, repo)
+	if err != nil || !ok {
+		t.Fatalf("StashCreate v1: ok=%v err=%v", ok, err)
+	}
+	if err := r.PushRef(ctx, repo, "origin", sha1, ref); err != nil {
+		t.Fatalf("PushRef v1: %v", err)
+	}
+
+	// The owning device force-pushes a NEWER snapshot; a drop still leased to
+	// the older sha must be rejected and must leave the newer snapshot alive.
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sha2, ok, err := r.StashCreate(ctx, repo)
+	if err != nil || !ok {
+		t.Fatalf("StashCreate v2: ok=%v err=%v", ok, err)
+	}
+	if err := r.PushRef(ctx, repo, "origin", sha2, ref); err != nil {
+		t.Fatalf("PushRef v2: %v", err)
+	}
+	err = r.DeleteRef(ctx, repo, "origin", ref, sha1)
+	if !errors.Is(err, ErrNonFastForward) {
+		t.Fatalf("stale-leased DeleteRef err = %v, want ErrNonFastForward", err)
+	}
+	got, err := r.LsRemoteRef(ctx, repo, "origin", ref)
+	if err != nil {
+		t.Fatalf("LsRemoteRef after rejected delete: %v", err)
+	}
+	if got != sha2 {
+		t.Fatalf("newer snapshot did not survive the stale drop: remote = %q, want %q", got, sha2)
+	}
+
+	// A correctly-leased delete removes the ref.
+	if err := r.DeleteRef(ctx, repo, "origin", ref, sha2); err != nil {
+		t.Fatalf("correctly-leased DeleteRef err = %v", err)
+	}
+	if _, err := r.LsRemoteRef(ctx, repo, "origin", ref); !errors.Is(err, ErrBranchNotFound) {
+		t.Fatalf("LsRemoteRef on deleted ref err = %v, want ErrBranchNotFound", err)
+	}
+
+	// Leased delete of the now-absent ref: rejected (absent != expected) —
+	// the caller's LsRemoteRef disambiguation is what makes drop idempotent.
+	if err := r.DeleteRef(ctx, repo, "origin", ref, sha2); !errors.Is(err, ErrNonFastForward) {
+		t.Fatalf("leased delete of absent ref err = %v, want ErrNonFastForward", err)
+	}
+
+	// Unconditional delete of an absent ref stays a non-error (git exits 0
+	// with only a stderr warning).
+	if err := r.DeleteRef(ctx, repo, "origin", ref, ""); err != nil {
+		t.Fatalf("unconditional delete of absent ref err = %v", err)
+	}
+}
+
 // TestPushRefRejectsRefOutsideWipNamespace pins that PushRef refuses to push
 // to a ref outside refs/devstrap/wip/*, never falling through to actually
 // invoke git — the caller-supplied ref for this primitive must never be able

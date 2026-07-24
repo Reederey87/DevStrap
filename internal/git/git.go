@@ -381,19 +381,65 @@ func (r Runner) FetchRef(ctx context.Context, dir, remote, ref string) error {
 
 // DeleteRef deletes ref from remote via a raw refspec push with an empty
 // source (`git push <remote> :<ref>`), used by the working-state WIP-ref
-// plane (Layer B, spec/07) for `wip drop`. Deleting an already-nonexistent
-// ref is NOT an error — git prints a stderr warning ("deleting a
-// non-existent ref") but still exits 0 — empirically confirmed; do not treat
-// that warning as a failure.
-func (r Runner) DeleteRef(ctx context.Context, dir, remote, ref string) error {
+// plane (Layer B, spec/07) for `wip drop`.
+//
+// When expectedSHA is non-empty the delete is a COMPARE-AND-DELETE: the
+// explicit-value form `--force-with-lease=<ref>:<sha>` makes the server
+// refuse the update unless the ref still points exactly at expectedSHA at
+// push time. This is what protects a drop driven by a possibly-stale
+// device_wip mirror row — the owning device may have force-pushed a NEWER
+// snapshot whose repo.wip.pushed event has not synced here yet, and an
+// unconditional delete would destroy that newer recovery data. A lease
+// rejection surfaces as ErrNonFastForward ("stale info"); a lease against an
+// already-deleted ref is ALSO rejected (absent != expectedSHA), so callers
+// that want already-gone idempotency must disambiguate with LsRemoteRef.
+//
+// With expectedSHA == "" the delete is unconditional; deleting an
+// already-nonexistent ref is then NOT an error — git prints a stderr warning
+// ("deleting a non-existent ref") but still exits 0 — empirically confirmed;
+// do not treat that warning as a failure.
+func (r Runner) DeleteRef(ctx context.Context, dir, remote, ref, expectedSHA string) error {
 	if !safeRemoteName(remote) {
 		return fmt.Errorf("invalid git remote name %q", remote)
 	}
 	if !safeRefPath(ref) {
 		return fmt.Errorf("invalid git ref %q", ref)
 	}
-	_, err := r.Run(ctx, dir, "push", remote, ":"+ref)
+	args := []string{"push"}
+	if expectedSHA != "" {
+		args = append(args, "--force-with-lease="+ref+":"+expectedSHA)
+	}
+	args = append(args, remote, ":"+ref)
+	_, err := r.Run(ctx, dir, args...)
 	return err
+}
+
+// LsRemoteRef returns the sha the remote currently advertises for exactly
+// ref, or ErrBranchNotFound when the remote has no such ref. Used by `wip
+// drop` to tell a lease-rejected delete's two causes apart: the ref is
+// already gone (idempotent success) vs. the ref moved to a sha the local
+// mirror does not know about (refuse — newer recovery data exists).
+func (r Runner) LsRemoteRef(ctx context.Context, dir, remote, ref string) (string, error) {
+	if !safeRemoteName(remote) {
+		return "", fmt.Errorf("invalid git remote name %q", remote)
+	}
+	if !safeRefPath(ref) {
+		return "", fmt.Errorf("invalid git ref %q", ref)
+	}
+	ctx, cancel := r.longTransferContext(ctx)
+	defer cancel()
+	out, err := r.Run(ctx, dir, "ls-remote", remote, ref)
+	if err != nil {
+		return "", err
+	}
+	// Output shape: "<sha>\t<ref>\n" per advertised ref; empty when absent.
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[1] == ref {
+			return fields[0], nil
+		}
+	}
+	return "", fmt.Errorf("%w: %s", ErrBranchNotFound, ref)
 }
 
 // MaintenanceRun runs a one-time `git maintenance run --auto` (commit-graph +

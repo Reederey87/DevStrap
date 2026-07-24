@@ -356,6 +356,33 @@ func resolveWipTarget(rows []state.DeviceWip, deviceID, projectPath string) (sta
 	}
 }
 
+// fetchVerifiedWip fetches row's WIP ref and verifies the fetched object is
+// EXACTLY the sha row's synced repo.wip.pushed record promised. The ref is
+// mutable (its owning device force-pushes it on every wip push), so the
+// remote can have advanced past what this device's mirror knows; without
+// this check, `wip show`/`wip apply` would fetch the newer object and then
+// show/apply it while still labeling the output with the mirror row's stale
+// sha — materializing content no locally-synced, signed event ever
+// described. Fail closed instead: the fix for a mismatch is `devstrap sync`
+// (pull the newer repo.wip.pushed record), then retry. ErrBranchNotFound
+// passes through untouched for the callers' ref-gone informational cases.
+func fetchVerifiedWip(ctx context.Context, r dsgit.Runner, localPath, pathKey string, row state.DeviceWip) (string, error) {
+	ref := wipRefFor(row.DeviceID, pathKey)
+	if err := r.FetchRef(ctx, localPath, "origin", ref); err != nil {
+		return ref, err
+	}
+	got, err := r.RevParse(ctx, localPath, ref)
+	if err != nil {
+		return ref, appError{code: exitGit, err: err}
+	}
+	if got != row.SHA {
+		return ref, appError{code: exitGit, err: fmt.Errorf(
+			"remote WIP ref for device %s has moved past the last synced record (expected %s, found %s); run `devstrap sync` to pull the newer record, then retry",
+			row.DeviceID, shortSHA(row.SHA), shortSHA(got))}
+	}
+	return ref, nil
+}
+
 // wipShowResult carries `wip show`'s output: the plain path (zero-pending or
 // ref-gone informational cases) or the full resolved device/ref/diff content.
 type wipShowResult struct {
@@ -403,14 +430,18 @@ func newWipShowCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("%s has no local git working tree to show WIP in", project.Path)}
 			}
 			r := gitRunner(opts)
-			ref := wipRefFor(row.DeviceID, project.PathKey)
-			if err := r.FetchRef(cmd.Context(), project.LocalPath, "origin", ref); err != nil {
+			ref, err := fetchVerifiedWip(cmd.Context(), r, project.LocalPath, project.PathKey, row)
+			if err != nil {
 				if errors.Is(err, dsgit.ErrBranchNotFound) {
 					out := wipShowResult{Path: project.Path, DeviceID: row.DeviceID, Ref: ref}
 					return opts.render(stdout, func(w io.Writer) error {
 						_, err := fmt.Fprintf(w, "WIP ref for device %s no longer exists on origin for %s\n", row.DeviceID, project.Path)
 						return err
 					}, out)
+				}
+				var app appError
+				if errors.As(err, &app) {
+					return err
 				}
 				return appError{code: exitGit, err: err}
 			}
@@ -426,11 +457,14 @@ func newWipShowCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// by — both staged and unstaged changes combined — which is
 			// exactly "what's different in the working tree" and reads the
 			// same way `git diff`/`git show` on an ordinary commit would.
-			stat, err := r.Run(cmd.Context(), project.LocalPath, "diff", "--stat", ref+"^", ref)
+			// Diff by the VERIFIED sha rather than the mutable ref name so the
+			// rendered content is exactly the object the synced record (and
+			// this output's own sha label) describe.
+			stat, err := r.Run(cmd.Context(), project.LocalPath, "diff", "--stat", row.SHA+"^", row.SHA)
 			if err != nil {
 				return appError{code: exitGit, err: err}
 			}
-			patch, err := r.Run(cmd.Context(), project.LocalPath, "diff", ref+"^", ref)
+			patch, err := r.Run(cmd.Context(), project.LocalPath, "diff", row.SHA+"^", row.SHA)
 			if err != nil {
 				return appError{code: exitGit, err: err}
 			}
@@ -490,14 +524,18 @@ func newWipApplyCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("%s has no local git working tree to apply WIP to", project.Path)}
 			}
 			r := gitRunner(opts)
-			ref := wipRefFor(row.DeviceID, project.PathKey)
-			if err := r.FetchRef(cmd.Context(), project.LocalPath, "origin", ref); err != nil {
+			ref, err := fetchVerifiedWip(cmd.Context(), r, project.LocalPath, project.PathKey, row)
+			if err != nil {
 				if errors.Is(err, dsgit.ErrBranchNotFound) {
 					out := wipApplyResult{Path: project.Path, DeviceID: row.DeviceID, Ref: ref}
 					return opts.render(stdout, func(w io.Writer) error {
 						_, err := fmt.Fprintf(w, "WIP ref for device %s no longer exists on origin for %s\n", row.DeviceID, project.Path)
 						return err
 					}, out)
+				}
+				var app appError
+				if errors.As(err, &app) {
+					return err
 				}
 				return appError{code: exitGit, err: err}
 			}
@@ -506,8 +544,10 @@ func newWipApplyCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// (an unrelated dirty file must not block a clean apply) — so `git
 			// stash apply` is called directly, with no --force escape hatch,
 			// and its outcome is only DISTINGUISHED afterward, never gated
-			// beforehand.
-			if _, err := r.Run(cmd.Context(), project.LocalPath, "stash", "apply", ref); err != nil {
+			// beforehand. Applied by the VERIFIED sha, not the mutable ref
+			// name, so what materializes is exactly the object the synced
+			// record promised.
+			if _, err := r.Run(cmd.Context(), project.LocalPath, "stash", "apply", row.SHA); err != nil {
 				dirty, dirtyErr := r.DirtyState(cmd.Context(), project.LocalPath)
 				if dirtyErr == nil && dirty == dsgit.DirtyConflicted {
 					// A partial merge already left standard <<<<<<</=======/>>>>>>>
@@ -577,13 +617,30 @@ func newWipDropCommand(stdout io.Writer, opts *options) *cobra.Command {
 			}
 			r := gitRunner(opts)
 			ref := wipRefFor(row.DeviceID, project.PathKey)
-			// Deleting an already-nonexistent ref is not an error (see
-			// Runner.DeleteRef's doc comment) — success is reported either way,
-			// since there is no reliable, non-racy way to tell "it was already
-			// gone" from "I just deleted it" apart, and the end state is
-			// identical.
-			if err := r.DeleteRef(cmd.Context(), project.LocalPath, "origin", ref); err != nil {
-				return appError{code: exitGit, err: err}
+			// COMPARE-AND-DELETE against the sha the synced record promised
+			// (explicit-value --force-with-lease): the ref is mutable and its
+			// owning device may have force-pushed a NEWER snapshot whose
+			// repo.wip.pushed event has not reached this device yet — an
+			// unconditional delete would permanently destroy that newer
+			// recovery data. A lease rejection has two causes, disambiguated
+			// by asking the remote what it actually advertises now: the ref is
+			// already gone (idempotent success — report dropped, clear the
+			// mirror) vs. the ref moved to an unknown sha (refuse; `devstrap
+			// sync` pulls the newer record, then retry).
+			if err := r.DeleteRef(cmd.Context(), project.LocalPath, "origin", ref, row.SHA); err != nil {
+				if !errors.Is(err, dsgit.ErrNonFastForward) {
+					return appError{code: exitGit, err: err}
+				}
+				got, lsErr := r.LsRemoteRef(cmd.Context(), project.LocalPath, "origin", ref)
+				if lsErr != nil && !errors.Is(lsErr, dsgit.ErrBranchNotFound) {
+					return appError{code: exitGit, err: lsErr}
+				}
+				if lsErr == nil {
+					return appError{code: exitGit, err: fmt.Errorf(
+						"remote WIP ref for device %s has moved past the last synced record (expected %s, found %s); run `devstrap sync` to pull the newer record, then retry",
+						row.DeviceID, shortSHA(row.SHA), shortSHA(got))}
+				}
+				// Already gone: fall through to clear the mirror row.
 			}
 			// Clears only THIS device's own local device_wip mirror row. This
 			// does NOT propagate to other devices' mirrors — there is no

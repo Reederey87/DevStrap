@@ -149,3 +149,34 @@ exec sh -c '! devstrap --home=$WORK/homeA --root=$WORK/CodeA wip drop work/proj3
 exec sh -c 'grep -q "multiple devices have pending WIP for work/proj3" $WORK/drop-multi.err'
 exec sh -c 'grep -qf $WORK/dev-b-id.txt $WORK/drop-multi.err'
 exec sh -c 'grep -q -- --device $WORK/drop-multi.err'
+
+# --- Case 6: stale-mirror protection (adversarial-review P1s) ---
+# The WIP ref is MUTABLE: its owning device force-pushes it on every wip
+# push. When the remote ref has advanced past what this device's synced
+# mirror row records, apply and drop must both fail closed — apply must not
+# materialize content no locally-synced record describes, and drop must not
+# destroy the newer recovery snapshot. Device B pushes a NEWER WIP for proj3
+# without syncing its event; A's mirror still holds the older record.
+exec sh -c 'echo B_V3_NEWER > $WORK/CodeB/work/proj3/README.md'
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB wip push work/proj3
+
+# A's apply against the stale mirror refuses and leaves A's tree untouched.
+exec sh -c '! devstrap --home=$WORK/homeA --root=$WORK/CodeA wip apply work/proj3 --device "$(cat $WORK/dev-b-id.txt)" 2> $WORK/apply-stale.err'
+exec sh -c 'grep -q "has moved past the last synced record" $WORK/apply-stale.err'
+exec sh -c '! grep -q B_V3_NEWER $WORK/CodeA/work/proj3/README.md'
+
+# A's drop against the stale mirror refuses; the newer snapshot survives on
+# the remote.
+exec sh -c '! devstrap --home=$WORK/homeA --root=$WORK/CodeA wip drop work/proj3 --device "$(cat $WORK/dev-b-id.txt)" 2> $WORK/drop-stale.err'
+exec sh -c 'grep -q "has moved past the last synced record" $WORK/drop-stale.err'
+exec sh -c 'git ls-remote --exit-code $WORK/rem3.git "refs/devstrap/wip/*" > /dev/null'
+
+# Once B syncs its newer repo.wip.pushed record and A pulls it, the same
+# apply succeeds and materializes exactly the newer snapshot's content (A
+# first restores its own dirty README so the apply is clean).
+exec devstrap --home=$WORK/homeB --root=$WORK/CodeB sync --hub-file=$WORK/hub.json
+exec devstrap --home=$WORK/homeA --root=$WORK/CodeA sync --hub-file=$WORK/hub.json
+exec git -C $WORK/CodeA/work/proj3 checkout -- README.md
+exec sh -c 'devstrap --home=$WORK/homeA --root=$WORK/CodeA wip apply work/proj3 --device "$(cat $WORK/dev-b-id.txt)"'
+stdout 'Applied WIP for work/proj3 from device'
+exec sh -c 'grep -q B_V3_NEWER $WORK/CodeA/work/proj3/README.md'
