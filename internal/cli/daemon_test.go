@@ -294,3 +294,31 @@ func TestLosingDaemonStartWritesNoJSONDocument(t *testing.T) {
 		t.Fatalf("a losing start left a pid record behind (stat err = %v)", statErr)
 	}
 }
+
+// TestDaemonEventsWithoutDaemonReturnsExitCode3 pins the wave's first genuine
+// use of the long-reserved exitDaemonUnavailable.
+//
+// It matters that this is `daemon events` and not `status` or `sync`: every
+// other command has a local path that works without a daemon, so returning
+// "daemon unavailable" for them would be a regression. A live event stream has
+// no daemonless equivalent, which is exactly what makes exit code 3 meaningful
+// here rather than merely available.
+func TestDaemonEventsWithoutDaemonReturnsExitCode3(t *testing.T) {
+	// Short path deliberately: this test's own name makes t.TempDir() long
+	// enough to exceed sockaddr_un's 104-byte cap on darwin, and a too-long
+	// address fails the dial with EINVAL rather than ENOENT — which
+	// isUnavailable correctly does NOT treat as "no daemon", so the assertion
+	// below would fail for a reason unrelated to what it is testing.
+	home, err := os.MkdirTemp("", "dh")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	_, _, err = executeForTest("--home", home, "daemon", "events")
+	if err == nil {
+		t.Fatal("daemon events succeeded with no daemon running")
+	}
+	if got := ExitCode(err); got != exitDaemonUnavailable {
+		t.Fatalf("exit code = %d, want %d (exitDaemonUnavailable)", got, exitDaemonUnavailable)
+	}
+}

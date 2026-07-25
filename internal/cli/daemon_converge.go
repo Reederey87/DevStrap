@@ -79,3 +79,34 @@ func (c cliWatchSource) WatchRoots(ctx context.Context) ([]string, error) {
 	}
 	return roots, nil
 }
+
+// cliReader adapts the local store to the daemon's Reader seam, backing
+// GET /v1/status.
+//
+// Note what this deliberately is NOT: a query API. It returns the same summary
+// `devstrap status` prints and nothing more. A consumer wanting per-project
+// detail opens the store itself — making the daemon a database proxy would give
+// it a second, drifting view of state it does not own.
+type cliReader struct {
+	opts *options
+}
+
+func (c cliReader) Status(ctx context.Context) (daemon.Status, error) {
+	store, err := c.opts.openState(ctx)
+	if err != nil {
+		return daemon.Status{}, err
+	}
+	defer closeStore(store)
+
+	summary, err := store.Summary(ctx)
+	if err != nil {
+		return daemon.Status{}, err
+	}
+	return daemon.Status{
+		WorkspaceName: summary.WorkspaceName,
+		WorkspaceID:   summary.WorkspaceID,
+		RootPath:      summary.RootPath,
+		ProjectCount:  summary.ProjectCount,
+		DeviceID:      summary.DeviceID,
+	}, nil
+}

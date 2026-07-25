@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -108,4 +110,63 @@ func isUnavailable(err error) bool {
 	//   ENOENT        — no socket file at all
 	//   ECONNREFUSED  — a socket file with no process accepting on it
 	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED)
+}
+
+// Status fetches the workspace snapshot without the caller opening the store.
+func (c *Client) Status(ctx context.Context) (Status, error) {
+	var out Status
+	err := c.get(ctx, "/v1/status", &out)
+	return out, err
+}
+
+// Events streams events until ctx is cancelled or the daemon stops, invoking fn
+// for each. It returns ErrUnavailable when no daemon is reachable, so a caller
+// can distinguish "nothing to watch" from a transport failure.
+//
+// The stream is explicitly LOSSY: the daemon drops events for a subscriber that
+// falls behind rather than slowing convergence. Callers must treat it as a
+// notification channel, never as a log they can reconstruct state from.
+func (c *Client) Events(ctx context.Context, fn func(Event)) error {
+	url := "http://" + socketHost + "/v1/events"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("daemon: build request: %w", err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+
+	// No client timeout on a stream: the shared c.http has one, so this uses a
+	// dedicated client whose only bound is the caller's context.
+	streamer := &http.Client{Transport: c.http.Transport}
+	resp, err := streamer.Do(req)
+	if err != nil {
+		if isUnavailable(err) {
+			return fmt.Errorf("%w: /v1/events", ErrUnavailable)
+		}
+		return fmt.Errorf("daemon: stream events: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("daemon: /v1/events: status %d", resp.StatusCode)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 4096), maxRequestBody)
+	for scanner.Scan() {
+		line := scanner.Text()
+		// SSE frames are "event: <kind>\ndata: <json>\n\n"; comments (": ...")
+		// are heartbeats and carry nothing.
+		payload, ok := strings.CutPrefix(line, "data: ")
+		if !ok {
+			continue
+		}
+		var event Event
+		if err := json.Unmarshal([]byte(payload), &event); err != nil {
+			continue
+		}
+		fn(event)
+	}
+	if err := scanner.Err(); err != nil && ctx.Err() == nil {
+		return fmt.Errorf("daemon: read event stream: %w", err)
+	}
+	return nil
 }
