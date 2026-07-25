@@ -40,6 +40,16 @@ type Watcher interface {
 	Watch(ctx context.Context, root string, events chan<- FSEvent) error
 }
 
+// PeerIdentity is the OS-reported identity of the process on the other end of a
+// connected Unix domain socket. UID is the authorization-relevant field; PID is
+// diagnostic only — it is unavailable on darwin, and a pid can be recycled
+// between observation and use, so it must never gate access. See PeerCred in the
+// build-tagged peercred_*.go files.
+type PeerIdentity struct {
+	UID uint32
+	PID int
+}
+
 type ServiceSpec struct {
 	Label       string
 	Description string

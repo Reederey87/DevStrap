@@ -31,6 +31,41 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-24 — feat(daemon): local socket transport core + peer-credential seam (CLI-05)
+
+Changed:
+- `internal/daemon` (new package): the Milestone 5 transport core, per `spec/13`'s own HTTP+JSON-over-Unix-socket MVP recommendation. `Listen` creates `~/.devstrap/devstrapd.sock` with a `0700` parent directory (the load-bearing gate — a peer that cannot traverse it never reaches the socket) and a `0600` socket (defense in depth; the residual umask window between `net.Listen` and `chmod` is documented in code). **Stale-socket takeover** probes an existing socket with a short-timeout dial: a live socket returns `ErrAlreadyRunning` (a running daemon is never displaced), a dead one is unlinked and rebound, and a path that is not a socket is a hard error that is never removed. `Server.Serve` blocks until context cancellation then gracefully drains; `net.UnixListener` unlinks on close, so the takeover path is only reached after a crash.
+- `internal/platform/peercred_{darwin,linux,other}.go` (new): build-tagged peer-credential seam mirroring the `procalive_*.go` convention — `GetsockoptXucred`/`LOCAL_PEERCRED` on darwin, `GetsockoptUcred`/`SO_PEERCRED` on linux, `ErrUnsupported` elsewhere. `golang.org/x/sys/unix` already carried both calls, so **no new dependency**. Both error paths of `RawConn.Control` are checked (dropping either turns a failed lookup into a silently-trusted connection). Deliberately **fail-closed**, the opposite of `ProcessAlive`'s fail-safe posture, with the reasoning recorded in the file: the two seams answer different questions.
+- Authorization: identity is resolved once per **connection** via `http.Server.ConnContext`, not per request, so a request cannot be served before the check runs. The peer must be the daemon's own uid; **root is not exempt**, because root can open a `0600` socket it does not own — precisely the case filesystem permissions cannot cover. Request hardening refuses any `Origin`/`Referer`-bearing request, pins `Host`, bounds bodies, and sets `ReadHeaderTimeout` (gosec G112).
+- Every response carries a `Devstrap-Daemon-Version` header, including error responses — the version-negotiation half of `CLI-05`.
+- Endpoints: `GET /v1/health`, `GET /v1/version` (snake_case JSON per `spec/13`). A wrong method on a real route returns 405, not 404.
+- `internal/daemon/client.go`: socket-dialing client exporting `ErrUnavailable`, distinguished from a real transport failure by inspecting the dial. The CLI maps it to the already-reserved `exitDaemonUnavailable = 3` in the next slice.
+- `internal/config/paths.go`: `Paths.SocketPath()`.
+- `spec/13`: new *Transport core — SHIPPED* subsection; the standing "the planned API still needs peer-credential checks / root rejection, message framing, and version negotiation (`CLI-05`)" note is corrected — all three are closed, while the job model and every endpoint beyond health/version remain design intent.
+- `spec/15`: new threat entry for DevStrap's first listening socket — the layered mitigation and the honest accepted residual (any process running as the same uid can drive the daemon; it already can read `state.db`, the key store, and hydrated `.env` files, so the daemon does not widen the trust boundary, it makes the existing one reachable over a socket).
+- `spec/03`: records the shipped transport core under `devstrapd`, and corrects the *No-daemon mode* paragraph, which still claimed `run-loop` "does not scan the local tree for new projects" and that `P6-XP-03` was "not yet run by the loop" — that stage shipped, so the daemon's remaining contribution there is sub-interval latency, not scanning at all.
+- `spec/13` frontmatter: `tracks_code` gains `internal/daemon/**`, so the new package has a specific spec owner — `TestEveryInternalPackageHasASpecificSpecOwner` fails otherwise, and spec/13 is the daemon API's natural owner.
+- `.testcoverage.yml`: `internal/daemon` floor at 72 (measured 78.4% at landing, seeded below per the `P7-QUAL-05` convention).
+
+Validated:
+- `gofmt -l cmd internal` (clean)
+- `GOCACHE=/tmp/devstrap-gocache go test -race -count=1 ./internal/daemon/... ./internal/platform/... ./internal/config/...` — all pass
+- `golangci-lint run ./internal/daemon/... ./internal/platform/... ./internal/config/...` — 0 issues (one line-scoped `//nolint:gosec` on the socket-directory `chmod`: G302 does not distinguish files from directories, and a directory needs the execute bit, so `0700` is the tightest mode available — not a loosening)
+- `GOOS=linux go build ./...` and `GOOS=windows go build ./...` — the linux seam compiles and `peercred_other.go` keeps windows building
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+
+Post-review (fable-5 security pass) — three fixes and one tracked follow-up:
+- **A false claim in this PR's own threat entry, corrected.** The entry originally asserted that a sandboxed agent "cannot reach the socket because `~/.devstrap` is outside its confinement." That is wrong under the default `guarded` policy on both platforms: a unix-socket `connect()` is a `network-outbound` operation under Seatbelt (not `file-write*`), and the profile only denies network for `readonly`/`cautious`; on Linux the default bwrap shape read-only-binds `/`, which does not block connecting to a socket. The codebase already conceded the class — the partial-network-deny warning says unix-domain sockets stay open. The entry now states the opposite honestly: a same-uid sandboxed agent CAN reach the socket and WILL pass the peercred check, the blast radius is nil today (health/version only), and either the profiles must deny the socket or a mutating endpoint must require more than the peercred uid before that stops being true.
+- **`isUnavailable` narrowed to `ENOENT`/`ECONNREFUSED`.** It previously classified every dial-stage `*net.OpError` as "no daemon", which would have swallowed client-side `EMFILE`, `EACCES` on a permission-broken state home, a caller's own cancellation, and a dial timeout against a wedged daemon. Callers map `ErrUnavailable` to a SILENT fallback, so a misclassification there is a real failure the user never sees.
+- **`os.Getuid()` → `os.Geteuid()`**: socket and file ownership follow the effective uid, so that is the correct comparison for a peer's uid. Identical in every supported deployment; correct under setuid.
+- **Version wording corrected** from "negotiation closed" to "advertisement shipped": the header exists on every response but no code reads it, so client-side skew handling is honestly a later slice.
+
+Follow-ups:
+- **Stale-socket takeover is probe-then-remove and therefore racy** (security review, LOW-MEDIUM): two daemons starting simultaneously can have the second unlink the first's now-live socket (split brain), and a live-but-wedged daemon whose accept backlog is full fails the 250ms probe and is misclassified dead — violating the "never evict a live daemon" invariant `ErrAlreadyRunning` promises. Both actors are same-uid (the 0700 directory blocks everyone else, and `net.Listen` on an occupied path fails `EADDRINUSE` rather than following anything), so the worst outcome is availability/split-brain, never hijack. Fix with an flock-serialized takeover beside the socket in the `daemon start` slice.
+- `devstrap daemon start|stop|status` + returning `exitDaemonUnavailable=3` (next slice).
+- Convergence (`Converger` seam over `runLoopTick`), the watcher wiring, `/v1/status` + `/v1/events`, and `service install --daemon` are the remaining slices of this wave.
+- A different-uid peer cannot be exercised end-to-end without root, so the refusal logic is unit-tested at the decision function (`TestAuthorizePeer`, including the root case) rather than over a real socket.
+
 ## 2026-07-24 — feat(platform): Milestone 5 entry gate — watcher tests, prune fix, gate review (TEST-06)
 
 Changed:

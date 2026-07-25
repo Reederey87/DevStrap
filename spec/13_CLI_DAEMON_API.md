@@ -1,6 +1,6 @@
 ---
 last_reviewed: 2026-07-24
-tracks_code: [cmd/**, internal/cli/**, internal/platform/**]
+tracks_code: [cmd/**, internal/cli/**, internal/daemon/**, internal/platform/**]
 ---
 # CLI and Daemon API
 
@@ -525,6 +525,19 @@ Recommendation:
 MVP: HTTP+JSON over Unix socket.
 ```
 
+### Transport core — SHIPPED 2026-07-24
+
+The MVP transport above is built (`internal/daemon`), as the first slice of the Milestone 5 daemon wave. What is live today:
+
+- **Socket and lifecycle.** `daemon.Listen` creates `~/.devstrap/devstrapd.sock` (`config.Paths.SocketPath`). Access control is layered, and the layering is deliberate: the parent directory is forced to `0700` — that is the real gate, since a peer that cannot traverse the directory never reaches the socket — and the socket itself is `chmod`ed to `0600` as defense in depth. The socket mode lands just after `net.Listen`, so it briefly carries umask-derived permissions; that window is exactly why the directory, not the socket mode, is the load-bearing control. **Stale-socket takeover:** a socket left behind by a crashed daemon is probed with a short-timeout dial — a *live* socket yields `ErrAlreadyRunning` (a running daemon is never displaced by a second one starting up), a *dead* one is unlinked and rebound. A path that exists but is **not** a socket is a hard error and is never removed. Graceful shutdown unlinks the socket (`net.UnixListener`'s default `SetUnlinkOnClose`), so the takeover path is only reached after a crash or `SIGKILL`.
+- **Peer-credential authorization (closes the `CLI-05` gap).** Identity is resolved once per *connection* via `http.Server`'s `ConnContext` hook — not per request — so a request cannot be served before the check has run. The syscall lives behind a build-tagged `internal/platform` seam mirroring the `procalive_*.go` convention: `GetsockoptXucred`/`LOCAL_PEERCRED` on darwin, `GetsockoptUcred`/`SO_PEERCRED` on linux, `ErrUnsupported` elsewhere. The seam is **fail-closed** — any error, including an unsupported platform, refuses the connection — which is the deliberate opposite of `ProcessAlive`'s fail-*safe* posture, because the two answer different questions ("may I let this caller in?" versus "may I steal this lock?"). The rule is that the peer must be the daemon's own uid; **root is not exempt**, since root can open a `0600` socket it does not own, which is precisely the case filesystem permissions cannot cover. Linux's pid is recorded for diagnostics only and never gates access (pids recycle).
+- **Request hardening.** Any request carrying `Origin` or `Referer` is refused — no legitimate DevStrap client sends either, and a browser always attaches one on a cross-origin request, so this closes the "local API driven by a page the user happens to have open" class. The `Host` header must be empty or the fixed `devstrapd.sock`. Bodies are bounded by `http.MaxBytesReader`, and `ReadHeaderTimeout` is set (an unbounded header read is a slowloris vector even locally, since any process running as this user can open a connection).
+- **Version advertisement (the other half of `CLI-05`).** Every response — including error responses — carries a `Devstrap-Daemon-Version` header, so a client *can* detect skew against its own binary without needing a successful request. Stated precisely: the mechanism ships, but **no code reads it yet** — client-side skew handling arrives with a later slice, so this is advertisement rather than negotiation.
+- **Endpoints.** `GET /v1/health` (`{"ok", "uptime_seconds"}`) and `GET /v1/version` (`{"version"}`). JSON tags are `snake_case` per this file's `--json` conventions, and a wrong method on a real route returns `405`, not `404`.
+- **Client.** `daemon.NewClient(socketPath)` dials the socket and exports `ErrUnavailable` for "no daemon is there", distinguished from a real transport failure by inspecting the dial. Callers map it to the already-reserved `exitDaemonUnavailable = 3`.
+
+Still design intent, in the sections below: `/v1/status`, `/v1/sync`, `/v1/hydrate`, `/v1/open`, `/v1/worktrees`, `/v1/agent-runs`, `/v1/events`, `/v1/projects`, `/v1/jobs`, and the whole job model. The package is transport only — it holds no convergence logic and imports no command code, so the dependency arrow points `daemon → core` and never `daemon → cobra` (see the `ARCH2-01` narrowing in `03_SYSTEM_ARCHITECTURE.md`).
+
 ## API endpoints
 
 ```text
@@ -653,7 +666,7 @@ Rules:
 - Exit-code taxonomy is overloaded (`CLI-04`): usage errors and overwrite-conflicts both map to `exitInvalidConfig`, and Cobra arg errors map to 1. Disambiguate.
 
 ### Daemon socket API (reserved for M5)
-The local Unix-socket API and job model are **design intent, not shipped** (`ARCH2-04`); `exitDaemonUnavailable=3` is reserved but never returned. The planned API still needs peer-credential checks / root rejection, message framing, and version negotiation (`CLI-05`).
+**Updated 2026-07-24.** The local Unix-socket API's **transport core is shipped** (see *Transport core — SHIPPED 2026-07-24* above): socket lifecycle with stale-socket takeover, peer-credential checks including root rejection, `Origin`/`Referer`/`Host` request hardening, bounded bodies, a `Devstrap-Daemon-Version` response header, and `GET /v1/health` + `GET /v1/version`. That closes two of `CLI-05`'s three named gaps outright — peer-credential checks / root rejection, and message framing (HTTP+JSON with bounded bodies and typed errors) — and ships the mechanism for the third: the version header is advertised on every response, but nothing consumes it yet, so client-side skew *handling* remains for a later slice. The **job model remains design intent** (`ARCH2-04`), as do every endpoint beyond health/version. `exitDaemonUnavailable=3` is still reserved-but-unreturned until the `devstrap daemon` command lands in the next slice of the wave; the client half (`daemon.ErrUnavailable`) that it maps from is already built.
 
 ### Planned commands (not yet registered)
 Referenced by the new workstreams; intentionally absent from the live command tree the drift test checks until implemented (`devstrap conflicts` has since shipped — see the 2026-06-28 implementation notes — and is documented under `status`):
