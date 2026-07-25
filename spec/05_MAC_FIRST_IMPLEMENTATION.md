@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-12
+last_reviewed: 2026-07-24
 tracks_code: [internal/platform/**, internal/cli/open.go, internal/cli/hydrate.go, .github/**]
 ---
 # Mac-First Implementation Guide
@@ -22,7 +22,7 @@ Daemon:     ~/Library/LaunchAgents/com.devstrap.devstrapd.plist
 State:      ~/.devstrap/state.db
 Socket:     ~/.devstrap/devstrapd.sock
 Managed:    ~/Code
-Watcher:    fsnotify/kqueue now; native FSEvents target
+Watcher:    fsnotify/kqueue (native FSEvents deferred — see the decision below)
 Secrets:    macOS Keychain + external CLI providers
 ```
 
@@ -125,6 +125,20 @@ Periodic scan → validate actual state
 ```
 
 Watcher events are debounced and batched before enqueueing reconciliation. The current fsnotify adapter defaults to a 250 ms debounce with a 2 s maximum latency and skips `.git`, `node_modules`, `.devstrap`, and `vendor` trees. The ignore compiler should feed richer watcher exclusions later so `.venv`, `dist`, `build`, and other generated trees do not exhaust watcher budgets or trigger hydration storms.
+
+### Native FSEvents vs fsnotify/kqueue — DEFERRED pending measurement (2026-07-24)
+
+**Decision: the daemon wave stays on the fsnotify/kqueue adapter. A native FSEvents adapter is deferred, not adopted and not abandoned.** The tracked task in `14_MVP_ROADMAP_AND_BACKLOG.md` — *"Implement FSEvents-specific Mac watcher if fsnotify/kqueue proves insufficient"* — stays unchecked; what changes here is that *"proves insufficient"* now has an operational definition and a slice of work that produces the evidence.
+
+**The cost is concrete and reaches past the watcher.** FSEvents is a CoreServices C API and there is no pure-Go binding, so a native adapter means **cgo on darwin**. The release pipeline builds every artifact with `CGO_ENABLED=0` and cross-compiles darwin *and* linux for amd64+arm64 from a single `ubuntu-latest` runner (`.goreleaser.yaml`, `.github/workflows/release.yml`); `modernc.org/sqlite` was chosen as a pure-Go driver precisely to keep that true. Enabling cgo for darwin requires a macOS builder with an SDK for the release build, forfeits the single self-contained static binary, and adds a linked-library dimension to the cosign/SBOM/notarization work (`P4-SEC-05`/`P4-QUAL-05`). That is a distribution-wide cost paid for a watcher improvement — it needs evidence, not a preference.
+
+**The benefit is real but unquantified.** fsnotify's macOS backend is kqueue, which needs an open file descriptor per watched path and — because kqueue has no directory-content notification — additionally one per entry inside each watched directory, so descriptor usage tracks the *file* count under `~/Code`, not the directory count. `addRecursiveWatch` registers the whole managed root at start and on every directory create, pruning only `.git`, `node_modules`, `.devstrap`, and `vendor` (`PLAT-01`: the ignore compiler still does not feed this list). FSEvents by contrast is one per-session stream subscribed to a path prefix, with no per-path descriptor, and it survives sleep/wake and volume remount through a replayable event id. Whether the kqueue cost actually bites depends on the size and shape of a real `~/Code` and on a per-process descriptor limit that varies by macOS version and launch context — not a constant this spec can assert.
+
+**We have no measurement, because the watcher has no consumer.** The only non-test reference to `NativeWatcher` in the tree is its own implementation; `platform.Watcher` has never been wired into a running command. Choosing FSEvents today would be guessing at a cost we have never observed.
+
+**Backed by:** the watcher-wiring slice of the daemon wave is the adapter's first real consumer (hints only) and instruments the thing in dispute — descriptor usage and `Add`/`Errors` failures against a real managed root — while degrading to `PollWatcher` on `EMFILE`/`ENOSPC`/any watcher error instead of failing (`PLAT-02`/`PLAT-03`). Correctness never rides on this choice: watch events are hints and periodic reconciliation is the backstop, so the worst case of staying on kqueue is added latency or a fall back to polling, never namespace divergence.
+
+**Reconsider when** either holds: (a) measured descriptor usage on a representative `~/Code` approaches the process limit even after the `spec/11` ignore compiler feeds watcher exclusions (`PLAT-01`) — i.e. the pruning fix is exhausted and the backend is still the constraint; or (b) the kqueue backend demonstrably drops or duplicates events across sleep/wake or volume remount in a way periodic reconciliation cannot absorb. Either finding makes cgo-on-darwin (or a separately shipped native helper) worth its distribution cost. Neither is demonstrated today.
 
 ## Reconciler behavior
 
@@ -335,7 +349,7 @@ Platform findings (`PLAT-*`, from `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.
 - **No ENOSPC/EMFILE handling (`PLAT-02`):** the watcher treats every Add/Errors failure as fatal with no fallback; add degraded polling + periodic reconciliation.
 - **Watcher/PollWatcher unwired; no periodic reconciliation backstop (`PLAT-03`).**
 - **No Chmod-only / OS-junk event filtering (`PLAT-04`).**
-- **`ServiceSpec` seam too thin to render the launchd plist (`PLAT-05`) — RESOLVED (`P4-PROD-04`).** `ServiceSpec` now carries Description/WorkingDir/Stdout+StderrPath/RestartOnFailure/RestartDelaySeconds and `ServiceManager` renders + installs the LaunchAgent (`internal/platform/service_launchd.go` + `service_darwin.go`, golden-tested) and the systemd user unit on Linux, driven by `devstrap service install|uninstall|status`. A native FSEvents watcher remains a follow-up.
+- **`ServiceSpec` seam too thin to render the launchd plist (`PLAT-05`) — RESOLVED (`P4-PROD-04`).** `ServiceSpec` now carries Description/WorkingDir/Stdout+StderrPath/RestartOnFailure/RestartDelaySeconds and `ServiceManager` renders + installs the LaunchAgent (`internal/platform/service_launchd.go` + `service_darwin.go`, golden-tested) and the systemd user unit on Linux, driven by `devstrap service install|uninstall|status`. A native FSEvents watcher remains a follow-up, scoped by the FSEvents/CGO decision under *Filesystem watcher* above.
 
 ## Audit follow-ups (2026-06-28)
 
