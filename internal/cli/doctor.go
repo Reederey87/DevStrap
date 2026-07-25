@@ -456,29 +456,45 @@ func checkRestoreJournal(home string) []checkResult {
 	return nil
 }
 
-// checkService reports the background run-loop service's health (P4-PROD-04).
-// It is entirely optional: an unsupported platform/session omits the check, a
-// not-installed service reports ok (with the install hint), a running service
-// reports ok, and an installed-but-stopped service warns with an inspection
-// remedy.
+// serviceCheckName names the service check after the mode the installed unit
+// actually runs. Reporting "run-loop service" for a `service install --daemon`
+// unit would be the same false framing that `ServiceStatus.Mode` exists to fix
+// — doctor is the other consumer of that field. An unknown/absent mode keeps
+// the historical name, so nothing changes for a run-loop install or for a unit
+// we cannot parse.
+func serviceCheckName(mode, suffix string) string {
+	base := "run-loop service"
+	if mode == serviceModeDaemon {
+		base = "daemon service"
+	}
+	return base + suffix
+}
+
+// checkService reports the background convergence service's health
+// (P4-PROD-04). It is entirely optional: an unsupported platform/session omits
+// the check, a not-installed service reports ok (with the install hint), a
+// running service reports ok, and an installed-but-stopped service warns with
+// an inspection remedy.
 func checkService(ctx context.Context, opts *options, store *state.Store) []checkResult {
 	mgr := serviceBackend()
 	label := mgr.DefaultLabel()
 	status, err := mgr.Status(ctx, label)
+	name := serviceCheckName(status.Mode, "")
+	custodyName := serviceCheckName(status.Mode, " custody")
 	if err != nil {
 		if errors.Is(err, platform.ErrUnsupported) {
 			return nil
 		}
-		return []checkResult{{Name: "run-loop service", Status: checkWarn, Detail: err.Error()}}
+		return []checkResult{{Name: name, Status: checkWarn, Detail: err.Error()}}
 	}
 	if !status.Installed {
-		return []checkResult{{Name: "run-loop service", Status: checkOK, Detail: "not installed (optional; `devstrap service install` for unattended sync)"}}
+		return []checkResult{{Name: name, Status: checkOK, Detail: "not installed (optional; `devstrap service install` for unattended sync)"}}
 	}
 	var custodyResult []checkResult
 	if store != nil {
 		recorded, custodyErr := store.KeyCustody(ctx)
 		if custodyErr != nil {
-			custodyResult = append(custodyResult, checkResult{Name: "run-loop service custody", Status: checkWarn, Detail: custodyErr.Error()})
+			custodyResult = append(custodyResult, checkResult{Name: custodyName, Status: checkWarn, Detail: custodyErr.Error()})
 		} else if state.EffectiveKeyCustody(recorded) == devicekeys.CustodyKeychain {
 			detail := "keychain-custody store under an unattended service; a locked keychain makes ticks fail closed"
 			remedy := fmt.Sprintf("re-initialize with %s=1 and migrate the key files to file custody", platform.NoKeychainEnv)
@@ -486,22 +502,22 @@ func checkService(ctx context.Context, opts *options, store *state.Store) []chec
 				detail = "keychain-custody store under an unattended service; the systemd user unit has no session D-Bus and fails closed every tick"
 				remedy += ", or reinstall with --allow-keychain-custody if a user-session D-Bus is available at service runtime"
 			}
-			custodyResult = append(custodyResult, checkResult{Name: "run-loop service custody", Status: checkWarn, Detail: detail, Remedy: remedy})
+			custodyResult = append(custodyResult, checkResult{Name: custodyName, Status: checkWarn, Detail: detail, Remedy: remedy})
 		}
 	}
 	if status.ExecPathMissing {
 		return append([]checkResult{{
-			Name:   "run-loop service",
+			Name:   name,
 			Status: checkWarn,
 			Detail: fmt.Sprintf("installed service ExecPath is missing: %s", status.ExecPath),
 			Remedy: "re-run devstrap service install (the installed unit points at a binary that no longer exists — e.g. after a brew upgrade)",
 		}}, custodyResult...)
 	}
 	if status.Running {
-		return append([]checkResult{{Name: "run-loop service", Status: checkOK, Detail: fmt.Sprintf("installed and running (%s)", status.Detail)}}, custodyResult...)
+		return append([]checkResult{{Name: name, Status: checkOK, Detail: fmt.Sprintf("installed and running (%s)", status.Detail)}}, custodyResult...)
 	}
 	return append([]checkResult{{
-		Name:   "run-loop service",
+		Name:   name,
 		Status: checkWarn,
 		Detail: fmt.Sprintf("installed but not running (%s)", status.Detail),
 		Remedy: fmt.Sprintf("inspect launchctl print / journalctl --user -u %s; reinstall with devstrap service install", label),

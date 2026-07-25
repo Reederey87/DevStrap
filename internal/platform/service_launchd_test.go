@@ -24,6 +24,23 @@ func goldenServiceSpec() ServiceSpec {
 	}
 }
 
+// goldenDaemonServiceSpec is the --daemon sibling of goldenServiceSpec: same
+// label/env/working dir, but Args/Description/log paths match daemon mode.
+func goldenDaemonServiceSpec() ServiceSpec {
+	return ServiceSpec{
+		Label:               "com.devstrap.run-loop",
+		Description:         "DevStrap daemon (socket API + watcher + periodic convergence)",
+		ExecPath:            "/usr/local/bin/devstrap",
+		Args:                []string{"daemon", "start", "--interval", "5m0s"},
+		Env:                 map[string]string{"PATH": "/usr/local/bin:/usr/bin:/bin"},
+		WorkingDir:          "/home/dev/Code",
+		StdoutPath:          "/home/dev/.devstrap/logs/devstrapd.out.log",
+		StderrPath:          "/home/dev/.devstrap/logs/devstrapd.err.log",
+		RestartOnFailure:    true,
+		RestartDelaySeconds: 30,
+	}
+}
+
 // checkGolden compares got against the golden file, rewriting it when
 // UPDATE_GOLDEN=1 so the fixtures can be regenerated deliberately.
 func checkGolden(t *testing.T, name string, got []byte) {
@@ -51,6 +68,14 @@ func TestRenderLaunchdPlistGolden(t *testing.T) {
 	checkGolden(t, "run_loop.plist.golden", got)
 }
 
+func TestRenderLaunchdPlistDaemonGolden(t *testing.T) {
+	got, err := renderLaunchdPlist(goldenDaemonServiceSpec())
+	if err != nil {
+		t.Fatalf("renderLaunchdPlist: %v", err)
+	}
+	checkGolden(t, "daemon.plist.golden", got)
+}
+
 func TestExtractLaunchdExecPathGolden(t *testing.T) {
 	plist, err := os.ReadFile(filepath.Join("testdata", "run_loop.plist.golden"))
 	if err != nil {
@@ -58,6 +83,19 @@ func TestExtractLaunchdExecPathGolden(t *testing.T) {
 	}
 	if got := extractLaunchdExecPath(plist); got != "/usr/local/bin/devstrap" {
 		t.Errorf("extractLaunchdExecPath = %q, want /usr/local/bin/devstrap", got)
+	}
+	if got := extractLaunchdMode(plist); got != "run-loop" {
+		t.Errorf("extractLaunchdMode(run-loop) = %q, want run-loop", got)
+	}
+}
+
+func TestExtractLaunchdModeDaemonGolden(t *testing.T) {
+	plist, err := os.ReadFile(filepath.Join("testdata", "daemon.plist.golden"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := extractLaunchdMode(plist); got != "daemon" {
+		t.Errorf("extractLaunchdMode(daemon) = %q, want daemon", got)
 	}
 }
 

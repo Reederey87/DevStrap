@@ -379,6 +379,38 @@ func TestDoctorWarnsWhenServiceInstalledButStopped(t *testing.T) {
 	}
 }
 
+// TestDoctorNamesServiceCheckAfterInstalledMode pins that doctor reports a
+// --daemon unit as "daemon service", not "run-loop service". doctor is the
+// second consumer of ServiceStatus.Mode, and reporting run-loop framing for a
+// daemon-backed unit is exactly the falsehood that field exists to prevent. An
+// unknown/absent mode keeps the historical name so nothing changes for a
+// run-loop install or for a unit we cannot parse.
+func TestDoctorNamesServiceCheckAfterInstalledMode(t *testing.T) {
+	for _, tc := range []struct{ mode, want string }{
+		{"daemon", "daemon service"},
+		{"run-loop", "run-loop service"},
+		{"", "run-loop service"},
+	} {
+		t.Run("mode="+tc.mode, func(t *testing.T) {
+			f := &fakeServiceManager{
+				labelVal:  "fake.run-loop",
+				statusVal: platform.ServiceStatus{Installed: true, Running: true, Mode: tc.mode, Detail: "running"},
+			}
+			withFakeService(t, f)
+
+			v := viper.New()
+			v.Set("home", t.TempDir())
+			results := checkService(context.Background(), &options{v: v}, nil)
+			if len(results) != 1 {
+				t.Fatalf("checkService results = %+v, want exactly one", results)
+			}
+			if results[0].Name != tc.want {
+				t.Errorf("check name = %q, want %q", results[0].Name, tc.want)
+			}
+		})
+	}
+}
+
 func TestDoctorWarnsWhenServiceExecPathMissing(t *testing.T) {
 	f := &fakeServiceManager{statusVal: platform.ServiceStatus{
 		Installed:       true,

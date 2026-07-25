@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-24
+last_reviewed: 2026-07-25
 tracks_code: [internal/platform/**, internal/cli/open.go, internal/cli/hydrate.go, .github/**]
 ---
 # Mac-First Implementation Guide
@@ -42,7 +42,7 @@ LaunchDaemon is only needed later if you need system-wide service behavior befor
 
 ## LaunchAgent plist — shipped via `devstrap service install` (`P4-PROD-04`)
 
-The **native daemon (`devstrapd serve`) stays deferred**, but the LaunchAgent installer is shipped: `devstrap service install` renders and installs a per-user LaunchAgent that wraps the portable `run-loop`, so the workspace converges unattended without the Phase 1 daemon. The rendered plist:
+The LaunchAgent installer is shipped: `devstrap service install` renders and installs a per-user LaunchAgent that wraps the portable `run-loop`, so the workspace converges unattended. **Since 2026-07-25 the same installer can supervise the shipped daemon instead** (`service install --daemon`, which bakes `daemon start` into the same plist under the same label); the daemon shipped as a subcommand of the one binary rather than a separate `devstrapd serve` executable. Both modes drive the same `runLoopTick`, so the daemonless path stays fully supported. The rendered plist:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -97,7 +97,7 @@ Troubleshooting (`launchctl print` surfaces `last exit code = N`):
 - **keychain-custody warning at install (`P7-XP-02`)** — a store with recorded keychain custody installs with a warning: a locked keychain (before the first GUI login after a reboot) makes run-loop ticks fail closed until unlock, and `doctor` names it while the service is installed.
 - **exit 127** — the service could not find the `devstrap` binary or a sibling tool (`git`) on the seeded `PATH`. Install `devstrap` to a stable directory and re-run `devstrap service install` so `ExecPath`/`PATH` point at it. `service status` and `doctor` now name this case directly (`ExecPath missing: <path>`, `P7-XP-05`).
 
-The deferred native daemon (`devstrapd serve`) would install its own `com.devstrap.devstrapd` LaunchAgent later and run in the foreground under launchd; `devstrap service` targets the shipped `run-loop` today.
+The daemon shipped 2026-07-25 as `devstrap daemon start`, **not** as a separate `devstrapd serve` binary and **not** under its own `com.devstrap.devstrapd` label: `service install --daemon` supervises it under the same `com.devstrap.run-loop` label the run-loop mode uses, because one label means one convergence service and two labels would double-converge against the same state home. It runs in the foreground under launchd, as launchd requires.
 
 ## Filesystem watcher
 

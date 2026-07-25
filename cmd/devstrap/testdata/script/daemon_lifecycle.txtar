@@ -1,0 +1,22 @@
+# The real daemon binary binds its socket, serves status, shuts down cleanly,
+# and reports the daemon-only events command's exact unavailable exit code.
+
+env DEVSTRAP_NO_KEYCHAIN=1
+
+exec devstrap --home=$SHORTHOME --root=$WORK/Code init
+
+exec devstrap --home=$SHORTHOME --root=$WORK/Code --json daemon status
+stdout '"running": *false'
+
+exec devstrap --home=$SHORTHOME --root=$WORK/Code daemon start --hub-file=$WORK/hub.json --interval=0 &daemon&
+waitfile $SHORTHOME/devstrapd.sock
+
+exec devstrap --home=$SHORTHOME --root=$WORK/Code --json daemon status
+stdout '"running": *true'
+
+exec devstrap --home=$SHORTHOME --root=$WORK/Code daemon stop
+wait daemon
+! exists $SHORTHOME/devstrapd.sock
+
+exitstatus 3 devstrap --home=$SHORTHOME --root=$WORK/Code daemon events
+stderr 'no daemon is running'

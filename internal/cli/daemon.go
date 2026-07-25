@@ -49,6 +49,24 @@ type daemonStatusResult struct {
 	Version string `json:"version,omitempty"`
 	Uptime  string `json:"uptime,omitempty"`
 	Detail  string `json:"detail,omitempty"`
+	// Convergence health, distinct from Running. A supervised daemon never
+	// exits on convergence failure — it backs off and keeps serving — so
+	// "running" says nothing about whether the workspace is converging, and
+	// the supervisor's restart count cannot be used as the failure signal the
+	// way it can for run-loop. Without these fields the only way to see a
+	// wedged daemon would be to curl the socket by hand.
+	Healthy             *bool  `json:"healthy,omitempty"`
+	LastError           string `json:"last_error,omitempty"`
+	ConsecutiveFailures int    `json:"consecutive_failures,omitempty"`
+	LastRunAt           string `json:"last_run_at,omitempty"`
+	// Watch reports the filesystem-hint plane. A degraded watcher is not an
+	// unhealthy daemon (correctness rides on periodic convergence), but a
+	// silently degraded one leaves the user believing they have sub-interval
+	// convergence when they do not.
+	WatchBackend  string `json:"watch_backend,omitempty"`
+	WatchDegraded *bool  `json:"watch_degraded,omitempty"`
+	WatchReason   string `json:"watch_reason,omitempty"`
+	WatchRoots    int    `json:"watch_roots,omitempty"`
 }
 
 type daemonStartResult struct {
@@ -298,6 +316,23 @@ func runDaemonStatus(cmd *cobra.Command, stdout io.Writer, opts *options) error 
 	case err == nil:
 		result.Running = true
 		result.Uptime = (time.Duration(health.UptimeSeconds) * time.Second).String()
+		// Only meaningful when a Converger is wired; a transport-only daemon
+		// would otherwise report a permanently "unhealthy" convergence it does
+		// not perform.
+		if health.Converging {
+			healthy := health.Healthy
+			result.Healthy = &healthy
+			result.LastError = health.LastError
+			result.ConsecutiveFailures = health.ConsecutiveFailures
+			result.LastRunAt = health.LastRunAt
+		}
+		result.WatchBackend = health.Watch.Backend
+		if health.Watch.Enabled {
+			degraded := health.Watch.Degraded
+			result.WatchDegraded = &degraded
+			result.WatchReason = health.Watch.Reason
+			result.WatchRoots = health.Watch.Roots
+		}
 		if v, verr := client.Version(cmd.Context()); verr == nil {
 			result.Version = v.Version
 		}
@@ -330,8 +365,33 @@ func runDaemonStatus(cmd *cobra.Command, stdout io.Writer, opts *options) error 
 				return ferr
 			}
 		}
-		_, ferr := fmt.Fprintf(w, ")\nsocket: %s\n", result.Socket)
-		return ferr
+		if _, ferr := fmt.Fprintf(w, ")\nsocket: %s\n", result.Socket); ferr != nil {
+			return ferr
+		}
+		// Running and converging are different questions, and the supervisor
+		// answers neither: it restarts only on a crash, so a daemon failing
+		// every cycle looks "running" to launchd/systemd forever.
+		if result.Healthy != nil {
+			if *result.Healthy {
+				if _, ferr := fmt.Fprintf(w, "converging: ok\n"); ferr != nil {
+					return ferr
+				}
+			} else {
+				if _, ferr := fmt.Fprintf(w, "converging: FAILING (%d consecutive; last error: %s)\n", result.ConsecutiveFailures, result.LastError); ferr != nil {
+					return ferr
+				}
+			}
+		}
+		if result.WatchDegraded != nil && *result.WatchDegraded {
+			if _, ferr := fmt.Fprintf(w, "watch: degraded (%s)\n", result.WatchReason); ferr != nil {
+				return ferr
+			}
+		} else if result.WatchDegraded != nil {
+			if _, ferr := fmt.Fprintf(w, "watch: %s, %d root(s)\n", result.WatchBackend, result.WatchRoots); ferr != nil {
+				return ferr
+			}
+		}
+		return nil
 	}, result)
 }
 

@@ -76,33 +76,60 @@ func systemdQuote(word string) string {
 // It deliberately accepts only the quoted/unquoted forms our renderer emits;
 // malformed hand-edited units degrade to an unknown ExecPath.
 func systemdUnquoteFirstWord(line string) (string, bool) {
+	word, _, ok := systemdUnquoteFirstWordRest(line)
+	return word, ok
+}
+
+// systemdUnquoteFirstWordRest is like systemdUnquoteFirstWord but also returns
+// the remainder of the line after the first word (for multi-word ExecStart).
+func systemdUnquoteFirstWordRest(line string) (string, string, bool) {
 	line = strings.TrimSpace(line)
 	if line == "" {
-		return "", false
+		return "", "", false
 	}
 	var word strings.Builder
 	if line[0] != '"' {
 		end := strings.IndexAny(line, " \t")
 		if end < 0 {
-			end = len(line)
+			return strings.ReplaceAll(line, "%%", "%"), "", true
 		}
-		return strings.ReplaceAll(line[:end], "%%", "%"), true
+		return strings.ReplaceAll(line[:end], "%%", "%"), strings.TrimSpace(line[end:]), true
 	}
 	for i := 1; i < len(line); i++ {
 		switch line[i] {
 		case '"':
-			return strings.ReplaceAll(word.String(), "%%", "%"), true
+			rest := ""
+			if i+1 < len(line) {
+				rest = strings.TrimSpace(line[i+1:])
+			}
+			return strings.ReplaceAll(word.String(), "%%", "%"), rest, true
 		case '\\':
 			i++
 			if i >= len(line) || (line[i] != '\\' && line[i] != '"') {
-				return "", false
+				return "", "", false
 			}
 			word.WriteByte(line[i])
 		default:
 			word.WriteByte(line[i])
 		}
 	}
-	return "", false
+	return "", "", false
+}
+
+// systemdUnquoteWords reverses systemdQuote for every ExecStart word, reusing
+// the same unquoting rules as systemdUnquoteFirstWord.
+func systemdUnquoteWords(line string) []string {
+	var words []string
+	rest := strings.TrimSpace(line)
+	for rest != "" {
+		word, next, ok := systemdUnquoteFirstWordRest(rest)
+		if !ok {
+			return nil
+		}
+		words = append(words, word)
+		rest = next
+	}
+	return words
 }
 
 func extractSystemdExecPath(unit []byte) string {
@@ -115,6 +142,20 @@ func extractSystemdExecPath(unit []byte) string {
 			return execPath
 		}
 		return ""
+	}
+	return ""
+}
+
+// extractSystemdMode best-effort parses the convergence mode from ExecStart=:
+// word[1] == "run-loop" → "run-loop"; word[1] == "daemon" && word[2] == "start"
+// → "daemon"; otherwise "".
+func extractSystemdMode(unit []byte) string {
+	for _, line := range strings.Split(string(unit), "\n") {
+		if !strings.HasPrefix(line, "ExecStart=") {
+			continue
+		}
+		words := systemdUnquoteWords(strings.TrimPrefix(line, "ExecStart="))
+		return serviceModeFromArgs(words)
 	}
 	return ""
 }

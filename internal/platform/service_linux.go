@@ -211,6 +211,7 @@ func (m SystemdUserManager) Status(ctx context.Context, label string) (ServiceSt
 	//nolint:gosec // unitPath is our own systemd user-unit for a validated label (validateServiceLabel), not user input.
 	if unit, err := os.ReadFile(unitPath); err == nil {
 		status.ExecPath = extractSystemdExecPath(unit)
+		status.Mode = extractSystemdMode(unit)
 		if status.ExecPath != "" {
 			if _, err := os.Stat(status.ExecPath); os.IsNotExist(err) {
 				status.ExecPathMissing = true

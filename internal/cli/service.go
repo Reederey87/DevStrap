@@ -20,14 +20,28 @@ import (
 // agent.go's sandboxBackend.
 var serviceBackend = func() platform.ServiceManager { return platform.Detect().Service }
 
+// Service modes, as recorded in the baked argv and parsed back by
+// platform.ServiceManager.Status.
+//
+// Both modes install under the SAME label (platform.ServiceManager's
+// DefaultLabel, historically named after run-loop). That is deliberate: one
+// label means one convergence service, so switching modes replaces the unit
+// rather than leaving two of them converging against the same state home. The
+// label therefore identifies the convergence service, not the mode it runs —
+// `service status` reports the mode separately.
+const (
+	serviceModeRunLoop = "run-loop"
+	serviceModeDaemon  = "daemon"
+)
+
 // newServiceCommand implements `devstrap service install|uninstall|status`
-// (P4-PROD-04): it wraps the existing `run-loop` in a per-user launchd
-// LaunchAgent (macOS) or systemd user service (Linux) so the workspace
-// converges unattended, without a bespoke daemon.
+// (P4-PROD-04): it wraps the existing `run-loop` (default) or `daemon start`
+// (`--daemon`) in a per-user launchd LaunchAgent (macOS) or systemd user
+// service (Linux) so the workspace converges unattended.
 func newServiceCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "service",
-		Short: "Install the run-loop as a background OS service",
+		Short: "Install background convergence as an OS service",
 	}
 	cmd.AddCommand(newServiceInstallCommand(stdout, opts))
 	cmd.AddCommand(newServiceUninstallCommand(stdout, opts))
@@ -41,6 +55,7 @@ func newServiceCommand(stdout io.Writer, opts *options) *cobra.Command {
 type serviceInstallResult struct {
 	Manager  string   `json:"manager"`
 	Label    string   `json:"label"`
+	Mode     string   `json:"mode,omitempty"`
 	UnitPath string   `json:"unit_path,omitempty"`
 	Notes    []string `json:"notes,omitempty"`
 }
@@ -52,12 +67,23 @@ func newServiceInstallCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var label string
 	var execPath string
 	var allowKeychainCustody bool
+	var daemonMode bool
 	cmd := &cobra.Command{
 		Use:   "install",
-		Short: "Install and start the run-loop background service",
+		Short: "Install and start the background convergence service",
 		Args:  usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			stderr := cmd.ErrOrStderr()
+			// A non-positive interval means OPPOSITE things to the two supervised
+			// commands: runLoopForever clamps it up to 5m, while the daemon's
+			// runPeriodic treats it as "on-demand only" and never converges. An
+			// unattended service that silently never converges is the worse
+			// failure and the harder one to notice, so refuse rather than pick a
+			// mode-dependent meaning. `daemon start --interval 0` is still
+			// available directly for an on-demand daemon.
+			if interval <= 0 {
+				return appError{code: exitUsage, err: fmt.Errorf("--interval must be positive for a background service (got %s); run `devstrap daemon start --interval 0` directly if you want an on-demand daemon with no periodic convergence", interval)}
+			}
 			// A service that cannot resolve a hub would relaunch and fail on
 			// every tick; refuse up front with the same remedy run-loop uses.
 			if err := hubConfigured(opts, hubFile); err != nil {
@@ -72,7 +98,12 @@ func newServiceInstallCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			bakedArgs, err := serviceRunLoopArgs(cmd, opts, interval, namespaceOnly, hubFile)
+			var bakedArgs []string
+			if daemonMode {
+				bakedArgs, err = serviceDaemonArgs(cmd, opts, interval, namespaceOnly, hubFile)
+			} else {
+				bakedArgs, err = serviceRunLoopArgs(cmd, opts, interval, namespaceOnly, hubFile)
+			}
 			if err != nil {
 				return err
 			}
@@ -80,22 +111,48 @@ func newServiceInstallCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if resolvedLabel == "" {
 				resolvedLabel = mgr.DefaultLabel()
 			}
+			wantMode := serviceModeRunLoop
+			if daemonMode {
+				wantMode = serviceModeDaemon
+			}
+			// Observe the prior mode BEFORE Install overwrites the unit, but do
+			// not announce the replacement until Install has actually succeeded —
+			// on an unsupported/headless manager Install fails and no replacement
+			// happened. A Status error is ignored on purpose: not being able to
+			// read a prior unit is not a reason to refuse a fresh install.
+			priorMode := ""
+			if prior, perr := mgr.Status(cmd.Context(), resolvedLabel); perr == nil && prior.Installed {
+				priorMode = prior.Mode
+			}
 			var serviceEnv map[string]string
 			if forceFileCustody {
 				serviceEnv = map[string]string{platform.NoKeychainEnv: "1"}
 			}
 			logDir := opts.paths().LogDir()
+			description := "DevStrap run-loop (scan + sync + materialize)"
+			stdoutPath := filepath.Join(logDir, "run-loop.out.log")
+			stderrPath := filepath.Join(logDir, "run-loop.err.log")
+			if daemonMode {
+				description = "DevStrap daemon (socket API + watcher + periodic convergence)"
+				stdoutPath = filepath.Join(logDir, "devstrapd.out.log")
+				stderrPath = filepath.Join(logDir, "devstrapd.err.log")
+			}
 			spec := platform.ServiceSpec{
 				Label:       resolvedLabel,
-				Description: "DevStrap run-loop (scan + sync + materialize)",
+				Description: description,
 				ExecPath:    resolvedExec,
 				Args:        bakedArgs,
-				StdoutPath:  filepath.Join(logDir, "run-loop.out.log"),
-				StderrPath:  filepath.Join(logDir, "run-loop.err.log"),
+				StdoutPath:  stdoutPath,
+				StderrPath:  stderrPath,
 				// Coupled to run-loop's own consecutive-failure ceiling — see the
 				// note by runLoopMaxConsecutiveFailures. Env stays nil unless the
 				// explicit non-secret file-custody override must survive into the
 				// service; adapters add PATH, and no secret enters a service file.
+				// In --daemon mode the coupling does not apply: `daemon start`
+				// never exits on convergence failure — it backs off internally
+				// to a 30m cap and keeps serving reads. A restart here therefore
+				// means a genuine crash, never a convergence outage; convergence
+				// health lives on /v1/health, not in the supervisor's restart count.
 				Env:                 serviceEnv,
 				RestartOnFailure:    true,
 				RestartDelaySeconds: 30,
@@ -108,7 +165,13 @@ func newServiceInstallCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			// Terminal confirmation of a completed state change, deliberately not gated by --quiet (P7-CLI-03).
-			_, _ = fmt.Fprintf(stderr, "installed %s service %q\n", mgr.Name(), resolvedLabel)
+			_, _ = fmt.Fprintf(stderr, "installed %s service %q (%s mode)\n", mgr.Name(), resolvedLabel, wantMode)
+			if priorMode != "" && priorMode != wantMode {
+				// One label, one convergence service: the install above replaced
+				// the other mode's unit rather than adding a second one, which
+				// would double-converge against the same state home.
+				_, _ = fmt.Fprintf(stderr, "replaced the previous %s-mode unit under the same label\n", priorMode)
+			}
 			unitPath := ""
 			if status, serr := mgr.Status(cmd.Context(), resolvedLabel); serr == nil && status.UnitPath != "" {
 				unitPath = status.UnitPath
@@ -123,17 +186,19 @@ func newServiceInstallCommand(stdout io.Writer, opts *options) *cobra.Command {
 			return opts.render(stdout, func(w io.Writer) error { return nil }, serviceInstallResult{
 				Manager:  mgr.Name(),
 				Label:    resolvedLabel,
+				Mode:     wantMode,
 				UnitPath: unitPath,
 				Notes:    notes,
 			})
 		},
 	}
-	cmd.Flags().DurationVar(&interval, "interval", 5*time.Minute, "run-loop sync interval")
+	cmd.Flags().DurationVar(&interval, "interval", 5*time.Minute, "convergence interval for the supervised command (run-loop, or daemon start under --daemon)")
 	cmd.Flags().BoolVar(&namespaceOnly, "namespace-only", false, "sync namespace metadata only; skip materialization")
 	cmd.Flags().StringVar(&hubFile, "hub-file", "", "file-backed test hub path")
 	cmd.Flags().StringVar(&label, "label", "", "service label (defaults to the OS-idiomatic label)")
 	cmd.Flags().StringVar(&execPath, "exec-path", "", "absolute path to the devstrap binary the service runs (defaults to this binary)")
 	cmd.Flags().BoolVar(&allowKeychainCustody, "allow-keychain-custody", false, "allow a systemd user service to use recorded keychain custody")
+	cmd.Flags().BoolVar(&daemonMode, "daemon", false, "supervise `devstrap daemon start` instead of `run-loop`: adds a local socket API and a filesystem watcher for sub-interval convergence; the daemon never exits on convergence failure, so a restart means a crash, not a failed sync")
 	return cmd
 }
 
@@ -205,7 +270,7 @@ func checkServiceInstallCustody(ctx context.Context, stderr io.Writer, opts *opt
 	switch mgr.Name() {
 	case "systemd-user":
 		return false, appError{code: exitInvalidConfig, err: fmt.Errorf(
-			"the systemd user unit runs with no session D-Bus; recorded keychain custody fails closed every tick, and the run-loop will exit into a restart loop.%s Re-initialize with %s=1 and migrate the key files to file custody, or pass --allow-keychain-custody if this box really has a user-session D-Bus at service runtime (for example, desktop Linux with linger)",
+			"the systemd user unit runs with no session D-Bus; recorded keychain custody fails closed every tick (run-loop exits into a restart loop; a --daemon unit keeps serving but never converges).%s Re-initialize with %s=1 and migrate the key files to file custody, or pass --allow-keychain-custody if this box really has a user-session D-Bus at service runtime (for example, desktop Linux with linger)",
 			unreachableNow, platform.NoKeychainEnv,
 		)}
 	case "launchd":
@@ -284,6 +349,7 @@ func newServiceUninstallCommand(stdout io.Writer, opts *options) *cobra.Command 
 type serviceStatusJSON struct {
 	Manager         string `json:"manager"`
 	Label           string `json:"label"`
+	Mode            string `json:"mode,omitempty"`
 	Installed       bool   `json:"installed"`
 	Running         bool   `json:"running"`
 	Detail          string `json:"detail"`
@@ -314,6 +380,7 @@ func newServiceStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 			out := serviceStatusJSON{
 				Manager:         mgr.Name(),
 				Label:           resolvedLabel,
+				Mode:            status.Mode,
 				Installed:       status.Installed,
 				Running:         status.Running,
 				Detail:          status.Detail,
@@ -324,6 +391,9 @@ func newServiceStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 			return opts.render(stdout, func(w io.Writer) error {
 				_, _ = fmt.Fprintf(w, "manager:   %s\n", mgr.Name())
 				_, _ = fmt.Fprintf(w, "label:     %s\n", resolvedLabel)
+				if status.Mode != "" {
+					_, _ = fmt.Fprintf(w, "mode:      %s\n", status.Mode)
+				}
 				_, _ = fmt.Fprintf(w, "installed: %t\n", status.Installed)
 				_, _ = fmt.Fprintf(w, "running:   %t\n", status.Running)
 				if status.Detail != "" {
@@ -454,13 +524,17 @@ func isEphemeralExecPath(p string) bool {
 	return strings.Contains(p, "go-build")
 }
 
-// serviceRunLoopArgs builds the run-loop argv the service executes. It bakes
-// the interval and optional --namespace-only/--hub-file (absolute), and
-// propagates the root-level --home/--root/--config ONLY when the operator set
-// them explicitly, so the service inherits the same non-default state locations
-// the operator is using now.
-func serviceRunLoopArgs(cmd *cobra.Command, opts *options, interval time.Duration, namespaceOnly bool, hubFile string) ([]string, error) {
-	args := []string{"run-loop", "--interval", interval.String()}
+// serviceConvergenceArgs bakes the argv a service unit runs. head is the
+// subcommand path ("run-loop", or "daemon start"); everything after it is
+// identical between the two modes, which is the point — one convergence
+// contract, two supervision shapes.
+//
+// It bakes the interval and optional --namespace-only/--hub-file (absolute),
+// and propagates the root-level --home/--root/--config ONLY when the operator
+// set them explicitly, so the service inherits the same non-default state
+// locations the operator is using now.
+func serviceConvergenceArgs(cmd *cobra.Command, opts *options, head []string, interval time.Duration, namespaceOnly bool, hubFile string) ([]string, error) {
+	args := append(append([]string{}, head...), "--interval", interval.String())
 	if namespaceOnly {
 		args = append(args, "--namespace-only")
 	}
@@ -500,4 +574,12 @@ func serviceRunLoopArgs(cmd *cobra.Command, opts *options, interval time.Duratio
 		}
 	}
 	return args, nil
+}
+
+func serviceRunLoopArgs(cmd *cobra.Command, opts *options, interval time.Duration, namespaceOnly bool, hubFile string) ([]string, error) {
+	return serviceConvergenceArgs(cmd, opts, []string{"run-loop"}, interval, namespaceOnly, hubFile)
+}
+
+func serviceDaemonArgs(cmd *cobra.Command, opts *options, interval time.Duration, namespaceOnly bool, hubFile string) ([]string, error) {
+	return serviceConvergenceArgs(cmd, opts, []string{"daemon", "start"}, interval, namespaceOnly, hubFile)
 }

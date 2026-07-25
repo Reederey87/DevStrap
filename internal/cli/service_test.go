@@ -136,6 +136,121 @@ func TestServiceInstallBuildsRunLoopArgs(t *testing.T) {
 	}
 }
 
+func TestServiceDaemonArgs(t *testing.T) {
+	f := &fakeServiceManager{}
+	withFakeService(t, f)
+	home := t.TempDir()
+	hub := filepath.Join(t.TempDir(), "hub.json")
+	_, _, err := executeForTest(
+		"--home", home,
+		"service", "install",
+		"--daemon",
+		"--hub-file", hub,
+		"--exec-path", "/usr/local/bin/devstrap",
+		"--interval", "10m",
+		"--namespace-only",
+	)
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if f.installedSpec == nil {
+		t.Fatal("Install was not called")
+	}
+	want := []string{"daemon", "start", "--interval", "10m0s", "--namespace-only", "--hub-file", hub, "--home", home}
+	if strings.Join(f.installedSpec.Args, " ") != strings.Join(want, " ") {
+		t.Errorf("baked args = %v, want %v", f.installedSpec.Args, want)
+	}
+}
+
+func TestServiceInstallDaemonModeBakesDaemonStart(t *testing.T) {
+	f := &fakeServiceManager{}
+	withFakeService(t, f)
+	home := t.TempDir()
+	_, _, err := executeForTest(
+		"--home", home,
+		"service", "install",
+		"--daemon",
+		"--hub-file", filepath.Join(t.TempDir(), "hub.json"),
+		"--exec-path", "/usr/local/bin/devstrap",
+	)
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if f.installedSpec == nil {
+		t.Fatal("Install was not called")
+	}
+	if len(f.installedSpec.Args) < 2 || f.installedSpec.Args[0] != "daemon" || f.installedSpec.Args[1] != "start" {
+		t.Errorf("Args[0:2] = %v, want [daemon start]", f.installedSpec.Args)
+	}
+	if f.installedSpec.Description != "DevStrap daemon (socket API + watcher + periodic convergence)" {
+		t.Errorf("Description = %q", f.installedSpec.Description)
+	}
+	wantErr := filepath.Join(home, "logs", "devstrapd.err.log")
+	if f.installedSpec.StderrPath != wantErr {
+		t.Errorf("StderrPath = %q, want %q", f.installedSpec.StderrPath, wantErr)
+	}
+}
+
+func TestServiceInstallWarnsOnModeChange(t *testing.T) {
+	f := &fakeServiceManager{
+		statusVal: platform.ServiceStatus{Installed: true, Mode: "run-loop"},
+	}
+	withFakeService(t, f)
+	_, stderr, err := executeForTest(
+		"--home", t.TempDir(),
+		"service", "install",
+		"--daemon",
+		"--hub-file", filepath.Join(t.TempDir(), "hub.json"),
+		"--exec-path", "/usr/local/bin/devstrap",
+	)
+	if err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	// The advisory reports a COMPLETED replacement, so it must come after a
+	// successful Install — announcing it beforehand would claim a replacement
+	// that never happened when Install fails (e.g. ErrUnsupported on a headless
+	// systemd box).
+	if !strings.Contains(stderr, "replaced the previous run-loop-mode unit") {
+		t.Errorf("stderr = %q, want mode-change advisory", stderr)
+	}
+	if !strings.Contains(stderr, "(daemon mode)") {
+		t.Errorf("stderr = %q, want the installed mode named in the confirmation", stderr)
+	}
+}
+
+// TestServiceInstallRefusesNonPositiveInterval pins that a background service
+// cannot be installed with an interval that means OPPOSITE things to the two
+// supervised commands: runLoopForever clamps <=0 up to 5m, while the daemon's
+// runPeriodic reads it as "never converge periodically". Silently installing an
+// unattended service that never converges is the worse failure of the two, so
+// both modes refuse rather than pick a mode-dependent meaning.
+func TestServiceInstallRefusesNonPositiveInterval(t *testing.T) {
+	for _, mode := range []string{"run-loop", "daemon"} {
+		t.Run(mode, func(t *testing.T) {
+			f := &fakeServiceManager{}
+			withFakeService(t, f)
+			args := []string{
+				"--home", t.TempDir(),
+				"service", "install",
+				"--interval", "0",
+				"--hub-file", filepath.Join(t.TempDir(), "hub.json"),
+				"--exec-path", "/usr/local/bin/devstrap",
+			}
+			if mode == "daemon" {
+				args = append(args, "--daemon")
+			}
+			_, _, err := executeForTest(args...)
+			if err == nil {
+				t.Fatalf("install with --interval 0 (%s) succeeded, want refusal", mode)
+			}
+			var appErr appError
+			if !errors.As(err, &appErr) || appErr.code != exitUsage {
+				t.Errorf("err = %v, want exitUsage appError", err)
+			}
+		})
+	}
+}
+
 func TestServiceInstallRefusesTempExecPath(t *testing.T) {
 	f := &fakeServiceManager{}
 	withFakeService(t, f)

@@ -142,51 +142,92 @@ func renderLaunchdPlist(spec ServiceSpec) ([]byte, error) {
 // nested wrong-shaped value must degrade to "", never return an unrelated
 // string — Codex review), and decodes the standard XML entities xmlEscape uses.
 func extractLaunchdExecPath(plist []byte) string {
+	args := extractLaunchdProgramArguments(plist)
+	if len(args) == 0 {
+		return ""
+	}
+	return args[0]
+}
+
+// extractLaunchdMode best-effort parses the convergence mode from
+// ProgramArguments: entry[1] == "run-loop" → "run-loop"; entry[1] == "daemon"
+// && entry[2] == "start" → "daemon"; otherwise "".
+func extractLaunchdMode(plist []byte) string {
+	return serviceModeFromArgs(extractLaunchdProgramArguments(plist))
+}
+
+// extractLaunchdProgramArguments best-effort parses ProgramArguments <string>
+// entries from the plist shape rendered above. Same shape bounds as
+// extractLaunchdExecPath: wrong nesting degrades to nil.
+//
+// Reading the mode needs argv[1..2], not just argv[0], so this accumulates to
+// </array> rather than returning at the first <string> the way the exec-path
+// parse used to. That widens the degrade slightly: a plist truncated AFTER the
+// first entry previously still yielded an exec path and now yields nothing, so
+// ExecPathMissing (P7-XP-05) is not flagged for it. Accepted — we write plists
+// through atomicWrite, so a truncated one means disk corruption rather than a
+// state this code should try to interpret, and degrading to empty is this
+// file's documented policy for every other malformed shape.
+func extractLaunchdProgramArguments(plist []byte) []string {
 	decoder := xml.NewDecoder(bytes.NewReader(plist))
 	seenProgramArguments := false
 	inProgramArguments := false
+	var args []string
 	for {
 		tok, err := decoder.Token()
 		if err != nil {
-			return ""
+			return nil
 		}
 		switch token := tok.(type) {
 		case xml.StartElement:
 			switch {
 			case inProgramArguments:
-				// Our rendered shape has ONLY <string> direct children; the
-				// very first element inside the array is either the exec path
-				// or proof this is a foreign plist — degrade, never guess.
+				// Our rendered shape has ONLY <string> direct children; any
+				// other element is a foreign plist — degrade, never guess.
 				if token.Name.Local != "string" {
-					return ""
+					return nil
 				}
-				var execPath string
-				if err := decoder.DecodeElement(&execPath, &token); err != nil {
-					return ""
+				var s string
+				if err := decoder.DecodeElement(&s, &token); err != nil {
+					return nil
 				}
-				return execPath
+				args = append(args, s)
 			case seenProgramArguments:
 				// The key's IMMEDIATE value must be the array; anything else
 				// (e.g. a wrapping <dict>) is a foreign shape.
 				if token.Name.Local != "array" {
-					return ""
+					return nil
 				}
 				inProgramArguments = true
 				seenProgramArguments = false
 			case token.Name.Local == "key":
 				var key string
 				if err := decoder.DecodeElement(&key, &token); err != nil {
-					return ""
+					return nil
 				}
 				seenProgramArguments = key == "ProgramArguments"
 			}
 		case xml.EndElement:
-			if inProgramArguments {
-				// The ProgramArguments array closed empty.
-				return ""
+			if inProgramArguments && token.Name.Local == "array" {
+				return args
 			}
 		}
 	}
+}
+
+// serviceModeFromArgs maps a full argv (exec path + subcommand path) to the
+// service mode string reported by Status. entry[0] is the binary.
+func serviceModeFromArgs(args []string) string {
+	if len(args) < 2 {
+		return ""
+	}
+	if args[1] == "run-loop" {
+		return "run-loop"
+	}
+	if args[1] == "daemon" && len(args) >= 3 && args[2] == "start" {
+		return "daemon"
+	}
+	return ""
 }
 
 // serviceLabelPattern constrains service labels to filename- and argv-safe

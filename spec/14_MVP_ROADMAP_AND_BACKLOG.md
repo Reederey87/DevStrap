@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-24
+last_reviewed: 2026-07-25
 tracks_code: [cmd/**, internal/**, .github/**, docs/audits/AUDIT_RECOMMENDATIONS.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # MVP Roadmap and Backlog
@@ -22,7 +22,7 @@ Milestone 2: Git hydration and open                         [shipped]
 Milestone 3: fresh worktree manager                         [shipped]
 Milestone 3.5: thin agent runner MVP                        [shipped]
 Milestone 4: env capture/hydrate and runtime injection      [shipped]
-Milestone 5: Mac daemon and watcher                         [entry gate satisfied 2026-07-24 — see below]
+Milestone 5: Mac daemon and watcher                         [shipped 2026-07-25, less the job queue and native FSEvents — see below]
 Milestone 6: Linux compatibility                            [portable Go first; native parts deferred]
 Milestone 7: multi-device hub                               [reframed as the cloud R2 hub — see below]
 ```
@@ -282,6 +282,8 @@ devstrap run work/org/repo -- printenv SOME_VAR
 > Deferred (2026-06-28). The cloud-sync cycle ships a **cross-platform core first** (`XP-*`) — portable Go on macOS + Ubuntu — with no native daemon or StrapFS this cycle. Eager-clone materialization on `sync` (`EAGER-*`) plus periodic reconciliation cover the loop without a resident watcher. Keep this milestone behind its entry gate below; do not start it until the gate is satisfied and the cloud planes (`EAGER-*`/`DRAFT-*`/`HUB-*`) are in place.
 >
 > **Gate satisfied 2026-07-24.** The cloud planes are in place (`EAGER-*`/`DRAFT-*`/`HUB-*` all shipped) and all three entry conditions are met. The daemon is unblocked **as a thin layer over the shipped `run-loop`** — transport, single-flight scheduling, status/SSE, and watcher hints — not as a re-implementation of convergence and never as a correctness dependency. See the entry-gate review below.
+>
+> **SHIPPED 2026-07-25** across PRs #229–#233 plus the `--daemon` installer slice, and it held the shape the gate licensed: the daemon calls the same `runLoopTick` the daemonless `run-loop` calls, so there is exactly one convergence path. `devstrap run-loop` remains the portable, daemonless way to converge and every command still works with no daemon present — the daemon buys sub-interval latency and a live read plane, never correctness. **Two tasks stay open on purpose** and are not bookkeeping debt: the *job queue* (what shipped is single-flight coalescing, not a queue) and *native FSEvents* (still gated on a measurement that only became takeable now — `/v1/health`'s `watch.roots`).
 
 Entry gate (review before starting M5) — **SATISFIED 2026-07-24**:
 
@@ -291,7 +293,7 @@ Entry gate (review before starting M5) — **SATISFIED 2026-07-24**:
 
 Deliverables:
 
-- `devstrapd serve`;
+- `devstrapd serve` — **shipped as `devstrap daemon start`**; there is no separate `devstrapd` binary, because one binary is what keeps a single distribution artifact and one convergence code path;
 - LaunchAgent install;
 - watcher/reconciler;
 - local socket API.
@@ -301,24 +303,46 @@ Tasks:
 ```text
 [x] Define platform adapter interfaces and detection seam before native watcher/service work
 [x] Add guard that prevents `runtime.GOOS` branching outside `internal/platform`
-[ ] Implement daemon process
-[ ] Implement job queue
-[ ] Implement HTTP over Unix socket
+[x] Implement daemon process — `devstrap daemon start|stop|status|events` (PRs #229/#230). Foreground by
+    design: launchd and systemd both supervise a foreground process, and a self-daemonizing one would
+    fight them.
+[ ] Implement job queue — deliberately still open. What shipped is a single-flight scheduler (one
+    convergence at a time; concurrent triggers join it and share its result), which is NOT a queue, and
+    the job types `spec/13` designs remain design intent.
+[x] Implement HTTP over Unix socket — `internal/daemon` transport core (PR #229, closes `CLI-05`):
+    0700 parent dir + 0600 socket, per-connection peer-credential auth with root NOT exempt,
+    stale-socket takeover that never displaces a live daemon, and Origin/Referer/Host hardening.
 [x] Implement fsnotify watcher adapter for Darwin/Linux
-[ ] Implement FSEvents-specific Mac watcher if fsnotify/kqueue proves insufficient
-[ ] Implement reconcile job
-[x] Implement LaunchAgent install/uninstall — shipped as `devstrap service`, wrapping run-loop (`P4-PROD-04`)
-[ ] Implement logs and daemon status
+[ ] Implement FSEvents-specific Mac watcher if fsnotify/kqueue proves insufficient — still gated on the
+    measurement `spec/05` names. That measurement is `/v1/health`'s `watch.roots` count, which only
+    became observable with this wave; it has not been taken against a real `~/Code` yet.
+[x] Implement reconcile job — the `Converger` seam over the existing `runLoopTick` (the `ARCH2-01`
+    narrowing, PR #231). Periodic ticks, watcher hints, and `POST /v1/sync` all drive that one
+    function, so no second convergence path exists to drift from `run-loop`.
+[x] Implement LaunchAgent install/uninstall — shipped as `devstrap service` (`P4-PROD-04`), wrapping
+    `run-loop` by default and `daemon start` under `--daemon`. Both modes install under the same label:
+    one label means one convergence service, so switching modes replaces the unit instead of leaving two
+    converging against the same state home.
+[x] Implement logs and daemon status — `devstrap daemon status`, `GET /v1/status`, and the `GET /v1/events`
+    SSE stream; a `--daemon` service unit routes the daemon's structured logs to `devstrapd.{out,err}.log`.
 ```
 
-Acceptance:
+Acceptance — **met 2026-07-25**. The original block named `devstrap daemon install`, a command that
+was never built and never should be: installing a service is `devstrap service`'s job, and the daemon
+is one of the two things it can supervise, not an installer of its own.
 
 ```bash
-devstrap daemon install
-devstrap daemon status
+devstrap service install --daemon
+devstrap service status --json     # "mode": "daemon", "running": true
+devstrap daemon status             # answered over the Unix socket, not the pid file
 mkdir ~/Code/experiments/new-project
 devstrap status
 ```
+
+Verified against live launchd on 2026-07-25 (see `spec/18`): the installed plist starts the daemon,
+which binds its socket and answers `daemon status` within ~2s; `service status --json` reports
+`mode: daemon` parsed back out of the installed unit; re-installing without `--daemon` prints the
+mode-replacement advisory; after `service uninstall`, `daemon events` exits 3.
 
 ### Entry-gate review (2026-07-24) — "do we still need the daemon?"
 
