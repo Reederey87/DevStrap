@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-13
+last_reviewed: 2026-07-24
 tracks_code: [cmd/**, internal/**, internal/config/**, .github/**, .goreleaser.yaml, scripts/**]
 ---
 # System Architecture
@@ -125,6 +125,10 @@ Responsibilities:
 - write logs and audit events.
 
 **Engine seam (`ARCH2-01`):** these responsibilities (reconciler, materializer, worktree manager, secret broker, policy engine) are today implemented as Cobra command closures inside `internal/cli`, not a separate package. Extract a thin `internal/engine` exposing intent-level operations (`Hydrate`, `NewWorktree`, `RunAgent`, `Sync`) so the daemon's job handlers and the CLI call the same core — otherwise the daemon phase must begin with a large, risky extraction from `internal/cli`.
+
+**Narrowed for the daemon wave (`ARCH2-01`, 2026-07-24).** The daemon built in this wave needs exactly **one** intent-level operation from that seam: *tick convergence*. Its surface is `/v1/health`, `/v1/version`, `/v1/status`, `/v1/sync`, and `/v1/events` — converge and report; it does not hydrate a single project, create a worktree, or run an agent on request. The seam that ships is therefore a `Converger` interface with a single convergence method, implemented by a thin `internal/cli` adapter over the **existing** `runLoopTick` (scan+adopt → sync → eager materialize), so the daemon's convergence handler and `devstrap run-loop` execute the identical code path — single-flight-coalesced when driven through the daemon. The full extraction of `Hydrate`/`NewWorktree`/`RunAgent` into `internal/engine` is **deferred**: lifting three more operations behind a package boundary that no second caller crosses would add indirection without paying down risk, and each is still invoked only from its own CLI command.
+
+This is not a re-run of the risk `ARCH2-01` named. The finding's argument was that the daemon phase would otherwise *open* with a large, risky extraction; wrapping `runLoopTick` behind an interface pays that debt for the only operation the daemon actually calls and fixes the dependency direction (daemon → `Converger`, never daemon → Cobra command), so every later operation can be lifted one at a time behind the same pattern instead of in one big-bang refactor. **Revisit the fuller extraction when the daemon must invoke those operations directly** — an editor or agent asking the socket API to materialize a path on demand, a job queue that owns worktree creation, or policy enforced in the daemon rather than at the CLI boundary. Until then `ARCH2-01` stays open in the backlog (`14_MVP_ROADMAP_AND_BACKLOG.md`, *Architecture & hygiene epics*), narrowed rather than closed.
 
 ### `devstraphub`
 

@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-17
+last_reviewed: 2026-07-24
 tracks_code: [cmd/**, internal/**, .github/**, docs/audits/AUDIT_RECOMMENDATIONS.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # MVP Roadmap and Backlog
@@ -22,7 +22,7 @@ Milestone 2: Git hydration and open                         [shipped]
 Milestone 3: fresh worktree manager                         [shipped]
 Milestone 3.5: thin agent runner MVP                        [shipped]
 Milestone 4: env capture/hydrate and runtime injection      [shipped]
-Milestone 5: Mac daemon and watcher                         [deferred — see below]
+Milestone 5: Mac daemon and watcher                         [entry gate satisfied 2026-07-24 — see below]
 Milestone 6: Linux compatibility                            [portable Go first; native parts deferred]
 Milestone 7: multi-device hub                               [reframed as the cloud R2 hub — see below]
 ```
@@ -280,12 +280,14 @@ devstrap run work/org/repo -- printenv SOME_VAR
 ## Milestone 5 — Mac daemon and watcher
 
 > Deferred (2026-06-28). The cloud-sync cycle ships a **cross-platform core first** (`XP-*`) — portable Go on macOS + Ubuntu — with no native daemon or StrapFS this cycle. Eager-clone materialization on `sync` (`EAGER-*`) plus periodic reconciliation cover the loop without a resident watcher. Keep this milestone behind its entry gate below; do not start it until the gate is satisfied and the cloud planes (`EAGER-*`/`DRAFT-*`/`HUB-*`) are in place.
+>
+> **Gate satisfied 2026-07-24.** The cloud planes are in place (`EAGER-*`/`DRAFT-*`/`HUB-*` all shipped) and all three entry conditions are met. The daemon is unblocked **as a thin layer over the shipped `run-loop`** — transport, single-flight scheduling, status/SSE, and watcher hints — not as a re-implementation of convergence and never as a correctness dependency. See the entry-gate review below.
 
-Entry gate (review before starting M5):
+Entry gate (review before starting M5) — **SATISFIED 2026-07-24**:
 
-- the indexer-hydration-storm test must pass (watcher treats events as hints and does not hydrate without explicit open/adopt);
-- the Mac sleep/wake watcher test must pass;
-- a written "do we still need the daemon?" review must confirm periodic-scan reconciliation is insufficient for real usage before daemon work begins.
+- [x] the indexer-hydration-storm test must pass (watcher treats events as hints and does not hydrate without explicit open/adopt) — **SATISFIED 2026-07-24** by `TestNativeWatcherCoalescesBurstIntoBoundedHints` and `TestNativeWatcherSkipsGeneratedDirCreatedAfterStart` in the new `internal/platform/fsnotify_watcher_test.go`. The condition is met **structurally**, not merely by throttling: 3000 writes collapse to a handful of hints, and every `FSEvent` carries `Kind=FSEventScan` with `Path=<watch root>` and nothing else — a consumer physically cannot learn *which* file changed, so it cannot hydrate a specific project from an event. Writing the test also surfaced a real defect, fixed in the same change: `addRecursiveWatch` prunes generated directories only *below* its own walk root, and the create-event branch passed each newly-created directory as that call's root, so a fresh `node_modules`/`.git` bypassed the prune entirely and registered a watch per subdirectory — with the first failing `watcher.Add` (terminal) killing the watcher outright. That is precisely this gate condition's failure mode, latent for as long as the watcher had no consumer; the test fails if the fix is reverted (mutation-checked, all four generated-directory cases). The invariant's remaining code-level form lands with the watcher's first real consumer: a watcher-triggered tick is namespace-only and never hydrates.
+- [x] the Mac sleep/wake watcher test must pass — **SATISFIED 2026-07-24**, in two halves, because `16_TEST_PLAN.md`'s *Sleep/wake simulation* entry has two clauses and one test cannot honestly cover both. Its **setup** clause ("approximate by stopping watcher and doing bulk changes") is `TestNativeWatcherRestartAfterBulkChangeMakesNoCompletenessClaim`, which deliberately does **not** assert that changes made while the watcher was down are reported — the invariant it exists to license is the opposite one: the watcher is a latency optimization and makes **no completeness claim**. Its **Expected** clause ("periodic reconciliation catches drift") is proven separately and pre-existed this PR: `cmd/devstrap/testdata/script/run_loop_once.txtar` (`P6-XP-03`) drives a real `run-loop --once` tick over a checkout that is present on disk but was never added, and asserts the tick adopts it. Together those are the gate condition: drift accumulated while the watcher is down is caught by reconciliation, never by the watcher — which is exactly what lets the verdict below justify a daemon without making it a correctness dependency.
+- [x] a written "do we still need the daemon?" review must confirm periodic-scan reconciliation is insufficient for real usage before daemon work begins — **SATISFIED 2026-07-24**: the review is below. Verdict: **yes, narrowly** — periodic-scan reconciliation is sufficient for *correctness* and insufficient for *latency, cost-at-low-latency, and live observability*.
 
 Deliverables:
 
@@ -317,6 +319,34 @@ devstrap daemon status
 mkdir ~/Code/experiments/new-project
 devstrap status
 ```
+
+### Entry-gate review (2026-07-24) — "do we still need the daemon?"
+
+The gate exists to force a deliberate decision, not to rubber-stamp one. What follows weighs the shipped daemonless path against a resident process on the evidence in the tree today.
+
+**What periodic-scan reconciliation already delivers.** `devstrap run-loop` (`internal/cli/run_loop.go`) runs scan+adopt → sync → eager-materialize on an interval (default 5 minutes, ≤10% jitter), and `devstrap service install` (`P4-PROD-04`) wraps it in a launchd LaunchAgent / systemd user service so it runs unattended across reboots. `P6-XP-03` closed the loop's local→namespace gap by running an idempotent scan+adopt at the start of every tick, so a project created locally reaches the namespace — and the hub — with no operator action. **Every product promise in `00_START_HERE.md` is reachable today with no daemon.** That is the honest counterweight, and it is why the answer below is "narrowly" rather than "obviously".
+
+**Where it is structurally insufficient.**
+
+1. **Latency has a floor set by the interval.** A local change waits for this device's next tick; a remote change waits for this device's next tick after the originating device's push. End-to-end cross-device propagation is therefore up to ~2 intervals (~10 minutes at the default) even when both machines are awake and idle. For the "same tree on every device" promise this is the difference between a workspace that feels live and one that feels batch-mode.
+2. **Cost is paid per tick, not per change.** Each tick unconditionally walks `~/Code` (`scan.Walk`), pulls the hub, and runs a materialize pass — whether or not anything changed. Shortening the interval to buy latency multiplies filesystem walks and hub round-trips across the whole fleet (R2 bills per request; the `git+ssh://` carrier pays a fetch per tick). Watcher hints invert the trade: **converge when something actually changed**, so the fleet can hold a long, cheap safe-interval *and* low latency at the same time. This is the single strongest argument for the daemon, and note what it argues for — a *trigger*, not a new engine.
+3. **No live status surface.** `status --watch` re-renders by re-reading SQLite on a 2 s poll; there is no event stream. The CLI cannot show convergence progress as it happens, and no external consumer (editor extension, TUI, menu bar, agent harness) can subscribe to it. A resident process is the only thing that can serve `/v1/events`.
+4. **Contention degrades instead of coalescing.** Concurrent work today serializes through the `~/.devstrap` maintenance lock: an interactive `devstrap sync` during a tick collides, and the loop's own response is to *skip the cycle* (`maintenance in progress; skipping this cycle`). A single-flight seam in a resident process turns that into joining the in-flight convergence — the same work, observed rather than dropped.
+5. **The local API does not exist.** The socket/job API in `13_CLI_DAEMON_API.md` is design intent and `exitDaemonUnavailable=3` is reserved but never returned (`ARCH2-04`). Editors and agents have no way to ask "is this path materialized yet?" short of spawning a full CLI process that opens the database.
+
+**What a daemon costs, stated plainly.** A resident process adds crash/restart and stale-process handling, single-instance enforcement, a socket permission model, log growth, and — the real risk — a second execution path that can drift from the CLI's. That last one is the reason the answer is conditional rather than unqualified.
+
+**Verdict: yes, and only as a thin layer.** Periodic-scan reconciliation is *not* insufficient for correctness and must never be made so. It *is* insufficient for latency, for cost at low latency, and for live observability — three real-usage properties that no amount of interval tuning delivers, because the loop cannot distinguish "nothing changed" from "not yet looked". The daemon is therefore justified as: a Unix-socket transport with peercred auth, a single-flight scheduler, a status/SSE surface, and a watcher supplying **hints only** — all wrapping the already-shipped `runLoopTick`. It is *not* justified as a re-implementation of convergence, a new engine package, or a correctness dependency.
+
+**Invariants that keep this verdict honest** (each is a merge condition for the daemon wave, not an aspiration):
+
+- **One convergence path.** The daemon's convergence handler calls the same `runLoopTick` the CLI calls, through a `Converger` seam — no second engine. See the `ARCH2-01` narrowing in `03_SYSTEM_ARCHITECTURE.md`.
+- **No-daemon correctness is preserved.** Every command still works with the daemon absent (`03_SYSTEM_ARCHITECTURE.md`, *No-daemon mode*); read paths fall back to direct-store reads, and `exitDaemonUnavailable=3` is returned only for genuinely daemon-only operations.
+- **Watcher events stay hints.** A watcher-triggered tick is namespace-only and never hydrates directly — the code-level form of this gate's storm-test condition.
+- **The daemonless path stays installable.** `devstrap service install` keeps installing `run-loop`; the daemon is an opt-in `--daemon` variant, not a replacement.
+- **Reversible at the seam.** If the watcher's real-world descriptor cost or burst behavior turns out worse than the polling it replaces (measured in the watcher-wiring slice; see the FSEvents decision in `05_MAC_FIRST_IMPLEMENTATION.md`), the fallback is the shipped `run-loop`, unchanged.
+
+**Revisit if** the measured hint plane does not actually reduce time-to-convergence against a comparable-cost interval, or if the daemon's status/SSE surface finds no consumer beyond `devstrap status` — either outcome would mean the resident process is carrying its costs without earning them, and the loop should reclaim the ground.
 
 ## Milestone 6 — Linux compatibility
 
@@ -494,7 +524,7 @@ Workstreams added by the second-pass design & implementation audit (`docs/audits
 - The resume cursor is shipped (per-origin-device Seq cursors, `P5-SYNC-01`), and full-state snapshot exchange + retention GC are shipped (2026-07-04: `hub compact`, sealed snapshots + signed CAS retention manifest, fail-closed import/recovery, tombstone GC over signed sync acks, `hub migrate-events`, advisory sweep lock).
 
 ### Architecture & hygiene epics
-- Extract `internal/engine` from `internal/cli` (`ARCH2-01`) before the daemon phase.
+- Extract `internal/engine` from `internal/cli` (`ARCH2-01`) before the daemon phase — **narrowed 2026-07-24, not closed**: the daemon wave ships a `Converger` seam over the existing `runLoopTick` (the only engine operation the daemon invokes); the full `Hydrate`/`NewWorktree`/`RunAgent` extraction stays open until the daemon must invoke those operations directly. See `03_SYSTEM_ARCHITECTURE.md`.
 - Signed **audit-log subsystem** (`spec/15`) — currently absent.
 - **`.devstrapignore` compiler** (`spec/11`) — currently absent; root cause of duplicated prune/secret/deny lists.
 - Daemon crash-recovery/reaper, observability/log-rotation, large-namespace scan benchmarks, cross-process `state.db` coordination, migration-rollback tests (audit coverage gaps).

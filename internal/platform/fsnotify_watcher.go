@@ -91,7 +91,17 @@ func (w NativeWatcher) Watch(ctx context.Context, root string, events chan<- FSE
 			if !ok {
 				return nil
 			}
-			if event.Has(fsnotify.Create) {
+			// A directory created after the initial walk must join the watch
+			// set, but it must honor the prune set too. addRecursiveWatch skips
+			// generated directories only BELOW its own walk root (so an
+			// explicitly-watched root that happens to be named `vendor` stays
+			// watchable), which means passing a freshly-created `node_modules`
+			// here as that call's root would bypass the prune entirely and
+			// register a watch for every subdirectory under it. Since a failed
+			// watcher.Add is terminal below, a single `npm install` under a
+			// watched project could exhaust the watch/fd budget and kill the
+			// watcher outright.
+			if event.Has(fsnotify.Create) && !shouldSkipWatchDir(filepath.Base(event.Name)) {
 				if info, statErr := os.Stat(event.Name); statErr == nil && info.IsDir() {
 					if addErr := addRecursiveWatch(watcher, event.Name); addErr != nil {
 						return addErr

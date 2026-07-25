@@ -31,6 +31,30 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-24 — feat(platform): Milestone 5 entry gate — watcher tests, prune fix, gate review (TEST-06)
+
+Changed:
+- `internal/platform/fsnotify_watcher.go`: **real defect fix.** `addRecursiveWatch` applies its prune set (`.git`, `node_modules`, `.devstrap`, `vendor`) only *below* its own walk root — deliberately, so an explicitly-watched root that happens to be named `vendor` stays watchable. But `Watch`'s create-event branch passed each newly-created directory to `addRecursiveWatch` as that call's root, bypassing the prune entirely: a fresh `node_modules`/`.git` under a watched tree registered a watch for every subdirectory beneath it, and because a failed `watcher.Add` is terminal, a single `npm install` could kill the watcher outright. The create branch now checks `shouldSkipWatchDir(filepath.Base(event.Name))` first. Latent since the adapter was written — it had no consumer, so nothing exercised it.
+- `internal/platform/fsnotify_watcher_test.go` (new): the watcher's first tests, closing `TEST-06` (no watcher tests, no goroutine-leak detection). Six tests: burst coalescing + hint shape (the storm gate condition), generated-dir exclusion (pins the fix above; mutation-checked across all four prune entries), restart-after-bulk-change (the sleep/wake gate condition), goroutine release on cancel, slow-consumer backpressure, and a prune-set table. Standard library only — no new dependency.
+- `spec/14_MVP_ROADMAP_AND_BACKLOG.md`: Milestone 5's entry gate marked **SATISFIED** with per-condition evidence, plus the written "do we still need the daemon?" review the gate requires. Verdict: **yes, narrowly** — periodic-scan reconciliation is sufficient for *correctness* and insufficient for *latency, cost-at-low-latency, and live observability*. Records five merge-condition invariants (one convergence path; no-daemon correctness preserved; watcher events stay hints; the daemonless path stays installable; reversible at the seam) and a "revisit if" clause.
+- `spec/05_MAC_FIRST_IMPLEMENTATION.md`: the FSEvents/CGO decision record. FSEvents stays conditional per `spec/14`'s own task list because a native adapter means cgo on darwin, and the release pipeline cross-compiles every artifact from one `ubuntu-latest` runner with `CGO_ENABLED=0` (`modernc.org/sqlite` was chosen to keep that true). The trigger is a measurement — descriptor usage against a real `~/Code` — not a preference, and correctness never rides on the choice.
+- `spec/03_SYSTEM_ARCHITECTURE.md`: `ARCH2-01` **narrowed, not closed**. The daemon needs exactly one intent-level operation (tick convergence), so a `Converger` seam over the existing `runLoopTick` ships instead of a full `internal/engine` extraction; the dependency direction the finding cares about (daemon → core, never daemon → Cobra) is satisfied, and the remaining extraction stays open in the backlog.
+- `spec/16_TEST_PLAN.md`: `TEST-06` annotated as implemented, naming each test and the defect found, and recording that `PollWatcher` is deliberately not re-covered here (`TestPollWatcherEmitsScanAndStopsOnContext` in `platform_test.go` already pins its hint shape and cancellation).
+- The `spec/14` sleep/wake bullet cites **both halves** of `spec/16`'s *Sleep/wake simulation* entry: its setup clause is this PR's restart test, and its "Expected: periodic reconciliation catches drift" clause is the pre-existing `cmd/devstrap/testdata/script/run_loop_once.txtar` (`P6-XP-03`). One test cannot honestly cover both, and citing only the first would rest the checkbox on a test that satisfies the setup but not the expectation (review finding).
+- `last_reviewed` bumped on `spec/03`, `spec/05`, `spec/14`, `spec/16` (all four carry substantive status/decision changes).
+
+Validated:
+- `gofmt -l cmd internal` (clean)
+- `GOCACHE=/tmp/devstrap-gocache go test -race -count=1 ./internal/platform/` — all six new tests pass
+- Mutation check: reverted the create-branch prune fix → `TestNativeWatcherSkipsGeneratedDirCreatedAfterStart` fails on all four cases (`node_modules`, `.git`, `vendor`, `.devstrap`), each reporting a hint for a write *inside* the generated directory; restored → passes.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+
+Follow-ups:
+- **Rename-into-place bypasses the prune** (found in review, pre-existing class): `mkdir staging` under a watched root is watched recursively, and `mv staging node_modules` keeps it watched, because inotify/kqueue watches follow the inode/fd rather than the name. Direct creation and a direct `mv` of an *unwatched* tree into place are both covered by this PR's fix; only the watched-then-renamed pattern leaks. Track with `PLAT-01`.
+- **Create-path terminal-error race** (found in review, the disclosed `PLAT-02` class): a directory created and then deleted between `os.Stat` and `WalkDir` makes the walk return `ENOENT`, which `Watch` treats as terminal — heavy churn from a build tool making transient directories can kill the watcher. The watcher-wiring slice's degrade-to-poll covers it; tolerating `ENOENT` in the create-path walk would be cheap hardening before then.
+- `PLAT-01` (unify the watcher exclusion set on the `spec/11` ignore compiler) remains open — this PR fixed the create-path bypass of the hardcoded list, not that list's divergence from the scanner's.
+- `PLAT-02`/`PLAT-03` (degrade to polling on `EMFILE`/`ENOSPC`; wire the watcher with a reconciliation backstop) are closed by the watcher-wiring slice of this wave, not here.
+- `PLAT-04` (chmod-only / OS-junk event filtering) remains open.
 ## 2026-07-24 — chore(docs): trunk doc truth-up after the working-state wave
 
 Changed:
