@@ -31,6 +31,31 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-24 — feat(daemon): convergence seam + single-flight scheduler (POST /v1/sync)
+
+Changed:
+- `internal/daemon/converge.go` (new): a one-method `Converger` interface and a single-flight `scheduler`. The interface is deliberately one method — the daemon converges and reports; it does not hydrate one project, create a worktree, or run an agent on request.
+- `internal/cli/daemon_converge.go` (new): `cliConverger` implements `Converger` by calling the **existing** `runLoopTick` — the same function `devstrap run-loop` calls. This is the entirety of the `ARCH2-01` narrowing recorded in `spec/03`: no `internal/engine` extraction, no second convergence path to drift, and the dependency arrow points daemon → core rather than daemon → cobra.
+- **Single-flight joins rather than queues.** A trigger arriving during a cycle waits on that cycle and receives its result flagged `coalesced`, so N simultaneous triggers produce ONE convergence and N identical answers. Without this a watcher hint storm would queue a cycle per event. A `full` request arriving during a `namespace-only` cycle sets a pending promotion so the next cycle runs full — deferred, never dropped.
+- **Failure policy deliberately differs from `run-loop`'s.** run-loop exits after five consecutive failures so its supervisor restarts it; the daemon must not, because it is also serving reads and a restart loop would make those flap. It backs off exponentially (capped at 30m so recovery is still noticed promptly), keeps serving, and splits liveness from convergence health on `/v1/health`: `ok` stays true while `healthy` goes false with a scrubbed `last_error` and `consecutive_failures`.
+- `POST /v1/sync` returns `{mode, started_at, duration_ms, coalesced}`; a daemon started without a converger answers 503 rather than pretending.
+- `daemon start` gains `--interval` (default 5m, `0` = on-demand only), `--hub-file`, `--namespace-only`, and the same fail-fast `hubConfigured` preflight `run-loop` runs, before the socket is bound.
+- Periodic waits carry the same ≤10% jitter as `run-loop` (`runLoopJitterBound`), for the same anti-stampede reason.
+
+Validated:
+- `gofmt -l cmd internal` (clean)
+- `GOCACHE=/tmp/devstrap-gocache go test -race -count=1 ./internal/daemon/` — nine new tests including 16-caller coalescing, pending-mode promotion, failure/recovery accounting, backoff growth+cap, joiner cancellation, periodic stop-on-cancel, zero-interval disable, the 503 path, and a health assertion that also proves `last_error` is scrubbed of credentials.
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
+- `golangci-lint run`
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+
+Note: adding the `hubConfigured` preflight to `daemon start` correctly broke the previous slice's `TestDaemonStartServesAndStops`, which started a daemon in a temp home with no hub. The preflight is right (it matches `run-loop`'s, and a daemon that starts and then fails every tick is worse than one that refuses); the test now supplies `--hub-file` and `--interval 0`, since it is about the socket lifecycle rather than convergence. The same applies to the two other lifecycle tests the CLI slice added (the pid-record regression and the losing-start stdout-purity test) — all three are lifecycle tests, and the preflight is what makes a hub mandatory for any `daemon start`.
+
+Follow-ups:
+- Watcher wiring (hints-only → `TickNamespaceOnly`, degrade-to-poll) is the next slice and is what makes `TickNamespaceOnly` reachable in production; until then it is exercised only by tests and `--namespace-only`.
+- `/v1/status` + `/v1/events` and the CLI fallback path.
+- `service install --daemon`.
+
 ## 2026-07-24 — feat(cli): devstrap daemon start|stop|status
 
 Changed:
