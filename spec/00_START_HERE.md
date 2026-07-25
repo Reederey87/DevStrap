@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-17
+last_reviewed: 2026-07-24
 tracks_code: [cmd/**, internal/**, .github/**, AGENTS.md, README.md, go.mod, go.sum, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # DevStrap — Start Here
@@ -160,7 +160,7 @@ Not implemented yet (genuinely unbuilt — features that are partly shipped are 
 - the bespoke **HTTP/SSE relay** (full-state snapshot exchange is now SHIPPED — sealed snapshots, signed retention manifest, `hub compact`, fail-closed import; the live R2/S3 backend is shipped: the `aws-sdk-go-v2` S3 adapter is wired behind the `hubFromOptions` `r2://` seam, with the `Hub` interface, R2 keying/retry/conditional-put logic, blob GC, retention floor, and content-hash verification all shipped and unit-tested, and the same conformance contract proven against MinIO via an env-gated integration test);
 - daemon, local socket API, FSEvents-specific Mac watcher (the LaunchAgent/systemd installers are now shipped as `devstrap service`, wrapping `run-loop`);
 - non-generic engine adapters (`cursor-cli`/`codex-cli`/`copilot-cli`) — `10_AGENT_WORKSPACES_AND_POLICIES.md` "Direction: DevStrap as the substrate agents run on (AD-5)" argues for a `worktree new --fresh-upstream --json` provisioning primitive plus a harness hook/MCP integration over growing more per-harness wrapper adapters, so this stays deliberately unbuilt rather than a near-term gap;
-- cross-machine working-state sync — the git-state validation plane's Layer A (`P7-GITSTATE-01`) is fully shipped, backend through `devstrap sync` runtime wiring (see "now built" above). WIP refs (Layer B, `refs/devstrap/wip/*`) remain genuinely unbuilt; the encrypted draft-bundle layer (Layer C) is shipped;
+- automatic fleet-wide **WIP-ref TTL/GC** — the working-state plane's Layers A, B, and C are all shipped, but `wip drop` clears only the dropping device's own mirror row and no sweep expires abandoned `refs/devstrap/wip/*` refs fleet-wide (`07_NAMESPACE_AND_SYNC_MODEL.md`, `12_DATA_MODEL_SQLITE.md`). Deliberately out of scope of the Layer B wave, and genuinely unbuilt.
 
 Cloud-sync workstreams from the 2026-06-28 audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`), now built:
 

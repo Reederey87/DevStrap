@@ -83,8 +83,10 @@ func (s *Store) DeleteDeviceWip(ctx context.Context, deviceID, pathKey string) e
 }
 
 // DeviceWipForProject reads every device's last-pushed WIP ref for a project,
-// newest push first. This is the read side backing a future `wip status` CLI
-// surfacing (out of scope for this change).
+// newest push first. This is the read side backing every consumer of the
+// mirror: `wip status`/`show`/`fetch`/`apply`/`drop` (which resolve and verify
+// a peer's ref against it) and the pending-WIP rows in `status --all-devices`
+// and `doctor`.
 func (s *Store) DeviceWipForProject(ctx context.Context, pathKey string) ([]DeviceWip, error) {
 	workspaceID, err := s.WorkspaceID(ctx)
 	if err != nil {
