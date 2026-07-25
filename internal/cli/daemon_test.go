@@ -129,8 +129,17 @@ func TestDaemonStartServesAndStops(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
+	// `daemon start` preflights the hub the same way run-loop does, so the test
+	// supplies the file-backed test hub. Periodic convergence is disabled
+	// (--interval 0) because this test is about the socket lifecycle, not
+	// convergence; leaving it on would run real sync cycles against an
+	// uninitialized store.
+	hubFile := filepath.Join(home, "hub.json")
 	started := make(chan error, 1)
-	go func() { started <- executeForTestContext(ctx, "--home", home, "daemon", "start") }()
+	go func() {
+		started <- executeForTestContext(ctx, "--home", home, "daemon", "start",
+			"--hub-file", hubFile, "--interval", "0")
+	}()
 
 	socket := filepath.Join(home, "devstrapd.sock")
 	waitForFile(t, socket)
@@ -209,8 +218,14 @@ func TestSecondDaemonStartLeavesRunningDaemonsRecordIntact(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
+	// Same preflight/interval reasoning as TestDaemonStartServesAndStops: this
+	// test is about the pid record, not convergence.
+	hubFile := filepath.Join(home, "hub.json")
 	started := make(chan error, 1)
-	go func() { started <- executeForTestContext(ctx, "--home", home, "daemon", "start") }()
+	go func() {
+		started <- executeForTestContext(ctx, "--home", home, "daemon", "start",
+			"--hub-file", hubFile, "--interval", "0")
+	}()
 	waitForFile(t, filepath.Join(home, "devstrapd.sock"))
 
 	first, err := readDaemonRecord(home)
@@ -219,7 +234,8 @@ func TestSecondDaemonStartLeavesRunningDaemonsRecordIntact(t *testing.T) {
 	}
 
 	// A second start must lose, and must not disturb the first's record.
-	if _, _, err := executeForTest("--home", home, "daemon", "start"); err == nil {
+	if _, _, err := executeForTest("--home", home, "daemon", "start",
+		"--hub-file", hubFile, "--interval", "0"); err == nil {
 		t.Fatal("second daemon start succeeded, want a conflict")
 	}
 
@@ -265,7 +281,8 @@ func TestLosingDaemonStartWritesNoJSONDocument(t *testing.T) {
 	}
 	defer func() { _ = listener.Close() }()
 
-	stdout, _, err := executeForTest("--home", home, "--json", "daemon", "start")
+	stdout, _, err := executeForTest("--home", home, "--json", "daemon", "start",
+		"--hub-file", filepath.Join(home, "hub.json"), "--interval", "0")
 	if err == nil {
 		t.Fatal("daemon start succeeded against an occupied socket, want a conflict")
 	}

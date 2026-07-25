@@ -78,6 +78,9 @@ func newDaemonCommand(stdout io.Writer, opts *options) *cobra.Command {
 }
 
 func newDaemonStartCommand(stdout io.Writer, opts *options) *cobra.Command {
+	var hubFile string
+	var interval time.Duration
+	var namespaceOnly bool
 	cmd := &cobra.Command{
 		Use:   "start",
 		Short: "Start the daemon in the foreground",
@@ -88,13 +91,23 @@ func newDaemonStartCommand(stdout io.Writer, opts *options) *cobra.Command {
 			"self-daemonizing one.",
 		Args: usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDaemonStart(cmd, stdout, opts)
+			// Fail fast on an unresolvable hub before binding the socket, the
+			// same preflight run-loop does (and for the same reason: a daemon
+			// that starts and then fails every tick is worse than one that
+			// refuses with a clear message).
+			if err := hubConfigured(opts, hubFile); err != nil {
+				return appError{code: exitInvalidConfig, err: err}
+			}
+			return runDaemonStart(cmd, stdout, opts, hubFile, interval, namespaceOnly)
 		},
 	}
+	cmd.Flags().StringVar(&hubFile, "hub-file", "", "file-backed test hub path")
+	cmd.Flags().DurationVar(&interval, "interval", 5*time.Minute, "time between convergence cycles (0 disables periodic convergence)")
+	cmd.Flags().BoolVar(&namespaceOnly, "namespace-only", false, "sync namespace metadata only; skip materialization")
 	return cmd
 }
 
-func runDaemonStart(cmd *cobra.Command, stdout io.Writer, opts *options) error {
+func runDaemonStart(cmd *cobra.Command, stdout io.Writer, opts *options, hubFile string, interval time.Duration, namespaceOnly bool) error {
 	paths := opts.paths()
 	socket := paths.SocketPath()
 	stderr := cmd.ErrOrStderr()
@@ -110,10 +123,19 @@ func runDaemonStart(cmd *cobra.Command, stdout io.Writer, opts *options) error {
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	converger := cliConverger{opts: opts, stdout: stdout, stderr: stderr, hubFile: hubFile}
+	if namespaceOnly {
+		// --namespace-only makes every periodic cycle skip materialization,
+		// mirroring run-loop's flag of the same name.
+		converger.forceNamespaceOnly = true
+	}
 	server, err := daemon.New(daemon.Config{
 		SocketPath: socket,
 		Version:    version,
 		Logger:     logging.Logger(cmd.Context()),
+		Converger:  converger,
+		Interval:   interval,
+		Jitter:     daemonJitter,
 	})
 	if err != nil {
 		return err
@@ -416,4 +438,14 @@ func daemonRecordReleased(home string, record daemonRecord) bool {
 		return true
 	}
 	return current.PID != record.PID || current.StartedAt != record.StartedAt
+}
+
+// daemonJitter perturbs each periodic wait by up to +10%, matching run-loop's
+// bound. Unjittered fleet-wide intervals stampede the hub — every device
+// installed on the same day would otherwise converge in lockstep.
+func daemonJitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	return d + time.Duration(runLoopJitterBound(d))
 }
