@@ -126,6 +126,17 @@ func (s *Server) Serve(ctx context.Context) error {
 	return s.serveListener(ctx, listener)
 }
 
+// ServeListener serves an already-bound listener until ctx is cancelled.
+//
+// Callers that must take an action only once the socket is genuinely theirs —
+// `devstrap daemon start` writes its pid record, and must not touch a running
+// daemon's record when its own bind loses — call Listen themselves, act on
+// success, and then hand the listener here. Serve is the convenience wrapper
+// that does both.
+func (s *Server) ServeListener(ctx context.Context, listener net.Listener) error {
+	return s.serveListener(ctx, listener)
+}
+
 // serveListener is the testable core of Serve: it takes an already-bound
 // listener so tests can drive the server without racing on socket creation.
 func (s *Server) serveListener(ctx context.Context, listener net.Listener) error {
