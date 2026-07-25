@@ -31,6 +31,46 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-24 — feat(cli): devstrap daemon start|stop|status
+
+Changed:
+- `internal/cli/daemon.go` (new): the CLI surface over the M5 transport core. `daemon start` runs in the FOREGROUND until `SIGINT`/`SIGTERM` — deliberate, because launchd and systemd both supervise a foreground process and a self-daemonizing one would fight them (the same reason `run-loop` is foreground). `daemon stop` signals the recorded process and waits for the daemon to actually be down. `daemon status` exits 0 whatever the run state (matching `service status`) and renders through the `Renderer` seam.
+- **`stop`'s success criterion is the socket, not just the PID.** "Down" is satisfied by EITHER the process exiting OR the control API no longer answering. The socket is the user-visible contract — once it stops responding and is unlinked, the daemon is stopped as far as every caller is concerned — and checking it also keeps the command correct when the daemon shares a process with something else (in-process tests, where PID liveness never flips). This was found by a test that hung on PID liveness alone; the fix is a genuine improvement to the contract, not a test accommodation.
+- Single-instance: the socket is the authoritative guard (only one process can bind it, and `daemon.Listen` refuses to displace a live one). `~/.devstrap/devstrapd.pid` records pid + an opaque platform start-time identity for reporting and for `stop`, never as the lock. The start-time identity is the same PID-reuse guard `repo_lock.go` applies, so a recycled PID is never signalled.
+- Stopping when nothing runs is a success no-op, and a record left by a crashed daemon is cleared rather than signalled — a supervisor or uninstall path must be able to call `stop` unconditionally.
+- `internal/cli/root.go`: registers the command group.
+- `spec/13`: new `### daemon` section (the command contract, the single-instance guard, and the maintenance-lock interop note); `daemon start|stop|status` added to both command inventories, and the stale "daemon/socket API" Planned entry narrowed to the job model and the endpoints beyond health/version, which are the parts that genuinely remain unbuilt.
+- `spec/00`: command inventory updated (`TestEveryCommandIsDocumented` path-anchors both files).
+
+Post-review fix (opus-5 pass on the CLI slice, plus independent tracing):
+- **A losing `daemon start` destroyed the RUNNING daemon's pid record.** The record was written before the socket was bound, and the removal `defer` was registered before the bind could fail — so a second start against a live daemon overwrote the record with its own pid and then deleted it outright. The live daemon was left with no record at all, and `daemon stop` reported "no daemon is running" while one was. Fixed by acquiring the socket FIRST (`daemon.Listen`, with `ErrAlreadyRunning` returned before anything is written) and only then writing the record, which makes the bad ordering impossible rather than merely unlikely. `internal/daemon` gained an exported `ServeListener` so the CLI can bind, act on success, and hand the listener over; `Serve` remains the convenience wrapper. Pinned by `TestSecondDaemonStartLeavesRunningDaemonsRecordIntact`, mutation-checked against the original ordering. (First mutation attempt did not reproduce the bug because the reconstruction returned early before the defer was registered — worth noting that the in-process harness makes both daemons share a pid, so the test pins the DELETION, which is the half that breaks `stop`, not the overwrite.)
+
+Second review pass (opus-5) reproduced finding 1 against a real binary and found three more; all fixed here:
+- **`daemon stop`'s down-criterion was wrong, not just imprecise.** It accepted "the control API stopped answering", but `http.Server.Shutdown` closes listeners and unlinks the socket FIRST and only then drains in-flight requests — so `stop` reported success at the START of the drain. Read-only today, but once a convergence tick holds the maintenance lock it would make `devstrap daemon stop && devstrap db restore` fail with a conflict from a daemon `stop` just declared stopped. The criterion is now "the daemon released its record" (or its process is gone): `daemon start` removes its record only after its listener returns, i.e. after the drain completed and its locks are released. This also removes the in-process-test accommodation the socket criterion had been carrying.
+- **Unconditional record removal raced a restart.** A draining daemon's deferred cleanup could delete its REPLACEMENT's record (this daemon drains → supervisor starts B → B writes its record → A's defer deletes it), reaching the same unstoppable state by race rather than by mistake. Removal is now conditional on the record still naming this process (`removeDaemonRecordIfOwn`).
+- **`daemonResponding` treated ANY client error as death** — a 10s timeout, a non-200, a decode failure, or a dial against a full accept backlog all read as "stopped". Removed entirely along with the socket criterion.
+- **`daemonRecordAlive` duplicated `repo_lock.go`'s guard** line for line instead of calling it, bypassing the `repoLockProcessAlive` seam and free to drift from the spec claim that they are the same guard. It now calls `processIdentityAlive`.
+- **`daemon start --json` announced a start that had not happened**: the render preceded the bind, so a losing second start printed a success document with a pid about to exit. The bind-first fix also fixed this; `spec/13` now documents the document as a post-bind start-up announcement.
+- Dropped an unreachable `exitInvalidConfig` mapping (`daemon.New` errors only on an empty socket path, which `Paths.SocketPath()` cannot produce), scoped `spec/13`'s unconditional PID-reuse claim to darwin/linux (`ProcessStartTime` is unimplemented elsewhere, leaving the guard inert), put the maintenance-lock interop sentence in the future tense (it describes an unwritten slice), corrected the stale PID-0 comment in the stale-record test, and bumped `spec/00`'s `last_reviewed` for its command-inventory edit.
+- Kept the redundant `signal.NotifyContext` in `runDaemonStart` with a comment explaining it is load-bearing for the in-process test (`daemon stop` SIGTERMs the test binary), since `cmd/devstrap/main.go` already installs the identical handler and it otherwise reads as removable.
+
+Third review pass (same reviewer, on the new stop criterion) — the criterion was confirmed sound, plus three carried-over fixes:
+- **The ownership guard was applied to `start` but not to either removal in `stop`** — the same race, left in the two places it was easiest to overlook. The post-release removal is the sharper one: it runs exactly when the record was released, which means it is either a no-op (record gone) or it deletes a REPLACEMENT daemon's record — the only case where the line has any effect at all. Both now call `removeDaemonRecordIfOwn`, which also makes the ownership rule uniform across all three removals; previously a reader would reasonably conclude the unguarded two had been judged safe.
+- **The record is now written atomically** (temp + rename, matching `atomicWrite` in the launchd adapter and `writeFileAtomic` in the git carrier). `daemonRecordReleased` treats an unreadable record as released, so a reader observing a half-written file would declare a still-draining daemon stopped. Narrow, but the class disappears entirely for the cost of a rename.
+- **`TestLosingDaemonStartWritesNoJSONDocument`** pins the property rather than the implementation: a start that never bound must write nothing to stdout. The reviewer's point was that "structurally unable to render before binding" is only true of the current body, and nothing stops a future edit from moving a render back above the bind — which is exactly how the original bug shipped. Mutation-checked by doing that move; the test then fails with the offending document. **The first version of this test was vacuous** — it passed `--hub-file`, a flag this slice does not yet have, so it errored on `unknown flag` before reaching any render and "passed" for the wrong reason. Caught by inspecting what the mutation actually produced rather than trusting that it failed.
+
+Deliberately NOT in this slice: convergence, the watcher, and every endpoint beyond health/version. `exitDaemonUnavailable = 3` is still not returned by any command — the client half (`daemon.ErrUnavailable`) exists and `daemon status`/`stop` already USE the client — only the exit-code mapping is deferred to the `status`/`sync` delegation slice.
+
+Validated:
+- `gofmt -l cmd internal` (clean)
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
+- `golangci-lint run`
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+
+Follow-ups:
+- Convergence seam (`Converger` over `runLoopTick`) + single-flight scheduling.
+- Watcher wiring (hints-only, degrade-to-poll), `/v1/status` + `/v1/events`, `service install --daemon`.
+
 ## 2026-07-24 — feat(daemon): local socket transport core + peer-credential seam (CLI-05)
 
 Changed:
