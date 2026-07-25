@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"io"
+	"os"
 
 	"github.com/Reederey87/DevStrap/internal/daemon"
 )
@@ -39,4 +40,42 @@ func (c cliConverger) Converge(ctx context.Context, mode daemon.TickMode) (daemo
 	namespaceOnly := c.forceNamespaceOnly || mode == daemon.TickNamespaceOnly
 	err := runLoopTick(ctx, c.stdout, c.stderr, c.opts, c.hubFile, namespaceOnly, true)
 	return daemon.Result{}, err
+}
+
+// cliWatchSource supplies the daemon's watch roots: the local paths of projects
+// that are actually materialized on this device.
+//
+// Watching per-project roots rather than the whole workspace root is deliberate.
+// The workspace root contains everything, including trees DevStrap does not
+// manage, and on kqueue (macOS) every watched entry costs a file descriptor —
+// so a blanket watch is both noisier and more expensive than the set of paths
+// whose changes actually mean something to the namespace.
+type cliWatchSource struct {
+	opts *options
+}
+
+func (c cliWatchSource) WatchRoots(ctx context.Context) ([]string, error) {
+	store, err := c.opts.openState(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer closeStore(store)
+
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	roots := make([]string, 0, len(projects))
+	for _, p := range projects {
+		// A skeleton has no content to watch yet; it becomes watchable after
+		// the next materialization, which the periodic cycle performs.
+		if p.LocalPath == "" || p.MaterializationState == "skeleton" {
+			continue
+		}
+		if _, statErr := os.Stat(p.LocalPath); statErr != nil {
+			continue
+		}
+		roots = append(roots, p.LocalPath)
+	}
+	return roots, nil
 }
