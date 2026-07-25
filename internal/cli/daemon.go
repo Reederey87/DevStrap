@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -75,6 +76,7 @@ func newDaemonCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.AddCommand(newDaemonStartCommand(stdout, opts))
 	cmd.AddCommand(newDaemonStopCommand(stdout, opts))
 	cmd.AddCommand(newDaemonStatusCommand(stdout, opts))
+	cmd.AddCommand(newDaemonEventsCommand(stdout, opts))
 	return cmd
 }
 
@@ -144,6 +146,7 @@ func runDaemonStart(cmd *cobra.Command, stdout io.Writer, opts *options, hubFile
 		Watcher:       adapters.Watcher,
 		WatchFallback: platform.PollWatcher{},
 		WatchSource:   cliWatchSource{opts: opts},
+		Reader:        cliReader{opts: opts},
 	})
 	if err != nil {
 		return err
@@ -456,4 +459,44 @@ func daemonJitter(d time.Duration) time.Duration {
 		return d
 	}
 	return d + time.Duration(runLoopJitterBound(d))
+}
+
+// newDaemonEventsCommand tails the daemon's event stream.
+//
+// This is the wave's first genuinely daemon-ONLY command, and therefore the
+// first caller to return the long-reserved exitDaemonUnavailable (3): every
+// other command has a local path that works without a daemon, so returning "the
+// daemon is unavailable" for them would be a regression, not a feature. A live
+// event stream has no daemonless equivalent — that is the whole point of it.
+func newDaemonEventsCommand(stdout io.Writer, opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "events",
+		Short: "Stream daemon events until interrupted (requires a running daemon)",
+		Long: "Stream daemon events until interrupted.\n\n" +
+			"The stream is deliberately LOSSY: the daemon drops events for a\n" +
+			"subscriber that falls behind rather than slowing convergence. Treat it\n" +
+			"as a notification channel, never as a log to reconstruct state from —\n" +
+			"`devstrap status` remains the source of truth.",
+		Args: usageArgs(cobra.NoArgs),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			socket := opts.paths().SocketPath()
+			client := daemon.NewClient(socket)
+			err := client.Events(cmd.Context(), func(event daemon.Event) {
+				line := fmt.Sprintf("%s  %s", event.At.Format(time.RFC3339), event.Kind)
+				if event.Detail != "" {
+					line += "  " + event.Detail
+				}
+				_, _ = fmt.Fprintln(stdout, line)
+			})
+			switch {
+			case err == nil, errors.Is(err, context.Canceled):
+				return nil
+			case errors.Is(err, daemon.ErrUnavailable):
+				return appError{code: exitDaemonUnavailable, err: fmt.Errorf(
+					"no daemon is running on %s; start one with `devstrap daemon start`", socket)}
+			default:
+				return err
+			}
+		},
+	}
 }

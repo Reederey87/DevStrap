@@ -65,6 +65,9 @@ type Config struct {
 	Watcher       platform.Watcher
 	WatchFallback platform.Watcher
 	WatchSource   WatchSource
+	// Reader supplies GET /v1/status. Optional: without it that endpoint
+	// answers 503, the same way /v1/sync does without a Converger.
+	Reader Reader
 }
 
 // Server is the daemon's HTTP-over-Unix-socket control API.
@@ -79,6 +82,8 @@ type Server struct {
 	interval   time.Duration
 	jitter     func(time.Duration) time.Duration
 	watch      *watchPlane
+	reader     Reader
+	events     *eventBus
 }
 
 // New validates cfg and builds a Server. It does not touch the filesystem;
@@ -109,6 +114,8 @@ func New(cfg Config) (*Server, error) {
 		mux:      http.NewServeMux(),
 		interval: cfg.Interval,
 		jitter:   cfg.Jitter,
+		reader:   cfg.Reader,
+		events:   newEventBus(),
 	}
 	if cfg.Converger != nil {
 		s.scheduler = newScheduler(cfg.Converger)
@@ -164,6 +171,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/health", s.handleHealth)
 	s.mux.HandleFunc("GET /v1/version", s.handleVersion)
 	s.mux.HandleFunc("POST /v1/sync", s.handleSync)
+	s.mux.HandleFunc("GET /v1/status", s.handleStatus)
+	s.mux.HandleFunc("GET /v1/events", s.handleEvents)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
@@ -204,12 +213,15 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "this daemon was started without a converger")
 		return
 	}
+	s.events.publish(Event{Kind: EventConvergeStarted, At: time.Now()})
 	result, err := s.scheduler.Converge(r.Context(), TickFull)
 	if err != nil {
+		s.events.publish(Event{Kind: EventConvergeFailed, At: time.Now(), Detail: redact.Scrub(err.Error())})
 		s.logger.Warn("daemon: convergence failed", "error", redact.Scrub(err.Error()))
 		writeError(w, http.StatusInternalServerError, "convergence failed: "+redact.Scrub(err.Error()))
 		return
 	}
+	s.events.publish(Event{Kind: EventConvergeDone, At: time.Now()})
 	writeJSON(w, http.StatusOK, result)
 }
 

@@ -31,6 +31,25 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-25 — feat(daemon): /v1/status + /v1/events SSE, and the first real use of exit code 3
+
+Changed:
+- `internal/daemon/status.go` (new): a narrow `Reader` seam backing `GET /v1/status` (the same summary `devstrap status` prints, without the caller opening SQLite), and `GET /v1/events`, a Server-Sent Events stream over a **closed set** of event kinds so no caller-supplied string becomes an event name and a consumer can switch exhaustively.
+- **The event stream is deliberately lossy.** Each subscriber has a bounded queue and the publisher DROPS for anyone who falls behind rather than blocking — convergence must never be slowed by a reader. Documented as a notification channel, never a log to reconstruct state from; `devstrap status` stays the source of truth. Pinned by a test that publishes 4× the buffer with nobody draining and asserts the publisher never blocks.
+- `devstrap daemon events` — the wave's **first genuinely daemon-only command**, and therefore the first caller to return the long-reserved `exitDaemonUnavailable` (3). That ordering is the point: every other command has a local path that works without a daemon, so returning "daemon unavailable" for them would be a regression rather than a feature. A live event stream has no daemonless equivalent.
+- **Deliberately NOT done — existing commands do not silently prefer the daemon.** The wave plan called for `devstrap status` to read through the socket when available and fall back otherwise. Rejected on reflection: it changes a core command's data path based on whether a daemon happens to be running, which is how "works on my machine" divergence starts, and it buys nothing since the CLI opens the store fine. The daemon's read path exists for *external* consumers that cannot afford a process spawn plus a database open per shell prompt. Recorded in `spec/13` so a later reader sees it as a decision rather than an omission.
+- `Reader` is not a query API: a consumer wanting per-project detail opens the store itself. Making the daemon a database proxy would give it a second, drifting view of state it does not own. Without a `Reader` the endpoint answers 503 rather than an empty snapshot a caller could not distinguish from a genuinely empty workspace, and reader errors become a generic message (a store error can carry a path or DSN).
+
+Validated:
+- `gofmt -l cmd internal` (clean)
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./internal/daemon/ ./internal/cli/` — new: status round-trip, 503-without-reader, reader-error non-leak, SSE round trip through a real `POST /v1/sync`, slow-subscriber drop, fan-out, idempotent unsubscribe, and the exit-code-3 assertion.
+- `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`
+
+Note: the exit-code-3 test initially failed with code 1 for a reason unrelated to its subject — its own long test name pushed `t.TempDir()` past `sockaddr_un`'s 104-byte cap, so the dial failed with `EINVAL`, which `isUnavailable` correctly does NOT classify as "no daemon". Fixed by using a short temp dir, with the reason recorded in the test. Third occurrence of the socket-path-length trap this wave; it is now commented at each site.
+
+Follow-ups:
+- `service install --daemon` and the wave close (txtar e2e, spec/14 checkbox reconciliation, ledger).
+
 ## 2026-07-24 — feat(daemon): watcher wiring — hints-only convergence + degrade-to-poll (PLAT-02/PLAT-03)
 
 Changed:
