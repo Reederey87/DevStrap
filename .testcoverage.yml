@@ -29,6 +29,10 @@ override:
     threshold: 62
   - path: ^internal/config$
     threshold: 35
+  # Measured 78.4% at landing; seeded a few points below, per this file's
+  # baseline-minus-a-buffer convention (P7-QUAL-05).
+  - path: ^internal/daemon$
+    threshold: 72
   - path: ^internal/devicekeys$
     threshold: 72
   - path: ^internal/draftbundle$

@@ -32,3 +32,10 @@ func (p Paths) LogDir() string {
 func (p Paths) KeyDir() string {
 	return filepath.Join(p.Home, "keys")
 }
+
+// SocketPath is the local daemon's Unix domain socket (spec/13). It lives
+// inside Home rather than a system runtime directory so it inherits the same
+// per-user directory that already guards state.db and the key store.
+func (p Paths) SocketPath() string {
+	return filepath.Join(p.Home, "devstrapd.sock")
+}
