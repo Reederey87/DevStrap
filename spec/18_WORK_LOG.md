@@ -31,6 +31,28 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-24 — feat(daemon): watcher wiring — hints-only convergence + degrade-to-poll (PLAT-02/PLAT-03)
+
+Changed:
+- `internal/daemon/watch.go` (new): the daemon becomes the **first consumer** of `internal/platform`'s watcher, which had been fully built and wired to nothing since it was written — that is literally `PLAT-03`, open since 2026-06-27, and it could not be closed without a consumer.
+- **A hint never hydrates.** Watcher-driven convergence always runs `TickNamespaceOnly`. An `FSEvent` carries only the watch root, so it cannot name the file that changed and there is nothing to hydrate *from*; running namespace-only makes that structural fact operational, so no filesystem activity — accidental or hostile — can cause DevStrap to clone repositories. This is the code-level form of the Milestone 5 entry gate's storm condition, which until now was satisfied only structurally (`spec/14`).
+- **Degrade, never fail (`PLAT-02`).** A native-watcher failure — realistically `EMFILE` or an inotify watch-limit on a large tree — falls back to `PollWatcher` rather than losing the plane. Degradation is surfaced on `/v1/health` as a `watch` object (`enabled`/`backend`/`degraded`/`reason`/`roots`/`hints`); a silently-degraded watcher would leave a user believing they have sub-interval convergence when they have none. A degraded watcher does NOT make the daemon unhealthy — correctness rides on periodic convergence.
+- **Watch roots are materialized project paths, not the workspace root.** The root contains unmanaged trees, and on kqueue each watched entry costs a descriptor, so a blanket watch is both noisier and more expensive than the set of paths whose changes mean something. Skeletons are skipped until materialized.
+- **Trigger floor.** The adapter debounces at ~250ms, but that bounds burst-to-hint, not hint-to-convergence; `minTriggerInterval` (5s) bounds the latter so a save-storm outlasting one cycle cannot immediately start another. Hints inside the floor are dropped rather than queued — a dropped hint costs at most one interval, because periodic convergence runs underneath.
+- The reported `roots` count is the measurement the FSEvents/CGO decision in `spec/05` is explicitly gated on.
+
+Validated:
+- `gofmt -l cmd internal` (clean)
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./internal/daemon/` — six new tests: the namespace-only invariant (every watcher-triggered cycle asserted), the 20-hints→1-cycle floor, degrade-to-poll (including that the degraded plane still triggers namespace-only and that a reason is recorded), empty-root-set and source-error both degrading rather than crashing, and stop-on-cancel.
+- `GOCACHE=/tmp/devstrap-gocache go test -race ./...`
+- `golangci-lint run`
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+
+Follow-ups:
+- `PLAT-01` (unify the watcher exclusion set on the `spec/11` ignore compiler) and `PLAT-04` (chmod-only / OS-junk event filtering) remain open; this slice closes `PLAT-02`/`PLAT-03` only.
+- The rename-into-place prune leak recorded in the entry-gate slice is unaffected by this wiring and still tracked against `PLAT-01`.
+- `/v1/status` + `/v1/events` and the CLI fallback path; then `service install --daemon` and the wave close.
+
 ## 2026-07-24 — feat(daemon): convergence seam + single-flight scheduler (POST /v1/sync)
 
 Changed:

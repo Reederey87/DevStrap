@@ -366,6 +366,19 @@ The daemon runs **no convergence code of its own**. `internal/daemon` declares a
 
 **`POST /v1/sync`** triggers a cycle (or joins one) and returns `{mode, started_at, duration_ms, coalesced}`. A daemon started without a converger answers `503` rather than pretending to converge.
 
+**Watch plane (shipped 2026-07-24).** The daemon is the first consumer of the `internal/platform` watcher, which had been built but wired to nothing since it was written (`PLAT-03`). It watches the **local paths of materialized projects**, not the workspace root: the root contains unmanaged trees too, and on kqueue every watched entry costs a file descriptor, so a blanket watch is both noisier and more expensive than the set of paths whose changes actually mean something.
+
+Two invariants govern it, and both are load-bearing for the Milestone 5 entry gate:
+
+1. **A hint never hydrates.** Watcher-driven convergence always runs `TickNamespaceOnly` — scan + adopt + sync, never materialization. An `FSEvent` carries only the watch root, so it cannot name the file that changed and there is nothing to hydrate *from*; running namespace-only makes that structural fact operational, so no filesystem activity — accidental or hostile — can cause DevStrap to clone repositories. Materialization stays on the periodic cycle and on explicit `POST /v1/sync`.
+2. **The watcher is an optimization, never the guarantee.** If it fails, dies, or is unsupported, periodic convergence still runs and correctness is unaffected — only latency degrades. That is what licenses degrading rather than failing.
+
+**Degrade path (`PLAT-02`).** A native watcher failure — most often descriptor exhaustion (`EMFILE`) or an inotify watch-limit (`ENOSPC`) on a large tree — falls back to `PollWatcher` instead of losing the plane. Degradation is never silent: `/v1/health` carries a `watch` object (`enabled`, `backend`, `degraded`, `reason`, `roots`, `hints`), because a silently-degraded watcher leaves a user believing they have sub-interval convergence when they have none. A degraded watcher does **not** make the daemon unhealthy — correctness rides on periodic convergence, not on the hints.
+
+**Trigger floor.** The adapter debounces at ~250ms, but a debounce bounds burst-to-hint, not hint-to-convergence. A separate floor (`minTriggerInterval`, 5s) bounds how often hints convert to cycles, so a save-storm that outlasts one convergence cannot immediately start another. Hints arriving inside the floor are dropped rather than queued — a dropped hint costs at most one interval of latency, because periodic convergence is still running underneath.
+
+**The `roots` count is a measurement, not decoration.** It is the number the FSEvents decision in `05_MAC_FIRST_IMPLEMENTATION.md` is explicitly gated on: revisit a native FSEvents backend when a real workspace's watched-path count approaches the per-process descriptor limit.
+
 **Maintenance-lock interop.** The daemon does **not** hold the shared state-home maintenance lock for its lifetime: `runLoopTick` takes and releases it per cycle, exactly as `run-loop` does, so `db backup --full`, `db restore`, and `db down` keep working against a running daemon.
 
 ### service

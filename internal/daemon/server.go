@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/redact"
 	"time"
 )
@@ -57,6 +58,13 @@ type Config struct {
 	// Jitter, when set, perturbs each periodic wait. The daemon uses it for the
 	// same reason run-loop does: unjittered fleet-wide intervals stampede the hub.
 	Jitter func(time.Duration) time.Duration
+	// Watcher/WatchFallback/WatchSource enable the watch plane. All three must
+	// be set; any missing one leaves the daemon periodic-only, which is a
+	// supported configuration rather than an error — the watcher is an
+	// optimization, never a correctness dependency.
+	Watcher       platform.Watcher
+	WatchFallback platform.Watcher
+	WatchSource   WatchSource
 }
 
 // Server is the daemon's HTTP-over-Unix-socket control API.
@@ -70,6 +78,7 @@ type Server struct {
 	scheduler  *scheduler
 	interval   time.Duration
 	jitter     func(time.Duration) time.Duration
+	watch      *watchPlane
 }
 
 // New validates cfg and builds a Server. It does not touch the filesystem;
@@ -103,6 +112,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.Converger != nil {
 		s.scheduler = newScheduler(cfg.Converger)
+		if cfg.Watcher != nil && cfg.WatchSource != nil {
+			s.watch = newWatchPlane(cfg.Watcher, cfg.WatchFallback, cfg.WatchSource, s.scheduler, logger)
+		}
 	}
 	s.routes()
 	return s, nil
@@ -124,6 +136,21 @@ type Health struct {
 	LastError           string `json:"last_error,omitempty"`
 	ConsecutiveFailures int    `json:"consecutive_failures,omitempty"`
 	LastRunAt           string `json:"last_run_at,omitempty"`
+	// Watch reports the filesystem-hint plane. A degraded watcher never makes
+	// the daemon unhealthy — correctness rides on periodic convergence — but it
+	// must be visible, or a user believes they have sub-interval convergence
+	// when they do not.
+	Watch WatchHealth `json:"watch"`
+}
+
+// WatchHealth is the watch plane's contribution to /v1/health.
+type WatchHealth struct {
+	Enabled  bool   `json:"enabled"`
+	Backend  string `json:"backend,omitempty"`
+	Degraded bool   `json:"degraded,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	Roots    int    `json:"roots,omitempty"`
+	Hints    uint64 `json:"hints,omitempty"`
 }
 
 // Version is the /v1/version payload.
@@ -155,6 +182,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		if ch.LastErr != nil {
 			health.Healthy = false
 			health.LastError = redact.Scrub(ch.LastErr.Error())
+		}
+	}
+	if s.watch != nil {
+		ws := s.watch.snapshot()
+		health.Watch = WatchHealth{
+			Enabled:  true,
+			Backend:  ws.Backend,
+			Degraded: ws.Degraded,
+			Reason:   redact.Scrub(ws.Reason),
+			Roots:    ws.Roots,
+			Hints:    ws.Hints,
 		}
 	}
 	writeJSON(w, http.StatusOK, health)
@@ -217,6 +255,9 @@ func (s *Server) serveListener(ctx context.Context, listener net.Listener) error
 
 	if s.scheduler != nil && s.interval > 0 {
 		go s.scheduler.runPeriodic(ctx, s.interval, s.jitter)
+	}
+	if s.watch != nil {
+		go s.watch.run(ctx)
 	}
 
 	serveErr := make(chan error, 1)

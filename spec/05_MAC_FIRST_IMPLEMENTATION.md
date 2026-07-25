@@ -346,8 +346,8 @@ Production distribution should include:
 Platform findings (`PLAT-*`, from `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md`):
 
 - **Watcher exclusion diverges from the scanner prune list (`PLAT-01`):** the fsnotify watcher would recursively register watches inside `.venv`/`dist`/`build`/`target`/`__pycache__`. Unify on the single `spec/11` ignore compiler.
-- **No ENOSPC/EMFILE handling (`PLAT-02`):** the watcher treats every Add/Errors failure as fatal with no fallback; add degraded polling + periodic reconciliation.
-- **Watcher/PollWatcher unwired; no periodic reconciliation backstop (`PLAT-03`).**
+- **No ENOSPC/EMFILE handling (`PLAT-02`):** the watcher treats every Add/Errors failure as fatal with no fallback; add degraded polling + periodic reconciliation. **[Implemented 2026-07-24: the daemon's watch plane (`internal/daemon/watch.go`) catches a native-watcher failure and falls back to `PollWatcher`, recording `degraded` + a `reason` on `/v1/health` so the degradation is visible rather than silent. Periodic convergence runs underneath either way, so a lost watcher costs latency, never correctness.]**
+- **Watcher/PollWatcher unwired; no periodic reconciliation backstop (`PLAT-03`).** **[Implemented 2026-07-24: the daemon is the adapter's first consumer — it watches materialized project roots and converts coalesced hints into namespace-only convergence, with the daemon's own periodic cycle as the backstop. `PLAT-01` (unify the exclusion set on the `spec/11` ignore compiler) and `PLAT-04` (chmod/OS-junk filtering) remain open.]**
 - **No Chmod-only / OS-junk event filtering (`PLAT-04`).**
 - **`ServiceSpec` seam too thin to render the launchd plist (`PLAT-05`) — RESOLVED (`P4-PROD-04`).** `ServiceSpec` now carries Description/WorkingDir/Stdout+StderrPath/RestartOnFailure/RestartDelaySeconds and `ServiceManager` renders + installs the LaunchAgent (`internal/platform/service_launchd.go` + `service_darwin.go`, golden-tested) and the systemd user unit on Linux, driven by `devstrap service install|uninstall|status`. A native FSEvents watcher remains a follow-up, scoped by the FSEvents/CGO decision under *Filesystem watcher* above.
 

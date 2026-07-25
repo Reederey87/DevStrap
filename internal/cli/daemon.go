@@ -15,6 +15,7 @@ import (
 
 	"github.com/Reederey87/DevStrap/internal/daemon"
 	"github.com/Reederey87/DevStrap/internal/logging"
+	"github.com/Reederey87/DevStrap/internal/platform"
 )
 
 // daemonPIDFile records the running daemon's identity next to its socket. The
@@ -129,13 +130,20 @@ func runDaemonStart(cmd *cobra.Command, stdout io.Writer, opts *options, hubFile
 		// mirroring run-loop's flag of the same name.
 		converger.forceNamespaceOnly = true
 	}
+	// The watcher is optional by construction: platform.Detect() always returns
+	// an adapter, but if the watch plane cannot start the daemon stays
+	// periodic-only rather than failing. Correctness never rides on it.
+	adapters := platform.Detect()
 	server, err := daemon.New(daemon.Config{
-		SocketPath: socket,
-		Version:    version,
-		Logger:     logging.Logger(cmd.Context()),
-		Converger:  converger,
-		Interval:   interval,
-		Jitter:     daemonJitter,
+		SocketPath:    socket,
+		Version:       version,
+		Logger:        logging.Logger(cmd.Context()),
+		Converger:     converger,
+		Interval:      interval,
+		Jitter:        daemonJitter,
+		Watcher:       adapters.Watcher,
+		WatchFallback: platform.PollWatcher{},
+		WatchSource:   cliWatchSource{opts: opts},
 	})
 	if err != nil {
 		return err
