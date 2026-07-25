@@ -106,7 +106,7 @@ Materialization is **eager**: after `devstrap sync`, the whole `~/Code` tree is 
 
 - Phase 0 local CLI: `init`, `scan`/`add`/`hydrate`/`open`, `worktree`, `env`, `run`, `status`, `doctor`, `db` (incl. `backup --full`/`restore`), `devices`, `conflicts`, `keys`.
 - Phase 3 agent loop: fresh‑worktree `agent run` inside an **OS‑enforced sandbox** (macOS Seatbelt; Linux bubblewrap/Landlock + a seccomp denylist), recorded logs, base‑gated `agent pr` with forge‑aware routing.
-- Multi‑device sync: **eager materialization** (`sync`/`materialize`), **encrypted draft bundles** + `.devstrapignore` compiler (`draft`), **cross‑device env‑profile exchange** and **synced device‑trust propagation**, event‑log **compaction + snapshot bootstrap**, and a portable **`run-loop`** with a `devstrap service install` (launchd/systemd) wrapper for unattended convergence.
+- Multi‑device sync: **eager materialization** (`sync`/`materialize`), **encrypted draft bundles** + `.devstrapignore` compiler (`draft`), **cross‑device env‑profile exchange** and **synced device‑trust propagation**, event‑log **compaction + snapshot bootstrap**, and a portable **`run-loop`** with a `devstrap service install` (launchd/systemd) wrapper for unattended convergence, plus the **cross-machine working-state plane** — `status --all-devices` git-state visibility (Layer A) and `wip push`/`fetch`/`apply` for moving uncommitted work between devices over `refs/devstrap/wip/*` (Layer B).
 - Three hub backends behind one `Hub` interface: the zero‑infrastructure **git carrier** (`hub init <git-url>` — any private git repo, no bucket, no credentials plane), a **local‑folder/cloud‑drive carrier**, and **R2/S3** (`hub: r2://<bucket>` + `DEVSTRAP_HUB_S3_*`).
 - Hardened internals: sanitized child env, value‑level secret redaction, partial clone with retry classification, WAL SQLite with single‑writer pool, HLC event ordering with property‑tested convergence, age X25519 + Ed25519 device identities in the OS keychain (file‑store fallback for headless/CI), per‑epoch workspace content keys with pairing‑code device enrollment.
 
@@ -116,7 +116,7 @@ Materialization is **eager**: after `devstrap sync`, the whole `~/Code` tree is 
 - A **hosted managed‑hub tier** — a DevStrap‑operated hub with zero setup, on a free‑with‑limits + subscription model. This is a plan, not a feature; see [`spec/20_COMMERCIALIZATION_AND_PRICING.md`](spec/20_COMMERCIALIZATION_AND_PRICING.md). The CLI and self‑hosting your own hub are free and open‑source **forever**.
 - Optional StrapFS (a lazy virtual filesystem) — deliberately deferred.
 
-A standing design/implementation audit drives the backlog. All passes are archived under [`docs/audits/`](docs/audits/) — see the [index & open backlog](docs/audits/README.md). The latest is the seventh pass, [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md`](docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md) (47 findings); Pass 6 is fully closed (43/43).
+A standing design/implementation audit drives the backlog. All passes are archived under [`docs/audits/`](docs/audits/) — see the [index & open backlog](docs/audits/README.md). The latest is the seventh pass, [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md`](docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md) (47 findings); Passes 5 and 6 are fully closed, and Pass 7's four still-open rows are the commercial hosted-tier cluster, gated on a business decision. Pass 4 still carries open rows of its own, including `P4-SEC-05` (Apple Developer ID signing + notarization — blocked on enrollment, with a Homebrew Gatekeeper deadline of 2026-09-01).
 
 ## Requirements
 
@@ -151,18 +151,24 @@ verification, `go install …@main`, and build-from-source are all covered in
 The zero-infrastructure default loop — any private git repo you can push to *is* the hub:
 
 ```bash
-devstrap init ~/Code --workspace-name personal   # 1. found a managed workspace
-devstrap scan ~/Code --adopt                      # 2. adopt the repos already on disk
-devstrap status                                   # 3. see what DevStrap manages
-gh repo create you/devstrap-hub --private         # 4. an empty private repo = the hub
-devstrap hub init git@github.com:you/devstrap-hub.git   # 5. point at it (writes config.yaml)
-devstrap sync                                     # 6. push the map + materialize the tree
-devstrap open <any-managed-path> --cursor         # 7. the folders are really on disk now
-devstrap run-loop                                 # 8. optional: converge on an interval, no daemon
+# Founder device — one command bootstraps the whole workspace
+gh repo create you/devstrap-hub --private                 # an empty private repo *is* the hub
+devstrap up --hub git@github.com:you/devstrap-hub.git     # init + adopt + hub config + first sync
+
+# Second device — pair it (the two machines exchange one code each way)
+devstrap pair                                             # founder: prints a code + the exact join command, then waits
+devstrap join <founder-code>                              # new device: init + hub config, prints ITS code
+                                                          # paste that back into the waiting `pair` prompt to approve
+devstrap sync                                             # new device: receive the grant and materialize the tree
+
+devstrap open <any-managed-path> --cursor                 # the folders are really on disk now
+devstrap run-loop                                         # optional: converge on an interval, no daemon
 ```
 
+Prefer the explicit steps? `devstrap up` is exactly `init` + `scan --adopt` + `hub init` + `sync`, each independently idempotent — run them individually if you want to see each stage.
+
 Load your SSH key first (`ssh-add ~/.ssh/<key>`) — git runs non-interactively. For a
-shared-folder or S3/R2 hub, pairing a second device, and the full agent loop, see
+shared-folder or S3/R2 hub, the pairing ceremony in full (including the high-assurance fingerprint compare), and the agent loop, see
 **[docs/quickstart.md](docs/quickstart.md)**; for choosing and operating a hub, see
 **[docs/self-hosting.md](docs/self-hosting.md)**.
 
@@ -173,6 +179,9 @@ Prefer not to install? Every command also works via `go run ./cmd/devstrap <cmd>
 | Command | Description |
 |---|---|
 | `devstrap init` | Initialize a DevStrap workspace |
+| `devstrap up` | Bootstrap a workspace end to end — `init` + `scan --adopt` + hub config + first `sync` (`--hub <url>`) |
+| `devstrap pair` | Founder-side guided pairing wizard: prints this device's code and the exact `join` command for the second device |
+| `devstrap join` | Join an existing workspace from a pairing code (`init --join` + hub config, then prints this device's own code for the founder to approve) |
 | `devstrap status` | Show local workspace status (`--json` supported) |
 | `devstrap doctor` | Check local prerequisites |
 | `devstrap scan` | Scan a workspace root for projects (`--adopt`, `--quarantine`) |
@@ -184,6 +193,7 @@ Prefer not to install? Every command also works via `go run ./cmd/devstrap <cmd>
 | `devstrap sync` | Push/pull namespace events and materialize the tree (hub from config: `hub: git@github.com:you/hub.git` — any private git repo, the zero-infra default — or `hub: r2://<bucket>`; `--hub-file <path>` overrides for local tests) |
 | `devstrap run-loop` | Run scan + sync + materialize on an interval (portable, no daemon) |
 | `devstrap worktree` | Manage isolated worktrees (`new`/`status`/`finalize`/`list`/`remove`/`cleanup`/`unlock`) |
+| `devstrap wip` | Share uncommitted work across devices via `refs/devstrap/wip/*` (`push`/`fetch`/`status`/`show`/`apply`/`drop`) |
 | `devstrap agent` | Run agents in isolated fresh worktrees inside an OS sandbox (`run`/`list`/`show`/`pr`; `--sandbox`, `--read-confine`) |
 | `devstrap env` | Manage project environment profiles (`capture`/`hydrate`/`bind`/`rotate`) |
 | `devstrap run` | Run a command with the project env profile injected |

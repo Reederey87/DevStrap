@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-17
+last_reviewed: 2026-07-24
 tracks_code: [internal/state/**, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # SQLite Data Model
@@ -187,7 +187,7 @@ Note: `env_ready`/`tooling_ready` exist but are not yet written or read; the der
 
 **`last_error` (P4-GIT-07, shipped):** the column has always been in the initial schema; writers now populate it. `UpdateProjectLocalState` accepts a scrubbed error string on every materialize/hydrate state write — empty string on success paths clears any prior failure (self-heal). Failure sites prefix the cause (`clone:`, `promote clone:`, `lfs pull:`, `draft extract:`) and run the text through `redact.Scrub` before persistence. Best-effort sub-step failures that do not flip materialization state (e.g. env hydrate after a successful clone) use `RecordProjectWarning`, which updates only `last_error`/`updated_at`. Readers: `ListProjects` / `ProjectByPath` / `ProjectByID` project `COALESCE(dps.last_error, '')` into `ProjectStatus.LastError`; `status` human mode prints a "Failed materializations" section when any project has non-empty `last_error`, and `doctor` emits one `checkWarn` per `materialization_state=failed` project (detail = `last_error`, or a legacy fallback when the row predates this write path). No new migration.
 
-### device_gitstate (working-state validation plane — sidecar)
+### device_gitstate (working-state validation plane — sidecar; ORIGINAL PROPOSAL, superseded by the shipped table below)
 
 Mirror of each device's read-only git-state snapshot for the cross-machine "forgot to push" validation plane (`repo.gitstate.observed`, see `07_NAMESPACE_AND_SYNC_MODEL.md`, audit Section 5). Deliberately a **sidecar** with an **opaque `device_id` and NO FK to `devices`**: remote devices are not enrolled until Phase 2, so the `device_project_state.device_id → devices(id)` FK above is exactly why this cannot reuse that table.
 
@@ -212,7 +212,7 @@ CREATE TABLE device_gitstate (
 );
 ```
 
-Status: planned. No `device_gitstate` migration exists yet; add it at the next free migration number at landing time when the Layer A working-state validation plane lands (00010–00023 are now taken — `00023` adds env profile source-event coordinates; see the migration list below). `sync_cursors` and `event_delivery` are defined; `hub_cursors` (00008) is frozen legacy since 00017 (see its section below); `pending_hub_deletes` (00011) backs the revoke-rewrap cleanup queue (`P5-PROD-02`). `device_sync_state` and `jobs` remain unwired.
+Status: **SHIPPED 2026-07-17 as migration `00029_device_gitstate.sql`, but with a different shape than this proposal** — see *device_gitstate (shipped — working-state validation plane Layer A mirror, `P7-GITSTATE-01`)* below for the schema that actually landed. The block above is retained as the original design proposal, and the two differ in ways worth keeping visible: the shipped table keys on `path_key` rather than `namespace_id` (and therefore carries no FK to `namespace_entries`, so a mirror row can apply before the project exists locally), and it names the ordering column `observed_at_hlc` rather than `source_event_hlc`. Separately, and still accurate: `sync_cursors` and `event_delivery` are defined but dead (superseded by the signed ack plane, `P4-SYNC-06`); `hub_cursors` (00008) is frozen legacy since 00017 (see its section below); `pending_hub_deletes` (00011) backs the revoke-rewrap cleanup queue (`P5-PROD-02`). `device_sync_state` and `jobs` remain unwired.
 
 ### env_profiles
 
@@ -633,7 +633,7 @@ CREATE TABLE device_wip (
 );
 ```
 
-`device_wip` (migration `00030_device_wip.sql`) is the apply-side mirror for `repo.wip.pushed` (`07`, working-state validation plane Layer B — "did I forget to push a WIP-only change, and is it recoverable from another machine"). The mechanism: `git stash create` produces a commit object WITHOUT touching the worktree or index, and that object is pushed to `refs/devstrap/wip/<device_id>/<path_key>` via a raw refspec (`git push <remote> <sha>:<ref>`, `Runner.PushRef`). Apply is MIRROR-ONLY, exactly like `device_gitstate` — `UpsertDeviceWipTx` `INSERT ... ON CONFLICT DO UPDATE`s the row for `(device_id, path_key)`, guarded by `WHERE excluded.observed_at_hlc >= device_wip.observed_at_hlc` so an out-of-order redelivery of a stale push cannot regress a newer one — this table holds "the last-pushed WIP ref," never a history log. This PR ships only the git primitives (`Runner.StashCreate`/`Runner.PushRef`), the `repo.wip.pushed` event, and this storage layer — the `wip push`/`wip fetch` CLI commands that emit and consume it land in a later PR.
+`device_wip` (migration `00030_device_wip.sql`) is the apply-side mirror for `repo.wip.pushed` (`07`, working-state validation plane Layer B — "did I forget to push a WIP-only change, and is it recoverable from another machine"). The mechanism: `git stash create` produces a commit object WITHOUT touching the worktree or index, and that object is pushed to `refs/devstrap/wip/<device_id>/<path_key>` via a raw refspec (`git push <remote> <sha>:<ref>`, `Runner.PushRef`). Apply is MIRROR-ONLY, exactly like `device_gitstate` — `UpsertDeviceWipTx` `INSERT ... ON CONFLICT DO UPDATE`s the row for `(device_id, path_key)`, guarded by `WHERE excluded.observed_at_hlc >= device_wip.observed_at_hlc` so an out-of-order redelivery of a stale push cannot regress a newer one — this table holds "the last-pushed WIP ref," never a history log. The storage layer landed with the git primitives (`Runner.StashCreate`/`Runner.PushRef`) and the `repo.wip.pushed` event; the full CLI that emits and consumes it — `wip push`/`fetch`/`status`/`show`/`apply`/`drop` — shipped across `P7-WIP-02`–`P7-WIP-05` (see `13_CLI_DAEMON_API.md` § *WIP commands*). Automatic fleet-wide WIP-ref TTL/GC remains out of scope and unbuilt.
 
 No FK to `devices` or `namespace_entries`, for exactly the same reasons as `device_gitstate` (`00029`): remote devices are not enrolled in the local device registry until Phase 2, and this plane does not need the pushed project to exist locally before the mirror can apply (no `env_pending_project`-style quarantine class for `repo.wip.pushed`). This plane is strictly separate from agent worktree-base resolution — `refs/devstrap/wip/*` must NEVER be read by `worktree new --fresh-upstream`'s base resolution, which always bases from `origin/<default_branch>`. No secret material is stored.
 

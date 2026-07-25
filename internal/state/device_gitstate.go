@@ -85,9 +85,10 @@ WHERE excluded.observed_at_hlc >= device_gitstate.observed_at_hlc;
 }
 
 // DeviceGitstateForProject reads every device's last-observed working-state
-// for a project, newest observation first. This is the read side backing the
-// future `status --all-devices`/`doctor` CLI surfacing (out of scope for this
-// change).
+// for a project, newest observation first. This is the read side backing
+// `status --all-devices`, `doctor`'s git-state freshness check, and the
+// producer's own change-dedup in captureAndRecordGitstates (which re-stamps
+// only when a capture differs from this device's last row).
 func (s *Store) DeviceGitstateForProject(ctx context.Context, pathKey string) ([]DeviceGitstate, error) {
 	workspaceID, err := s.WorkspaceID(ctx)
 	if err != nil {

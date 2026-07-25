@@ -31,6 +31,28 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-24 — chore(docs): trunk doc truth-up after the working-state wave
+
+Changed:
+- `spec/00_START_HERE.md`: removed the stale "Not implemented yet" bullet that claimed WIP refs (Layer B) remain unbuilt (contradicted the shipped inventory at the Layer B "now built" line); terminal punctuation on the preceding non-generic-engines bullet corrected to `.`. Bumped `last_reviewed` to 2026-07-24.
+- `spec/13_CLI_DAEMON_API.md`: corrected the agent-commands trailer — project-env allowlists shipped 2026-07-17; only non-generic engines and `agent cleanup` remain future work. Bumped `last_reviewed` to 2026-07-24.
+- `README.md`: the Quickstart's pairing block was **incomplete enough to strand a user** — it implied pairing finished with `pair` on the founder and `join` on the joiner, omitting that `pair` blocks waiting for the joiner's code to be pasted back and that the joiner then needs one `devstrap sync` to receive the grant and materialize (`docs/quickstart.md` had this right; the README was the outlier). Also corrected the `join` row, which said "enrollment in one step" — `join` prints this device's code *for the founder to approve*, and "enroll" is the founder-side command's own name. Also scoped the audit sentence honestly: Pass 7's four open rows are the commercial cluster, but Pass 4 still carries open rows of its own including `P4-SEC-05` (notarization, Homebrew Gatekeeper deadline 2026-09-01), so "the four still-open rows … rather than on engineering" understated the backlog. Command reference gained `up`/`pair`/`join`/`wip` rows; quickstart replaced with the shipped `up`/`pair`/`join` wizard loop plus an explicit-steps note; Multi-device sync shipped bullet now names the working-state plane (Layer A + Layer B); audit paragraph updated for Passes 5/6 closed and Pass 7 engineering backlog closed (four commercial-tier rows remain business-gated).
+- `spec/12_DATA_MODEL_SQLITE.md`: the file carried a **duplicate `device_gitstate` section still marked "Status: planned. No `device_gitstate` migration exists yet"** alongside its own shipped section for the same table. Relabelled as the superseded original proposal, recording rather than deleting the two schemas' real differences (shipped keys on `path_key` not `namespace_id`, hence no `namespace_entries` FK; `observed_at_hlc` not `source_event_hlc`), and dropped the stale "00010–00023 are now taken" migration-numbering advice (the tree is at 00030). Also corrected the `device_wip` trailer claiming the `wip push`/`wip fetch` CLI "land in a later PR" — they shipped as `P7-WIP-02`–`P7-WIP-05`. Bumped `last_reviewed` to 2026-07-24.
+- Code comments only (no behavior change): `internal/cli/doctor.go` `gitstateStaleAfter` (producer is wired into `devstrap sync`) and `checkPendingWip` (`wip apply`/`drop` exist); `internal/state/device_wip.go` / `device_gitstate.go` read-side comments now name the shipped CLI surfaces.
+- Documentation-only; no behavior change, no new tests.
+- `last_reviewed` bumped on `spec/00_START_HERE.md`, `spec/12_DATA_MODEL_SQLITE.md`, and `spec/13_CLI_DAEMON_API.md` (substantive status-claim edits) and deliberately NOT on any other spec file.
+- Process note: the `spec/12` staleness was found because the spec-drift gate refused the `internal/state/**` comment edits with no matching spec touch. The gate did its job — the correct response was to look for real staleness in the mapped specs, not to drop the code edits or to make a token spec touch.
+
+Validated:
+- `gofmt -l cmd internal` (clean — prints nothing)
+- `GOCACHE=/tmp/devstrap-gocache go build ./...`
+- `GOCACHE=/tmp/devstrap-gocache go test ./internal/cli/... ./internal/state/...`
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+
+Follow-ups:
+- **`doctor`'s git-state freshness check warns on healthy quiescent projects** (found while reviewing this PR's own comment edit, and the reason that comment was rewritten twice). `captureAndRecordGitstates` runs every sync cycle but re-stamps `observed_at_hlc` only when the capture DIFFERS from this device's last row (`gitstateUnchangedSinceLastCapture`, `internal/cli/sync.go:395`). So `gitstateStaleAfter` measures time since the last observed *change*, not since the last sync: a clean project on its branch and level with upstream — the normal state of most adopted repos — trips `checkGitstateFreshness` after 7 days even on a device syncing every five minutes, and the remedy that check prints ("run `devstrap sync` on an active device") is a no-op for exactly that case. A fix means either a liveness stamp distinct from the observation HLC, or scoping the warning to projects whose last observation was not already clean. Both are behavior changes and out of scope for a documentation PR; the constant's doc comment now states the real semantics and this consequence instead of the false claim it briefly carried.
+- Milestone 5 daemon wave (entry gate, transport core, CLI, convergence, watcher, client API, service integration) — this PR is its first, docs-only step.
+
 ## 2026-07-24 — chore(deps): bump golang.org/x/text v0.38.0 → v0.40.0 (GO-2026-5970)
 
 Changed:

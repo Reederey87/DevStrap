@@ -578,9 +578,21 @@ func checkFailedMaterializations(ctx context.Context, store *state.Store) []chec
 // gitstateStaleAfter is the default staleness threshold for a project's
 // newest repo.gitstate.observed report (working-state validation plane Layer
 // A). It is a plain constant rather than a config knob (unlike
-// keys.rotate_max_age/durability.export_interval) because P7-GITSTATE-01 has
-// no wired producer yet (nothing calls capture during `devstrap sync`), so
-// there is no real-world cadence to tune against.
+// keys.rotate_max_age/durability.export_interval) because there is no
+// real-world cadence to tune against: `captureAndRecordGitstates` runs on every
+// `devstrap sync` cycle (`P7-GITSTATE-01`), but it re-stamps `observed_at_hlc`
+// only when the capture DIFFERS from this device's last row (see
+// gitstateUnchangedSinceLastCapture) — so this threshold measures time since the
+// last observed *change*, not time since the last sync.
+//
+// Known consequence, tracked as a follow-up: a quiescent project — clean, on its
+// branch, level with upstream, which is the normal state of most adopted repos —
+// stops re-stamping, so it trips checkGitstateFreshness after this window even
+// on a device syncing every five minutes, and the remedy that check prints ("run
+// `devstrap sync` on an active device") is a no-op for exactly that case. Fixing
+// it means either distinguishing "no change" from "no contact" (a liveness stamp
+// separate from the observation HLC) or scoping the warning to projects whose
+// last observation was not already clean; both are behavior changes.
 const gitstateStaleAfter = 7 * 24 * time.Hour
 
 // checkGitstateFreshness surfaces, per local project, whether any device has
@@ -646,9 +658,8 @@ const wipStaleAfter = 48 * time.Hour
 // visible. A recently-captured WIP ref is likewise silent (an active,
 // expected-to-be-resolved-soon snapshot is not something doctor needs to
 // interrupt about); only a ref older than wipStaleAfter produces a row, naming
-// the device and age with a remedy pointing at `wip show` (the read/inspect
-// command this PR adds — `apply`/`drop` do not exist yet, so the remedy is
-// deliberately forward-looking guidance rather than a runnable one-liner).
+// the device and age with a remedy pointing at `wip show` (and, once
+// inspected, `wip apply` or `wip drop` to resolve it).
 func checkPendingWip(ctx context.Context, store *state.Store) []checkResult {
 	projects, err := store.ListProjects(ctx)
 	if err != nil {
