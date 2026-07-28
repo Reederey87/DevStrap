@@ -9,6 +9,9 @@ import (
 	"runtime"
 	"testing"
 	"time"
+
+	"github.com/Reederey87/DevStrap/internal/ignore"
+	"github.com/fsnotify/fsnotify"
 )
 
 // These tests satisfy the Milestone 5 entry gate in spec/14 ("the
@@ -192,6 +195,218 @@ func TestNativeWatcherSkipsGeneratedDirCreatedAfterStart(t *testing.T) {
 	}
 }
 
+func TestWatcherPrunesCompilerIgnoredDirectories(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".devstrapignore"), []byte("generated/\n"), 0o600); err != nil {
+		t.Fatalf("write .devstrapignore: %v", err)
+	}
+	for _, dir := range []string{".venv", "dist", "__pycache__", "generated", "src"} {
+		if err := os.MkdirAll(filepath.Join(root, dir, "deep"), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	watcher := NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
+	events, errs := startWatcher(ctx, watcher, root, 1024)
+	awaitWatcherReady(t, root, events)
+
+	for _, dir := range []string{".venv", "dist", "__pycache__", "generated"} {
+		path := filepath.Join(root, dir, "deep", "ignored.txt")
+		if err := os.WriteFile(path, []byte("ignored"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	if hints := drain(events, 700*time.Millisecond); hints != 0 {
+		t.Fatalf("ignored-directory writes produced %d hints, want 0", hints)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "src", "deep", "real.go"), []byte("package real"), 0o600); err != nil {
+		t.Fatalf("write real source: %v", err)
+	}
+	select {
+	case <-events:
+	case <-time.After(3 * time.Second):
+		t.Fatal("watcher did not report a write in a real source directory")
+	}
+
+	cancel()
+	assertContextCanceled(t, errs)
+}
+
+func TestWatcherPrunesDirectoryRenamedIntoPlace(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "build-tmp")
+	deep := filepath.Join(source, "deep")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	watcher := NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
+	events, errs := startWatcher(ctx, watcher, root, 1024)
+	awaitWatcherReady(t, root, events)
+
+	target := filepath.Join(root, "build")
+	if err := os.Rename(source, target); err != nil {
+		t.Fatalf("rename into ignored path: %v", err)
+	}
+	drain(events, 700*time.Millisecond)
+
+	if err := os.WriteFile(filepath.Join(target, "deep", "ignored.txt"), []byte("ignored"), 0o600); err != nil {
+		t.Fatalf("write in renamed ignored directory: %v", err)
+	}
+	if hints := drain(events, 700*time.Millisecond); hints != 0 {
+		t.Fatalf("write in directory renamed into ignored place produced %d hints, want 0", hints)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "real.txt"), []byte("real"), 0o600); err != nil {
+		t.Fatalf("write real file: %v", err)
+	}
+	select {
+	case <-events:
+	case <-time.After(3 * time.Second):
+		t.Fatal("watcher stopped after a directory was renamed into an ignored path")
+	}
+
+	cancel()
+	assertContextCanceled(t, errs)
+}
+
+// TestWatcherDropsWatchesForDirectoryRenamedOutOfTree covers the descriptor leak
+// PLAT-01 named: before this, nothing in internal/platform ever called
+// watcher.Remove, so the watch set only grew for the life of a Watch call and a
+// long-lived supervised daemon marched toward EMFILE. Note it is the DESCENDANT
+// watch that leaks — the kernel drops the renamed directory's own watch, but
+// everything below it survives.
+func TestWatcherDropsWatchesForDirectoryRenamedOutOfTree(t *testing.T) {
+	root := t.TempDir()
+	removed := filepath.Join(root, "removed", "nested")
+	if err := os.MkdirAll(removed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	events := make(chan FSEvent, 1024)
+	errs := make(chan error, 1)
+	watcher := NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
+	go func() {
+		errs <- watcher.watch(ctx, root, events, raw, ignore.DefaultMatcher())
+	}()
+	awaitWatcherReady(t, root, events)
+
+	if got := len(raw.WatchList()); got != 3 {
+		t.Fatalf("initial watch count = %d, want 3 (%v)", got, raw.WatchList())
+	}
+	// Rename OUT of the tree rather than delete. Both inotify and kqueue drop a
+	// watch when the watched inode is unlinked, so a deletion test passes with or
+	// without the explicit Remove and proves nothing about it. A rename-out
+	// leaves the inode very much alive outside the tree — precisely the
+	// descriptor this adapter used to hold for the life of the Watch call.
+	outside := filepath.Join(t.TempDir(), "moved")
+	if err := os.Rename(filepath.Join(root, "removed"), outside); err != nil {
+		t.Fatalf("rename watched directory out of the tree: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for len(raw.WatchList()) != 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := raw.WatchList(); len(got) != 1 {
+		t.Fatalf("watch count after rename-out = %d, want root only (%v)", len(got), got)
+	}
+
+	cancel()
+	assertContextCanceled(t, errs)
+}
+
+func TestWatcherIgnoresChmodOnlyEvents(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "watched.txt")
+	if err := os.WriteFile(path, []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	watcher := NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
+	events, errs := startWatcher(ctx, watcher, root, 1024)
+	awaitWatcherReady(t, root, events)
+
+	for i := range 10 {
+		mode := os.FileMode(0o600)
+		if i%2 == 0 {
+			mode = 0o640
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatalf("chmod burst: %v", err)
+		}
+	}
+	if hints := drain(events, 700*time.Millisecond); hints != 0 {
+		t.Fatalf("chmod-only burst produced %d hints, want 0", hints)
+	}
+
+	if err := os.WriteFile(path, []byte("after"), 0o600); err != nil {
+		t.Fatalf("write watched file: %v", err)
+	}
+	select {
+	case <-events:
+	case <-time.After(3 * time.Second):
+		t.Fatal("watcher did not report a write after ignoring chmod events")
+	}
+
+	cancel()
+	assertContextCanceled(t, errs)
+}
+
+// TestWatcherIgnoresOSJunkFiles pins that junk filtering is UNCONDITIONAL —
+// hence the negating .devstrapignore. Routing this through the compiled matcher
+// instead would let a user pattern re-admit the noise, because defaults are
+// applied before user patterns. Wanting `foo~` to be SYNCED (a legitimate
+// content choice, which this ignore file expresses) is not the same as wanting a
+// convergence hint every time an editor writes a backup.
+func TestWatcherIgnoresOSJunkFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".devstrapignore"),
+		[]byte("!*~\n!.DS_Store\n!4913\n"), 0o600); err != nil {
+		t.Fatalf("write .devstrapignore: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	watcher := NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
+	events, errs := startWatcher(ctx, watcher, root, 1024)
+	awaitWatcherReady(t, root, events)
+
+	for _, name := range []string{".DS_Store", "4913", "editor.txt~"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("junk"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	if hints := drain(events, 700*time.Millisecond); hints != 0 {
+		t.Fatalf("OS/editor junk produced %d hints, want 0", hints)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "real.txt"), []byte("real"), 0o600); err != nil {
+		t.Fatalf("write real file: %v", err)
+	}
+	select {
+	case <-events:
+	case <-time.After(3 * time.Second):
+		t.Fatal("watcher did not report a real file after ignoring junk")
+	}
+
+	cancel()
+	assertContextCanceled(t, errs)
+}
+
 // TestNativeWatcherRestartAfterBulkChangeMakesNoCompletenessClaim is the
 // sleep/wake gate condition, following spec/16's own approximation (stop the
 // watcher, bulk-change the tree, restart).
@@ -330,28 +545,144 @@ func TestNativeWatcherBlocksOnSlowConsumerAndUnblocksOnCancel(t *testing.T) {
 	assertContextCanceled(t, errs)
 }
 
-func TestShouldSkipWatchDir(t *testing.T) {
-	tests := []struct {
-		name string
-		skip bool
-	}{
-		{".git", true},
-		{"node_modules", true},
-		{".devstrap", true},
-		{"vendor", true},
-		{"src", false},
-		{"", false},
-		{".github", false},
-		{"node_modules_old", false},
-		{"Vendor", false}, // case-sensitive by design; real dirs are lowercase
+// TestWatchSetIsExactlyTheCompilerSurvivors is the real PLAT-01 pin: it asserts
+// the WATCH SET, not hint counts.
+//
+// Asserting hints cannot detect the defect PLAT-01 names. The file-event filter
+// suppresses hints from inside an ignored directory even when that directory is
+// still watched, so restoring the old hardcoded `.git/node_modules/.devstrap/
+// vendor` list leaves a hint-based test green while every `.venv`, `dist`,
+// `target` and user-ignored tree quietly consumes descriptors again — which is
+// the entire finding.
+func TestWatchSetIsExactlyTheCompilerSurvivors(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".devstrapignore"), []byte("generated/\n"), 0o600); err != nil {
+		t.Fatalf("write .devstrapignore: %v", err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := shouldSkipWatchDir(tc.name); got != tc.skip {
-				t.Fatalf("shouldSkipWatchDir(%q) = %v, want %v", tc.name, got, tc.skip)
-			}
-		})
+	// One directory per exclusion source: canonical default, user pattern,
+	// watcher-local, junk-named — plus real source that must survive.
+	for _, dir := range []string{
+		filepath.Join(".venv", "deep"),
+		filepath.Join("dist", "deep"),
+		filepath.Join("target", "deep"),
+		filepath.Join("generated", "deep"),
+		filepath.Join("vendor", "deep"),
+		filepath.Join(".Trash", "deep"),
+		filepath.Join("backup~", "deep"),
+		filepath.Join("src", "deep"),
+	} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
 	}
+
+	raw, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	matcher, err := ignore.CompileFromDir(root, true)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if err := addRecursiveWatch(raw, root, root, matcher); err != nil {
+		t.Fatalf("addRecursiveWatch: %v", err)
+	}
+
+	want := map[string]bool{
+		root:                               true,
+		filepath.Join(root, "src"):         true,
+		filepath.Join(root, "src", "deep"): true,
+	}
+	got := map[string]bool{}
+	for _, w := range raw.WatchList() {
+		got[w] = true
+	}
+	if len(got) != len(want) {
+		t.Fatalf("watch set = %v, want exactly %v", raw.WatchList(), want)
+	}
+	for path := range want {
+		if !got[path] {
+			t.Fatalf("watch set = %v, missing %s", raw.WatchList(), path)
+		}
+	}
+}
+
+// TestWatcherSurvivesTransientDirectories covers the failure that made every
+// other benefit in this change unobservable: a directory created and deleted
+// before the walk reaches it used to return ENOENT, which is terminal for the
+// watcher. Any `go test`, `npm`, or build run inside a watched project does
+// exactly that, so the native watcher died within seconds of arming and re-died
+// on every 60s retry — permanently degraded on any machine actually in use.
+func TestWatcherSurvivesTransientDirectories(t *testing.T) {
+	root := t.TempDir()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	watcher := NativeWatcher{Debounce: 20 * time.Millisecond, MaxLatency: 100 * time.Millisecond}
+	events, errs := startWatcher(ctx, watcher, root, 4096)
+	awaitWatcherReady(t, root, events)
+
+	for i := range 12 {
+		dir := filepath.Join(root, fmt.Sprintf("transient-%d", i), "sub")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		if err := os.RemoveAll(filepath.Join(root, fmt.Sprintf("transient-%d", i))); err != nil {
+			t.Fatalf("remove transient dir: %v", err)
+		}
+		select {
+		case err := <-errs:
+			t.Fatalf("watcher died after %d transient directories: %v", i+1, err)
+		case <-time.After(60 * time.Millisecond):
+		}
+	}
+
+	// Still alive and still reporting real changes.
+	drain(events, 300*time.Millisecond)
+	if err := os.WriteFile(filepath.Join(root, "real.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write real file: %v", err)
+	}
+	select {
+	case <-events:
+	case err := <-errs:
+		t.Fatalf("DIAG watcher exited: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("watcher stopped reporting after transient directory churn")
+	}
+
+	cancel()
+	assertContextCanceled(t, errs)
+}
+
+// TestWatcherReportsDeletionOfFileNamedLikeAPrunedDirectory pins the unknown-path
+// reading. A deleted path cannot be stat'd, and the two readings disagree: `build`
+// is pruned as a directory but is ordinary content as a file. Forcing the
+// directory reading swallowed these deletions entirely while still reporting
+// WRITES to the same file — silence in the direction that loses data.
+func TestWatcherReportsDeletionOfFileNamedLikeAPrunedDirectory(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "build")
+	if err := os.WriteFile(path, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	watcher := NativeWatcher{Debounce: 20 * time.Millisecond, MaxLatency: 100 * time.Millisecond}
+	events, errs := startWatcher(ctx, watcher, root, 1024)
+	awaitWatcherReady(t, root, events)
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove %s: %v", path, err)
+	}
+	select {
+	case <-events:
+	case <-time.After(3 * time.Second):
+		t.Fatal("deleting a file named like a pruned directory produced no hint")
+	}
+
+	cancel()
+	assertContextCanceled(t, errs)
 }
 
 func assertContextCanceled(t *testing.T, errs <-chan error) {
@@ -363,5 +694,33 @@ func assertContextCanceled(t *testing.T, errs <-chan error) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timeout waiting for watcher shutdown")
+	}
+}
+
+// TestEventPathUnderRoot pins the guard against the backend's own bad output.
+// fsnotify's kqueue backend emits events with an empty or "." Name after a watch
+// is removed. A relative name resolves against the process working directory, so
+// without this guard the create branch would recursively watch the daemon's cwd —
+// which is how the descriptor-release change first showed up as a lost-hint bug.
+func TestEventPathUnderRoot(t *testing.T) {
+	root := filepath.Join(string(filepath.Separator), "workspace", "code")
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{filepath.Join(root, "project"), true},
+		{filepath.Join(root, "a", "b", "c"), true},
+		{root, true},
+		{"", false},              // observed on darwin after Remove
+		{".", false},             // observed on darwin after Remove
+		{"relative/path", false}, // resolves against cwd
+		{filepath.Join(string(filepath.Separator), "elsewhere"), false},
+		{filepath.Join(root, "..", "sibling"), false},
+		{root + "-sibling", false}, // shared prefix, different tree
+	}
+	for _, tc := range cases {
+		if got := eventPathUnderRoot(root, tc.name); got != tc.want {
+			t.Errorf("eventPathUnderRoot(%q, %q) = %v, want %v", root, tc.name, got, tc.want)
+		}
 	}
 }
