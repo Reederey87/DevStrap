@@ -169,6 +169,25 @@ func TestDaemonRecordAliveRejectsRecycledPID(t *testing.T) {
 	}
 }
 
+// TestDaemonStartOnOverLongSocketPathIsConfigError pins that one condition has
+// one exit class. Listen returns a plain error and runDaemonStart maps only
+// ErrAlreadyRunning, so without an explicit check the same over-long path
+// exits generic(1) here while exiting exitInvalidConfig(2) from every client
+// command and from `service install --daemon`.
+func TestDaemonStartOnOverLongSocketPathIsConfigError(t *testing.T) {
+	home := filepath.Join(t.TempDir(), strings.Repeat("d", 120))
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	_, _, err := executeForTest("--home", home, "daemon", "start", "--hub-file", filepath.Join(t.TempDir(), "hub.json"))
+	if err == nil {
+		t.Fatal("daemon start succeeded with an unbindable socket path")
+	}
+	if got := ExitCode(err); got != exitInvalidConfig {
+		t.Fatalf("exit code = %d, want %d (same class as the client commands)", got, exitInvalidConfig)
+	}
+}
+
 func TestClientCommandOnOverLongSocketPathIsConfigError(t *testing.T) {
 	home := filepath.Join(string(filepath.Separator), strings.Repeat("h", 120))
 	_, stderr, err := executeForTest("--home", home, "daemon", "status")

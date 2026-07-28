@@ -152,6 +152,15 @@ func runDaemonStart(cmd *cobra.Command, stdout io.Writer, opts *options, hubFile
 	socket := paths.SocketPath()
 	stderr := cmd.ErrOrStderr()
 
+	// Classify the socket path here, not just inside Listen. Listen returns a
+	// plain error, and runDaemonStart maps only ErrAlreadyRunning — so without
+	// this the SAME misconfiguration exits generic(1) from `daemon start`
+	// while exiting exitInvalidConfig(2) from every client command and from
+	// `service install --daemon`. One condition, one exit class.
+	if err := paths.ValidateSocketPath(); err != nil {
+		return appError{code: exitInvalidConfig, err: err}
+	}
+
 	// Ctrl-C and a supervisor's SIGTERM both mean "shut down cleanly".
 	//
 	// This duplicates the handler cmd/devstrap/main.go already installs on the
