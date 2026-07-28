@@ -9,10 +9,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/redact"
-	"time"
 )
 
 // versionHeader carries the daemon's build version on every response, so a
@@ -118,7 +118,7 @@ func New(cfg Config) (*Server, error) {
 		events:   newEventBus(),
 	}
 	if cfg.Converger != nil {
-		s.scheduler = newScheduler(cfg.Converger)
+		s.scheduler = newScheduler(cfg.Converger, s.events)
 		if cfg.Watcher != nil && cfg.WatchSource != nil {
 			s.watch = newWatchPlane(cfg.Watcher, cfg.WatchFallback, cfg.WatchSource, s.scheduler, logger)
 		}
@@ -143,6 +143,10 @@ type Health struct {
 	LastError           string `json:"last_error,omitempty"`
 	ConsecutiveFailures int    `json:"consecutive_failures,omitempty"`
 	LastRunAt           string `json:"last_run_at,omitempty"`
+	// LastSuccessAt is the last cycle that SUCCEEDED. LastRunAt is the last
+	// cycle attempted, pass or fail, so a consumer asking "how stale is my
+	// data" needs this one and cannot infer it from LastRunAt + Healthy.
+	LastSuccessAt string `json:"last_success_at,omitempty"`
 	// Watch reports the filesystem-hint plane. A degraded watcher never makes
 	// the daemon unhealthy — correctness rides on periodic convergence — but it
 	// must be visible, or a user believes they have sub-interval convergence
@@ -188,6 +192,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		if !ch.LastRunAt.IsZero() {
 			health.LastRunAt = ch.LastRunAt.UTC().Format(time.RFC3339)
 		}
+		if !ch.LastSuccessAt.IsZero() {
+			health.LastSuccessAt = ch.LastSuccessAt.UTC().Format(time.RFC3339)
+		}
 		if ch.LastErr != nil {
 			health.Healthy = false
 			health.LastError = redact.Scrub(ch.LastErr.Error())
@@ -213,15 +220,12 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "this daemon was started without a converger")
 		return
 	}
-	s.events.publish(Event{Kind: EventConvergeStarted, At: time.Now()})
 	result, err := s.scheduler.Converge(r.Context(), TickFull)
 	if err != nil {
-		s.events.publish(Event{Kind: EventConvergeFailed, At: time.Now(), Detail: redact.Scrub(err.Error())})
 		s.logger.Warn("daemon: convergence failed", "error", redact.Scrub(err.Error()))
 		writeError(w, http.StatusInternalServerError, "convergence failed: "+redact.Scrub(err.Error()))
 		return
 	}
-	s.events.publish(Event{Kind: EventConvergeDone, At: time.Now()})
 	writeJSON(w, http.StatusOK, result)
 }
 

@@ -74,7 +74,7 @@ func quietLogger() *slog.Logger {
 func TestWatcherTriggersNamespaceOnlyConvergence(t *testing.T) {
 	fake := newFakeConverger()
 	close(fake.release)
-	s := newScheduler(fake)
+	s := newScheduler(fake, nil)
 	stub := &stubWatcher{name: "stub", emit: make(chan time.Time, 1)}
 	plane := newWatchPlane(stub, nil, stubSource{roots: []string{t.TempDir()}}, s, quietLogger())
 
@@ -101,7 +101,7 @@ func TestWatcherTriggersNamespaceOnlyConvergence(t *testing.T) {
 func TestWatcherFloorsTriggerRate(t *testing.T) {
 	fake := newFakeConverger()
 	close(fake.release)
-	s := newScheduler(fake)
+	s := newScheduler(fake, nil)
 	stub := &stubWatcher{name: "stub", emit: make(chan time.Time)}
 	plane := newWatchPlane(stub, nil, stubSource{roots: []string{t.TempDir()}}, s, quietLogger())
 
@@ -134,7 +134,7 @@ func TestWatcherFloorsTriggerRate(t *testing.T) {
 func TestWatcherDegradesToPollingOnFailure(t *testing.T) {
 	fake := newFakeConverger()
 	close(fake.release)
-	s := newScheduler(fake)
+	s := newScheduler(fake, nil)
 
 	native := &stubWatcher{name: "fsnotify", failWith: errors.New("too many open files")}
 	fallback := &stubWatcher{name: "poll", emit: make(chan time.Time, 1)}
@@ -169,7 +169,7 @@ func TestWatcherDegradesToPollingOnFailure(t *testing.T) {
 // TestWatcherReportsNoRootsWithoutFailing pins that a fresh workspace with
 // nothing materialized is a normal state, not an error.
 func TestWatcherReportsNoRootsWithoutFailing(t *testing.T) {
-	s := newScheduler(newFakeConverger())
+	s := newScheduler(newFakeConverger(), nil)
 	plane := newWatchPlane(&stubWatcher{name: "stub"}, nil, stubSource{roots: nil}, s, quietLogger())
 
 	done := make(chan struct{})
@@ -188,7 +188,7 @@ func TestWatcherReportsNoRootsWithoutFailing(t *testing.T) {
 // TestWatcherSourceErrorDegradesRatherThanCrashing pins that the daemon
 // survives an unreadable store — periodic convergence still runs.
 func TestWatcherSourceErrorDegradesRatherThanCrashing(t *testing.T) {
-	s := newScheduler(newFakeConverger())
+	s := newScheduler(newFakeConverger(), nil)
 	plane := newWatchPlane(&stubWatcher{name: "stub"}, nil, stubSource{err: errors.New("store locked")}, s, quietLogger())
 
 	done := make(chan struct{})
@@ -205,7 +205,7 @@ func TestWatcherSourceErrorDegradesRatherThanCrashing(t *testing.T) {
 
 // TestWatcherStopsOnCancel pins that the plane is bounded by its context.
 func TestWatcherStopsOnCancel(t *testing.T) {
-	s := newScheduler(newFakeConverger())
+	s := newScheduler(newFakeConverger(), nil)
 	stub := &stubWatcher{name: "stub", emit: make(chan time.Time)}
 	plane := newWatchPlane(stub, nil, stubSource{roots: []string{t.TempDir(), t.TempDir()}}, s, quietLogger())
 

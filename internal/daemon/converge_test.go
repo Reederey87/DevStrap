@@ -54,12 +54,195 @@ func (f *fakeConverger) seenModes() []TickMode {
 	return append([]TickMode(nil), f.modes...)
 }
 
+func receiveEvent(t *testing.T, events <-chan Event) Event {
+	t.Helper()
+	select {
+	case event := <-events:
+		return event
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for convergence event")
+		return Event{}
+	}
+}
+
+func TestPeriodicCyclePublishesConvergeEvents(t *testing.T) {
+	fake := newFakeConverger()
+	bus := newEventBus()
+	_, events := bus.subscribe()
+	s := newScheduler(fake, bus)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// An hour, deliberately: runPeriodic converges IMMEDIATELY on entry and
+		// only then waits, so one cycle is observed without the test racing the
+		// next tick. A short interval would make the "no further events"
+		// assertion depend on cancel() landing before tick two, and on a
+		// starved runner it would not.
+		s.runPeriodic(ctx, time.Hour, nil)
+	}()
+
+	<-fake.started
+	close(fake.release)
+	first := receiveEvent(t, events)
+	second := receiveEvent(t, events)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runPeriodic did not stop after cancellation")
+	}
+
+	if first.Kind != EventConvergeStarted || second.Kind != EventConvergeDone {
+		t.Fatalf("events = [%q, %q], want [%q, %q]", first.Kind, second.Kind, EventConvergeStarted, EventConvergeDone)
+	}
+	if got := len(events); got != 0 {
+		t.Fatalf("got %d additional events, want exactly one started and one done", got)
+	}
+}
+
+func TestFailedCyclePublishesScrubbedFailure(t *testing.T) {
+	fake := newFakeConverger()
+	close(fake.release)
+	fake.err = errors.New("hub unavailable at https://user:supersecret@hub.example/path")
+	bus := newEventBus()
+	_, events := bus.subscribe()
+	s := newScheduler(fake, bus)
+
+	if _, err := s.Converge(t.Context(), TickFull); err == nil {
+		t.Fatal("Converge succeeded, want injected failure")
+	}
+	started := receiveEvent(t, events)
+	failed := receiveEvent(t, events)
+	if started.Kind != EventConvergeStarted {
+		t.Fatalf("first event kind = %q, want %q", started.Kind, EventConvergeStarted)
+	}
+	if failed.Kind != EventConvergeFailed {
+		t.Fatalf("terminal event kind = %q, want %q (not %q)", failed.Kind, EventConvergeFailed, EventConvergeDone)
+	}
+	if strings.Contains(failed.Detail, "supersecret") {
+		t.Fatalf("failure detail leaked URL credential: %q", failed.Detail)
+	}
+}
+
+func TestConcurrentCallersPublishExactlyOneStarted(t *testing.T) {
+	fake := newFakeConverger()
+	bus := newEventBus()
+	_, events := bus.subscribe()
+	s := newScheduler(fake, bus)
+
+	const callers = 5
+	var wg sync.WaitGroup
+	var coalesced atomic.Int32
+	results := make(chan Result, callers)
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			result, err := s.Converge(t.Context(), TickFull)
+			if err != nil {
+				t.Errorf("Converge: %v", err)
+				return
+			}
+			if result.Coalesced {
+				coalesced.Add(1)
+			}
+			results <- result
+		}()
+	}
+
+	<-fake.started
+	time.Sleep(100 * time.Millisecond)
+	close(fake.release)
+	wg.Wait()
+	close(results)
+
+	if got := fake.count(); got != 1 {
+		t.Fatalf("converger called %d times, want 1", got)
+	}
+	if got := len(results); got != callers {
+		t.Fatalf("got %d results, want %d", got, callers)
+	}
+	if got := coalesced.Load(); got != callers-1 {
+		t.Fatalf("coalesced callers = %d, want %d", got, callers-1)
+	}
+	first := receiveEvent(t, events)
+	second := receiveEvent(t, events)
+	if first.Kind != EventConvergeStarted || second.Kind != EventConvergeDone || len(events) != 0 {
+		t.Fatalf("events = [%q, %q] plus %d queued, want exactly started then done", first.Kind, second.Kind, len(events))
+	}
+}
+
+func TestCancelledJoinerPublishesNothing(t *testing.T) {
+	fake := newFakeConverger()
+	bus := newEventBus()
+	_, events := bus.subscribe()
+	s := newScheduler(fake, bus)
+
+	ownerDone := make(chan error, 1)
+	go func() {
+		_, err := s.Converge(context.WithoutCancel(t.Context()), TickFull)
+		ownerDone <- err
+	}()
+	<-fake.started
+
+	ctx, cancel := context.WithCancel(t.Context())
+	joinerDone := make(chan error, 1)
+	go func() {
+		_, err := s.Converge(ctx, TickFull)
+		joinerDone <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	if err := <-joinerDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("joiner error = %v, want context.Canceled", err)
+	}
+
+	close(fake.release)
+	if err := <-ownerDone; err != nil {
+		t.Fatalf("owner Converge: %v", err)
+	}
+	first := receiveEvent(t, events)
+	second := receiveEvent(t, events)
+	if first.Kind != EventConvergeStarted || second.Kind != EventConvergeDone || len(events) != 0 {
+		t.Fatalf("events = [%q, %q] plus %d queued, want only owner's started and done", first.Kind, second.Kind, len(events))
+	}
+}
+
+func TestLastSuccessAtDoesNotAdvanceOnFailure(t *testing.T) {
+	fake := newFakeConverger()
+	close(fake.release)
+	s := newScheduler(fake, nil)
+
+	if _, err := s.Converge(t.Context(), TickFull); err != nil {
+		t.Fatalf("successful cycle: %v", err)
+	}
+	successHealth := s.snapshot()
+	if successHealth.LastSuccessAt.IsZero() {
+		t.Fatal("LastSuccessAt not recorded after success")
+	}
+
+	time.Sleep(time.Millisecond)
+	fake.err = errors.New("hub unavailable")
+	if _, err := s.Converge(t.Context(), TickFull); err == nil {
+		t.Fatal("failed cycle succeeded")
+	}
+	failedHealth := s.snapshot()
+	if !failedHealth.LastRunAt.After(successHealth.LastRunAt) {
+		t.Fatalf("LastRunAt did not advance: before=%v after=%v", successHealth.LastRunAt, failedHealth.LastRunAt)
+	}
+	if !failedHealth.LastSuccessAt.Equal(successHealth.LastSuccessAt) {
+		t.Fatalf("LastSuccessAt advanced on failure: before=%v after=%v", successHealth.LastSuccessAt, failedHealth.LastSuccessAt)
+	}
+}
+
 // TestSchedulerCoalescesConcurrentTriggers is the core contract: a burst of
 // triggers must produce ONE convergence, not one per trigger. Without this a
 // watcher hint storm would queue a cycle per event.
 func TestSchedulerCoalescesConcurrentTriggers(t *testing.T) {
 	fake := newFakeConverger()
-	s := newScheduler(fake)
+	s := newScheduler(fake, nil)
 
 	const callers = 16
 	var wg sync.WaitGroup
@@ -108,7 +291,7 @@ func TestSchedulerCoalescesConcurrentTriggers(t *testing.T) {
 func TestSchedulerRunsSequentialTriggersSeparately(t *testing.T) {
 	fake := newFakeConverger()
 	close(fake.release) // never block
-	s := newScheduler(fake)
+	s := newScheduler(fake, nil)
 
 	for i := range 3 {
 		result, err := s.Converge(t.Context(), TickFull)
@@ -129,7 +312,7 @@ func TestSchedulerRunsSequentialTriggersSeparately(t *testing.T) {
 // materialization the caller asked for actually happens.
 func TestSchedulerPromotesPendingFullMode(t *testing.T) {
 	fake := newFakeConverger()
-	s := newScheduler(fake)
+	s := newScheduler(fake, nil)
 
 	started := make(chan struct{})
 	go func() {
@@ -170,7 +353,7 @@ func TestSchedulerTracksFailuresForHealth(t *testing.T) {
 	fake := newFakeConverger()
 	close(fake.release)
 	fake.err = errors.New("hub unreachable")
-	s := newScheduler(fake)
+	s := newScheduler(fake, nil)
 
 	for range 3 {
 		if _, err := s.Converge(t.Context(), TickFull); err == nil {
@@ -217,7 +400,7 @@ func TestBackoffGrowsAndCaps(t *testing.T) {
 // context is cancelled stops waiting, rather than being pinned to a long cycle.
 func TestSchedulerConvergeRespectsCallerCancellation(t *testing.T) {
 	fake := newFakeConverger()
-	s := newScheduler(fake)
+	s := newScheduler(fake, nil)
 
 	go func() { _, _ = s.Converge(context.WithoutCancel(t.Context()), TickFull) }()
 	<-fake.started
@@ -247,7 +430,7 @@ func TestSchedulerConvergeRespectsCallerCancellation(t *testing.T) {
 func TestRunPeriodicStopsOnCancel(t *testing.T) {
 	fake := newFakeConverger()
 	close(fake.release)
-	s := newScheduler(fake)
+	s := newScheduler(fake, nil)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
@@ -272,7 +455,7 @@ func TestRunPeriodicStopsOnCancel(t *testing.T) {
 func TestRunPeriodicDisabledAtZeroInterval(t *testing.T) {
 	fake := newFakeConverger()
 	close(fake.release)
-	s := newScheduler(fake)
+	s := newScheduler(fake, nil)
 
 	done := make(chan struct{})
 	go func() {
@@ -332,6 +515,61 @@ func TestSyncEndpointReturns503WithoutConverger(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+}
+
+// TestSyncEndpointPublishesViaScheduler pins the WIRING: server.events reaches
+// the scheduler through New, so a POST-triggered cycle still emits its pair now
+// that the handler no longer publishes them itself.
+//
+// Deliberately NOT named for the double-publish defect: a SINGLE POST emitted
+// exactly started+done on the old handler too, so this assertion passes on the
+// pre-change code. The defect was N CONCURRENT posts publishing N starteds for
+// one cycle, and that is pinned at scheduler level by
+// TestConcurrentCallersPublishExactlyOneStarted.
+func TestSyncEndpointPublishesViaScheduler(t *testing.T) {
+	fake := newFakeConverger()
+	close(fake.release)
+	socket := tempSocketPath(t)
+	server, err := New(Config{SocketPath: socket, Version: "test", Logger: testLogger(), Converger: fake})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, events := server.events.subscribe()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	waitForSocket(t, socket)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("Serve returned %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Error("timeout waiting for Serve to return")
+		}
+	})
+
+	client := rawClient(socket)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://"+socketHost+"/v1/sync", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("sync status = %d, want 200", resp.StatusCode)
+	}
+
+	first := receiveEvent(t, events)
+	second := receiveEvent(t, events)
+	if first.Kind != EventConvergeStarted || second.Kind != EventConvergeDone || len(events) != 0 {
+		t.Fatalf("events = [%q, %q] plus %d queued, want exactly one started and one done", first.Kind, second.Kind, len(events))
 	}
 }
 

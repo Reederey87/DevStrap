@@ -59,6 +59,7 @@ type daemonStatusResult struct {
 	LastError           string `json:"last_error,omitempty"`
 	ConsecutiveFailures int    `json:"consecutive_failures,omitempty"`
 	LastRunAt           string `json:"last_run_at,omitempty"`
+	LastSuccess         string `json:"last_success_at,omitempty"`
 	// Watch reports the filesystem-hint plane. A degraded watcher is not an
 	// unhealthy daemon (correctness rides on periodic convergence), but a
 	// silently degraded one leaves the user believing they have sub-interval
@@ -325,6 +326,7 @@ func runDaemonStatus(cmd *cobra.Command, stdout io.Writer, opts *options) error 
 			result.LastError = health.LastError
 			result.ConsecutiveFailures = health.ConsecutiveFailures
 			result.LastRunAt = health.LastRunAt
+			result.LastSuccess = health.LastSuccessAt
 		}
 		result.WatchBackend = health.Watch.Backend
 		if health.Watch.Enabled {
@@ -367,6 +369,11 @@ func runDaemonStatus(cmd *cobra.Command, stdout io.Writer, opts *options) error 
 		}
 		if _, ferr := fmt.Fprintf(w, ")\nsocket: %s\n", result.Socket); ferr != nil {
 			return ferr
+		}
+		if result.LastSuccess != "" {
+			if _, ferr := fmt.Fprintf(w, "last successful convergence: %s\n", result.LastSuccess); ferr != nil {
+				return ferr
+			}
 		}
 		// Running and converging are different questions, and the supervisor
 		// answers neither: it restarts only on a crash, so a daemon failing
