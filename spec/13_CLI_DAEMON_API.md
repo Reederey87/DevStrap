@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-25
+last_reviewed: 2026-07-28
 tracks_code: [cmd/**, internal/cli/**, internal/daemon/**, internal/platform/**]
 ---
 # CLI and Daemon API
@@ -384,6 +384,16 @@ Two invariants govern it, and both are load-bearing for the Milestone 5 entry ga
 **`GET /v1/status` and `GET /v1/events` (shipped 2026-07-25).** `/v1/status` serves the same workspace summary `devstrap status` prints, without the caller opening SQLite — the cheap read path a shell prompt, editor adapter, or TUI needs. It is backed by a narrow `Reader` seam, deliberately NOT a query API: a consumer wanting per-project detail opens the store itself, because making the daemon a database proxy would give it a second, drifting view of state it does not own. Without a `Reader` the endpoint answers `503` rather than an empty snapshot, which a caller could not distinguish from a genuinely empty workspace. Reader errors become a generic message — a store error string can carry a path or DSN.
 
 `/v1/events` is a Server-Sent Events stream of a **closed set** of event kinds (`converge.started`, `converge.done`, `converge.failed`, `watch.degraded`), so no caller-supplied string ever becomes an event name and a consumer can switch exhaustively. The stream is **explicitly lossy**: each subscriber has a bounded queue and the publisher DROPS for anyone who falls behind rather than blocking, because convergence must never be slowed by a reader. Consumers must treat it as a notification channel, never as a log to reconstruct state from — `devstrap status` remains the source of truth. A 30s heartbeat comment keeps an idle stream from looking hung.
+
+**Events are scoped to the CYCLE, not the request (`M5D-01`, 2026-07-28).** Convergence events are published by the scheduler, not by the HTTP handler. Three consequences, and each is the point:
+
+- **Every trigger publishes.** A periodic tick and a watcher-driven cycle emit exactly what `POST /v1/sync` does. Publishing from the handler — as the first cut did — left the stream **inert on a normally-running daemon**, which is precisely the unattended `service install --daemon` case the stream exists to serve: only API-triggered cycles emitted, and nothing triggers the API on its own.
+- **One cycle, one `started`, one terminal event.** `Converge` is single-flight, so N triggers arriving together produce one cycle; a joiner publishes nothing, because it did not start work. Handler-scoped publishing emitted one `started` per *caller*, and left an orphan `started` with no terminal event whenever a joiner's context was cancelled. A caller that wants to know it joined reads `coalesced` on its own response — that is per-request information and belongs there, not on a broadcast stream.
+- **Terminal events publish under the scheduler's lock**, before the in-flight cycle is released. That is what orders a cycle's terminal event ahead of the next cycle's `started`; published after the unlock, `started(N+1)` can overtake `done(N)`, and an `Event` carries no cycle id with which a consumer could re-pair them. This is safe only because `eventBus.publish` is non-blocking and never calls back into the scheduler, so the lock order is strictly scheduler → bus. If that ever stops holding, the fix is a cycle id on the event, not a looser lock.
+
+`converge.failed` carries a **scrubbed** detail, on the same terms as `last_error` — a convergence error can quote a hub URL.
+
+**`last_success_at` on `/v1/health`.** `last_run_at` is the last cycle *attempted*, pass or fail. A consumer asking the operationally interesting question — "how stale is my data?" — cannot answer it from `last_run_at` alone, and pairing it with `healthy` disambiguates only while the daemon is currently failing. `last_success_at` records the last cycle that actually succeeded, and is absent until one has. `devstrap daemon status` surfaces it in human output as well as JSON.
 
 **Deliberately NOT done: existing commands do not silently prefer the daemon.** It would be easy to make `devstrap status` read through the socket when one is available and fall back otherwise. That is rejected: it changes a core command's data path based on whether a daemon happens to be running, which is how "works on my machine" divergence starts, and it buys nothing — the CLI opens the store perfectly well. The daemon's read path exists for *external* consumers that cannot afford a process spawn and a database open per shell prompt. `exitDaemonUnavailable` is therefore returned only by commands that genuinely cannot work without a daemon.
 

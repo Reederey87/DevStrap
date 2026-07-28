@@ -79,6 +79,24 @@ Follow-ups:
 - `PLAT-01` (watcher exclusion is still a four-name hardcoded switch while `internal/ignore` owns the real `.devstrapignore` compiler) and `PLAT-04` (chmod/OS-junk event filtering) remain open. Both now matter more than they did: the watcher has a live consumer.
 - `CLI-05`'s version-negotiation half is mechanism-only — every response carries `Devstrap-Daemon-Version` and nothing reads it.
 
+## 2026-07-28 — feat(daemon): convergence events published by the scheduler, not the handler (M5D-01)
+
+Changed:
+- `internal/daemon/converge.go` — the **scheduler** now publishes `converge.started` / `converge.done` / `converge.failed`. Previously the only publish sites were inside `handleSync`, so `GET /v1/events` was **inert on a normally-running daemon**: periodic ticks and watcher-driven cycles call `scheduler.Converge` directly and emitted nothing, and nothing triggers `POST /v1/sync` on its own. On the unattended `service install --daemon` unit shipped by #234 — the case the stream exists for — a subscriber saw essentially nothing.
+- **This fixed two latent defects beyond the missing events, both consequences of publishing per REQUEST rather than per CYCLE.** `Converge` is single-flight, but the old `started` publish fired before `Converge` was even called: (1) N concurrent POSTs published N `started` events for ONE cycle; (2) a joiner whose context was cancelled left an orphan `started` with no terminal event. A joiner now publishes nothing — it did not start work — and the per-request fact it *did* join survives where it belongs, on its own response as `coalesced`.
+- **Terminal events publish under `s.mu`, before the in-flight cycle is released.** This was a deliberate reversal of the first design, which published after the unlock to keep a hypothetical future bus from stalling the scheduler. That rationale is speculative and it costs real ordering: once `inFlight` clears, the next cycle can publish `started(N+1)` before goroutine N publishes `done(N)`, and `Event` carries no cycle id with which a consumer could re-pair them. Publishing under the lock is safe *only* because `eventBus.publish` is non-blocking and never calls back into the scheduler (lock order is strictly scheduler → bus); the code says so, and names the alternative fix — a cycle id — should that ever stop holding.
+- `last_success_at` added to `/v1/health`, the scheduler, and `daemon status` (human + JSON). `last_run_at` is the last cycle *attempted*; it cannot answer "how stale is my data", and combining it with `healthy` disambiguates only while the daemon is currently failing.
+- `spec/13` documents the cycle-scoped publication contract, the lock-ordering rationale, and `last_success_at`.
+
+Validated:
+- `gofmt -l cmd internal` (clean); `go build ./...`
+- `GOCACHE=/tmp/devstrap-gocache go test -race -count=1 ./...` — full suite green
+- New: `TestPeriodicCyclePublishesConvergeEvents` (the headline regression — fails on the previous code), `TestFailedCyclePublishesScrubbedFailure`, `TestConcurrentCallersPublishExactlyOneStarted`, `TestCancelledJoinerPublishesNothing`, `TestLastSuccessAtDoesNotAdvanceOnFailure`, `TestSyncEndpointNoLongerDoublePublishes`; the concurrency ones also under `-race -count=5`.
+- `TestSchedulerCoalescesConcurrentTriggers`, `TestSchedulerPromotesPendingFullMode`, `TestSchedulerTracksFailuresForHealth`, `TestBackoffGrowsAndCaps`, `TestRunPeriodicDisabledAtZeroInterval` and the `status_test.go` bus tests pass **unchanged** — the evidence the refactor is behavior-preserving.
+
+Follow-ups:
+- The rest of the M5D wave: `/v1/sync` mode parameter + `Client.Sync` + `devstrap daemon sync` (M5D-02), socket path guard + flock-serialized takeover (M5D-03), watch-plane liveness and the idle-vs-degraded split (M5D-04), version-skew consumption (M5D-05), `PLAT-01`/`PLAT-04` (M5D-06).
+
 ## 2026-07-25 — feat(daemon): /v1/status + /v1/events SSE, and the first real use of exit code 3
 
 Changed:

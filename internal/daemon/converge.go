@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/Reederey87/DevStrap/internal/redact"
 )
 
 // Converger runs one convergence cycle. It is the daemon's ONLY dependency on
@@ -57,6 +59,9 @@ var ErrConvergeInFlight = errors.New("daemon: convergence already in flight")
 // The remaining eleven designed job types stay design intent.
 type scheduler struct {
 	converger Converger
+	// events receives cycle lifecycle events. May be nil in tests that do not
+	// care about them; every publish site must nil-check.
+	events *eventBus
 
 	mu       sync.Mutex
 	inFlight *cycle
@@ -66,10 +71,11 @@ type scheduler struct {
 	pendingMode TickMode
 
 	// last* record the most recent outcome for /v1/health.
-	lastResult Result
-	lastErr    error
-	lastRunAt  time.Time
-	failures   int
+	lastResult    Result
+	lastErr       error
+	lastRunAt     time.Time
+	lastSuccessAt time.Time
+	failures      int
 }
 
 // cycle is one in-flight convergence that late callers can wait on.
@@ -80,8 +86,8 @@ type cycle struct {
 	err    error
 }
 
-func newScheduler(c Converger) *scheduler {
-	return &scheduler{converger: c}
+func newScheduler(c Converger, events *eventBus) *scheduler {
+	return &scheduler{converger: c, events: events}
 }
 
 // Converge runs a cycle, or joins the one already running.
@@ -117,6 +123,8 @@ func (s *scheduler) Converge(ctx context.Context, mode TickMode) (Result, error)
 	s.inFlight = current
 	s.mu.Unlock()
 
+	s.publish(Event{Kind: EventConvergeStarted, At: time.Now()})
+
 	started := time.Now()
 	result, err := s.converger.Converge(ctx, mode)
 	result.Mode = mode
@@ -131,6 +139,17 @@ func (s *scheduler) Converge(ctx context.Context, mode TickMode) (Result, error)
 		s.failures++
 	} else {
 		s.failures = 0
+		s.lastSuccessAt = started
+	}
+	// Published under s.mu deliberately: it is what orders this cycle's
+	// terminal event before the next cycle's `started`. Safe because
+	// eventBus.publish is non-blocking and never calls back into the
+	// scheduler, so the lock order is strictly scheduler -> bus. If that ever
+	// stops being true, move this out and give Event a cycle id instead.
+	if err != nil {
+		s.publish(Event{Kind: EventConvergeFailed, At: time.Now(), Detail: redact.Scrub(err.Error())})
+	} else {
+		s.publish(Event{Kind: EventConvergeDone, At: time.Now()})
 	}
 	s.mu.Unlock()
 	close(current.done)
@@ -140,10 +159,11 @@ func (s *scheduler) Converge(ctx context.Context, mode TickMode) (Result, error)
 
 // convergeHealth is the scheduler's contribution to /v1/health.
 type convergeHealth struct {
-	LastResult Result
-	LastRunAt  time.Time
-	Failures   int
-	LastErr    error
+	LastResult    Result
+	LastRunAt     time.Time
+	LastSuccessAt time.Time
+	Failures      int
+	LastErr       error
 }
 
 // snapshot reports the scheduler's health for /v1/health.
@@ -151,10 +171,17 @@ func (s *scheduler) snapshot() convergeHealth {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return convergeHealth{
-		LastResult: s.lastResult,
-		LastRunAt:  s.lastRunAt,
-		Failures:   s.failures,
-		LastErr:    s.lastErr,
+		LastResult:    s.lastResult,
+		LastRunAt:     s.lastRunAt,
+		LastSuccessAt: s.lastSuccessAt,
+		Failures:      s.failures,
+		LastErr:       s.lastErr,
+	}
+}
+
+func (s *scheduler) publish(e Event) {
+	if s.events != nil {
+		s.events.publish(e)
 	}
 }
 
