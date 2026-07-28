@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -397,6 +398,68 @@ func TestDaemonSyncWithoutDaemonReturnsExitCode3(t *testing.T) {
 	}
 	if got := ExitCode(err); got != exitDaemonUnavailable {
 		t.Fatalf("exit code = %d, want %d", got, exitDaemonUnavailable)
+	}
+}
+
+// blockingNamespaceConverger holds a namespace-only cycle open so a concurrent
+// full request is forced to JOIN it, reproducing the coalescing case where the
+// caller observes a weaker cycle than the one it asked for.
+type blockingNamespaceConverger struct {
+	release chan struct{}
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (c *blockingNamespaceConverger) Converge(ctx context.Context, mode daemon.TickMode) (daemon.Result, error) {
+	c.once.Do(func() { close(c.entered) })
+	select {
+	case <-c.release:
+	case <-ctx.Done():
+		return daemon.Result{}, ctx.Err()
+	}
+	return daemon.Result{Mode: mode, StartedAt: time.Now(), DurationMS: 3}, nil
+}
+
+// TestDaemonSyncDoesNotClaimSuccessForWorkItDidNotDo is the honesty contract.
+//
+// A full `daemon sync` arriving while a namespace-only cycle is in flight joins
+// that cycle and gets back mode=namespace-only, coalesced=true — no
+// materialization happened. Exiting 0 with a plain "converged" line would tell
+// a script its full sync ran when it did not.
+func TestDaemonSyncDoesNotClaimSuccessForWorkItDidNotDo(t *testing.T) {
+	c := &blockingNamespaceConverger{release: make(chan struct{}), entered: make(chan struct{})}
+	home := startDaemonForCLITest(t, c)
+
+	// Occupy the scheduler with a namespace-only cycle.
+	go func() { _, _, _ = executeForTest("--home", home, "daemon", "sync", "--namespace-only") }()
+	<-c.entered
+
+	done := make(chan string, 1)
+	go func() {
+		stdout, _, err := executeForTest("--home", home, "--json", "daemon", "sync")
+		if err != nil {
+			t.Errorf("daemon sync: %v", err)
+		}
+		done <- stdout
+	}()
+	time.Sleep(150 * time.Millisecond)
+	close(c.release)
+
+	stdout := <-done
+	var result daemonSyncResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if result.Mode == daemon.TickFull {
+		// The retry claimed the next cycle, which is the good outcome.
+		if result.Deferred {
+			t.Fatal("reported deferred while also reporting a full cycle")
+		}
+		return
+	}
+	// Otherwise it MUST say so rather than implying the full sync ran.
+	if !result.Deferred || result.RequestedMode != daemon.TickFull {
+		t.Fatalf("observed a %s cycle for a full request but did not report it as deferred: %+v", result.Mode, result)
 	}
 }
 

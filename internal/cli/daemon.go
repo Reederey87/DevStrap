@@ -87,6 +87,16 @@ type daemonSyncResult struct {
 	StartedAt  time.Time       `json:"started_at"`
 	DurationMS int64           `json:"duration_ms"`
 	Coalesced  bool            `json:"coalesced,omitempty"`
+	// RequestedMode is set only when the observed cycle was WEAKER than what
+	// this caller asked for, which happens when a full request joins an
+	// in-flight namespace-only cycle. Without it a script sees mode
+	// "namespace-only" and exit 0 for a request that asked to materialize, and
+	// has no way to tell that apart from having asked for namespace-only.
+	RequestedMode daemon.TickMode `json:"requested_mode,omitempty"`
+	// Deferred reports that the requested work has NOT run yet. The scheduler
+	// remembers the stronger mode and promotes the next cycle, so it is queued
+	// rather than lost — but it has not happened when this command returns.
+	Deferred bool `json:"deferred,omitempty"`
 }
 
 func newDaemonCommand(stdout io.Writer, opts *options) *cobra.Command {
@@ -606,6 +616,16 @@ func newDaemonSyncCommand(stdout io.Writer, opts *options) *cobra.Command {
 			}
 			client, socket := daemonClient(opts)
 			result, err := client.Sync(cmd.Context(), mode)
+			// A full request that arrives mid-cycle JOINS the weaker cycle
+			// already running and returns its result: coalesced, mode
+			// namespace-only, nothing materialized. Reporting that as a plain
+			// success would tell a caller its full sync happened when it did
+			// not. The scheduler has recorded the promotion, so exactly ONE
+			// retry is enough to claim the next cycle; a loop is not, because a
+			// busy watcher could keep starting namespace-only cycles forever.
+			if err == nil && result.Coalesced && mode == daemon.TickFull && result.Mode != daemon.TickFull {
+				result, err = client.Sync(cmd.Context(), mode)
+			}
 			switch {
 			case errors.Is(err, daemon.ErrUnavailable):
 				return daemonUnavailable(socket)
@@ -621,10 +641,27 @@ func newDaemonSyncCommand(stdout io.Writer, opts *options) *cobra.Command {
 			case err != nil:
 				return err
 			}
-			rendered := daemonSyncResult(result)
+			rendered := daemonSyncResult{
+				Mode:       result.Mode,
+				StartedAt:  result.StartedAt,
+				DurationMS: result.DurationMS,
+				Coalesced:  result.Coalesced,
+			}
+			deferred := result.Mode != mode
+			if deferred {
+				rendered.RequestedMode = mode
+				rendered.Deferred = true
+			}
 			return opts.render(stdout, func(w io.Writer) error {
 				duration := (time.Duration(result.DurationMS) * time.Millisecond).String()
-				if result.Coalesced {
+				switch {
+				case deferred:
+					_, ferr := fmt.Fprintf(w,
+						"joined a %s convergence already in progress, finished in %s\n"+
+							"the %s sync you asked for has NOT run; it is queued and will run on the next cycle\n",
+						result.Mode, duration, mode)
+					return ferr
+				case result.Coalesced:
 					_, ferr := fmt.Fprintf(w, "joined a convergence already in progress (%s), finished in %s\n", result.Mode, duration)
 					return ferr
 				}

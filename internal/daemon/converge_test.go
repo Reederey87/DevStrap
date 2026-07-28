@@ -582,6 +582,41 @@ func TestSyncEndpointRejectsUnknownMode(t *testing.T) {
 	}
 }
 
+func TestSync503WithUnparseableBodyStillMapsToConvergerUnavailable(t *testing.T) {
+	// A 503 whose body is empty or truncated still means "cannot converge".
+	// Nesting that mapping under a successful JSON parse would drop the curated
+	// explanation exactly when the peer is misbehaving.
+	client := NewClient("/unused")
+	client.http.Transport = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Body:       io.NopCloser(strings.NewReader("not json at all")),
+			Header:     make(http.Header),
+		}, nil
+	})
+	if _, err := client.Sync(t.Context(), TickFull); !errors.Is(err, ErrConvergerUnavailable) {
+		t.Fatalf("err = %v, want ErrConvergerUnavailable even with an unparseable body", err)
+	}
+}
+
+func TestSyncRouteDiscriminatorIgnoresQueryAndSiblingPaths(t *testing.T) {
+	// The 503 remap must key on the ROUTE, not a prefix of the raw path: a
+	// future /v1/sync-state would otherwise silently inherit it.
+	client := NewClient("/unused")
+	client.http.Transport = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"nope"}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+	var out struct{}
+	err := client.request(t.Context(), client.http, http.MethodGet, "/v1/sync-state", &out)
+	if errors.Is(err, ErrConvergerUnavailable) {
+		t.Fatalf("a sibling route inherited the /v1/sync 503 remap: %v", err)
+	}
+}
+
 func TestClientSyncHasNoRequestTimeout(t *testing.T) {
 	client := NewClient("/unused")
 	deadlineSeen := make(chan bool, 1)

@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"syscall"
 	"time"
@@ -87,10 +88,23 @@ func (c *Client) request(ctx context.Context, requester *http.Client, method, pa
 		// make the client allocate without limit.
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		var parsed errorBody
-		if json.Unmarshal(body, &parsed) == nil && parsed.Error != "" {
-			if strings.HasPrefix(path, "/v1/sync") && resp.StatusCode == http.StatusServiceUnavailable {
+		hasDetail := json.Unmarshal(body, &parsed) == nil && parsed.Error != ""
+
+		// Route on the ROUTE, not on the raw path: `path` carries a query
+		// string, so a prefix match here would also catch a future
+		// /v1/sync-state or /v1/syncthing and silently inherit this remap.
+		route, _, _ := strings.Cut(path, "?")
+		if route == syncRoute && resp.StatusCode == http.StatusServiceUnavailable {
+			// Deliberately NOT nested under hasDetail: a 503 with an empty or
+			// truncated body still means the daemon cannot converge, and
+			// degrading to a bare status line would lose the curated
+			// explanation exactly when the peer is misbehaving.
+			if hasDetail {
 				return fmt.Errorf("%w: %s", ErrConvergerUnavailable, parsed.Error)
 			}
+			return fmt.Errorf("%w: the daemon reported it cannot converge", ErrConvergerUnavailable)
+		}
+		if hasDetail {
 			return fmt.Errorf("daemon: %s: %s (status %d)", path, parsed.Error, resp.StatusCode)
 		}
 		return fmt.Errorf("daemon: %s: status %d", path, resp.StatusCode)
@@ -126,9 +140,12 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 	return out, err
 }
 
+// syncRoute is the convergence endpoint's path without its query string.
+const syncRoute = "/v1/sync"
+
 // Sync asks the daemon to run (or join) one convergence cycle.
 func (c *Client) Sync(ctx context.Context, mode TickMode) (Result, error) {
-	path := "/v1/sync?mode=" + string(mode)
+	path := syncRoute + "?" + url.Values{"mode": []string{string(mode)}}.Encode()
 	var out Result
 
 	// No client timeout on a convergence trigger: a cycle legitimately runs for
