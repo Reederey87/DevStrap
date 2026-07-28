@@ -31,6 +31,25 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-28 — M5D-04 supervised watch plane
+
+Changed:
+
+- Replaced the one-shot filesystem watch plane with a lifetime supervisor that preserves one hint consumer and event channel, re-discovers materialized roots every 60s, avoids re-arming unchanged sets, and retries the native watcher after degradation.
+- Added explicit idle/watching/degraded state to watch health while retaining the derived compatibility boolean; idle zero-root health is now visible on the wire rather than erased by `omitempty`.
+- Published scrubbed `watch.degraded` transitions through the daemon event bus, reusing the same closed-set kind for a single recovery notification, and added race-tested coverage for idle liveness, late materialization, stable roots, native retry, transition-only events, and idle JSON presence.
+- Updated the daemon API contract for tri-state health, independent re-discovery, native recovery, and transition-oriented watch events.
+
+- Post-review: added a fourth phase, `starting`, set at construction. `watchPhase`'s zero value is the empty string, so between daemon start and the first resolved root set `/v1/health` reported `"state": ""` — reintroducing on the wire the very ambiguity this field exists to remove (a consumer cannot tell "not started yet" from "never reported"). The window is real: resolving roots opens SQLite. Pinned by `TestWatchPhaseIsNeverEmptyOnTheWire`.
+
+Validated:
+
+- `gofmt -l cmd internal`; native/Linux/Windows `go build ./...`; `go test -race -count=1 ./...`; `go test -race -count=10 ./internal/daemon/`; pinned `golangci-lint` v2.12.0 (`0 issues`); and `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+
+- None.
+
 ## 2026-07-28 — M5D-03 socket-lifecycle hardening
 
 Changed:

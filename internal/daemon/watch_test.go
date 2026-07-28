@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -62,6 +64,58 @@ type stubSource struct {
 
 func (s stubSource) WatchRoots(context.Context) ([]string, error) { return s.roots, s.err }
 
+type mutableSource struct {
+	mu    sync.Mutex
+	roots []string
+	err   error
+}
+
+func (s *mutableSource) WatchRoots(context.Context) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.roots...), s.err
+}
+
+func (s *mutableSource) setRoots(roots []string) {
+	s.mu.Lock()
+	s.roots = append([]string(nil), roots...)
+	s.mu.Unlock()
+}
+
+type controlledWatcher struct {
+	name string
+
+	mu       sync.Mutex
+	fail     bool
+	attempts int
+}
+
+func (w *controlledWatcher) Name() string { return w.name }
+
+func (w *controlledWatcher) Watch(ctx context.Context, _ string, _ chan<- platform.FSEvent) error {
+	w.mu.Lock()
+	w.attempts++
+	fail := w.fail
+	w.mu.Unlock()
+	if fail {
+		return errors.New("temporary watcher failure")
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (w *controlledWatcher) setFail(fail bool) {
+	w.mu.Lock()
+	w.fail = fail
+	w.mu.Unlock()
+}
+
+func (w *controlledWatcher) count() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.attempts
+}
+
 func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
@@ -76,7 +130,7 @@ func TestWatcherTriggersNamespaceOnlyConvergence(t *testing.T) {
 	close(fake.release)
 	s := newScheduler(fake, nil)
 	stub := &stubWatcher{name: "stub", emit: make(chan time.Time, 1)}
-	plane := newWatchPlane(stub, nil, stubSource{roots: []string{t.TempDir()}}, s, quietLogger())
+	plane := newWatchPlane(stub, nil, stubSource{roots: []string{t.TempDir()}}, s, quietLogger(), nil)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -103,7 +157,7 @@ func TestWatcherFloorsTriggerRate(t *testing.T) {
 	close(fake.release)
 	s := newScheduler(fake, nil)
 	stub := &stubWatcher{name: "stub", emit: make(chan time.Time)}
-	plane := newWatchPlane(stub, nil, stubSource{roots: []string{t.TempDir()}}, s, quietLogger())
+	plane := newWatchPlane(stub, nil, stubSource{roots: []string{t.TempDir()}}, s, quietLogger(), nil)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -138,7 +192,7 @@ func TestWatcherDegradesToPollingOnFailure(t *testing.T) {
 
 	native := &stubWatcher{name: "fsnotify", failWith: errors.New("too many open files")}
 	fallback := &stubWatcher{name: "poll", emit: make(chan time.Time, 1)}
-	plane := newWatchPlane(native, fallback, stubSource{roots: []string{t.TempDir()}}, s, quietLogger())
+	plane := newWatchPlane(native, fallback, stubSource{roots: []string{t.TempDir()}}, s, quietLogger(), nil)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -166,40 +220,66 @@ func TestWatcherDegradesToPollingOnFailure(t *testing.T) {
 	}
 }
 
-// TestWatcherReportsNoRootsWithoutFailing pins that a fresh workspace with
-// nothing materialized is a normal state, not an error.
-func TestWatcherReportsNoRootsWithoutFailing(t *testing.T) {
+// TestWatcherWithNoRootsIsIdleNotDegraded pins that a fresh workspace with
+// nothing materialized is a normal live state, not an error.
+// TestWatchPhaseIsNeverEmptyOnTheWire pins that the tri-state has no unnamed
+// fourth member. The zero value of watchPhase is "", and reporting that on
+// /v1/health would reintroduce the exact ambiguity this state field removes.
+func TestWatchPhaseIsNeverEmptyOnTheWire(t *testing.T) {
 	s := newScheduler(newFakeConverger(), nil)
-	plane := newWatchPlane(&stubWatcher{name: "stub"}, nil, stubSource{roots: nil}, s, quietLogger())
+	plane := newWatchPlane(&stubWatcher{name: "stub"}, nil, stubSource{roots: nil}, s, quietLogger(), nil)
+	if got := plane.snapshot().Phase; got != watchPhaseStarting {
+		t.Fatalf("phase before run = %q, want %q", got, watchPhaseStarting)
+	}
+	if plane.snapshot().Degraded {
+		t.Fatal("a plane that has not started must not report degraded")
+	}
+}
 
+func TestWatcherWithNoRootsIsIdleNotDegraded(t *testing.T) {
+	s := newScheduler(newFakeConverger(), nil)
+	source := &mutableSource{}
+	watcher := &stubWatcher{name: "stub", emit: make(chan time.Time)}
+	plane := newWatchPlane(watcher, nil, source, s, quietLogger(), nil)
+	plane.rediscoverInterval = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	done := make(chan struct{})
-	go func() { defer close(done); plane.run(t.Context()) }()
+	go func() { defer close(done); plane.run(ctx) }()
+	waitFor(t, func() bool { return plane.snapshot().Phase == watchPhaseIdle })
+	st := plane.snapshot()
+	if st.Degraded || st.Reason != "no materialized projects yet" {
+		t.Fatalf("state = %+v, want normal idle state", st)
+	}
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("run did not return for an empty root set")
+		t.Fatal("watch plane returned while idle")
+	default:
 	}
-	st := plane.snapshot()
-	if !st.Degraded || st.Reason == "" {
-		t.Fatalf("state = %+v, want a recorded reason for not watching", st)
-	}
+
+	source.setRoots([]string{t.TempDir()})
+	waitFor(t, func() bool { return plane.snapshot().Phase == watchPhaseWatching })
 }
 
 // TestWatcherSourceErrorDegradesRatherThanCrashing pins that the daemon
 // survives an unreadable store — periodic convergence still runs.
 func TestWatcherSourceErrorDegradesRatherThanCrashing(t *testing.T) {
 	s := newScheduler(newFakeConverger(), nil)
-	plane := newWatchPlane(&stubWatcher{name: "stub"}, nil, stubSource{err: errors.New("store locked")}, s, quietLogger())
+	plane := newWatchPlane(&stubWatcher{name: "stub"}, nil, stubSource{err: errors.New("store locked")}, s, quietLogger(), nil)
 
 	done := make(chan struct{})
-	go func() { defer close(done); plane.run(t.Context()) }()
+	ctx, cancel := context.WithCancel(t.Context())
+	go func() { defer close(done); plane.run(ctx) }()
+	waitFor(t, func() bool { return plane.snapshot().Phase == watchPhaseDegraded })
+	if st := plane.snapshot(); !st.Degraded {
+		t.Fatalf("state = %+v, want degraded", st)
+	}
+	cancel()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("run did not return after a source error")
-	}
-	if st := plane.snapshot(); !st.Degraded {
-		t.Fatalf("state = %+v, want degraded", st)
+		t.Fatal("watch plane did not stop after source-error cancellation")
 	}
 }
 
@@ -207,7 +287,7 @@ func TestWatcherSourceErrorDegradesRatherThanCrashing(t *testing.T) {
 func TestWatcherStopsOnCancel(t *testing.T) {
 	s := newScheduler(newFakeConverger(), nil)
 	stub := &stubWatcher{name: "stub", emit: make(chan time.Time)}
-	plane := newWatchPlane(stub, nil, stubSource{roots: []string{t.TempDir(), t.TempDir()}}, s, quietLogger())
+	plane := newWatchPlane(stub, nil, stubSource{roots: []string{t.TempDir(), t.TempDir()}}, s, quietLogger(), nil)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
@@ -220,6 +300,142 @@ func TestWatcherStopsOnCancel(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("watch plane did not stop on cancel")
 	}
+}
+
+func TestWatcherPicksUpProjectMaterializedAfterStart(t *testing.T) {
+	s := newScheduler(newFakeConverger(), nil)
+	source := &mutableSource{}
+	watcher := &stubWatcher{name: "stub", emit: make(chan time.Time)}
+	plane := newWatchPlane(watcher, nil, source, s, quietLogger(), nil)
+	plane.rediscoverInterval = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go plane.run(ctx)
+	waitFor(t, func() bool { return plane.snapshot().Phase == watchPhaseIdle })
+
+	source.setRoots([]string{t.TempDir()})
+	waitFor(t, func() bool {
+		st := plane.snapshot()
+		return st.Phase == watchPhaseWatching && st.Roots == 1
+	})
+}
+
+func TestWatcherDoesNotRearmWhenRootsUnchanged(t *testing.T) {
+	s := newScheduler(newFakeConverger(), nil)
+	watcher := &controlledWatcher{name: "native"}
+	plane := newWatchPlane(watcher, nil, stubSource{roots: []string{t.TempDir()}}, s, quietLogger(), nil)
+	plane.rediscoverInterval = 10 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go plane.run(ctx)
+	waitFor(t, func() bool { return plane.snapshot().Phase == watchPhaseWatching })
+	time.Sleep(80 * time.Millisecond)
+	if got := watcher.count(); got != 1 {
+		t.Fatalf("native watcher armed %d times for unchanged roots, want 1", got)
+	}
+}
+
+func TestWatcherRetriesNativeAfterDegrade(t *testing.T) {
+	s := newScheduler(newFakeConverger(), nil)
+	native := &controlledWatcher{name: "native", fail: true}
+	fallback := &stubWatcher{name: "poll", emit: make(chan time.Time)}
+	plane := newWatchPlane(native, fallback, stubSource{roots: []string{t.TempDir()}}, s, quietLogger(), nil)
+	plane.rediscoverInterval = 20 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go plane.run(ctx)
+	waitFor(t, func() bool { return plane.snapshot().Phase == watchPhaseDegraded })
+
+	native.setFail(false)
+	waitFor(t, func() bool {
+		st := plane.snapshot()
+		return st.Phase == watchPhaseWatching && !st.Degraded && st.Backend == "native"
+	})
+	if st := plane.snapshot(); st.Reason != "" {
+		t.Fatalf("recovered state retained reason %q", st.Reason)
+	}
+}
+
+func TestWatchDegradedPublishesOncePerTransition(t *testing.T) {
+	s := newScheduler(newFakeConverger(), nil)
+	native := &controlledWatcher{name: "native", fail: true}
+	fallback := &stubWatcher{name: "poll", emit: make(chan time.Time)}
+	bus := newEventBus()
+	id, events := bus.subscribe()
+	defer bus.unsubscribe(id)
+	plane := newWatchPlane(native, fallback, stubSource{roots: []string{t.TempDir()}}, s, quietLogger(), bus)
+	plane.rediscoverInterval = 15 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go plane.run(ctx)
+	waitFor(t, func() bool { return native.count() >= 4 })
+	if got := drainEvents(events); len(got) != 1 || got[0].Kind != EventWatchDegraded {
+		t.Fatalf("repeated failures published events %+v, want one watch.degraded transition", got)
+	}
+
+	native.setFail(false)
+	waitFor(t, func() bool { return plane.snapshot().Phase == watchPhaseWatching })
+	got := waitForEvents(t, events, 1)
+	if !strings.Contains(got[0].Detail, "recovered") {
+		t.Fatalf("recovery event detail = %q, want recovery", got[0].Detail)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if extra := drainEvents(events); len(extra) != 0 {
+		t.Fatalf("stable recovery published extra events: %+v", extra)
+	}
+}
+
+func TestWatchHealthIdleIsVisibleOnTheWire(t *testing.T) {
+	payload, err := json.Marshal(WatchHealth{
+		Enabled:  true,
+		State:    string(watchPhaseIdle),
+		Degraded: false,
+		Roots:    0,
+		Reason:   "no materialized projects yet",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"state", "degraded", "roots"} {
+		if _, ok := fields[field]; !ok {
+			t.Fatalf("%s absent from idle watch health JSON: %s", field, payload)
+		}
+	}
+}
+
+func drainEvents(events <-chan Event) []Event {
+	var got []Event
+	for {
+		select {
+		case event := <-events:
+			got = append(got, event)
+		default:
+			return got
+		}
+	}
+}
+
+func waitForEvents(t *testing.T, events <-chan Event, count int) []Event {
+	t.Helper()
+	got := make([]Event, 0, count)
+	deadline := time.After(5 * time.Second)
+	for len(got) < count {
+		select {
+		case event := <-events:
+			got = append(got, event)
+		case <-deadline:
+			t.Fatalf("got %d events, want %d", len(got), count)
+		}
+	}
+	return got
 }
 
 func waitFor(t *testing.T, cond func() bool) {

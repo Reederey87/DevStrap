@@ -3,28 +3,50 @@ package daemon
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/Reederey87/DevStrap/internal/platform"
+	"github.com/Reederey87/DevStrap/internal/redact"
 )
 
-// WatchSource supplies the roots to watch. It is re-consulted on every
-// (re)start of the watch plane, so a project adopted mid-run is picked up on the
-// next restart rather than requiring a daemon bounce.
+// WatchSource supplies the roots to watch. It is re-consulted periodically
+// while the plane runs, so projects materialized after daemon startup are
+// discovered without restarting the daemon.
 type WatchSource interface {
 	WatchRoots(ctx context.Context) ([]string, error)
 }
+
+// watchPhase is what the plane is actually doing. It exists because a boolean
+// `degraded` cannot distinguish "nothing to watch yet" (a brand-new workspace,
+// entirely normal) from "the watcher failed" (worth alarming on) — and
+// conflating them makes the alarm useless on day one.
+type watchPhase string
+
+const (
+	// watchPhaseStarting is the state before the plane has resolved roots even
+	// once. It exists because the zero value of watchPhase is "", and an empty
+	// string on /v1/health is precisely the ambiguity this tri-state removes:
+	// a consumer could not tell "not started yet" from "never reported". The
+	// window is real — WatchRoots opens SQLite — so it needs a name.
+	watchPhaseStarting watchPhase = "starting" // roots not resolved yet
+	watchPhaseIdle     watchPhase = "idle"     // no materialized projects yet
+	watchPhaseWatching watchPhase = "watching" // native watcher armed
+	watchPhaseDegraded watchPhase = "degraded" // watcher failed; polling or nothing
+)
 
 // watchState is what /v1/health and `daemon status` report about the watch
 // plane. Degradation must be visible: a silently-degraded watcher would leave a
 // user believing they have sub-interval convergence when they have none.
 type watchState struct {
+	// Phase distinguishes normal idleness from native watching and degradation.
+	Phase watchPhase
 	// Backend is the adapter actually running ("fsnotify", "poll"), or empty
 	// when the watch plane is not running at all.
 	Backend string
-	// Degraded is true when the native watcher failed and the plane fell back
-	// to polling, or gave up entirely.
+	// Degraded is retained for existing consumers and is always derived from
+	// Phase.
 	Degraded bool
 	// Reason explains the degradation in one line.
 	Reason string
@@ -40,6 +62,13 @@ type watchState struct {
 // hint-to-convergence: without this floor, a save-storm that outlasts one
 // convergence would start another the moment it finished.
 const minTriggerInterval = 5 * time.Second
+
+const (
+	defaultRediscoverInterval = 60 * time.Second
+	// A Watch call is long-lived. Surviving this short window distinguishes an
+	// armed native watcher from adapters that reject an arm immediately.
+	nativeArmReadyDelay = 10 * time.Millisecond
+)
 
 // watchPlane turns filesystem hints into convergence triggers.
 //
@@ -63,6 +92,9 @@ type watchPlane struct {
 	source    WatchSource
 	scheduler *scheduler
 	logger    logger
+	events    *eventBus
+
+	rediscoverInterval time.Duration
 
 	mu    sync.Mutex
 	state watchState
@@ -75,8 +107,17 @@ type logger interface {
 	Warn(msg string, args ...any)
 }
 
-func newWatchPlane(w, fallback platform.Watcher, src WatchSource, s *scheduler, log logger) *watchPlane {
-	return &watchPlane{watcher: w, fallback: fallback, source: src, scheduler: s, logger: log}
+func newWatchPlane(w, fallback platform.Watcher, src WatchSource, s *scheduler, log logger, events *eventBus) *watchPlane {
+	return &watchPlane{
+		watcher:            w,
+		fallback:           fallback,
+		source:             src,
+		scheduler:          s,
+		logger:             log,
+		events:             events,
+		rediscoverInterval: defaultRediscoverInterval,
+		state:              watchState{Phase: watchPhaseStarting},
+	}
 }
 
 func (p *watchPlane) snapshot() watchState {
@@ -88,6 +129,7 @@ func (p *watchPlane) snapshot() watchState {
 func (p *watchPlane) setState(fn func(*watchState)) {
 	p.mu.Lock()
 	fn(&p.state)
+	p.state.Degraded = p.state.Phase == watchPhaseDegraded
 	p.mu.Unlock()
 }
 
@@ -95,49 +137,112 @@ func (p *watchPlane) setState(fn func(*watchState)) {
 // cancellation: every other failure degrades rather than propagating, because
 // the daemon must keep serving and converging without a watcher.
 func (p *watchPlane) run(ctx context.Context) {
-	roots, err := p.source.WatchRoots(ctx)
-	if err != nil {
-		p.degrade("could not resolve watch roots: " + err.Error())
-		return
-	}
-	if len(roots) == 0 {
-		p.degrade("no materialized projects to watch yet")
-		return
-	}
-
 	events := make(chan platform.FSEvent, 64)
 	go p.consume(ctx, events)
 
-	active := p.watcher
-	name := "unknown"
-	if active != nil {
-		name = active.Name()
+	interval := p.rediscoverInterval
+	if interval <= 0 {
+		interval = defaultRediscoverInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	var current []string
+	var cancelArm context.CancelFunc
+	defer func() {
+		if cancelArm != nil {
+			cancelArm()
+		}
+	}()
+
+	for {
+		roots, err := p.source.WatchRoots(ctx)
+		switch {
+		case err != nil:
+			p.degrade("could not resolve watch roots: " + err.Error())
+		case len(roots) == 0:
+			current = nil
+			if cancelArm != nil {
+				cancelArm()
+				cancelArm = nil
+			}
+			p.idle()
+		default:
+			if !sameRoots(current, roots) || p.snapshot().Phase == watchPhaseDegraded {
+				if cancelArm != nil {
+					cancelArm()
+				}
+				current = append([]string(nil), roots...)
+				armCtx, cancel := context.WithCancel(ctx)
+				cancelArm = cancel
+				go p.arm(armCtx, roots, events)
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// arm tries the native watcher first, then retains the existing polling
+// fallback semantics after a real (non-context) native failure.
+func (p *watchPlane) arm(ctx context.Context, roots []string, events chan<- platform.FSEvent) {
+	nativeResult := make(chan error, 1)
+	go func() { nativeResult <- p.watchAll(ctx, p.watcher, roots, events) }()
+
+	timer := time.NewTimer(nativeArmReadyDelay)
+	defer timer.Stop()
+	select {
+	case err := <-nativeResult:
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		p.degrade("native watcher failed, polling instead: " + err.Error())
+	case <-timer.C:
+		name := "unknown"
+		if p.watcher != nil {
+			name = p.watcher.Name()
+		}
+		p.watching(name, len(roots))
+		p.logger.Info("daemon: watching workspace", "backend", name, "roots", len(roots))
+		err := <-nativeResult
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		p.degrade("native watcher failed, polling instead: " + err.Error())
+	case <-ctx.Done():
+		return
+	}
+
+	if p.fallback == nil || ctx.Err() != nil {
+		return
 	}
 	p.setState(func(s *watchState) {
-		s.Backend = name
+		s.Backend = p.fallback.Name()
 		s.Roots = len(roots)
-		s.Degraded = false
-		s.Reason = ""
 	})
-	p.logger.Info("daemon: watching workspace", "backend", name, "roots", len(roots))
-
-	if err := p.watchAll(ctx, active, roots, events); err == nil || ctx.Err() != nil {
-		return
-	} else {
-		// The native watcher failed for a real reason — most likely descriptor
-		// exhaustion (EMFILE) or an inotify watch limit (ENOSPC) on a large
-		// tree. Falling back to polling keeps sub-interval convergence working
-		// at reduced fidelity instead of losing the plane entirely (PLAT-02).
-		p.degrade("native watcher failed, polling instead: " + err.Error())
-	}
-
-	if p.fallback == nil {
-		return
-	}
-	p.setState(func(s *watchState) { s.Backend = p.fallback.Name() })
 	if err := p.watchAll(ctx, p.fallback, roots, events); err != nil && ctx.Err() == nil {
 		p.degrade("polling watcher failed: " + err.Error())
 	}
+}
+
+func sameRoots(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	a = append([]string(nil), a...)
+	b = append([]string(nil), b...)
+	sort.Strings(a)
+	sort.Strings(b)
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // watchAll runs one watcher across every root, returning the first non-context
@@ -195,9 +300,48 @@ func (p *watchPlane) consume(ctx context.Context, events <-chan platform.FSEvent
 }
 
 func (p *watchPlane) degrade(reason string) {
+	changed := false
 	p.setState(func(s *watchState) {
-		s.Degraded = true
+		changed = s.Phase != watchPhaseDegraded
+		s.Phase = watchPhaseDegraded
 		s.Reason = reason
 	})
 	p.logger.Warn("daemon: watch plane degraded", "reason", reason)
+	if changed {
+		p.publish(Event{Kind: EventWatchDegraded, At: time.Now(), Detail: redact.Scrub(reason)})
+	}
+}
+
+func (p *watchPlane) idle() {
+	recovered := false
+	p.setState(func(s *watchState) {
+		recovered = s.Phase == watchPhaseDegraded
+		s.Phase = watchPhaseIdle
+		s.Backend = ""
+		s.Reason = "no materialized projects yet"
+		s.Roots = 0
+	})
+	if recovered {
+		p.publish(Event{Kind: EventWatchDegraded, At: time.Now(), Detail: "watch plane recovered: idle"})
+	}
+}
+
+func (p *watchPlane) watching(backend string, roots int) {
+	recovered := false
+	p.setState(func(s *watchState) {
+		recovered = s.Phase == watchPhaseDegraded
+		s.Phase = watchPhaseWatching
+		s.Backend = backend
+		s.Reason = ""
+		s.Roots = roots
+	})
+	if recovered {
+		p.publish(Event{Kind: EventWatchDegraded, At: time.Now(), Detail: "watch plane recovered: native watcher armed"})
+	}
+}
+
+func (p *watchPlane) publish(e Event) {
+	if p.events != nil {
+		p.events.publish(e)
+	}
 }
