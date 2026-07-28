@@ -104,6 +104,31 @@ func (w *controlledWatcher) Watch(ctx context.Context, _ string, _ chan<- platfo
 	return ctx.Err()
 }
 
+// slowFailWatcher fails only after a delay, reproducing the motivating case:
+// addRecursiveWatch walks thousands of directories before hitting the inotify
+// or descriptor limit, so the failure arrives long after the arm began.
+type slowFailWatcher struct {
+	name  string
+	delay time.Duration
+
+	mu       sync.Mutex
+	attempts int
+}
+
+func (w *slowFailWatcher) Name() string { return w.name }
+
+func (w *slowFailWatcher) Watch(ctx context.Context, _ string, _ chan<- platform.FSEvent) error {
+	w.mu.Lock()
+	w.attempts++
+	w.mu.Unlock()
+	select {
+	case <-time.After(w.delay):
+		return errors.New("no space left on device")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (w *controlledWatcher) setFail(fail bool) {
 	w.mu.Lock()
 	w.fail = fail
@@ -220,11 +245,6 @@ func TestWatcherDegradesToPollingOnFailure(t *testing.T) {
 	}
 }
 
-// TestWatcherWithNoRootsIsIdleNotDegraded pins that a fresh workspace with
-// nothing materialized is a normal live state, not an error.
-// TestWatchPhaseIsNeverEmptyOnTheWire pins that the tri-state has no unnamed
-// fourth member. The zero value of watchPhase is "", and reporting that on
-// /v1/health would reintroduce the exact ambiguity this state field removes.
 func TestWatchPhaseIsNeverEmptyOnTheWire(t *testing.T) {
 	s := newScheduler(newFakeConverger(), nil)
 	plane := newWatchPlane(&stubWatcher{name: "stub"}, nil, stubSource{roots: nil}, s, quietLogger(), nil)
@@ -236,6 +256,11 @@ func TestWatchPhaseIsNeverEmptyOnTheWire(t *testing.T) {
 	}
 }
 
+// TestWatcherWithNoRootsIsIdleNotDegraded pins that a fresh workspace with
+// nothing materialized is a normal live state, not an error.
+// TestWatchPhaseIsNeverEmptyOnTheWire pins that the tri-state has no unnamed
+// fourth member. The zero value of watchPhase is "", and reporting that on
+// /v1/health would reintroduce the exact ambiguity this state field removes.
 func TestWatcherWithNoRootsIsIdleNotDegraded(t *testing.T) {
 	s := newScheduler(newFakeConverger(), nil)
 	source := &mutableSource{}
@@ -356,6 +381,59 @@ func TestWatcherRetriesNativeAfterDegrade(t *testing.T) {
 	})
 	if st := plane.snapshot(); st.Reason != "" {
 		t.Fatalf("recovered state retained reason %q", st.Reason)
+	}
+}
+
+// TestSlowFailingWatcherDoesNotFlapRecovery is the regression for the
+// flagship failure mode. On a large tree the native watcher fails only after
+// walking it, so a retry that declares "watching" on a short timer publishes a
+// FALSE recovery and then a fresh degrade — once per retry, forever, producing
+// exactly the alarm-flapping this plane exists to eliminate. A retry from
+// degraded must survive a probation before it may claim recovery.
+func TestSlowFailingWatcherDoesNotFlapRecovery(t *testing.T) {
+	s := newScheduler(newFakeConverger(), nil)
+	bus := newEventBus()
+	_, events := bus.subscribe()
+	// Models production proportions: the arm fails long after the short
+	// healthy-path delay (10ms) but well within one re-discovery interval,
+	// exactly as a large-tree walk fails in seconds against a 60s interval.
+	// Under the previous code the 10ms timer declared "watching" first and
+	// published a false recovery on every retry.
+	native := &slowFailWatcher{name: "native", delay: 40 * time.Millisecond}
+	plane := newWatchPlane(native, &stubWatcher{name: "poll"}, stubSource{roots: []string{t.TempDir()}}, s, quietLogger(), bus)
+	plane.rediscoverInterval = 150 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); plane.run(ctx) }()
+
+	// Let several re-discovery ticks elapse so any per-retry flap would show.
+	time.Sleep(400 * time.Millisecond)
+	cancel()
+	<-done
+
+	var kinds []string
+	for {
+		select {
+		case e := <-events:
+			kinds = append(kinds, e.Detail)
+			continue
+		default:
+		}
+		break
+	}
+
+	recoveries := 0
+	for _, d := range kinds {
+		if strings.Contains(d, "recovered") {
+			recoveries++
+		}
+	}
+	if recoveries > 0 {
+		t.Fatalf("published %d false recovery event(s) for a watcher that never recovered: %v", recoveries, kinds)
+	}
+	if plane.snapshot().Phase != watchPhaseDegraded {
+		t.Fatalf("phase = %q, want %q for a persistently failing watcher", plane.snapshot().Phase, watchPhaseDegraded)
 	}
 }
 

@@ -68,6 +68,11 @@ const (
 	// A Watch call is long-lived. Surviving this short window distinguishes an
 	// armed native watcher from adapters that reject an arm immediately.
 	nativeArmReadyDelay = 10 * time.Millisecond
+
+	// maxRecoveryProbation caps how long a retry from degraded waits before
+	// claiming recovery. Recovery visibility delayed by up to this long is a
+	// far better trade than a false "recovered" every retry.
+	maxRecoveryProbation = 30 * time.Second
 )
 
 // watchPlane turns filesystem hints into convergence triggers.
@@ -149,33 +154,63 @@ func (p *watchPlane) run(ctx context.Context) {
 
 	var current []string
 	var cancelArm context.CancelFunc
-	defer func() {
+	var armDone chan struct{}
+	// armAlive reports whether the arm we last started is still running. A
+	// finished arm has closed its channel.
+	armAlive := func() bool {
+		if armDone == nil {
+			return false
+		}
+		select {
+		case <-armDone:
+			return false
+		default:
+			return true
+		}
+	}
+	stopArm := func() {
 		if cancelArm != nil {
 			cancelArm()
+			cancelArm = nil
 		}
-	}()
+		armDone = nil
+	}
+	defer stopArm()
 
 	for {
 		roots, err := p.source.WatchRoots(ctx)
 		switch {
 		case err != nil:
+			// A store blip must not tear down a healthy watcher. Resolving
+			// roots opens SQLite, so a busy timeout here says nothing about
+			// the arm — which is still watching the same roots it was given.
+			// Flipping to degraded would publish a false alarm AND, because
+			// the degraded phase forces a re-arm on the next tick, cancel and
+			// rebuild every descriptor for no reason.
+			if armAlive() {
+				p.logger.Warn("daemon: could not resolve watch roots; keeping the current watcher",
+					"error", err.Error())
+				break
+			}
 			p.degrade("could not resolve watch roots: " + err.Error())
 		case len(roots) == 0:
 			current = nil
-			if cancelArm != nil {
-				cancelArm()
-				cancelArm = nil
-			}
+			stopArm()
 			p.idle()
 		default:
-			if !sameRoots(current, roots) || p.snapshot().Phase == watchPhaseDegraded {
+			if !sameRoots(current, roots) || p.snapshot().Phase == watchPhaseDegraded || !armAlive() {
 				if cancelArm != nil {
 					cancelArm()
 				}
 				current = append([]string(nil), roots...)
 				armCtx, cancel := context.WithCancel(ctx)
 				cancelArm = cancel
-				go p.arm(armCtx, roots, events)
+				done := make(chan struct{})
+				armDone = done
+				go func() {
+					defer close(done)
+					p.arm(armCtx, roots, events)
+				}()
 			}
 		}
 
@@ -189,15 +224,43 @@ func (p *watchPlane) run(ctx context.Context) {
 
 // arm tries the native watcher first, then retains the existing polling
 // fallback semantics after a real (non-context) native failure.
+//
+// There is no success signal to wait for: platform.Watcher.Watch blocks until
+// it errors or is cancelled, so "armed" can only ever be inferred from "has not
+// failed yet". How long to wait before inferring it is the whole subtlety.
+//
+// From a HEALTHY state a short delay is right — the arm is almost certainly
+// fine and the daemon should report so promptly. Retrying from DEGRADED is the
+// opposite case: the motivating failure is descriptor exhaustion on a large
+// tree, where addRecursiveWatch walks thousands of directories before hitting
+// the limit — far longer than the short delay. Declaring "watching" after
+// 10ms there would publish a false recovery, then a fresh degrade when the walk
+// finally failed, once per retry: precisely the flapping this plane exists to
+// eliminate. So a retry from degraded must SURVIVE a probation before it may
+// claim recovery.
 func (p *watchPlane) arm(ctx context.Context, roots []string, events chan<- platform.FSEvent) {
+	wasDegraded := p.snapshot().Phase == watchPhaseDegraded
+	ready := nativeArmReadyDelay
+	if wasDegraded {
+		ready = p.recoveryProbation()
+	}
+
 	nativeResult := make(chan error, 1)
 	go func() { nativeResult <- p.watchAll(ctx, p.watcher, roots, events) }()
 
-	timer := time.NewTimer(nativeArmReadyDelay)
+	timer := time.NewTimer(ready)
 	defer timer.Stop()
 	select {
 	case err := <-nativeResult:
-		if err == nil || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			// The watcher exited on its own without an error and without
+			// cancellation. Nothing is armed, so continuing to report the
+			// previous phase would be a liveness lie that no later tick
+			// corrects (unchanged roots + non-degraded phase never re-arms).
+			p.degrade("native watcher exited unexpectedly without an error")
 			return
 		}
 		p.degrade("native watcher failed, polling instead: " + err.Error())
@@ -209,7 +272,11 @@ func (p *watchPlane) arm(ctx context.Context, roots []string, events chan<- plat
 		p.watching(name, len(roots))
 		p.logger.Info("daemon: watching workspace", "backend", name, "roots", len(roots))
 		err := <-nativeResult
-		if err == nil || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			p.degrade("native watcher exited unexpectedly without an error")
 			return
 		}
 		p.degrade("native watcher failed, polling instead: " + err.Error())
@@ -227,6 +294,31 @@ func (p *watchPlane) arm(ctx context.Context, roots []string, events chan<- plat
 	if err := p.watchAll(ctx, p.fallback, roots, events); err != nil && ctx.Err() == nil {
 		p.degrade("polling watcher failed: " + err.Error())
 	}
+}
+
+// recoveryProbation is how long a retry from degraded must survive before it
+// may claim recovery. It tracks the re-discovery interval so a probation can
+// never outlast the cadence that scheduled it, and is floored so a fast test
+// interval still exercises the probation path rather than skipping it.
+func (p *watchPlane) recoveryProbation() time.Duration {
+	interval := p.rediscoverInterval
+	if interval <= 0 {
+		interval = defaultRediscoverInterval
+	}
+	// One FULL re-discovery interval, not a fraction. The probation has to
+	// outlast how long an arm takes to fail, and that latency is unbounded in
+	// principle — addRecursiveWatch walks the whole tree before hitting the
+	// limit. In production the interval is 60s against a walk that fails in
+	// seconds, so a full interval clears it comfortably; half an interval
+	// narrows the margin for no benefit, since nothing depends on announcing
+	// recovery sooner.
+	if interval > maxRecoveryProbation {
+		return maxRecoveryProbation
+	}
+	if interval < nativeArmReadyDelay {
+		return nativeArmReadyDelay
+	}
+	return interval
 }
 
 func sameRoots(a, b []string) bool {
@@ -299,45 +391,51 @@ func (p *watchPlane) consume(ctx context.Context, events <-chan platform.FSEvent
 	}
 }
 
+// degrade, idle and watching publish INSIDE the state lock, for the same reason
+// scheduler.Converge publishes its terminal events under its own: it is what
+// orders the events consistently with the states they describe. Published after
+// the unlock, a concurrent transition can interleave and a consumer sees
+// "recovered" then "degraded" while the settled state is watching. Safe because
+// eventBus.publish is non-blocking and never calls back into the plane, so the
+// lock order is strictly plane -> bus.
 func (p *watchPlane) degrade(reason string) {
-	changed := false
-	p.setState(func(s *watchState) {
-		changed = s.Phase != watchPhaseDegraded
-		s.Phase = watchPhaseDegraded
+	p.transition(watchPhaseDegraded, func(s *watchState) {
 		s.Reason = reason
-	})
+	}, redact.Scrub(reason))
 	p.logger.Warn("daemon: watch plane degraded", "reason", reason)
-	if changed {
-		p.publish(Event{Kind: EventWatchDegraded, At: time.Now(), Detail: redact.Scrub(reason)})
-	}
 }
 
 func (p *watchPlane) idle() {
-	recovered := false
-	p.setState(func(s *watchState) {
-		recovered = s.Phase == watchPhaseDegraded
-		s.Phase = watchPhaseIdle
+	p.transition(watchPhaseIdle, func(s *watchState) {
 		s.Backend = ""
 		s.Reason = "no materialized projects yet"
 		s.Roots = 0
-	})
-	if recovered {
-		p.publish(Event{Kind: EventWatchDegraded, At: time.Now(), Detail: "watch plane recovered: idle"})
-	}
+	}, "watch plane recovered: idle")
 }
 
 func (p *watchPlane) watching(backend string, roots int) {
-	recovered := false
-	p.setState(func(s *watchState) {
-		recovered = s.Phase == watchPhaseDegraded
-		s.Phase = watchPhaseWatching
+	p.transition(watchPhaseWatching, func(s *watchState) {
 		s.Backend = backend
 		s.Reason = ""
 		s.Roots = roots
-	})
-	if recovered {
-		p.publish(Event{Kind: EventWatchDegraded, At: time.Now(), Detail: "watch plane recovered: native watcher armed"})
+	}, "watch plane recovered: native watcher armed")
+}
+
+// transition moves the plane to phase, applying fields, and publishes exactly
+// once when the degraded-ness actually CHANGED — entering degraded, or leaving
+// it. A plane that re-fails while already degraded publishes nothing, which is
+// what keeps a flapping watcher from becoming its own event storm on a stream
+// documented as lossy.
+func (p *watchPlane) transition(phase watchPhase, fields func(*watchState), detail string) {
+	p.mu.Lock()
+	was := p.state.Phase
+	p.state.Phase = phase
+	fields(&p.state)
+	p.state.Degraded = p.state.Phase == watchPhaseDegraded
+	if (was == watchPhaseDegraded) != (phase == watchPhaseDegraded) {
+		p.publish(Event{Kind: EventWatchDegraded, At: time.Now(), Detail: detail})
 	}
+	p.mu.Unlock()
 }
 
 func (p *watchPlane) publish(e Event) {
