@@ -75,7 +75,12 @@ func TestPeriodicCyclePublishesConvergeEvents(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.runPeriodic(ctx, 50*time.Millisecond, nil)
+		// An hour, deliberately: runPeriodic converges IMMEDIATELY on entry and
+		// only then waits, so one cycle is observed without the test racing the
+		// next tick. A short interval would make the "no further events"
+		// assertion depend on cancel() landing before tick two, and on a
+		// starved runner it would not.
+		s.runPeriodic(ctx, time.Hour, nil)
 	}()
 
 	<-fake.started
@@ -513,7 +518,16 @@ func TestSyncEndpointReturns503WithoutConverger(t *testing.T) {
 	}
 }
 
-func TestSyncEndpointNoLongerDoublePublishes(t *testing.T) {
+// TestSyncEndpointPublishesViaScheduler pins the WIRING: server.events reaches
+// the scheduler through New, so a POST-triggered cycle still emits its pair now
+// that the handler no longer publishes them itself.
+//
+// Deliberately NOT named for the double-publish defect: a SINGLE POST emitted
+// exactly started+done on the old handler too, so this assertion passes on the
+// pre-change code. The defect was N CONCURRENT posts publishing N starteds for
+// one cycle, and that is pinned at scheduler level by
+// TestConcurrentCallersPublishExactlyOneStarted.
+func TestSyncEndpointPublishesViaScheduler(t *testing.T) {
 	fake := newFakeConverger()
 	close(fake.release)
 	socket := tempSocketPath(t)
