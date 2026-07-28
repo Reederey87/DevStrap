@@ -151,10 +151,13 @@ credential reads readable and says so at run start.
 
 DevStrap is honest about its edges. Not yet built, by design:
 
-- **The local daemon** (`devstrapd`), its socket API, and an FSEvents-specific Mac watcher —
-  every CLI command works correctly without a daemon; local reconciliation is the explicit
-  `devstrap scan` plus the portable `run-loop` (which `devstrap service install` already wraps in
-  an unattended LaunchAgent/systemd user unit).
+- **The daemon's job model** and every socket endpoint beyond health/version/status/events/sync,
+  and an **FSEvents-specific Mac watcher** (gated on a descriptor measurement, now observable as
+  the daemon's own `watch.roots`). The daemon itself shipped in 2026-07 — `devstrap daemon
+  start|stop|status|events` over a peer-credential-authenticated Unix socket, supervised by
+  `devstrap service install --daemon` — but it remains an *optimization, never a correctness
+  dependency*: every CLI command works with no daemon running, and the portable `run-loop` is
+  still the daemonless way to converge unattended.
 - **StrapFS** — the optional lazy virtual filesystem, deferred until the product loop is proven.
 - **A bespoke HTTP/SSE relay** and a hosted control plane for production device enrollment —
   the git/folder/R2 carriers cover the transport today.

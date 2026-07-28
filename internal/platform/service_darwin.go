@@ -153,6 +153,7 @@ func (m LaunchdManager) Status(ctx context.Context, label string) (ServiceStatus
 	//nolint:gosec // plistPath is our own agents-dir plist for a validated label (validateServiceLabel), not user input.
 	if plist, err := os.ReadFile(plistPath); err == nil {
 		status.ExecPath = extractLaunchdExecPath(plist)
+		status.Mode = extractLaunchdMode(plist)
 		if status.ExecPath != "" {
 			if _, err := os.Stat(status.ExecPath); os.IsNotExist(err) {
 				status.ExecPathMissing = true

@@ -10,6 +10,20 @@ func TestRenderSystemdUnitGolden(t *testing.T) {
 		t.Fatalf("renderSystemdUnit: %v", err)
 	}
 	checkGolden(t, "run_loop.service.golden", got)
+	if got := extractSystemdMode(got); got != "run-loop" {
+		t.Errorf("extractSystemdMode(run-loop) = %q, want run-loop", got)
+	}
+}
+
+func TestRenderSystemdUnitDaemonGolden(t *testing.T) {
+	got, err := renderSystemdUnit(goldenDaemonServiceSpec())
+	if err != nil {
+		t.Fatalf("renderSystemdUnit: %v", err)
+	}
+	checkGolden(t, "daemon.service.golden", got)
+	if got := extractSystemdMode(got); got != "daemon" {
+		t.Errorf("extractSystemdMode(daemon) = %q, want daemon", got)
+	}
 }
 
 func TestSystemdQuoteEscapesSpacesAndPercent(t *testing.T) {

@@ -246,7 +246,7 @@ Capability layers (see [`spec/14_MVP_ROADMAP_AND_BACKLOG.md`](spec/14_MVP_ROADMA
 1. **Local CLI proof** — scan, register, hydrate, fresh worktrees, env profiles. ✅
 2. **Agent workspaces** — one worktree per task, fresh remote base, logs, forge‑agnostic PR/MR, OS‑enforced sandbox. ✅
 3. **Multi‑device sync** — eager materialization, encrypted draft/env blobs, device‑trust propagation, compaction + snapshot bootstrap, the zero‑knowledge hub (git/folder carriers + R2/S3). ✅
-4. **Unattended operation** — `run-loop` + `devstrap service install` (launchd/systemd). ✅ · a native daemon + FSEvents watcher remain ⏳
+4. **Unattended operation** — `run-loop` + `devstrap service install` (launchd/systemd). ✅ · a local daemon with a socket API and filesystem watcher, via `service install --daemon`. ✅ · a native FSEvents watcher remains ⏳
 5. **Hosted managed tier** — a DevStrap‑operated hub + control plane; a plan, see [`spec/20`](spec/20_COMMERCIALIZATION_AND_PRICING.md). ⏳
 6. **Optional StrapFS** — File Provider / FUSE evaluation. ⏳ (deliberately deferred)
 

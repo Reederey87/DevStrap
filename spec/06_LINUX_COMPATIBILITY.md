@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-14
+last_reviewed: 2026-07-25
 tracks_code: [internal/platform/**, internal/devicekeys/**, .github/**]
 ---
 # Linux Compatibility Plan
@@ -89,7 +89,7 @@ Paths: ~/.devstrap, ~/Code, XDG optional
 
 ## systemd user service — shipped via `devstrap service install` (`P4-PROD-04`)
 
-The **native daemon (`devstrapd serve`) stays deferred**, but the systemd user-unit installer is shipped: `devstrap service install` renders and installs a `--user` service wrapping the portable `run-loop`, so a Linux box converges unattended without the daemon. The rendered unit (`~/.config/systemd/user/devstrap-run-loop.service`, written atomically at mode `0600`):
+The systemd user-unit installer is shipped: `devstrap service install` renders and installs a `--user` service wrapping the portable `run-loop`, so a Linux box converges unattended. **Since 2026-07-25 the same installer can supervise the shipped daemon instead** (`service install --daemon`, baking `daemon start` into the same unit under the same name); both modes drive the same `runLoopTick`, so the daemonless path stays fully supported. The rendered unit (`~/.config/systemd/user/devstrap-run-loop.service`, written atomically at mode `0600`):
 
 ```ini
 [Unit]

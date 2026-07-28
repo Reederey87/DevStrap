@@ -81,6 +81,10 @@ type ServiceStatus struct {
 	// ExecPathMissing is true when ExecPath is non-empty and no longer exists
 	// on disk — the brew-upgrade / deleted-binary case (P7-XP-05).
 	ExecPathMissing bool
+	// Mode is the convergence command the installed unit runs — "run-loop" or
+	// "daemon" — parsed best-effort from our own rendered argv; empty when
+	// unparseable or when the unit was not written by us.
+	Mode string
 }
 
 type ServiceManager interface {

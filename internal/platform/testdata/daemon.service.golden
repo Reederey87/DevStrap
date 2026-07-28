@@ -1,0 +1,16 @@
+[Unit]
+Description=DevStrap daemon (socket API + watcher + periodic convergence)
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/devstrap daemon start --interval 5m0s
+Restart=on-failure
+RestartSec=30
+Environment="PATH=/usr/local/bin:/usr/bin:/bin"
+WorkingDirectory=/home/dev/Code
+
+[Install]
+WantedBy=default.target

@@ -18,9 +18,12 @@ import (
 )
 
 const (
-	exitGeneric           = 1
-	exitInvalidConfig     = 2
-	exitDaemonUnavailable = 3 // reserved for M5 daemon (ARCH2-04); not yet returned.
+	exitGeneric       = 1
+	exitInvalidConfig = 2
+	// Returned only by genuinely daemon-only commands (`daemon events`). Every
+	// other command has a local path that works without a daemon, so returning
+	// this for them would be a regression, not a feature.
+	exitDaemonUnavailable = 3
 	exitConflict          = 4
 	exitDirtyWorktree     = 5
 	exitAuth              = 6
