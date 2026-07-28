@@ -82,6 +82,23 @@ type daemonStopResult struct {
 	Detail  string `json:"detail,omitempty"`
 }
 
+type daemonSyncResult struct {
+	Mode       daemon.TickMode `json:"mode"`
+	StartedAt  time.Time       `json:"started_at"`
+	DurationMS int64           `json:"duration_ms"`
+	Coalesced  bool            `json:"coalesced,omitempty"`
+	// RequestedMode is set only when the observed cycle was WEAKER than what
+	// this caller asked for, which happens when a full request joins an
+	// in-flight namespace-only cycle. Without it a script sees mode
+	// "namespace-only" and exit 0 for a request that asked to materialize, and
+	// has no way to tell that apart from having asked for namespace-only.
+	RequestedMode daemon.TickMode `json:"requested_mode,omitempty"`
+	// Deferred reports that the requested work has NOT run yet. The scheduler
+	// remembers the stronger mode and promotes the next cycle, so it is queued
+	// rather than lost — but it has not happened when this command returns.
+	Deferred bool `json:"deferred,omitempty"`
+}
+
 func newDaemonCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "daemon",
@@ -96,6 +113,7 @@ func newDaemonCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.AddCommand(newDaemonStopCommand(stdout, opts))
 	cmd.AddCommand(newDaemonStatusCommand(stdout, opts))
 	cmd.AddCommand(newDaemonEventsCommand(stdout, opts))
+	cmd.AddCommand(newDaemonSyncCommand(stdout, opts))
 	return cmd
 }
 
@@ -306,12 +324,11 @@ func newDaemonStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 
 func runDaemonStatus(cmd *cobra.Command, stdout io.Writer, opts *options) error {
 	paths := opts.paths()
-	socket := paths.SocketPath()
+	client, socket := daemonClient(opts)
 	result := daemonStatusResult{Socket: socket}
 
 	// The socket is the source of truth: a daemon that answers is running,
 	// whatever the pid file says. The pid file only enriches the report.
-	client := daemon.NewClient(socket)
 	health, err := client.Health(cmd.Context())
 	switch {
 	case err == nil:
@@ -400,6 +417,21 @@ func runDaemonStatus(cmd *cobra.Command, stdout io.Writer, opts *options) error 
 		}
 		return nil
 	}, result)
+}
+
+// daemonClient builds a client for this invocation's socket, returning the
+// socket path so callers can name it in errors.
+func daemonClient(opts *options) (*daemon.Client, string) {
+	socket := opts.paths().SocketPath()
+	return daemon.NewClient(socket), socket
+}
+
+// daemonUnavailable is the shared mapping for "no daemon is listening". Only
+// daemon-ONLY commands use it: a command with a working local path must never
+// report exit 3, because that would turn a fallback into a failure.
+func daemonUnavailable(socket string) error {
+	return appError{code: exitDaemonUnavailable, err: fmt.Errorf(
+		"no daemon is running on %s; start one with `devstrap daemon start`", socket)}
 }
 
 func daemonRecordPath(home string) string {
@@ -546,8 +578,7 @@ func newDaemonEventsCommand(stdout io.Writer, opts *options) *cobra.Command {
 			"`devstrap status` remains the source of truth.",
 		Args: usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			socket := opts.paths().SocketPath()
-			client := daemon.NewClient(socket)
+			client, socket := daemonClient(opts)
 			err := client.Events(cmd.Context(), func(event daemon.Event) {
 				line := fmt.Sprintf("%s  %s", event.At.Format(time.RFC3339), event.Kind)
 				if event.Detail != "" {
@@ -559,11 +590,86 @@ func newDaemonEventsCommand(stdout io.Writer, opts *options) *cobra.Command {
 			case err == nil, errors.Is(err, context.Canceled):
 				return nil
 			case errors.Is(err, daemon.ErrUnavailable):
-				return appError{code: exitDaemonUnavailable, err: fmt.Errorf(
-					"no daemon is running on %s; start one with `devstrap daemon start`", socket)}
+				return daemonUnavailable(socket)
 			default:
 				return err
 			}
 		},
 	}
+}
+
+func newDaemonSyncCommand(stdout io.Writer, opts *options) *cobra.Command {
+	var namespaceOnly bool
+	cmd := &cobra.Command{
+		Use:   "sync",
+		Short: "Ask the running daemon to converge now (requires a running daemon)",
+		Long: "Ask the running daemon to converge now.\n\n" +
+			"`devstrap sync` runs a convergence cycle in this process and works\n" +
+			"without a daemon. This daemon-namespaced command triggers a cycle in\n" +
+			"the running daemon. The two are safe to overlap because the existing\n" +
+			"SQLite and repository-operation locks serialize their work.",
+		Args: usageArgs(cobra.NoArgs),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			mode := daemon.TickFull
+			if namespaceOnly {
+				mode = daemon.TickNamespaceOnly
+			}
+			client, socket := daemonClient(opts)
+			result, err := client.Sync(cmd.Context(), mode)
+			// A full request that arrives mid-cycle JOINS the weaker cycle
+			// already running and returns its result: coalesced, mode
+			// namespace-only, nothing materialized. Reporting that as a plain
+			// success would tell a caller its full sync happened when it did
+			// not. The scheduler has recorded the promotion, so exactly ONE
+			// retry is enough to claim the next cycle; a loop is not, because a
+			// busy watcher could keep starting namespace-only cycles forever.
+			if err == nil && result.Coalesced && mode == daemon.TickFull && result.Mode != daemon.TickFull {
+				result, err = client.Sync(cmd.Context(), mode)
+			}
+			switch {
+			case errors.Is(err, daemon.ErrUnavailable):
+				return daemonUnavailable(socket)
+			case errors.Is(err, daemon.ErrConvergerUnavailable):
+				// `devstrap daemon start` ALWAYS wires a converger, so this is
+				// not a user misconfiguration and must not prescribe a flag as
+				// though it were. It means the daemon on this socket is
+				// transport-only — a programmatically constructed one, which
+				// today is only ever a test harness.
+				return fmt.Errorf(
+					"the daemon on %s is transport-only and cannot converge; "+
+						"it was not started by `devstrap daemon start`", socket)
+			case err != nil:
+				return err
+			}
+			rendered := daemonSyncResult{
+				Mode:       result.Mode,
+				StartedAt:  result.StartedAt,
+				DurationMS: result.DurationMS,
+				Coalesced:  result.Coalesced,
+			}
+			deferred := result.Mode != mode
+			if deferred {
+				rendered.RequestedMode = mode
+				rendered.Deferred = true
+			}
+			return opts.render(stdout, func(w io.Writer) error {
+				duration := (time.Duration(result.DurationMS) * time.Millisecond).String()
+				switch {
+				case deferred:
+					_, ferr := fmt.Fprintf(w,
+						"joined a %s convergence already in progress, finished in %s\n"+
+							"the %s sync you asked for has NOT run; it is queued and will run on the next cycle\n",
+						result.Mode, duration, mode)
+					return ferr
+				case result.Coalesced:
+					_, ferr := fmt.Fprintf(w, "joined a convergence already in progress (%s), finished in %s\n", result.Mode, duration)
+					return ferr
+				}
+				_, ferr := fmt.Fprintf(w, "converged (%s) in %s\n", result.Mode, duration)
+				return ferr
+			}, rendered)
+		},
+	}
+	cmd.Flags().BoolVar(&namespaceOnly, "namespace-only", false, "sync namespace metadata only; skip materialization")
+	return cmd
 }

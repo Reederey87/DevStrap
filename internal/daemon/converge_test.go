@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -10,6 +11,12 @@ import (
 	"testing"
 	"time"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
 
 // fakeConverger records calls and blocks until released, so a test can hold a
 // cycle open and observe what concurrent callers do.
@@ -515,6 +522,125 @@ func TestSyncEndpointReturns503WithoutConverger(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", resp.StatusCode)
+	}
+}
+
+func TestSyncEndpointAcceptsNamespaceOnlyMode(t *testing.T) {
+	fake := newFakeConverger()
+	close(fake.release)
+	client := NewClient(startServerWithConverger(t, fake))
+	if _, err := client.Sync(t.Context(), TickNamespaceOnly); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if got := fake.seenModes(); len(got) != 1 || got[0] != TickNamespaceOnly {
+		t.Fatalf("modes = %v, want [%s]", got, TickNamespaceOnly)
+	}
+}
+
+func TestSyncEndpointDefaultsToFull(t *testing.T) {
+	fake := newFakeConverger()
+	close(fake.release)
+	socket := startServerWithConverger(t, fake)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://"+socketHost+"/v1/sync", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := rawClient(socket).Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if got := fake.seenModes(); len(got) != 1 || got[0] != TickFull {
+		t.Fatalf("modes = %v, want [%s]", got, TickFull)
+	}
+}
+
+func TestSyncEndpointRejectsUnknownMode(t *testing.T) {
+	fake := newFakeConverger()
+	socket := startServerWithConverger(t, fake)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "http://"+socketHost+"/v1/sync?mode=bogus", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := rawClient(socket).Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "full") || !strings.Contains(string(body), "namespace-only") {
+		t.Fatalf("body = %q, want both accepted values", body)
+	}
+	if got := fake.count(); got != 0 {
+		t.Fatalf("converger called %d times, want 0", got)
+	}
+}
+
+func TestSync503WithUnparseableBodyStillMapsToConvergerUnavailable(t *testing.T) {
+	// A 503 whose body is empty or truncated still means "cannot converge".
+	// Nesting that mapping under a successful JSON parse would drop the curated
+	// explanation exactly when the peer is misbehaving.
+	client := NewClient("/unused")
+	client.http.Transport = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Body:       io.NopCloser(strings.NewReader("not json at all")),
+			Header:     make(http.Header),
+		}, nil
+	})
+	if _, err := client.Sync(t.Context(), TickFull); !errors.Is(err, ErrConvergerUnavailable) {
+		t.Fatalf("err = %v, want ErrConvergerUnavailable even with an unparseable body", err)
+	}
+}
+
+func TestSyncRouteDiscriminatorIgnoresQueryAndSiblingPaths(t *testing.T) {
+	// The 503 remap must key on the ROUTE, not a prefix of the raw path: a
+	// future /v1/sync-state would otherwise silently inherit it.
+	client := NewClient("/unused")
+	client.http.Transport = roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"nope"}`)),
+			Header:     make(http.Header),
+		}, nil
+	})
+	var out struct{}
+	err := client.request(t.Context(), client.http, http.MethodGet, "/v1/sync-state", &out)
+	if errors.Is(err, ErrConvergerUnavailable) {
+		t.Fatalf("a sibling route inherited the /v1/sync 503 remap: %v", err)
+	}
+}
+
+func TestClientSyncHasNoRequestTimeout(t *testing.T) {
+	client := NewClient("/unused")
+	deadlineSeen := make(chan bool, 1)
+	client.http.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		_, hasDeadline := req.Context().Deadline()
+		deadlineSeen <- hasDeadline
+		time.Sleep(time.Second)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body: io.NopCloser(strings.NewReader(
+				`{"mode":"full","started_at":"2026-07-28T00:00:00Z","duration_ms":1000}`,
+			)),
+		}, nil
+	})
+
+	if _, err := client.Sync(t.Context(), TickFull); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	if <-deadlineSeen {
+		t.Fatal("Sync transport received a client-timeout deadline; the 10s shared client was used")
+	}
+	if client.http.Timeout != clientTimeout {
+		t.Fatalf("shared client timeout = %s, want %s (Sync must bypass it, not mutate it)", client.http.Timeout, clientTimeout)
 	}
 }
 

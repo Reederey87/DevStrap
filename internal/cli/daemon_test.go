@@ -7,11 +7,52 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/Reederey87/DevStrap/internal/daemon"
 )
+
+type daemonTestConverger struct{}
+
+func (daemonTestConverger) Converge(_ context.Context, mode daemon.TickMode) (daemon.Result, error) {
+	return daemon.Result{
+		Mode:       mode,
+		StartedAt:  time.Now(),
+		DurationMS: 12,
+	}, nil
+}
+
+func startDaemonForCLITest(t *testing.T, converger daemon.Converger) string {
+	t.Helper()
+	home, err := os.MkdirTemp("", "dh")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	socket := filepath.Join(home, "devstrapd.sock")
+	server, err := daemon.New(daemon.Config{SocketPath: socket, Version: "test", Converger: converger})
+	if err != nil {
+		t.Fatalf("daemon.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	waitForFile(t, socket)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("daemon Serve: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Error("daemon Serve did not stop")
+		}
+	})
+	return home
+}
 
 // TestDaemonStatusReportsNotRunning covers the common case — no daemon — and
 // pins that it is reported as a fact rather than as an error. `daemon status`
@@ -320,5 +361,125 @@ func TestDaemonEventsWithoutDaemonReturnsExitCode3(t *testing.T) {
 	}
 	if got := ExitCode(err); got != exitDaemonUnavailable {
 		t.Fatalf("exit code = %d, want %d (exitDaemonUnavailable)", got, exitDaemonUnavailable)
+	}
+}
+
+func TestDaemonSyncAgainstRunningDaemon(t *testing.T) {
+	home := startDaemonForCLITest(t, daemonTestConverger{})
+	stdout, _, err := executeForTest("--home", home, "--json", "daemon", "sync", "--namespace-only")
+	if err != nil {
+		t.Fatalf("daemon sync: %v", err)
+	}
+	var result daemonSyncResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if result.Mode != daemon.TickNamespaceOnly {
+		t.Fatalf("result = %+v, want namespace-only mode", result)
+	}
+	var shape map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(stdout), &shape); err != nil {
+		t.Fatalf("decode JSON shape: %v", err)
+	}
+	if _, ok := shape["duration_ms"]; !ok {
+		t.Fatalf("JSON shape = %v, want duration_ms field", shape)
+	}
+}
+
+func TestDaemonSyncWithoutDaemonReturnsExitCode3(t *testing.T) {
+	home, err := os.MkdirTemp("", "dh")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	_, _, err = executeForTest("--home", home, "daemon", "sync")
+	if err == nil {
+		t.Fatal("daemon sync succeeded with no daemon running")
+	}
+	if got := ExitCode(err); got != exitDaemonUnavailable {
+		t.Fatalf("exit code = %d, want %d", got, exitDaemonUnavailable)
+	}
+}
+
+// blockingNamespaceConverger holds a namespace-only cycle open so a concurrent
+// full request is forced to JOIN it, reproducing the coalescing case where the
+// caller observes a weaker cycle than the one it asked for.
+type blockingNamespaceConverger struct {
+	release chan struct{}
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (c *blockingNamespaceConverger) Converge(ctx context.Context, mode daemon.TickMode) (daemon.Result, error) {
+	c.once.Do(func() { close(c.entered) })
+	select {
+	case <-c.release:
+	case <-ctx.Done():
+		return daemon.Result{}, ctx.Err()
+	}
+	return daemon.Result{Mode: mode, StartedAt: time.Now(), DurationMS: 3}, nil
+}
+
+// TestDaemonSyncDoesNotClaimSuccessForWorkItDidNotDo is the honesty contract.
+//
+// A full `daemon sync` arriving while a namespace-only cycle is in flight joins
+// that cycle and gets back mode=namespace-only, coalesced=true — no
+// materialization happened. Exiting 0 with a plain "converged" line would tell
+// a script its full sync ran when it did not.
+func TestDaemonSyncDoesNotClaimSuccessForWorkItDidNotDo(t *testing.T) {
+	c := &blockingNamespaceConverger{release: make(chan struct{}), entered: make(chan struct{})}
+	home := startDaemonForCLITest(t, c)
+
+	// Occupy the scheduler with a namespace-only cycle.
+	go func() { _, _, _ = executeForTest("--home", home, "daemon", "sync", "--namespace-only") }()
+	<-c.entered
+
+	done := make(chan string, 1)
+	go func() {
+		stdout, _, err := executeForTest("--home", home, "--json", "daemon", "sync")
+		if err != nil {
+			t.Errorf("daemon sync: %v", err)
+		}
+		done <- stdout
+	}()
+	time.Sleep(150 * time.Millisecond)
+	close(c.release)
+
+	stdout := <-done
+	var result daemonSyncResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout)
+	}
+	if result.Mode == daemon.TickFull {
+		// The retry claimed the next cycle, which is the good outcome.
+		if result.Deferred {
+			t.Fatal("reported deferred while also reporting a full cycle")
+		}
+		return
+	}
+	// Otherwise it MUST say so rather than implying the full sync ran.
+	if !result.Deferred || result.RequestedMode != daemon.TickFull {
+		t.Fatalf("observed a %s cycle for a full request but did not report it as deferred: %+v", result.Mode, result)
+	}
+}
+
+func TestDaemonSyncAgainstConvergerlessDaemonIsNotUnavailable(t *testing.T) {
+	home := startDaemonForCLITest(t, nil)
+	_, _, err := executeForTest("--home", home, "daemon", "sync")
+	if err == nil {
+		t.Fatal("daemon sync succeeded against convergerless daemon")
+	}
+	if got := ExitCode(err); got == exitDaemonUnavailable {
+		t.Fatalf("exit code = %d, must not report unavailable when daemon answered", got)
+	}
+	// The message must NOT prescribe a flag: `devstrap daemon start` always
+	// wires a converger, so a convergerless daemon is never a user
+	// misconfiguration and telling the user to restart with one would send
+	// them chasing a setting that was never wrong.
+	if !strings.Contains(err.Error(), "transport-only") {
+		t.Fatalf("error = %q, want the transport-only explanation", err)
+	}
+	if strings.Contains(err.Error(), "--hub-file") {
+		t.Fatalf("error = %q, must not prescribe a flag for a state the CLI cannot produce", err)
 	}
 }

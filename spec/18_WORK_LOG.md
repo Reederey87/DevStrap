@@ -31,6 +31,23 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-28 — M5D-02 daemon-triggered convergence
+
+Changed:
+
+- Added the validated `mode=full|namespace-only` query contract to `POST /v1/sync`, a no-timeout `Client.Sync`, and `devstrap daemon sync [--namespace-only]` with Renderer-backed human/JSON output, coalescing visibility, exit-3 unavailable handling, and a distinct convergerless-daemon remedy.
+- Generalized the daemon client's request helper across methods and client instances, and centralized daemon CLI client construction/unavailable mapping without changing `daemon status`'s exit-0 behavior.
+- Documented the API/client timeout contract, daemon-only command surface, and consistency with PR #233; added endpoint, client-timeout, and CLI regression coverage.
+- Post-review (fable-5, no blockers; three should-fixes accepted): (1) **a coalesced `daemon sync` could claim success for work it did not do** — a `full` request arriving during a `namespace-only` cycle joins it and returns `mode: namespace-only`, so exit 0 plus a "converged" line told a script its materialization had run when only the scheduler's promotion was recorded. The command now retries exactly once (the promotion makes one retry normally sufficient; a loop would spin forever against a busy watcher) and, if still weaker, reports `requested_mode` + `deferred: true` and says plainly that the requested sync has not run. This was a correctness gap in the new command's own contract, not polish. (2) The `503` → `ErrConvergerUnavailable` mapping was nested under a successful JSON parse, so an empty or truncated 503 degraded to a bare status line and lost the curated explanation exactly when the peer was misbehaving; it is now parse-independent. (3) The mapping discriminated on `strings.HasPrefix(path, "/v1/sync")` against a path carrying a query string, which a future `/v1/sync-state` would silently inherit — it now keys on the route, and a test pins that a sibling route does not inherit it. The `mode` parameter is built with `url.Values` rather than string concatenation.
+
+Validated:
+
+- `gofmt -l cmd internal`; native/Linux/Windows `go build ./...`; `go test -race -count=1 ./...`; pinned `golangci-lint` v2.12.0 (`0 issues`); and `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+
+- None.
+
 ## 2026-07-25 — feat(cli): service install --daemon + the daemon's first real-binary e2e (Milestone 5 wave close)
 
 Closes the Milestone 5 daemon wave (PRs #229–#233 plus this slice). Two capabilities and the reconciliation.
