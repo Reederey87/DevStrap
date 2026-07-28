@@ -746,7 +746,7 @@ func checkDaemonSocketPath(paths config.Paths) []checkResult {
 		return []checkResult{{
 			Name:   "daemon socket path",
 			Status: checkWarn,
-			Detail: err.Error() + "\n`devstrap daemon start` will refuse; everything else is unaffected",
+			Detail: err.Error() + "\n`devstrap daemon start` and `service install --daemon` will refuse; convergence via `devstrap sync`, `run-loop`, and a non-daemon service unit is unaffected",
 		}}
 	}
 	return []checkResult{{Name: "daemon socket path", Status: checkOK, Detail: paths.SocketPath()}}

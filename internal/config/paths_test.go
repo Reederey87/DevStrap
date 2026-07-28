@@ -45,7 +45,19 @@ func TestSocketPathLimitMatchesRealBind(t *testing.T) {
 
 func socketPathOfLength(t *testing.T, length int) string {
 	t.Helper()
-	base := filepath.Join("/tmp", "dsp")
+	// A DETERMINISTIC path here is a real flake, not a theoretical one: a
+	// SIGKILLed run never fires t.Cleanup, so the socket it left behind makes
+	// every later run fail with "address already in use" until someone removes
+	// it by hand — and this repo's normal workflow runs `go test ./...` from
+	// several worktrees at once, which collide at the bind instant. MkdirTemp
+	// gives each run its own parent; the padding then hits the exact length.
+	parent, err := os.MkdirTemp("/tmp", "dsp")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(parent) })
+
+	base := filepath.Join(parent, "d")
 	dirLength := length - len(filepath.Join(base, "s")) + len(base)
 	if dirLength <= len(base) {
 		t.Fatalf("cannot construct %d-byte socket path under %s", length, base)
@@ -54,7 +66,6 @@ func socketPathOfLength(t *testing.T, length int) string {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatalf("mkdir exact-length socket dir: %v", err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	socket := filepath.Join(dir, "s")
 	if len(socket) != length {
 		t.Fatalf("constructed socket length = %d, want %d", len(socket), length)

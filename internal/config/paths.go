@@ -55,7 +55,7 @@ func (p Paths) ValidateSocketPath() error {
 	socket := p.SocketPath()
 	if len(socket) > maxUnixSocketPath {
 		return fmt.Errorf(
-			"daemon socket path is %d bytes, over the %d-byte OS limit: %s\n"+
+			"daemon socket path is %d bytes, over DevStrap's %d-byte portable limit: %s\n"+
 				"choose a shorter state home, e.g. --home ~/.devstrap",
 			len(socket), maxUnixSocketPath, socket)
 	}

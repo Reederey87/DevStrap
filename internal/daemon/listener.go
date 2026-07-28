@@ -50,7 +50,7 @@ const maxUnixSocketPath = 103
 func Listen(socketPath string) (net.Listener, error) {
 	if len(socketPath) > maxUnixSocketPath {
 		return nil, fmt.Errorf(
-			"daemon socket path is %d bytes, over the %d-byte OS limit: %s\n"+
+			"daemon socket path is %d bytes, over DevStrap's %d-byte portable limit: %s\n"+
 				"choose a shorter state home, e.g. --home ~/.devstrap",
 			len(socketPath), maxUnixSocketPath, socketPath)
 	}
