@@ -324,7 +324,10 @@ func newDaemonStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 
 func runDaemonStatus(cmd *cobra.Command, stdout io.Writer, opts *options) error {
 	paths := opts.paths()
-	client, socket := daemonClient(opts)
+	client, socket, err := daemonClient(opts)
+	if err != nil {
+		return err
+	}
 	result := daemonStatusResult{Socket: socket}
 
 	// The socket is the source of truth: a daemon that answers is running,
@@ -421,9 +424,13 @@ func runDaemonStatus(cmd *cobra.Command, stdout io.Writer, opts *options) error 
 
 // daemonClient builds a client for this invocation's socket, returning the
 // socket path so callers can name it in errors.
-func daemonClient(opts *options) (*daemon.Client, string) {
-	socket := opts.paths().SocketPath()
-	return daemon.NewClient(socket), socket
+func daemonClient(opts *options) (*daemon.Client, string, error) {
+	paths := opts.paths()
+	socket := paths.SocketPath()
+	if err := paths.ValidateSocketPath(); err != nil {
+		return nil, socket, appError{code: exitInvalidConfig, err: err}
+	}
+	return daemon.NewClient(socket), socket, nil
 }
 
 // daemonUnavailable is the shared mapping for "no daemon is listening". Only
@@ -578,8 +585,11 @@ func newDaemonEventsCommand(stdout io.Writer, opts *options) *cobra.Command {
 			"`devstrap status` remains the source of truth.",
 		Args: usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, socket := daemonClient(opts)
-			err := client.Events(cmd.Context(), func(event daemon.Event) {
+			client, socket, err := daemonClient(opts)
+			if err != nil {
+				return err
+			}
+			err = client.Events(cmd.Context(), func(event daemon.Event) {
 				line := fmt.Sprintf("%s  %s", event.At.Format(time.RFC3339), event.Kind)
 				if event.Detail != "" {
 					line += "  " + event.Detail
@@ -614,7 +624,10 @@ func newDaemonSyncCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if namespaceOnly {
 				mode = daemon.TickNamespaceOnly
 			}
-			client, socket := daemonClient(opts)
+			client, socket, err := daemonClient(opts)
+			if err != nil {
+				return err
+			}
 			result, err := client.Sync(cmd.Context(), mode)
 			// A full request that arrives mid-cycle JOINS the weaker cycle
 			// already running and returns its result: coalesced, mode

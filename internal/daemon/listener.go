@@ -28,6 +28,11 @@ var ErrAlreadyRunning = errors.New("daemon: already running")
 // immediately or it is not there.
 const dialProbeTimeout = 250 * time.Millisecond
 
+// maxUnixSocketPath must match config.maxUnixSocketPath. The daemon package
+// deliberately stays independent of config, so TestListenConstantsAgree pins
+// the duplicated platform boundary against config's validator.
+const maxUnixSocketPath = 103
+
 // Listen creates the daemon's Unix domain socket, taking over a stale socket
 // left behind by a crashed process but refusing to displace a live one.
 //
@@ -43,6 +48,12 @@ const dialProbeTimeout = 250 * time.Millisecond
 // carries umask-derived permissions. That window is why the 0700 directory is
 // the load-bearing control rather than the socket mode.
 func Listen(socketPath string) (net.Listener, error) {
+	if len(socketPath) > maxUnixSocketPath {
+		return nil, fmt.Errorf(
+			"daemon socket path is %d bytes, over the %d-byte OS limit: %s\n"+
+				"choose a shorter state home, e.g. --home ~/.devstrap",
+			len(socketPath), maxUnixSocketPath, socketPath)
+	}
 	dir := filepath.Dir(socketPath)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("daemon: create socket dir: %w", err)
@@ -57,6 +68,12 @@ func Listen(socketPath string) (net.Listener, error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("daemon: secure socket dir: %w", err)
 	}
+
+	unlock, err := lockSocketTakeover(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	if err := clearStaleSocket(socketPath); err != nil {
 		return nil, err

@@ -31,6 +31,24 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-28 — M5D-03 socket-lifecycle hardening
+
+Changed:
+
+- Added a portable 103-byte Unix-socket path guard at config, listener, shared daemon-client, and doctor boundaries, with invalid-config CLI classification and actionable shorter-home guidance.
+- Serialized stale-socket probe, removal, bind, and chmod under a kernel-released advisory `flock` on the permanent state-home `devstrapd.lock` fixture, preventing concurrent starts from unlinking and rebinding over one another while preserving all live/non-socket refusals.
+- Added boundary, real-bind, constant-agreement, concurrent-election, CLI exit-class, and doctor grading regressions; documented the socket-path constraint and takeover lock.
+- **`doctor` WARNS rather than errors on an over-long socket path**, and that grading is the substantive call here. `checkError` makes `devstrap doctor` exit non-zero, which is disproportionate for a subsystem that is optional by design: correctness rides on periodic convergence, every command works without a daemon, and a user may never start one. An otherwise-healthy workspace must not fail its health check over it. The first cut graded it `checkError`, which cascaded — eight `.txtar` scripts and four `_test.go` files had to be rewritten onto short state homes purely so their `doctor` invocations would keep passing. Downgrading to `checkWarn` made all of that churn unnecessary and it was reverted; the whole diff is now confined to files this change actually concerns, and `cmd/devstrap`'s testscripts pass on their original long `$WORK` homes. The warning states the real consequence (`devstrap daemon start` will refuse) instead of implying the workspace is broken.
+- The real-bind test pins each kernel's ACTUAL behavior rather than the constant, which surfaced a genuine platform asymmetry: a 104-byte path fails on darwin but still binds on Linux (whose `sun_path` is 108). DevStrap rejects >103 everywhere anyway — a workspace that works on a Mac must work on Linux, and the reverse surprise is worse than four bytes of headroom.
+
+Validated:
+
+- `gofmt -l cmd internal`; native/Linux/Windows `go build ./...`; `go test -race -count=1 ./...`; the concurrent takeover regression 10× under `-race`; and pinned `golangci-lint` v2.12.0 (`0 issues`).
+
+Follow-ups:
+
+- None.
+
 ## 2026-07-28 — M5D-02 daemon-triggered convergence
 
 Changed:

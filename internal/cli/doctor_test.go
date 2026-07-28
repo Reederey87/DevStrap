@@ -8,12 +8,30 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Reederey87/DevStrap/internal/config"
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
 	"github.com/spf13/viper"
 )
+
+func TestDoctorChecksDaemonSocketPath(t *testing.T) {
+	normal := checkDaemonSocketPath(config.Paths{Home: filepath.Join(string(filepath.Separator), "tmp", "devstrap")})
+	if len(normal) != 1 || normal[0].Status != checkOK {
+		t.Fatalf("normal socket check = %+v, want ok", normal)
+	}
+
+	overlong := checkDaemonSocketPath(config.Paths{Home: filepath.Join(string(filepath.Separator), strings.Repeat("h", 120))})
+	// checkWarn, NOT checkError: doctor's exit code must not fail over an
+	// optional subsystem in an otherwise healthy workspace.
+	if len(overlong) != 1 || overlong[0].Status != checkWarn {
+		t.Fatalf("over-long socket check = %+v, want warning", overlong)
+	}
+	if !strings.Contains(overlong[0].Detail, "choose a shorter state home") {
+		t.Fatalf("over-long detail = %q, want actionable remedy", overlong[0].Detail)
+	}
+}
 
 func TestDoctorErrorsOnOpenHubHashChainBreak(t *testing.T) {
 	env, store, _ := setupRecovery(t, true)

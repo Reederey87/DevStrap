@@ -9,10 +9,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Reederey87/DevStrap/internal/config"
 	"github.com/Reederey87/DevStrap/internal/platform"
 )
 
@@ -188,6 +190,74 @@ func TestListenRefusesNonSocketPath(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("Listen removed a file it did not create: %v", err)
+	}
+}
+
+func TestListenConstantsAgree(t *testing.T) {
+	atLimit := config.Paths{Home: strings.Repeat("h", maxUnixSocketPath-len("/devstrapd.sock"))}
+	if got := len(atLimit.SocketPath()); got != maxUnixSocketPath {
+		t.Fatalf("test path length = %d, want %d", got, maxUnixSocketPath)
+	}
+	if err := atLimit.ValidateSocketPath(); err != nil {
+		t.Fatalf("config rejected daemon package's at-limit path: %v", err)
+	}
+	overLimit := config.Paths{Home: atLimit.Home + "h"}
+	if err := overLimit.ValidateSocketPath(); err == nil {
+		t.Fatal("config accepted daemon package's over-limit path")
+	}
+}
+
+func TestConcurrentListenTakeoverElectsOneWinner(t *testing.T) {
+	socket := tempSocketPath(t)
+	stale, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("create stale socket: %v", err)
+	}
+	unixListener, ok := stale.(*net.UnixListener)
+	if !ok {
+		t.Fatalf("listener is %T, want *net.UnixListener", stale)
+	}
+	unixListener.SetUnlinkOnClose(false)
+	if err := stale.Close(); err != nil {
+		t.Fatalf("close stale listener: %v", err)
+	}
+
+	const contenders = 8
+	start := make(chan struct{})
+	results := make(chan struct {
+		listener net.Listener
+		err      error
+	}, contenders)
+	var ready sync.WaitGroup
+	ready.Add(contenders)
+	for range contenders {
+		go func() {
+			ready.Done()
+			<-start
+			listener, listenErr := Listen(socket)
+			results <- struct {
+				listener net.Listener
+				err      error
+			}{listener: listener, err: listenErr}
+		}()
+	}
+	ready.Wait()
+	close(start)
+
+	winners := 0
+	for range contenders {
+		result := <-results
+		if result.err == nil {
+			winners++
+			t.Cleanup(func() { _ = result.listener.Close() })
+			continue
+		}
+		if !errors.Is(result.err, ErrAlreadyRunning) {
+			t.Errorf("losing Listen err = %v, want ErrAlreadyRunning", result.err)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("successful listeners = %d, want exactly 1", winners)
 	}
 }
 

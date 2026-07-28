@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-24
+last_reviewed: 2026-07-28
 tracks_code: [cmd/**, internal/**, internal/config/**, .github/**, .goreleaser.yaml, scripts/**]
 ---
 # System Architecture
@@ -124,7 +124,7 @@ Responsibilities:
 - serve local API;
 - write logs and audit events.
 
-**Transport core shipped (2026-07-24).** "Serve local API" is now real: `internal/daemon` implements the HTTP+JSON-over-Unix-socket transport at `~/.devstrap/devstrapd.sock` — socket lifecycle with stale-socket takeover, connection-time peer-credential authorization (fail-closed; root not exempt), `Origin`/`Referer`/`Host` request hardening, a version header on every response, and `GET /v1/health` + `GET /v1/version`. It is **transport only**: no convergence logic, no command imports, so the dependency arrow points `daemon → core` and never `daemon → cobra`. The remaining responsibilities above (watch, sync, reconcile, jobs, policy) arrive in later slices of the wave. See `13_CLI_DAEMON_API.md` for the wire contract and `15_SECURITY_THREAT_MODEL.md` for the socket's threat entry.
+**Transport core shipped (2026-07-24; lifecycle hardened 2026-07-28).** "Serve local API" is now real: `internal/daemon` implements the HTTP+JSON-over-Unix-socket transport at `~/.devstrap/devstrapd.sock` — socket lifecycle with stale-socket takeover, connection-time peer-credential authorization (fail-closed; root not exempt), `Origin`/`Referer`/`Host` request hardening, a version header on every response, and `GET /v1/health` + `GET /v1/version`. Socket paths are rejected above the portable darwin-derived 103-byte usable maximum before bind or client construction. Concurrent stale-socket takeover is serialized across probe → remove → bind → chmod by a non-blocking advisory `flock` on the permanent state-home `devstrapd.lock`; kernel release on process exit prevents a killed starter from wedging its successor. It is **transport only**: no convergence logic, no command imports, so the dependency arrow points `daemon → core` and never `daemon → cobra`. The remaining responsibilities above (watch, sync, reconcile, jobs, policy) arrive in later slices of the wave. See `13_CLI_DAEMON_API.md` for the wire contract and `15_SECURITY_THREAT_MODEL.md` for the socket's threat entry.
 
 **Engine seam (`ARCH2-01`):** these responsibilities (reconciler, materializer, worktree manager, secret broker, policy engine) are today implemented as Cobra command closures inside `internal/cli`, not a separate package. Extract a thin `internal/engine` exposing intent-level operations (`Hydrate`, `NewWorktree`, `RunAgent`, `Sync`) so the daemon's job handlers and the CLI call the same core — otherwise the daemon phase must begin with a large, risky extraction from `internal/cli`.
 

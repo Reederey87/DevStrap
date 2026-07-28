@@ -269,6 +269,7 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 	results = append(results, checkTool("gh", false))
 	results = append(results, checkTool("go", false))
 	results = append(results, checkStateHome(paths)...)
+	results = append(results, checkDaemonSocketPath(paths)...)
 	results = append(results, checkRestoreJournal(paths.Home)...)
 	if _, err := os.Stat(paths.StateDB()); err == nil {
 		store, err := opts.openState(ctx)
@@ -729,6 +730,26 @@ func checkStateHome(paths config.Paths) []checkResult {
 	}
 	out = append(out, checkResult{Name: "state home", Status: checkOK, Detail: fmt.Sprintf("%s (mode %s)", paths.Home, stat.Mode().Perm())})
 	return out
+}
+
+// checkDaemonSocketPath warns — it does NOT error — when the state home makes
+// the daemon socket path unbindable.
+//
+// checkError makes `devstrap doctor` exit non-zero, and that would be
+// disproportionate here: the daemon is optional by design (correctness rides on
+// periodic convergence, and every command works without one), so a workspace
+// that is healthy in every other respect must not fail its health check over a
+// subsystem the user may never start. A warning states the real consequence —
+// `devstrap daemon start` will refuse — and leaves the exit code alone.
+func checkDaemonSocketPath(paths config.Paths) []checkResult {
+	if err := paths.ValidateSocketPath(); err != nil {
+		return []checkResult{{
+			Name:   "daemon socket path",
+			Status: checkWarn,
+			Detail: err.Error() + "\n`devstrap daemon start` will refuse; everything else is unaffected",
+		}}
+	}
+	return []checkResult{{Name: "daemon socket path", Status: checkOK, Detail: paths.SocketPath()}}
 }
 
 func checkDB(ctx context.Context, store *state.Store) []checkResult {
