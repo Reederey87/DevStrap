@@ -31,6 +31,31 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-28 — M5D-05 daemon build-skew visibility
+
+Changed:
+
+- Recorded the daemon build header safely across ordinary and streaming client calls; added the reserved `api_version: "v1"` version payload marker and a typed upgrade error for unknown future protocols.
+- Warned once on stderr after successful daemon-only requests when real CLI and daemon build versions differ, kept matched/unknown/dev builds silent, and exposed mismatch-only `cli_version`/`version_skew` status fields.
+- Added a warning-grade doctor check with the exact daemon restart remedy and closed `CLI-05` in the daemon API contract.
+- Added daemon client/server and CLI regressions for header capture, the API marker, unknown-version rejection, warning placement, silent matching builds, and status JSON shape.
+
+- Post-review: `daemon status` originally RETURNED the unsupported-protocol error, which broke the contract the file above documents — status exits 0 whatever the run state, the same contract `service status` has. An uninterpretable daemon is exactly when a user reaches for status, so making it the one command that refuses to run would be backwards. It now reports `api_mismatch` and prints both protocol versions, still exiting 0; `daemon events` and `daemon sync`, which must genuinely speak to the daemon, still fail.
+
+- Post-review (dual: Codex + a Claude reviewer — they agreed on three findings and contradicted each other on none; **two merge blockers**, both fixed):
+  - **The prescribed remedy was wrong for this feature's own motivating case.** The warning said `devstrap daemon stop && devstrap daemon start`, but the stated trigger is an upgrade leaving a *supervised* LaunchAgent on the old binary — and `spec/13` already records that hand-stopping a supervised daemon "does not hand convergence back to anything, it just stops it": the process exits 0, both supervisors restart only on failure, and the appended `daemon start` then runs in the operator's foreground shell. Following the remedy produced exactly the broken state the spec warns about. The warning now labels both supervision modes, and `doctor` — which already queries the service manager — names the single applicable one (`service install --daemon` replaces and restarts the unit).
+  - **`daemon sync` did not honor the protocol contract `spec/13` states.** The sentence "commands that must actually *speak* to the daemon do fail on it" was true only of `daemon events`; `sync` went straight to `POST /v1/sync` and would have parsed a v2 result document as v1. It now preflights `GET /v1/version` like `events`, which also means an uninterpretable daemon is never asked to run a cycle whose result would be discarded.
+  - **A test named for the regression it existed to prevent never reproduced it.** `TestDaemonStatusReportsProtocolMismatchWithoutFailing` started an ordinary v1 daemon and asserted `api_mismatch == ""`, so a revert to `return verr` would have passed it. It now runs against a hand-rolled listener advertising `api_version: "v2"` (the real server cannot advertise a foreign protocol), with `TestDaemonSyncRefusesAnUnsupportedProtocol` covering the other half; both were verified load-bearing by reverting the fix and watching them fail. The old negative assertion survives as its own test.
+  - Also fixed: no message claims which side is stale, since the comparison is equality-only — "the running daemon predates this binary" was wrong whenever the CLI was the stale one, as was the typed error's "speaks newer protocol"; `daemon status` no longer double-reports the skew on stderr *and* stdout, because it **is** the report; `status` falls back to the header-advertised build version when the version *body* is unreadable, which is precisely when it used to render `version skew: daemon , CLI 0.1.3`; `sync` warns before the cycle instead of after minutes of cloning; `doctor` skips the version check on an over-long socket path rather than surfacing the bare `EINVAL` this corpus says a user must never see; the advertised header is clamped to 64 bytes and stripped of control characters before reaching a terminal, and a header-less response no longer erases a known version; and the four silence rules the contract promises (equal, empty, `unknown`, `dev`) are now pinned by a table — only *equal* had coverage, and an unversioned daemon normalizes to `unknown`, so mishandling it would have warned on every command.
+
+Validated:
+
+- `gofmt -l cmd internal`; native/Linux/Windows `go build ./...`; `go test -race -count=1 ./...`; pinned golangci-lint v2.12.0 (`0 issues`); and `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+
+- `doctor` builds most `Detail` strings from raw `err.Error()` (20+ call sites, all predating this change). The two touched here are scrubbed; scrubbing the rest is a file-wide question that does not belong in a version-skew PR.
+
 ## 2026-07-28 — M5D-04 supervised watch plane
 
 Changed:

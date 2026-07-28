@@ -18,6 +18,57 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
 
+func TestClientRejectsUnknownAPIVersion(t *testing.T) {
+	client := &Client{http: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{versionHeader: []string{"2.0.0"}},
+			Body:       io.NopCloser(strings.NewReader(`{"version":"2.0.0","api_version":"v2"}`)),
+		}, nil
+	})}}
+
+	_, err := client.Version(t.Context())
+	var apiErr *UnsupportedAPIVersionError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("Version error = %v, want *UnsupportedAPIVersionError", err)
+	}
+	if apiErr.APIVersion != "v2" {
+		t.Fatalf("APIVersion = %q, want %q", apiErr.APIVersion, "v2")
+	}
+	// The message names both protocols and prescribes a restart. It must NOT
+	// claim the daemon is "newer": api_version is compared for equality only, so
+	// ordering is exactly what this detection cannot establish.
+	if !strings.Contains(err.Error(), "v2") || !strings.Contains(err.Error(), "restart") {
+		t.Fatalf("Version error = %q, want both protocols and a restart remedy", err)
+	}
+	if strings.Contains(err.Error(), "newer") {
+		t.Fatalf("Version error = %q claims the daemon is newer, which equality cannot establish", err)
+	}
+}
+
+// TestRecordedDaemonVersionIsClampedAndSticky covers the two ways the advertised
+// header misbehaves: it is wire-supplied text that gets printed to a terminal,
+// and it can be missing from a later response.
+func TestRecordedDaemonVersionIsClampedAndSticky(t *testing.T) {
+	c := &Client{}
+
+	c.recordDaemonVersion("0.1.2\x1b[31mred\x07")
+	if got := c.DaemonVersion(); got != "0.1.2[31mred" {
+		t.Fatalf("DaemonVersion = %q, want control bytes stripped", got)
+	}
+
+	c.recordDaemonVersion(strings.Repeat("v", maxDaemonVersionLen+50))
+	if got := len(c.DaemonVersion()); got != maxDaemonVersionLen {
+		t.Fatalf("recorded length = %d, want clamped to %d", got, maxDaemonVersionLen)
+	}
+
+	c.recordDaemonVersion("0.1.3")
+	c.recordDaemonVersion("")
+	if got := c.DaemonVersion(); got != "0.1.3" {
+		t.Fatalf("DaemonVersion = %q; a header-less response must not erase a known version", got)
+	}
+}
+
 // fakeConverger records calls and blocks until released, so a test can hold a
 // cycle open and observe what concurrent callers do.
 type fakeConverger struct {

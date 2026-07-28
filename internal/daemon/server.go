@@ -16,13 +16,19 @@ import (
 )
 
 // versionHeader carries the daemon's build version on every response, so a
-// client CAN detect skew against its own binary. It is a header rather than a
+// client can detect skew against its own binary. It is a header rather than a
 // body field so it is available on error responses too.
-//
-// Precisely: this is version ADVERTISEMENT. Nothing reads it yet — client-side
-// skew handling arrives with a later slice — so do not describe it as
-// negotiation until a consumer exists.
 const versionHeader = "Devstrap-Daemon-Version"
+
+// apiVersion is deliberately only a reserved protocol marker, not a
+// negotiation surface. There is one API and no downgrade path or feature
+// gating; a future unknown value simply tells an older client to upgrade
+// before it can misinterpret the response.
+const apiVersion = "v1"
+
+// APIVersion reports the protocol version this build speaks, so a caller can
+// name both sides of a mismatch.
+func APIVersion() string { return apiVersion }
 
 const (
 	// readHeaderTimeout bounds header reads (gosec G112: an unbounded header
@@ -167,7 +173,25 @@ type WatchHealth struct {
 
 // Version is the /v1/version payload.
 type Version struct {
-	Version string `json:"version"`
+	Version    string `json:"version"`
+	APIVersion string `json:"api_version"`
+}
+
+// UnsupportedAPIVersionError reports that the daemon speaks a protocol this
+// client cannot safely interpret.
+type UnsupportedAPIVersionError struct {
+	APIVersion string
+}
+
+// Error deliberately does not claim the daemon is NEWER. Detection is by
+// equality, not ordering: api_version is an opaque marker, so an older daemon, a
+// malformed value, and a genuinely future one are indistinguishable here, and
+// diagnosing all three as "newer" states the one thing this comparison cannot
+// know. The remedy is still worth naming, because a mismatched local daemon is
+// overwhelmingly a half-finished upgrade.
+func (e *UnsupportedAPIVersionError) Error() string {
+	return fmt.Sprintf("daemon speaks protocol %q, which this DevStrap CLI (%s) does not support; "+
+		"restart the daemon so it runs the same build as the CLI", e.APIVersion, apiVersion)
 }
 
 func (s *Server) routes() {
@@ -240,7 +264,7 @@ func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, Version{Version: s.version})
+	writeJSON(w, http.StatusOK, Version{Version: s.version, APIVersion: apiVersion})
 }
 
 // Serve binds the socket and serves until ctx is cancelled, then drains
