@@ -216,11 +216,19 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 
 // handleSync triggers a convergence cycle, or joins one already running.
 func (s *Server) handleSync(w http.ResponseWriter, r *http.Request) {
+	mode := TickMode(r.URL.Query().Get("mode"))
+	if mode == "" {
+		mode = TickFull
+	}
+	if mode != TickFull && mode != TickNamespaceOnly {
+		writeError(w, http.StatusBadRequest, "invalid mode; accepted values are full and namespace-only")
+		return
+	}
 	if s.scheduler == nil {
 		writeError(w, http.StatusServiceUnavailable, "this daemon was started without a converger")
 		return
 	}
-	result, err := s.scheduler.Converge(r.Context(), TickFull)
+	result, err := s.scheduler.Converge(r.Context(), mode)
 	if err != nil {
 		s.logger.Warn("daemon: convergence failed", "error", redact.Scrub(err.Error()))
 		writeError(w, http.StatusInternalServerError, "convergence failed: "+redact.Scrub(err.Error()))

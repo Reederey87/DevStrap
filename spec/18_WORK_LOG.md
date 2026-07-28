@@ -31,6 +31,22 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-28 — M5D-02 daemon-triggered convergence
+
+Changed:
+
+- Added the validated `mode=full|namespace-only` query contract to `POST /v1/sync`, a no-timeout `Client.Sync`, and `devstrap daemon sync [--namespace-only]` with Renderer-backed human/JSON output, coalescing visibility, exit-3 unavailable handling, and a distinct convergerless-daemon remedy.
+- Generalized the daemon client's request helper across methods and client instances, and centralized daemon CLI client construction/unavailable mapping without changing `daemon status`'s exit-0 behavior.
+- Documented the API/client timeout contract, daemon-only command surface, and consistency with PR #233; added endpoint, client-timeout, and CLI regression coverage.
+
+Validated:
+
+- `gofmt -l cmd internal`; native/Linux/Windows `go build ./...`; `go test -race -count=1 ./...`; pinned `golangci-lint` v2.12.0 (`0 issues`); and `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+
+- None.
+
 ## 2026-07-25 — feat(cli): service install --daemon + the daemon's first real-binary e2e (Milestone 5 wave close)
 
 Closes the Milestone 5 daemon wave (PRs #229–#233 plus this slice). Two capabilities and the reconciliation.

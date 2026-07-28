@@ -21,6 +21,10 @@ import (
 // expected to fall back to reading local state directly rather than fail.
 var ErrUnavailable = errors.New("daemon: unavailable")
 
+// ErrConvergerUnavailable reports that a daemon is reachable, but it was
+// started without a convergence engine.
+var ErrConvergerUnavailable = errors.New("daemon: converger unavailable")
+
 // clientTimeout bounds a single request. The daemon is a local process, so a
 // request that has not completed in this long is wedged, not slow.
 const clientTimeout = 10 * time.Second
@@ -49,27 +53,27 @@ func NewClient(socketPath string) *Client {
 // Health reports the daemon's liveness and uptime.
 func (c *Client) Health(ctx context.Context) (Health, error) {
 	var out Health
-	err := c.get(ctx, "/v1/health", &out)
+	err := c.request(ctx, c.http, http.MethodGet, "/v1/health", &out)
 	return out, err
 }
 
 // Version reports the daemon's build version.
 func (c *Client) Version(ctx context.Context) (Version, error) {
 	var out Version
-	err := c.get(ctx, "/v1/version", &out)
+	err := c.request(ctx, c.http, http.MethodGet, "/v1/version", &out)
 	return out, err
 }
 
-func (c *Client) get(ctx context.Context, path string, out any) error {
+func (c *Client) request(ctx context.Context, requester *http.Client, method, path string, out any) error {
 	// The host is fixed so it matches the server's Host check; it is not used
 	// for routing, since the transport always dials the socket.
 	url := "http://" + socketHost + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
 	if err != nil {
 		return fmt.Errorf("daemon: build request: %w", err)
 	}
 
-	resp, err := c.http.Do(req)
+	resp, err := requester.Do(req)
 	if err != nil {
 		if isUnavailable(err) {
 			return fmt.Errorf("%w: %s", ErrUnavailable, path)
@@ -84,6 +88,9 @@ func (c *Client) get(ctx context.Context, path string, out any) error {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		var parsed errorBody
 		if json.Unmarshal(body, &parsed) == nil && parsed.Error != "" {
+			if strings.HasPrefix(path, "/v1/sync") && resp.StatusCode == http.StatusServiceUnavailable {
+				return fmt.Errorf("%w: %s", ErrConvergerUnavailable, parsed.Error)
+			}
 			return fmt.Errorf("daemon: %s: %s (status %d)", path, parsed.Error, resp.StatusCode)
 		}
 		return fmt.Errorf("daemon: %s: status %d", path, resp.StatusCode)
@@ -115,7 +122,21 @@ func isUnavailable(err error) bool {
 // Status fetches the workspace snapshot without the caller opening the store.
 func (c *Client) Status(ctx context.Context) (Status, error) {
 	var out Status
-	err := c.get(ctx, "/v1/status", &out)
+	err := c.request(ctx, c.http, http.MethodGet, "/v1/status", &out)
+	return out, err
+}
+
+// Sync asks the daemon to run (or join) one convergence cycle.
+func (c *Client) Sync(ctx context.Context, mode TickMode) (Result, error) {
+	path := "/v1/sync?mode=" + string(mode)
+	var out Result
+
+	// No client timeout on a convergence trigger: a cycle legitimately runs for
+	// minutes (blobless clone + materialize), and the shared client's 10s bound
+	// would cancel the request context and abort the cycle server-side. Bounded
+	// only by the caller's context, exactly as Events is.
+	syncer := &http.Client{Transport: c.http.Transport}
+	err := c.request(ctx, syncer, http.MethodPost, path, &out)
 	return out, err
 }
 
