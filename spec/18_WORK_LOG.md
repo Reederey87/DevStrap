@@ -31,6 +31,29 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-28 — M5D-04 supervised watch plane
+
+Changed:
+
+- Replaced the one-shot filesystem watch plane with a lifetime supervisor that preserves one hint consumer and event channel, re-discovers materialized roots every 60s, avoids re-arming unchanged sets, and retries the native watcher after degradation.
+- Added explicit idle/watching/degraded state to watch health while retaining the derived compatibility boolean; idle zero-root health is now visible on the wire rather than erased by `omitempty`.
+- Published scrubbed `watch.degraded` transitions through the daemon event bus, reusing the same closed-set kind for a single recovery notification, and added race-tested coverage for idle liveness, late materialization, stable roots, native retry, transition-only events, and idle JSON presence.
+- Updated the daemon API contract for tri-state health, independent re-discovery, native recovery, and transition-oriented watch events.
+
+- Post-review: added a fourth phase, `starting`, set at construction. `watchPhase`'s zero value is the empty string, so between daemon start and the first resolved root set `/v1/health` reported `"state": ""` — reintroducing on the wire the very ambiguity this field exists to remove (a consumer cannot tell "not started yet" from "never reported"). The window is real: resolving roots opens SQLite. Pinned by `TestWatchPhaseIsNeverEmptyOnTheWire`.
+
+- Post-review (fable-5 — one MERGE BLOCKER, fixed): the 10ms readiness heuristic defeated the plane's own contract in the flagship scenario. `addRecursiveWatch` walks the whole tree before hitting an inotify/descriptor limit, so on a large tree every 60s retry declared `watching` on the timer, published a FALSE recovery, then degraded again when the walk finally failed — a recovered/degraded pair per minute and `/v1/health` flapping, in exactly the case this plane exists to make honest. It also falsified the spec sentence "repeated failed retries while already degraded publish nothing". A retry from degraded now must survive a probation of **one full re-discovery interval** (capped at 30s) before claiming recovery; the healthy path keeps its short delay. `TestSlowFailingWatcherDoesNotFlapRecovery` pins it, and was verified load-bearing by forcing the probation back to the old value and watching it fail.
+- Post-review (Codex — one P1, fixed): the probation above and the degraded-plane re-arm cadence cancelled each other. A probation lasts one full re-discovery interval and a degraded plane re-arms on every tick, so the loop replaced its *own* probationary retry each cadence, restarting the probation forever. A recovered watcher was torn down and rebuilt every interval and recovery was never announced — the plane reported `degraded` indefinitely while the watcher underneath was healthy. Only a scheduling stall longer than the probation could break the cycle, which is why the recovery tests passed while in truth being coin flips. The re-arm decision now reads phase and probation together under one lock (`needsRearm`); the probation is released the moment its outcome is known rather than at arm exit (holding it across the polling fallback would suppress every future native retry); and it is keyed by arm generation, so a cancelled arm cannot release its replacement's probation. Pinned by `TestNeedsRearmLeavesAProbationaryArmAlone` (timing-free) and `TestRecoveryProbationSurvivesTheRediscoveryTick`, which recovers in ≤3 native arms with the fix and burns 349 without it. The first version of that integration test passed against the reintroduced bug — recovery still arrived whenever the loop stalled — so it was rewritten to count arms rather than wait for an outcome.
+- Post-review (three should-fixes accepted): a watcher exiting with no error and no cancellation now degrades instead of leaving the plane claiming `watching` with nothing armed — a liveness lie no later tick corrects, since unchanged roots plus a non-degraded phase never re-arm. A `WatchRoots` failure no longer degrades (and thereby tears down and rebuilds) a healthy live arm, since resolving roots opens SQLite and a busy-timeout blip says nothing about the watcher. And transitions now publish INSIDE the state lock, matching `scheduler.Converge`'s ordering rationale, so a concurrent transition can no longer let a consumer observe "recovered" then "degraded" while the settled state is `watching`.
+
+Validated:
+
+- `gofmt -l cmd internal`; native/Linux/Windows `go build ./...`; `go test -race -count=1 ./...`; `go test -race -count=10 ./internal/daemon/`; pinned `golangci-lint` v2.12.0 (`0 issues`); and `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+
+- None.
+
 ## 2026-07-28 — M5D-03 socket-lifecycle hardening
 
 Changed:

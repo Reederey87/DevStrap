@@ -120,7 +120,7 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Converger != nil {
 		s.scheduler = newScheduler(cfg.Converger, s.events)
 		if cfg.Watcher != nil && cfg.WatchSource != nil {
-			s.watch = newWatchPlane(cfg.Watcher, cfg.WatchFallback, cfg.WatchSource, s.scheduler, logger)
+			s.watch = newWatchPlane(cfg.Watcher, cfg.WatchFallback, cfg.WatchSource, s.scheduler, logger, s.events)
 		}
 	}
 	s.routes()
@@ -157,10 +157,11 @@ type Health struct {
 // WatchHealth is the watch plane's contribution to /v1/health.
 type WatchHealth struct {
 	Enabled  bool   `json:"enabled"`
+	State    string `json:"state"`
 	Backend  string `json:"backend,omitempty"`
-	Degraded bool   `json:"degraded,omitempty"`
+	Degraded bool   `json:"degraded"`
 	Reason   string `json:"reason,omitempty"`
-	Roots    int    `json:"roots,omitempty"`
+	Roots    int    `json:"roots"`
 	Hints    uint64 `json:"hints,omitempty"`
 }
 
@@ -204,6 +205,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		ws := s.watch.snapshot()
 		health.Watch = WatchHealth{
 			Enabled:  true,
+			State:    string(ws.Phase),
 			Backend:  ws.Backend,
 			Degraded: ws.Degraded,
 			Reason:   redact.Scrub(ws.Reason),
