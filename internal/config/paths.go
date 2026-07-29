@@ -1,9 +1,17 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 )
+
+// maxUnixSocketPath is the longest usable Unix socket path. sockaddr_un.sun_path
+// is a 104-byte array on darwin (108 on Linux) and the kernel needs room for the
+// terminating NUL, so the usable maximum is one less. We apply darwin's tighter
+// bound everywhere: a workspace that works on a Mac must work on Linux, and the
+// reverse surprise is worse than 4 bytes of headroom.
+const maxUnixSocketPath = 103
 
 type Paths struct {
 	Home string
@@ -38,4 +46,18 @@ func (p Paths) KeyDir() string {
 // per-user directory that already guards state.db and the key store.
 func (p Paths) SocketPath() string {
 	return filepath.Join(p.Home, "devstrapd.sock")
+}
+
+// ValidateSocketPath reports whether the daemon socket path can actually be
+// bound. Callers should invoke it BEFORE net.Listen (which fails with a bare
+// EINVAL) and before building a client (which cannot classify that EINVAL).
+func (p Paths) ValidateSocketPath() error {
+	socket := p.SocketPath()
+	if len(socket) > maxUnixSocketPath {
+		return fmt.Errorf(
+			"daemon socket path is %d bytes, over DevStrap's %d-byte portable limit: %s\n"+
+				"choose a shorter state home, e.g. --home ~/.devstrap",
+			len(socket), maxUnixSocketPath, socket)
+	}
+	return nil
 }

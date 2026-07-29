@@ -31,6 +31,29 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-28 — M5D-03 socket-lifecycle hardening
+
+Changed:
+
+- Added a portable 103-byte Unix-socket path guard at config, listener, shared daemon-client, and doctor boundaries, with invalid-config CLI classification and actionable shorter-home guidance.
+- Serialized stale-socket probe, removal, bind, and chmod under a kernel-released advisory `flock` on the permanent state-home `devstrapd.lock` fixture, preventing concurrent starts from unlinking and rebinding over one another while preserving all live/non-socket refusals.
+- Added boundary, real-bind, constant-agreement, concurrent-election, CLI exit-class, and doctor grading regressions; documented the socket-path constraint and takeover lock.
+- **`doctor` WARNS rather than errors on an over-long socket path**, and that grading is the substantive call here. `checkError` makes `devstrap doctor` exit non-zero, which is disproportionate for a subsystem that is optional by design: correctness rides on periodic convergence, every command works without a daemon, and a user may never start one. An otherwise-healthy workspace must not fail its health check over it. The first cut graded it `checkError`, which cascaded — eight `.txtar` scripts and four `_test.go` files had to be rewritten onto short state homes purely so their `doctor` invocations would keep passing. Downgrading to `checkWarn` made all of that churn unnecessary and it was reverted; the whole diff is now confined to files this change actually concerns, and `cmd/devstrap`'s testscripts pass on their original long `$WORK` homes. The warning states the real consequence (`devstrap daemon start` will refuse) instead of implying the workspace is broken.
+- The real-bind test pins each kernel's ACTUAL behavior rather than the constant, which surfaced a genuine platform asymmetry: a 104-byte path fails on darwin but still binds on Linux (whose `sun_path` is 108). DevStrap rejects >103 everywhere anyway — a workspace that works on a Mac must work on Linux, and the reverse surprise is worse than four bytes of headroom.
+
+- Post-review (fable-5, no blockers; three should-fixes accepted): (1) `TestSocketPathLimitMatchesRealBind` built its exact-length path deterministically under `/tmp`, which the reviewer REPRODUCED as a real failure — a SIGKILLed run never fires `t.Cleanup`, so its leftover socket makes every later run fail `address already in use` until removed by hand, and this repo routinely runs `go test ./...` from several worktrees at once. Now `os.MkdirTemp` per run. (2) The error said "over the N-byte OS limit", which is false on Linux (107 usable): 103 is DevStrap's darwin-derived PORTABLE limit, and the message now says so. (3) `service install --daemon` performed no socket-path validation, so it would happily install a unit whose supervised `daemon start` then refused on every launch — a launchd/systemd crash-loop diagnosable only from logs. It now refuses up front with `exitInvalidConfig`, pinned by `TestServiceInstallDaemonRefusesOverLongSocketPath`, and the `doctor` warning no longer overclaims "everything else is unaffected" (it names `service install --daemon` too, and states that `sync`/`run-loop`/non-daemon units are unaffected).
+- That third fix immediately caught two pre-existing tests whose `t.TempDir()` homes exceed the limit *because `t.TempDir()` embeds the test name* — exactly the class of misconfiguration the guard exists to surface. Both moved to the established `shortTestDir` helper.
+
+- Post-review (Codex, dual review — one P2 accepted): `daemon start` did not classify its own new failure. `Listen` returns a plain error and `runDaemonStart` maps only `ErrAlreadyRunning`, so the SAME over-long path exited generic(1) from `daemon start` while exiting `exitInvalidConfig`(2) from every client command and from `service install --daemon` — three exit classes for one condition, and the spec had just documented the invalid-config behaviour. `runDaemonStart` now validates up front. Pinned by `TestDaemonStartOnOverLongSocketPathIsConfigError`. (Worth noting the two reviewers were complementary here: fable-5 found the deterministic-path flake, the inaccurate Linux error text, and the missing `service install --daemon` guard; Codex found the exit-code inconsistency none of those touched.)
+
+Validated:
+
+- `gofmt -l cmd internal`; native/Linux/Windows `go build ./...`; `go test -race -count=1 ./...`; the concurrent takeover regression 10× under `-race`; and pinned `golangci-lint` v2.12.0 (`0 issues`).
+
+Follow-ups:
+
+- None.
+
 ## 2026-07-28 — M5D-02 daemon-triggered convergence
 
 Changed:

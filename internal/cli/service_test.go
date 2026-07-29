@@ -136,6 +136,35 @@ func TestServiceInstallBuildsRunLoopArgs(t *testing.T) {
 	}
 }
 
+// TestServiceInstallDaemonRefusesOverLongSocketPath pins that the install
+// refuses UP FRONT rather than handing the supervisor a unit that can never
+// work. `daemon start` rejects an over-long socket path, so without this check
+// launchd/systemd would restart a process that fails identically every time —
+// a crash-loop the operator can only diagnose from logs.
+func TestServiceInstallDaemonRefusesOverLongSocketPath(t *testing.T) {
+	f := &fakeServiceManager{}
+	withFakeService(t, f)
+	home := filepath.Join(t.TempDir(), strings.Repeat("d", 120))
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	_, _, err := executeForTest(
+		"--home", home,
+		"service", "install",
+		"--daemon",
+		"--exec-path", "/usr/local/bin/devstrap",
+	)
+	if err == nil {
+		t.Fatal("install --daemon succeeded with an unbindable socket path")
+	}
+	if got := ExitCode(err); got != exitInvalidConfig {
+		t.Fatalf("exit code = %d, want %d (a misconfiguration, not a generic failure)", got, exitInvalidConfig)
+	}
+	if f.installedSpec != nil {
+		t.Fatal("a unit was installed despite the refusal")
+	}
+}
+
 func TestServiceDaemonArgs(t *testing.T) {
 	f := &fakeServiceManager{}
 	withFakeService(t, f)
@@ -165,7 +194,7 @@ func TestServiceDaemonArgs(t *testing.T) {
 func TestServiceInstallDaemonModeBakesDaemonStart(t *testing.T) {
 	f := &fakeServiceManager{}
 	withFakeService(t, f)
-	home := t.TempDir()
+	home := shortTestDir(t) // daemon-mode install validates the socket path; t.TempDir() embeds the test name and overruns sun_path
 	_, _, err := executeForTest(
 		"--home", home,
 		"service", "install",
@@ -197,7 +226,9 @@ func TestServiceInstallWarnsOnModeChange(t *testing.T) {
 	}
 	withFakeService(t, f)
 	_, stderr, err := executeForTest(
-		"--home", t.TempDir(),
+		// shortTestDir, not t.TempDir(): daemon-mode install validates the
+		// socket path, and t.TempDir() embeds this test's long name.
+		"--home", shortTestDir(t),
 		"service", "install",
 		"--daemon",
 		"--hub-file", filepath.Join(t.TempDir(), "hub.json"),
@@ -479,7 +510,7 @@ func TestServiceInstallUnsetCustodyWarns(t *testing.T) {
 func TestServiceInstallPreservesBehaviorBeforeInit(t *testing.T) {
 	f := &fakeServiceManager{nameVal: "systemd-user"}
 	withFakeService(t, f)
-	home := t.TempDir()
+	home := shortTestDir(t) // daemon-mode install validates the socket path; t.TempDir() embeds the test name and overruns sun_path
 	store, err := state.Open(t.Context(), filepath.Join(home, "state.db"))
 	if err != nil {
 		t.Fatal(err)

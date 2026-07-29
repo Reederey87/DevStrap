@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,23 @@ func (daemonTestConverger) Converge(_ context.Context, mode daemon.TickMode) (da
 		StartedAt:  time.Now(),
 		DurationMS: 12,
 	}, nil
+}
+
+// shortTestDir returns a state home short enough for a Unix socket path.
+//
+// t.TempDir() embeds the test name, which on darwin routinely pushes
+// <home>/devstrapd.sock past sockaddr_un's 104-byte sun_path — and now that
+// Listen validates the length up front, such a test fails on the guard rather
+// than on a bare EINVAL. This is the same workaround the daemon package uses;
+// it is a test-environment constraint, not a product one.
+func shortTestDir(t *testing.T) string {
+	t.Helper()
+	home, err := os.MkdirTemp("", "dh")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	return home
 }
 
 func startDaemonForCLITest(t *testing.T, converger daemon.Converger) string {
@@ -58,7 +76,7 @@ func startDaemonForCLITest(t *testing.T, converger daemon.Converger) string {
 // pins that it is reported as a fact rather than as an error. `daemon status`
 // must exit 0 whatever the run state, the same contract `service status` has.
 func TestDaemonStatusReportsNotRunning(t *testing.T) {
-	home := t.TempDir()
+	home := shortTestDir(t)
 	stdout, _, err := executeForTest("--home", home, "daemon", "status")
 	if err != nil {
 		t.Fatalf("daemon status err = %v, want nil (status must not fail when no daemon runs)", err)
@@ -69,7 +87,7 @@ func TestDaemonStatusReportsNotRunning(t *testing.T) {
 }
 
 func TestDaemonStatusJSONShape(t *testing.T) {
-	home := t.TempDir()
+	home := shortTestDir(t)
 	stdout, _, err := executeForTest("--home", home, "--json", "daemon", "status")
 	if err != nil {
 		t.Fatalf("daemon status --json err = %v", err)
@@ -148,6 +166,43 @@ func TestDaemonRecordAliveRejectsRecycledPID(t *testing.T) {
 	// being treated as dead.
 	if !daemonRecordAlive(daemonRecord{PID: self, StartedAt: 0}) {
 		t.Fatal("a record without a start identity should fall back to liveness")
+	}
+}
+
+// TestDaemonStartOnOverLongSocketPathIsConfigError pins that one condition has
+// one exit class. Listen returns a plain error and runDaemonStart maps only
+// ErrAlreadyRunning, so without an explicit check the same over-long path
+// exits generic(1) here while exiting exitInvalidConfig(2) from every client
+// command and from `service install --daemon`.
+func TestDaemonStartOnOverLongSocketPathIsConfigError(t *testing.T) {
+	home := filepath.Join(t.TempDir(), strings.Repeat("d", 120))
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	_, _, err := executeForTest("--home", home, "daemon", "start", "--hub-file", filepath.Join(t.TempDir(), "hub.json"))
+	if err == nil {
+		t.Fatal("daemon start succeeded with an unbindable socket path")
+	}
+	if got := ExitCode(err); got != exitInvalidConfig {
+		t.Fatalf("exit code = %d, want %d (same class as the client commands)", got, exitInvalidConfig)
+	}
+}
+
+func TestClientCommandOnOverLongSocketPathIsConfigError(t *testing.T) {
+	home := filepath.Join(string(filepath.Separator), strings.Repeat("h", 120))
+	_, stderr, err := executeForTest("--home", home, "daemon", "status")
+	if err == nil {
+		t.Fatal("daemon status accepted an over-long socket path")
+	}
+	var app appError
+	if !errors.As(err, &app) || app.code != exitInvalidConfig {
+		t.Fatalf("err = %v, want appError code %d", err, exitInvalidConfig)
+	}
+	if strings.Contains(strings.ToLower(stderr), "invalid argument") {
+		t.Fatalf("stderr = %q, want actionable validation rather than raw EINVAL", stderr)
+	}
+	if !strings.Contains(stderr, "choose a shorter state home") {
+		t.Fatalf("stderr = %q, want shorter-home remedy", stderr)
 	}
 }
 

@@ -581,5 +581,14 @@ func serviceRunLoopArgs(cmd *cobra.Command, opts *options, interval time.Duratio
 }
 
 func serviceDaemonArgs(cmd *cobra.Command, opts *options, interval time.Duration, namespaceOnly bool, hubFile string) ([]string, error) {
+	// Refuse up front rather than installing a unit that cannot work. A
+	// daemon-mode unit supervises `daemon start`, which now REFUSES an
+	// over-long socket path — so without this check the install succeeds and
+	// launchd/systemd then restarts a process that fails identically every
+	// time. A crash-loop discovered from logs is a far worse experience than
+	// an install that says why it stopped.
+	if err := opts.paths().ValidateSocketPath(); err != nil {
+		return nil, appError{code: exitInvalidConfig, err: err}
+	}
 	return serviceConvergenceArgs(cmd, opts, []string{"daemon", "start"}, interval, namespaceOnly, hubFile)
 }
