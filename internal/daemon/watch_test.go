@@ -437,6 +437,92 @@ func TestSlowFailingWatcherDoesNotFlapRecovery(t *testing.T) {
 	}
 }
 
+// TestRecoveryProbationSurvivesTheRediscoveryTick pins the interaction between
+// the two mechanisms added here, which cancelled each other. A probation lasts a
+// full re-discovery interval, and a degraded plane re-arms on every tick — so if
+// the loop treats its own probationary retry as just another degraded arm to
+// replace, the tick tears it down and restarts the probation forever: descriptors
+// rebuilt every cadence, recovery never announced, permanently degraded despite a
+// perfectly healthy watcher.
+//
+// The interval here is deliberately shorter than the probation floor, so the tick
+// ALWAYS lands mid-probation instead of racing it. That makes the failure
+// deterministic rather than a coin flip.
+func TestRecoveryProbationSurvivesTheRediscoveryTick(t *testing.T) {
+	s := newScheduler(newFakeConverger(), nil)
+	native := &controlledWatcher{name: "native", fail: true}
+	plane := newWatchPlane(native, &stubWatcher{name: "poll"}, stubSource{roots: []string{t.TempDir()}}, s, quietLogger(), nil)
+	// A 5ms cadence against the 10ms probation floor: every tick fires while
+	// the retry is still on probation.
+	plane.rediscoverInterval = 5 * time.Millisecond
+	if plane.recoveryProbation() <= plane.rediscoverInterval {
+		t.Fatalf("probation %v must exceed interval %v for this test to exercise the tick collision",
+			plane.recoveryProbation(), plane.rediscoverInterval)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go plane.run(ctx)
+	waitFor(t, func() bool { return plane.snapshot().Phase == watchPhaseDegraded })
+
+	// The count at the moment the watcher turns healthy is the baseline: a
+	// probation that survives recovers on the FIRST retry after this point,
+	// while one that is cancelled every tick burns an arm per cadence and
+	// recovers only if the loop happens to stall past the probation.
+	native.setFail(false)
+	before := native.count()
+	waitFor(t, func() bool {
+		st := plane.snapshot()
+		return st.Phase == watchPhaseWatching && st.Backend == "native"
+	})
+	if spent := native.count() - before; spent > 3 {
+		t.Fatalf("recovery consumed %d native arms, want at most a few: the probation is being restarted every tick", spent)
+	}
+
+	// And the recovered arm is then left alone rather than rebuilt every tick.
+	settled := native.count()
+	time.Sleep(60 * time.Millisecond)
+	if got := native.count(); got != settled {
+		t.Fatalf("native watcher re-armed %d more times after recovery, want a stable arm", got-settled)
+	}
+}
+
+// TestNeedsRearmLeavesAProbationaryArmAlone pins the predicate itself, with no
+// timing involved: it is the direct statement of the rule that the integration
+// test above can only observe indirectly.
+func TestNeedsRearmLeavesAProbationaryArmAlone(t *testing.T) {
+	roots := []string{"/a", "/b"}
+	newPlane := func(phase watchPhase, probation uint64) *watchPlane {
+		p := newWatchPlane(nil, nil, stubSource{}, nil, quietLogger(), nil)
+		p.state.Phase = phase
+		p.probationArm = probation
+		return p
+	}
+
+	cases := []struct {
+		name      string
+		phase     watchPhase
+		probation uint64
+		current   []string
+		armAlive  bool
+		want      bool
+	}{
+		{"degraded and polling re-arms to retry native", watchPhaseDegraded, 0, roots, true, true},
+		{"degraded but on probation is left alone", watchPhaseDegraded, 7, roots, true, false},
+		{"a dead arm always re-arms, probation or not", watchPhaseDegraded, 7, roots, false, true},
+		{"changed roots always re-arm, probation or not", watchPhaseDegraded, 7, []string{"/a"}, true, true},
+		{"a healthy watching arm is left alone", watchPhaseWatching, 0, roots, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newPlane(tc.phase, tc.probation)
+			if got := p.needsRearm(tc.current, roots, tc.armAlive); got != tc.want {
+				t.Fatalf("needsRearm = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWatchDegradedPublishesOncePerTransition(t *testing.T) {
 	s := newScheduler(newFakeConverger(), nil)
 	native := &controlledWatcher{name: "native", fail: true}

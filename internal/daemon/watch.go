@@ -103,6 +103,13 @@ type watchPlane struct {
 
 	mu    sync.Mutex
 	state watchState
+	// probationArm is the generation of the arm currently serving a recovery
+	// probation, or 0 for none. It is control state, deliberately not part of
+	// watchState: nothing reports it, and the re-discovery loop is its only
+	// consumer. A generation rather than a boolean because a cancelled arm and
+	// its replacement overlap briefly — the outgoing arm must not clear a flag
+	// the incoming one just set.
+	probationArm uint64
 }
 
 // logger is the tiny slice of *slog.Logger this file needs, so tests can assert
@@ -131,6 +138,39 @@ func (p *watchPlane) snapshot() watchState {
 	return p.state
 }
 
+// beginProbation marks gen as the arm serving a recovery probation.
+func (p *watchPlane) beginProbation(gen uint64) {
+	p.mu.Lock()
+	p.probationArm = gen
+	p.mu.Unlock()
+}
+
+// endProbation clears the probation only if gen still owns it, so a cancelled
+// arm cannot clear the probation of the arm that replaced it.
+func (p *watchPlane) endProbation(gen uint64) {
+	p.mu.Lock()
+	if p.probationArm == gen {
+		p.probationArm = 0
+	}
+	p.mu.Unlock()
+}
+
+// needsRearm decides whether the re-discovery loop should replace the current
+// arm. Reading the phase and the probation together under one lock is the point:
+// a degraded plane retries native on every cadence, EXCEPT when the arm it
+// already has IS that retry and is still serving its probation. Cancelling that
+// arm would restart the probation on every tick — and since a probation is one
+// full interval, the tick would always win, so a genuinely recovered watcher
+// would be torn down and rebuilt forever without ever announcing recovery.
+func (p *watchPlane) needsRearm(current, roots []string, armAlive bool) bool {
+	if !armAlive || !sameRoots(current, roots) {
+		return true
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.state.Phase == watchPhaseDegraded && p.probationArm == 0
+}
+
 func (p *watchPlane) setState(fn func(*watchState)) {
 	p.mu.Lock()
 	fn(&p.state)
@@ -155,6 +195,7 @@ func (p *watchPlane) run(ctx context.Context) {
 	var current []string
 	var cancelArm context.CancelFunc
 	var armDone chan struct{}
+	var armGen uint64
 	// armAlive reports whether the arm we last started is still running. A
 	// finished arm has closed its channel.
 	armAlive := func() bool {
@@ -198,7 +239,7 @@ func (p *watchPlane) run(ctx context.Context) {
 			stopArm()
 			p.idle()
 		default:
-			if !sameRoots(current, roots) || p.snapshot().Phase == watchPhaseDegraded || !armAlive() {
+			if p.needsRearm(current, roots, armAlive()) {
 				if cancelArm != nil {
 					cancelArm()
 				}
@@ -207,9 +248,11 @@ func (p *watchPlane) run(ctx context.Context) {
 				cancelArm = cancel
 				done := make(chan struct{})
 				armDone = done
+				armGen++
+				gen := armGen
 				go func() {
 					defer close(done)
-					p.arm(armCtx, roots, events)
+					p.arm(armCtx, gen, roots, events)
 				}()
 			}
 		}
@@ -238,11 +281,14 @@ func (p *watchPlane) run(ctx context.Context) {
 // finally failed, once per retry: precisely the flapping this plane exists to
 // eliminate. So a retry from degraded must SURVIVE a probation before it may
 // claim recovery.
-func (p *watchPlane) arm(ctx context.Context, roots []string, events chan<- platform.FSEvent) {
+func (p *watchPlane) arm(ctx context.Context, gen uint64, roots []string, events chan<- platform.FSEvent) {
 	wasDegraded := p.snapshot().Phase == watchPhaseDegraded
 	ready := nativeArmReadyDelay
 	if wasDegraded {
 		ready = p.recoveryProbation()
+		// Claim the probation so the re-discovery loop leaves this arm alone
+		// until the probation resolves, one way or the other.
+		p.beginProbation(gen)
 	}
 
 	nativeResult := make(chan error, 1)
@@ -252,6 +298,11 @@ func (p *watchPlane) arm(ctx context.Context, roots []string, events chan<- plat
 	defer timer.Stop()
 	select {
 	case err := <-nativeResult:
+		// The probation is over the moment its outcome is known — not when this
+		// function returns, which for a failed native arm is after the polling
+		// fallback finally exits. Holding the probation across the polling phase
+		// would suppress every future native retry.
+		p.endProbation(gen)
 		if ctx.Err() != nil {
 			return
 		}
@@ -265,6 +316,7 @@ func (p *watchPlane) arm(ctx context.Context, roots []string, events chan<- plat
 		}
 		p.degrade("native watcher failed, polling instead: " + err.Error())
 	case <-timer.C:
+		p.endProbation(gen)
 		name := "unknown"
 		if p.watcher != nil {
 			name = p.watcher.Name()
@@ -281,6 +333,7 @@ func (p *watchPlane) arm(ctx context.Context, roots []string, events chan<- plat
 		}
 		p.degrade("native watcher failed, polling instead: " + err.Error())
 	case <-ctx.Done():
+		p.endProbation(gen)
 		return
 	}
 
@@ -297,9 +350,16 @@ func (p *watchPlane) arm(ctx context.Context, roots []string, events chan<- plat
 }
 
 // recoveryProbation is how long a retry from degraded must survive before it
-// may claim recovery. It tracks the re-discovery interval so a probation can
-// never outlast the cadence that scheduled it, and is floored so a fast test
-// interval still exercises the probation path rather than skipping it.
+// may claim recovery. It scales with the re-discovery interval — the cadence is
+// the only in-band estimate of how patient this plane should be — and is floored
+// so a fast test interval still exercises the probation path rather than
+// skipping it.
+//
+// A probation may therefore be as long as, or longer than, the interval that
+// scheduled it. That is deliberate and safe only because the loop refuses to
+// re-arm over a live probation (see needsRearm): a probation that raced the next
+// tick would be cancelled and restarted forever, and recovery would never be
+// announced at all.
 func (p *watchPlane) recoveryProbation() time.Duration {
 	interval := p.rediscoverInterval
 	if interval <= 0 {
@@ -312,6 +372,8 @@ func (p *watchPlane) recoveryProbation() time.Duration {
 	// seconds, so a full interval clears it comfortably; half an interval
 	// narrows the margin for no benefit, since nothing depends on announcing
 	// recovery sooner.
+	//
+	// The cap keeps recovery visibility bounded when the cadence is long.
 	if interval > maxRecoveryProbation {
 		return maxRecoveryProbation
 	}
