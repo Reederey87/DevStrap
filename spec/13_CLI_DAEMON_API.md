@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-28
+last_reviewed: 2026-07-29
 tracks_code: [cmd/**, internal/cli/**, internal/daemon/**, internal/platform/**]
 ---
 # CLI and Daemon API
@@ -391,7 +391,7 @@ The plane re-reads materialized watch roots on its own 60s cadence, independentl
 
 **Trigger floor.** The adapter debounces at ~250ms, but a debounce bounds burst-to-hint, not hint-to-convergence. A separate floor (`minTriggerInterval`, 5s) bounds how often hints convert to cycles, so a save-storm that outlasts one convergence cannot immediately start another. Hints arriving inside the floor are dropped rather than queued — a dropped hint costs at most one interval of latency, because periodic convergence is still running underneath.
 
-**The `roots` count is a measurement, not decoration.** It is the number the FSEvents decision in `05_MAC_FIRST_IMPLEMENTATION.md` is explicitly gated on: revisit a native FSEvents backend when a real workspace's watched-path count approaches the per-process descriptor limit.
+**The `roots` count is how many PROJECTS are being watched, not how many directories.** `WatchRoots` returns one path per materialized project, and `addRecursiveWatch` then walks each one, so a workspace reporting `roots: 12` can hold thousands of kqueue descriptors. The distinction is worth stating because an earlier draft of `05_MAC_FIRST_IMPLEMENTATION.md` treated this field as the descriptor-cost measurement the FSEvents decision is gated on; it is not, and that decision's threshold is stated in *watched directories*, which this API does not currently expose (a tracked follow-up in `14_MVP_ROADMAP_AND_BACKLOG.md`). What `roots` is good for is confirming the plane is armed over the projects you expect.
 
 **`GET /v1/status` and `GET /v1/events` (shipped 2026-07-25).** `/v1/status` serves the same workspace summary `devstrap status` prints, without the caller opening SQLite — the cheap read path a shell prompt, editor adapter, or TUI needs. It is backed by a narrow `Reader` seam, deliberately NOT a query API: a consumer wanting per-project detail opens the store itself, because making the daemon a database proxy would give it a second, drifting view of state it does not own. Without a `Reader` the endpoint answers `503` rather than an empty snapshot, which a caller could not distinguish from a genuinely empty workspace. Reader errors become a generic message — a store error string can carry a path or DSN.
 

@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-28
+last_reviewed: 2026-07-29
 tracks_code: [cmd/**, internal/**, internal/config/**, .github/**, .goreleaser.yaml, scripts/**]
 ---
 # System Architecture
@@ -383,7 +383,7 @@ Hub backends:
 
 Mac implementation:
 
-- watcher: native FSEvents binding preferred; fsnotify/kqueue acceptable for early MVP but not equivalent to FSEvents;
+- watcher: fsnotify/kqueue on darwin — not equivalent to FSEvents, but measured against it in 2026-07 and kept on the evidence (`spec/05`);
 - service: launchd LaunchAgent;
 - secrets: Keychain + external vault CLI;
 - future VFS: File Provider or macFUSE/FSKit.
@@ -491,7 +491,7 @@ As of `2026-06-30`, the repository contains the Go workspace:
 - focused tests for the implemented CLI/config/state/platform packages;
 - the cloud-sync layer (`P5`/`HUB-*`): `internal/sync` (the `Hub` interface, `FileHub`, the `EncryptedHub` envelope-encryption decorator, event apply/dedup, cursor logic), `internal/workspacekeys` (the per-epoch Workspace Content Key keyring, `P4-SEC-02`/`SEC-07`), `internal/hub` (the `R2Hub` two-plane backend with keying/retry/conditional-put/retention-floor logic and the **shipped** `aws-sdk-go-v2` `S3Adapter` behind `hubFromOptions` `r2://` wiring, `P5-HUB-01`), `internal/envbundle`/`internal/draftbundle`/`internal/ignore`/`internal/childenv`/`internal/git`/`internal/devicekeys`/`internal/redact`, `devstrap sync`/`run-loop`/`hub gc`/`devices revoke`, and an env-gated MinIO conformance test.
 
-The daemon and FSEvents-specific Mac watcher are still design targets; the service installers are SHIPPED (`devstrap service install|uninstall|status`, `P4-PROD-04` — a launchd LaunchAgent / systemd `--user` unit wrapping `run-loop`). Native platform-specific watcher or service-manager code must implement the `internal/platform` interfaces instead of branching through the core, as the shipped `LaunchdManager`/`SystemdUserManager` do.
+The daemon SHIPPED 2026-07-25 (`devstrap daemon start|stop|status|sync|events` over a peer-credential-authenticated Unix socket, with a supervised watch plane); the FSEvents-specific Mac watcher was measured against and deferred on the evidence 2026-07-29 (`spec/05`); the service installers are SHIPPED (`devstrap service install|uninstall|status`, `P4-PROD-04` — a launchd LaunchAgent / systemd `--user` unit wrapping `run-loop`). Native platform-specific watcher or service-manager code must implement the `internal/platform` interfaces instead of branching through the core, as the shipped `LaunchdManager`/`SystemdUserManager` do.
 
 ## Pass 6 audit recommendations (2026-07-01)
 
