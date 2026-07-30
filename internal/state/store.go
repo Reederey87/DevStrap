@@ -3728,6 +3728,47 @@ SELECT COUNT(*) FROM devices WHERE trust_state IN ('approved', 'revoked', 'lost'
 	return count > 0, nil
 }
 
+// Applying a forged repo.wip.dropped clears a mirror pointer only; deleting
+// the ref still requires origin push credentials. repo.wip.pushed already
+// permits equivalent denial-of-recovery by overwriting the sha so
+// fetchVerifiedWip fails closed forever. Keeping both at one tier avoids a
+// device whose pushes apply but whose retractions do not; both upgrade
+// together at Phase-2 enrollment.
+//
+// The two are equivalent in POWER but not in OBSERVABILITY, and the weaker
+// half is the new one: a forged pushed fails loudly (the row exists and
+// fetchVerifiedWip reports the sha moved), while a forged dropped renders as
+// silent absence — "No pending WIP" on the very machine someone went to for
+// recovery.
+//
+// CONSTRAINT ON THE TTL/GC SLICE (P7-WIP-07/08), recorded here because this is
+// where a reader will look for it. Once a sweep uses mirror state — a
+// tombstone, a row's age, or its absence — as authority to delete a remote
+// ref, the tier stops being a question about pointers and becomes one about
+// credentialed data destruction run by the victim's own device.
+//
+// Note what this tier does NOT mean, because the name invites the wrong
+// reading: verifyEventSignature gates on `mustVerifyEvent(type) || enrolled`,
+// and hasEnrolledDevices is true once ANY device is approved/revoked/lost. So
+// in every workspace that has a peer — every workspace a fleet-wide sweep has
+// work to do in — these events are already signature-verified and
+// approval-gated, fail-closed (HUB-03). This tier governs only the
+// single-device pre-enrollment window, where there is no fleet to sweep.
+// Promoting the two WIP types here would therefore buy the GC slice nothing.
+//
+// The real residuals are narrower: a revoked device can backdate below its own
+// revocation boundary (the accepted P7-SYNC-02 residual) and age down its OWN
+// row; and a compromised approved device can tombstone any owner's row, which
+// with a matching revoke turns a live ref into a reapable orphan — amplification
+// inside the already-accepted P7-SEC-05 threat. GC does upgrade that accepted
+// DoS from denial to destruction, which spec/15 must state when it ships.
+//
+// The requirement on that slice is therefore NOT a tier change: mirror state
+// must be a candidate FILTER, never the deletion authority. Each delete has to
+// be corroborated by evidence the event log cannot forge — the remote's
+// advertised sha, the ref object's own committer date, and a --force-with-lease
+// pin to that sha.
+//
 // mustVerifyEvent reports whether an event type is destructive or
 // trust-affecting and therefore requires a valid signature from a known,
 // approved device (SECU-03). Unknown devices and devices with no signing key

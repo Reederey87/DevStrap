@@ -64,23 +64,74 @@ WHERE excluded.observed_at_hlc >= device_wip.observed_at_hlc;
 	return nil
 }
 
-// DeleteDeviceWip removes one device's pending-WIP mirror row for a project
-// after `wip drop` deletes the corresponding remote ref. This clears only the
-// LOCAL mirror on the device that ran the drop — it does not propagate to
-// other devices' mirrors (no repo.wip.dropped event exists; automatic
-// fleet-wide WIP-ref GC is explicitly out of scope for this feature, see
-// spec/07). No-op (no error) if no matching row exists.
-func (s *Store) DeleteDeviceWip(ctx context.Context, deviceID, pathKey string) error {
-	workspaceID, err := s.WorkspaceID(ctx)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, `DELETE FROM device_wip WHERE workspace_id = ? AND device_id = ? AND path_key = ?;`, workspaceID, deviceID, pathKey)
-	if err != nil {
-		return fmt.Errorf("delete device wip: %w", err)
+// TombstoneDeviceWipTx records a deletion without erasing the last observed
+// push. Keeping that push's sha is required by the read predicate: a racing
+// push from another device stream can have a lower/equal HLC but a different
+// sha, and therefore remains live.
+//
+// droppedSHA is the sha the delete was LEASED against, or "" when the deleting
+// command found the ref already absent and so proved nothing about which sha
+// was there. An empty dropped_sha makes the tombstone sha-AGNOSTIC in the
+// predicate below — observed absence outranks any sha guess.
+//
+// dropped_at_hlc and dropped_sha must move TOGETHER. Taking MAX of the HLC
+// while letting the sha be last-write-wins would converge to a (hlc, sha) pair
+// that no drop event ever carried: with two honest drops of different shas
+// arriving newest-first, the row would end up holding the newer HLC beside the
+// older drop's sha, and a push of the sha that WAS deleted would then read
+// live forever. The CASE keeps the pair coherent, with a deterministic
+// sha-order tiebreak so every device converges on the same winner when two
+// drops share an HLC.
+func (tx *Tx) TombstoneDeviceWipTx(ctx context.Context, deviceID, pathKey, path, droppedSHA string, event Event) error {
+	now := timestampNow()
+	if _, err := tx.tx.ExecContext(ctx, `
+INSERT INTO device_wip (
+  workspace_id, device_id, path_key, path, ref, sha, base_sha, captured_at,
+  observed_at_hlc, source_event_id, updated_at, dropped_at_hlc, dropped_sha
+) VALUES (?, ?, ?, ?, '', '', '', '', 0, ?, ?, ?, ?)
+ON CONFLICT(workspace_id, device_id, path_key) DO UPDATE SET
+  dropped_sha = CASE
+    WHEN excluded.dropped_at_hlc > COALESCE(device_wip.dropped_at_hlc, 0)
+      OR (excluded.dropped_at_hlc = COALESCE(device_wip.dropped_at_hlc, 0)
+          AND excluded.dropped_sha < COALESCE(device_wip.dropped_sha, ''))
+    THEN excluded.dropped_sha
+    ELSE device_wip.dropped_sha END,
+  dropped_at_hlc = MAX(COALESCE(device_wip.dropped_at_hlc, 0), excluded.dropped_at_hlc),
+  updated_at = excluded.updated_at;
+`, tx.workspaceID, deviceID, pathKey, path, event.ID, now, event.HLC, droppedSHA); err != nil {
+		return fmt.Errorf("tombstone device wip: %w", err)
 	}
 	return nil
 }
+
+// deviceWipLivePredicate deliberately includes sha inequality, not just HLC.
+// Push and drop events can arrive from different device streams in either
+// order. A LEASED drop proves only that it deleted dropped_sha; if the owner
+// concurrently pushed a different sha, that recovery ref is live even when its
+// bare int64 HLC is lower than or equal to the dropper's HLC. This also covers
+// equal HLCs, which have no device-id tiebreak in this mirror.
+//
+// Two guards keep that escape from firing where it must not:
+//
+//   - observed_at_hlc > 0. A drop arriving with no prior push inserts a
+//     TOMBSTONE-ONLY row (observed_at_hlc = 0, empty ref/sha) — a routine
+//     delivery order, and the normal state on a snapshot-bootstrapped device
+//     whose pushed event was already compacted away. Ungated, that row's empty
+//     sha differs from dropped_sha and the tombstone would read LIVE: a phantom
+//     pending-WIP entry with no ref, surfaced by `wip status`,
+//     `status --all-devices`, and `doctor`, and unusable by `wip show`/`apply`.
+//     An unobserved push cannot be the racing push the escape protects.
+//
+//   - dropped_sha <> ”. An empty dropped_sha means the dropping command found
+//     the ref ALREADY ABSENT and so leased nothing — it proved the ref is gone
+//     but not which sha was there. Observed absence must therefore outrank any
+//     sha comparison, or a stale-mirror drop would emit a sha that was never
+//     deleted and resurrect the row on every device as a permanent phantom.
+const deviceWipLivePredicate = `(dropped_at_hlc IS NULL
+   OR observed_at_hlc > dropped_at_hlc
+   OR (observed_at_hlc > 0
+       AND COALESCE(dropped_sha, '') <> ''
+       AND sha <> dropped_sha))`
 
 // DeviceWipForProject reads every device's last-pushed WIP ref for a project,
 // newest push first. This is the read side backing every consumer of the
@@ -97,6 +148,7 @@ SELECT device_id, path, path_key, ref, sha, base_sha, captured_at,
        observed_at_hlc, source_event_id, updated_at
 FROM device_wip
 WHERE workspace_id = ? AND path_key = ?
+  AND `+deviceWipLivePredicate+`
 ORDER BY observed_at_hlc DESC;
 `, workspaceID, pathKey)
 	if err != nil {

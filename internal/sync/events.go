@@ -47,7 +47,8 @@ const (
 	// Strictly separate from agent worktree-base resolution — refs/devstrap/wip/*
 	// must NEVER be read by the fresh-worktree resolver (spec/07's
 	// non-negotiable invariant).
-	EventRepoWipPushed = "repo.wip.pushed"
+	EventRepoWipPushed  = "repo.wip.pushed"
+	EventRepoWipDropped = "repo.wip.dropped"
 )
 
 // Conflict type identifiers, exported so the CLI resolver can branch on them
@@ -188,6 +189,29 @@ type WipPayload struct {
 	SHA        string `json:"sha"`
 	BaseSHA    string `json:"base_sha"`
 	CapturedAt string `json:"captured_at"`
+}
+
+// WipDroppedPayload records the retraction of a pushed WIP ref. DeviceID is
+// the ref's OWNER; the event's own DeviceID is the DROPPER — equal for a
+// self-drop, different when a peer reaps a revoked device's ref or a human
+// runs `wip gc --device`. SHA is the sha the delete was leased against and is
+// load-bearing at apply time (see the tombstone rules).
+type WipDroppedPayload struct {
+	Path     string `json:"path"`
+	DeviceID string `json:"device_id"`
+	SHA      string `json:"sha"`
+}
+
+// safeWipOwnerID screens the payload-supplied ref OWNER before it reaches
+// wipRefFor. Defense in depth only: the real gate is fetch-time revalidation of
+// the derived ref by git.safeRefPath/safeBranchName, which this deliberately
+// mirrors — including rejecting ".." as a SUBSTRING, not just as the whole
+// string, so no component can traverse.
+func safeWipOwnerID(deviceID string) bool {
+	if deviceID == "" || deviceID == "." || strings.Contains(deviceID, "..") || strings.HasPrefix(deviceID, "-") {
+		return false
+	}
+	return !strings.ContainsAny(deviceID, "/\\ \t\r\n~^:?*[")
 }
 
 // DeviceKeyGrant carries a device.key.granted event (P4-SEC-07): a Workspace
@@ -387,6 +411,14 @@ func NewGitstateEvent(payloadJSON string) state.Event {
 func NewWipPushedEvent(payloadJSON string) state.Event {
 	return state.Event{
 		Type:        EventRepoWipPushed,
+		PayloadJSON: payloadJSON,
+		ContentHash: state.ContentHash(payloadJSON),
+	}
+}
+
+func NewWipDroppedEvent(payloadJSON string) state.Event {
+	return state.Event{
+		Type:        EventRepoWipDropped,
 		PayloadJSON: payloadJSON,
 		ContentHash: state.ContentHash(payloadJSON),
 	}
@@ -1045,6 +1077,22 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 			BaseSHA:    payload.BaseSHA,
 			CapturedAt: payload.CapturedAt,
 		}, event)
+	case EventRepoWipDropped:
+		var payload WipDroppedPayload
+		if err := json.Unmarshal([]byte(event.PayloadJSON), &payload); err != nil {
+			return fmt.Errorf("%w: decode wip dropped event %s: %w", state.ErrEventVerification, event.ID, err)
+		}
+		pk, err := pathkey.Clean(payload.Path)
+		if err != nil {
+			return fmt.Errorf("%w: wip dropped path %q: %w", state.ErrEventVerification, payload.Path, err)
+		}
+		if !safeWipOwnerID(payload.DeviceID) {
+			return fmt.Errorf("%w: wip dropped event %s: unsafe owner device id %q", state.ErrEventVerification, event.ID, payload.DeviceID)
+		}
+		// pushed keys on event.DeviceID because the pusher is always the ref
+		// owner. dropped keys on payload.DeviceID because a peer dropper may
+		// retract the owner's ref.
+		return tx.TombstoneDeviceWipTx(ctx, payload.DeviceID, pk.Key, pk.Display, payload.SHA, event)
 	case EventDeviceRevoked, EventDeviceLost:
 		// TRUST-01: a synced trust flip. Signature verification already ran
 		// (mustVerifyEvent), so the SIGNER is a locally-approved device; the

@@ -27,6 +27,18 @@ func wipEvent(t *testing.T, id, dev string, seq, hlc int64, payload WipPayload) 
 	}
 }
 
+func wipDroppedEvent(t *testing.T, id, dropper string, seq, hlc int64, payload WipDroppedPayload) state.Event {
+	t.Helper()
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return state.Event{
+		ID: id, DeviceID: dropper, Seq: seq, HLC: hlc << hlcLogicalBits,
+		Type: EventRepoWipDropped, PayloadJSON: string(raw), ContentHash: state.ContentHash(string(raw)),
+	}
+}
+
 func signedWipEvent(t *testing.T, signing devicekeys.SigningIdentity, id, dev string, seq, hlc int64, payload WipPayload) state.Event {
 	t.Helper()
 	ev := wipEvent(t, id, dev, seq, hlc, payload)
@@ -257,5 +269,117 @@ func TestNewWipPushedEventStampsTypeAndContentHash(t *testing.T) {
 	}
 	if ev.ContentHash != state.ContentHash(string(raw)) {
 		t.Fatalf("ContentHash = %q, want the payload's content hash", ev.ContentHash)
+	}
+}
+
+func TestWipTombstoneBlocksOlderPushedResurrection(t *testing.T) {
+	base := time.Now().UnixMilli()
+	path := "work/acme/proj"
+	push := func(t *testing.T, id string, seq, offset int64, sha string) state.Event {
+		return wipEvent(t, id, "dev_owner", seq, base+offset, WipPayload{Path: path, SHA: sha})
+	}
+	drop := func(t *testing.T, id string, seq, offset int64, sha string) state.Event {
+		return wipDroppedEvent(t, id, "dev_dropper", seq, base+offset, WipDroppedPayload{Path: path, DeviceID: "dev_owner", SHA: sha})
+	}
+	tests := []struct {
+		name string
+		evs  []state.Event
+		live bool
+		sha  string
+	}{
+		{"pushed positive control", []state.Event{push(t, "p1", 1, 5, "abc")}, true, "abc"},
+		{"drop then older same push", []state.Event{drop(t, "d2", 1, 9, "abc"), push(t, "p2", 1, 5, "abc")}, false, ""},
+		{"newer same push revives", []state.Event{drop(t, "d3", 1, 9, "abc"), push(t, "p3a", 1, 5, "abc"), push(t, "p3b", 2, 12, "abc")}, true, "abc"},
+		{"concurrent different sha", []state.Event{drop(t, "d4", 1, 9, "abc"), push(t, "p4", 1, 7, "def")}, true, "def"},
+		{"equal hlc different sha", []state.Event{drop(t, "d5", 1, 9, "abc"), push(t, "p5", 1, 9, "def")}, true, "def"},
+		// The repeated semantic delivery has an older cross-stream HLC. MAX
+		// must retain 9, so an equal-HLC same-SHA push stays dead.
+		{"drop delivered twice", []state.Event{drop(t, "d6a", 1, 9, "abc"), drop(t, "d6b", 2, 5, "abc"), push(t, "p6", 1, 9, "abc")}, false, ""},
+		// A drop with NO prior push inserts a tombstone-only row
+		// (observed_at_hlc = 0, empty sha). Routine, not exotic: the drop
+		// simply arrives first, or a snapshot-bootstrapped device never sees a
+		// pushed event that was already compacted away. That empty sha differs
+		// from dropped_sha, so an ungated sha escape renders the tombstone as a
+		// phantom pending WIP carrying no ref — surfaced by `wip status`,
+		// `status --all-devices`, and `doctor`, and unusable by
+		// `wip show`/`apply`. An unobserved push cannot be the racing push the
+		// escape exists for.
+		{"drop with no prior push", []state.Event{drop(t, "d7", 1, 9, "abc")}, false, ""},
+		// ...and the tombstone must still bite once that push arrives late.
+		{"drop with no prior push then older push", []state.Event{drop(t, "d8", 1, 9, "abc"), push(t, "p8", 1, 5, "abc")}, false, ""},
+		// TWO drops of DIFFERENT shas, newest-HLC first. Reachable with only
+		// honest CLI events: A pushes abc, B drops it, A re-pushes def, C drops
+		// that — then a fourth device pulls the two drops out of order. If
+		// dropped_at_hlc took MAX while dropped_sha was last-write-wins, the row
+		// would converge on the newer HLC beside the OLDER drop's sha, a pair no
+		// event ever carried, and the push of the sha that WAS deleted would
+		// read live forever. The pair must move together.
+		{"two drops different shas newest first", []state.Event{
+			drop(t, "d9a", 1, 12, "def"), drop(t, "d9b", 2, 9, "abc"), push(t, "p9", 1, 10, "def"),
+		}, false, ""},
+		// The same, delivered oldest-drop-first, must converge identically —
+		// otherwise devices disagree on liveness depending on pull order.
+		{"two drops different shas oldest first", []state.Event{
+			drop(t, "d10a", 1, 9, "abc"), drop(t, "d10b", 2, 12, "def"), push(t, "p10", 1, 10, "def"),
+		}, false, ""},
+		// An UNLEASED drop (the already-gone path publishes SHA "") proved the
+		// ref absent but not which sha was there, so it must be sha-agnostic: a
+		// prior observation of any sha at or below its HLC is dead. Treating ""
+		// as just another sha would make every real sha differ from it and
+		// resurrect the row on every device.
+		{"unleased drop outranks a different sha", []state.Event{
+			drop(t, "d11", 1, 9, ""), push(t, "p11", 1, 5, "abc"),
+		}, false, ""},
+		// ...but an unleased drop still must not bury a genuinely NEWER push.
+		{"unleased drop does not bury a newer push", []state.Event{
+			drop(t, "d12", 1, 9, ""), push(t, "p12", 1, 12, "abc"),
+		}, true, "abc"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			st, _ := newSyncStore(t)
+			// Apply one delivery window at a time. ApplyEvents sorts within a
+			// window, while this regression must force cross-stream arrival
+			// orders that only separate sync pulls can produce.
+			for _, ev := range tt.evs {
+				if _, err := ApplyEvents(ctx, st, []state.Event{ev}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rows, err := st.DeviceWipForProject(ctx, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.live {
+				if len(rows) != 1 || rows[0].SHA != tt.sha {
+					t.Fatalf("rows=%#v, want live sha %q", rows, tt.sha)
+				}
+			} else if len(rows) != 0 {
+				t.Fatalf("rows=%#v, want tombstoned row absent", rows)
+			}
+		})
+	}
+}
+
+func TestWipDroppedAppliesForPeerOwner(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newSyncStore(t)
+	base := time.Now().UnixMilli()
+	path := "work/acme/proj"
+	events := []state.Event{
+		wipEvent(t, "owner-push", "dev_owner", 1, base+5, WipPayload{Path: path, SHA: "abc"}),
+		wipEvent(t, "dropper-push", "dev_dropper", 1, base+5, WipPayload{Path: path, SHA: "xyz"}),
+		wipDroppedEvent(t, "peer-drop", "dev_dropper", 2, base+9, WipDroppedPayload{Path: path, DeviceID: "dev_owner", SHA: "abc"}),
+	}
+	if _, err := ApplyEvents(ctx, st, events); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.DeviceWipForProject(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].DeviceID != "dev_dropper" || rows[0].SHA != "xyz" {
+		t.Fatalf("rows=%#v, want only dropper's own live row", rows)
 	}
 }
