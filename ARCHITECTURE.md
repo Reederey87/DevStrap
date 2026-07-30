@@ -152,8 +152,11 @@ credential reads readable and says so at run start.
 DevStrap is honest about its edges. Not yet built, by design:
 
 - **The daemon's job model** and every socket endpoint beyond health/version/status/events/sync,
-  and an **FSEvents-specific Mac watcher** (gated on a descriptor measurement, now observable as
-  the daemon's own `watch.roots`). The daemon itself shipped in 2026-07 — `devstrap daemon
+  and an **FSEvents-specific Mac watcher** (measured against and deferred on the evidence in
+  2026-07 — on a representative code tree the kqueue backend used 15.5% of the measured
+  descriptor limit once the watcher started pruning through the ignore compiler, so
+  cgo-on-darwin is not worth its distribution cost; see `spec/05` for the numbers, the
+  proxy-tree caveat, and the threshold that would flip the verdict). The daemon itself shipped in 2026-07 — `devstrap daemon
   start|stop|status|events` over a peer-credential-authenticated Unix socket, supervised by
   `devstrap service install --daemon` — but it remains an *optimization, never a correctness
   dependency*: every CLI command works with no daemon running, and the portable `run-loop` is

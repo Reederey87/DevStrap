@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-25
+last_reviewed: 2026-07-29
 tracks_code: [cmd/**, internal/**, .github/**, docs/audits/AUDIT_RECOMMENDATIONS.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # MVP Roadmap and Backlog
@@ -22,7 +22,7 @@ Milestone 2: Git hydration and open                         [shipped]
 Milestone 3: fresh worktree manager                         [shipped]
 Milestone 3.5: thin agent runner MVP                        [shipped]
 Milestone 4: env capture/hydrate and runtime injection      [shipped]
-Milestone 5: Mac daemon and watcher                         [shipped 2026-07-25, less the job queue and native FSEvents — see below]
+Milestone 5: Mac daemon and watcher                         [shipped 2026-07-25; honesty/liveness follow-up 2026-07-29; job queue open by design, FSEvents measured and deferred]
 Milestone 6: Linux compatibility                            [portable Go first; native parts deferred]
 Milestone 7: multi-device hub                               [reframed as the cloud R2 hub — see below]
 ```
@@ -283,7 +283,9 @@ devstrap run work/org/repo -- printenv SOME_VAR
 >
 > **Gate satisfied 2026-07-24.** The cloud planes are in place (`EAGER-*`/`DRAFT-*`/`HUB-*` all shipped) and all three entry conditions are met. The daemon is unblocked **as a thin layer over the shipped `run-loop`** — transport, single-flight scheduling, status/SSE, and watcher hints — not as a re-implementation of convergence and never as a correctness dependency. See the entry-gate review below.
 >
-> **SHIPPED 2026-07-25** across PRs #229–#233 plus the `--daemon` installer slice, and it held the shape the gate licensed: the daemon calls the same `runLoopTick` the daemonless `run-loop` calls, so there is exactly one convergence path. `devstrap run-loop` remains the portable, daemonless way to converge and every command still works with no daemon present — the daemon buys sub-interval latency and a live read plane, never correctness. **Two tasks stay open on purpose** and are not bookkeeping debt: the *job queue* (what shipped is single-flight coalescing, not a queue) and *native FSEvents* (still gated on a measurement that only became takeable now — `/v1/health`'s `watch.roots`).
+> **SHIPPED 2026-07-25** across PRs #229–#233 plus the `--daemon` installer slice, and it held the shape the gate licensed: the daemon calls the same `runLoopTick` the daemonless `run-loop` calls, so there is exactly one convergence path. `devstrap run-loop` remains the portable, daemonless way to converge and every command still works with no daemon present — the daemon buys sub-interval latency and a live read plane, never correctness. **Two tasks stay open on purpose** and are not bookkeeping debt: the *job queue* (what shipped is single-flight coalescing, not a queue) and *native FSEvents* (measured 2026-07-29 against a proxy tree and deferred against a recorded numeric threshold — see the task list below and `05_MAC_FIRST_IMPLEMENTATION.md`; it is now a decision on evidence rather than an open question).
+
+> **Follow-up wave SHIPPED 2026-07-29** (`M5D-01..07`, PRs #235–#241). The daemon that shipped on 2026-07-25 worked but reported a world more alive than the one it observed: `/v1/events` published only from `POST /v1/sync`, so on a supervised daemon — the unattended case `service install --daemon` exists for — the stream was inert; `EventWatchDegraded` was declared and never emitted; nothing could trigger `POST /v1/sync` at all; a fresh workspace reported its watch plane *degraded* and then let the plane's goroutine exit, so a project materialized later was invisible until a restart; and the watcher never released a descriptor. That wave closed all of it, plus the socket-lifecycle race #229's own security review had recorded and left open.
 
 Entry gate (review before starting M5) — **SATISFIED 2026-07-24**:
 
@@ -313,9 +315,17 @@ Tasks:
     0700 parent dir + 0600 socket, per-connection peer-credential auth with root NOT exempt,
     stale-socket takeover that never displaces a live daemon, and Origin/Referer/Host hardening.
 [x] Implement fsnotify watcher adapter for Darwin/Linux
-[ ] Implement FSEvents-specific Mac watcher if fsnotify/kqueue proves insufficient — still gated on the
-    measurement `spec/05` names. That measurement is `/v1/health`'s `watch.roots` count, which only
-    became observable with this wave; it has not been taken against a real `~/Code` yet.
+[ ] Implement FSEvents-specific Mac watcher if fsnotify/kqueue proves insufficient — still unbuilt,
+    but no longer an open QUESTION: MEASURED 2026-07-29 (`M5D-07`) and DEFERRED on the evidence.
+    kqueue costs ~6.8 descriptors per watched directory; after `M5D-06`'s compiler-driven pruning a
+    37,799-directory tree watches 5,639 directories for 38,095 fds — 15.5% of the 245,760 that
+    machine's `kern.maxfilesperproc` allows. Reconsider at ~20,000 watched directories. The reading is
+    a PROXY (`~/Code` was empty, so the tree was the maintainer's working tree; one machine, one macOS
+    version) and the threshold quantity is NOT reported by `/v1/health` — `watch.roots` counts
+    projects, not directories. Method, caveats, and threshold: `05_MAC_FIRST_IMPLEMENTATION.md`.
+[ ] Export the recursively-watched directory count through `WatchHealth` so the FSEvents reconsider
+    threshold above is checkable without re-running a harness (`len(watcher.WatchList())` already
+    exists inside the adapter; it needs plumbing through the `platform.Watcher` seam).
 [x] Implement reconcile job — the `Converger` seam over the existing `runLoopTick` (the `ARCH2-01`
     narrowing, PR #231). Periodic ticks, watcher hints, and `POST /v1/sync` all drive that one
     function, so no second convergence path exists to drift from `run-loop`.
