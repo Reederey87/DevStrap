@@ -31,6 +31,26 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-30 — doctor never puts a raw error string in Detail
+
+Changed:
+
+- Routed all 28 raw `err.Error()` interpolations in `internal/cli/doctor.go`'s `checkResult` `Detail`/`Remedy` fields through one `scrubbed(err)` helper wrapping `redact.Scrub`; the single site that already scrubbed (`daemon version`) collapses onto the same helper. `checkResult.Detail` carries `json:"detail,omitempty"`, so whatever a check puts there reaches **both** the human table and the `--json` document, and doctor is deliberately the one surface that exposes raw subsystem errors — hub open/reachability (remote URLs with userinfo), git and store failures, key custody, restore-journal state.
+- **The load-bearing part is a structural guard, not the 28 edits.** `TestDoctorDetailsNeverCarryRawErrorStrings` parses `doctor.go` with `go/ast` and fails on any `Detail`/`Remedy` value whose expression tree contains an `.Error()` call not wrapped in `scrubbed`/`redact.Scrub`. Without it this PR is a one-time cleanup and site #29 lands next quarter. `TestScrubbedRedactsCredentialBearingErrors` covers the other half — a guard over an identity function would pass — using the shapes doctor actually produces (https userinfo, ssh userinfo, a JSON token field), plus the `nil` case.
+- Deliberately preserved: the `daemon socket path` check keeps its multi-line remedy inside `Detail` (it prints in the human table), so the concatenation `scrubbed(err) + "\n…"` stays rather than being "tidied" into `Remedy`.
+
+- **Post-review (self, and it is the finding worth recording): the first version of the AST guard could not fail.** It keyed on the composite literal's TYPE being the ident `checkResult` — which silently skipped every site written as `[]checkResult{{Name: …, Detail: …}}`, because an element of a slice literal has an **elided type** (`lit.Type == nil`). That is most of this file. Caught by mutation-checking rather than by reading: reverting a site to `err.Error()` left the suite green, and only verifying that the mutation had actually applied (site count 26 → 25) showed the test, not the code, was wrong. Rewritten to match on the **field name** anywhere in the file — simpler and strictly broader, since `doctor.go` has exactly one struct with those fields — and its floor assertion raised from 50 to 90, because 50 was satisfied by the explicit-literal subset alone and so did not catch the narrowing either. Both guard shapes are now mutation-verified (elided-literal site and the concatenated-remedy site each fail with the offending `file:line` named).
+
+Validated:
+
+- `gofmt -l cmd internal` (empty); `go build ./...`; `go test -race -count=1 ./...`; pinned golangci-lint v2.12.0 (`0 issues`); `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+- Mutation checks, each run with the mutation's application verified first: reverting an elided-literal site → guard fails naming `doctor.go:125`; reverting the concatenated-remedy site → guard fails naming `doctor.go:769`; making `scrubbed` the identity → the behavioral test fails on the https-userinfo case (the AST guard correctly does **not** catch this, which is why both exist).
+
+Follow-ups:
+
+- The guard sees only `doctor.go`. A `checkResult` assembled through a local variable, or moved to another file, silently falls outside it — the floor assertion turns a wholesale style change into a failure, but a single stray site would not be caught. Noted in the test's own docstring rather than over-engineered.
+- `redact.Scrub` is pattern-based and can mangle innocent token-shaped text; it degrades legibility, never correctness, and the one pre-existing scrubbed site has lived with it.
+
 ## 2026-07-30 — P7-WIP-06 fleet-wide WIP-drop tombstones
 
 Changed:

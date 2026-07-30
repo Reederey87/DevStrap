@@ -136,6 +136,17 @@ Mitigation:
 - run git with interactive prompts disabled, bounded command contexts, sanitized environment, and protocol policy that denies `ext::`;
 - redact URL credentials from git command and stderr text before surfacing errors.
 
+**`doctor`'s graded output is scrubbed on BOTH surfaces.** `checkResult.Detail` carries a
+`json:"detail,omitempty"` tag, so whatever a check puts there reaches the human table *and* the
+`--json` document — and doctor is deliberately the one place that surfaces raw subsystem errors
+(hub open/reachability, git and store failures, key custody, restore-journal state). Those errors
+can carry a hub remote URL with userinfo, a token-shaped fragment, or a PEM body. Every
+`Detail`/`Remedy` construction therefore routes through a single `scrubbed(err)` helper wrapping
+`redact.Scrub`, and a structural `go/ast` test over `doctor.go` fails on any that does not — the
+call-site count only ever grows, so the invariant is enforced rather than periodically re-cleaned.
+Residual: `redact.Scrub` is pattern-based, so it can mangle innocent text that merely looks
+token-shaped; that degrades legibility, never correctness.
+
 ### Threat: hub compromise
 
 Mitigation:

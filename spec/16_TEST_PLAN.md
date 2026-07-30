@@ -399,6 +399,18 @@ Git-carrier conformance (`AD-1` first slice, 2026-07-04): `assertHubRoundTrip` i
 
 The carrier flake behind GitHub issues #174/#176 was a detached auto-maintenance
 child from `git fetch` continuing to write inside `.git` after the test returned.
+Structural invariants that only ever grow get a **structural test, not a one-time cleanup.**
+`doctor.go` had 28 sites interpolating a raw `err.Error()` into a user-visible `Detail`; converting
+them is a cleanup, but nothing stops site #29. `TestDoctorDetailsNeverCarryRawErrorStrings` parses
+the file with `go/ast` and fails on any `Detail`/`Remedy` value whose expression tree contains an
+`.Error()` call not wrapped in `scrubbed`/`redact.Scrub`, and `TestScrubbedRedactsCredentialBearingErrors`
+covers the other half (a guard over an identity function would pass). Two lessons are worth carrying
+to the next such guard: it must key on the **field name**, not the composite-literal type — the first
+version keyed on `lit.Type` being `checkResult` and therefore silently skipped every
+`[]checkResult{{…}}` element, whose type is elided, which is most of the file and made the guard pass
+against a deliberately reverted site; and it needs its own **floor assertion** (`checked < N`) so a
+future style change makes it fail loudly rather than pass vacuously.
+
 Hub test helpers that shell out to Git directly must be hermetic too: ignore global
 and system configuration, disable prompts, fsmonitor, and automatic housekeeping,
 and provide a fixed test identity. This prevents developer configuration from
