@@ -442,6 +442,53 @@ func (r Runner) LsRemoteRef(ctx context.Context, dir, remote, ref string) (strin
 	return "", fmt.Errorf("%w: %s", ErrBranchNotFound, ref)
 }
 
+type RemoteRef struct {
+	Ref string
+	SHA string
+}
+
+const wipRefGlob = "refs/devstrap/wip/*"
+
+// LsRemoteWipRefs enumerates the remote WIP namespace without writing any
+// local refs. That structural property keeps worktree base resolution isolated
+// from recovery refs.
+func (r Runner) LsRemoteWipRefs(ctx context.Context, dir, remote string) (refs []RemoteRef, skipped int, err error) {
+	if !safeRemoteName(remote) {
+		return nil, 0, fmt.Errorf("invalid git remote name %q", remote)
+	}
+	ctx, cancel := r.longTransferContext(ctx)
+	defer cancel()
+	out, err := r.Run(ctx, dir, "ls-remote", remote, wipRefGlob)
+	if err != nil {
+		return nil, 0, err
+	}
+	refs, skipped = parseLsRemoteWipRefs(out)
+	return refs, skipped, nil
+}
+
+func parseLsRemoteWipRefs(out string) ([]RemoteRef, int) {
+	var refs []RemoteRef
+	skipped := 0
+	lines := strings.Split(out, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1] // ordinary command-output terminator
+	}
+	for _, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			skipped++
+			continue
+		}
+		if len(fields) != 2 || !isHexObjectID(fields[0]) || !safeRefPath(fields[1]) ||
+			!strings.HasPrefix(fields[1], "refs/devstrap/wip/") {
+			skipped++
+			continue
+		}
+		refs = append(refs, RemoteRef{Ref: fields[1], SHA: fields[0]})
+	}
+	return refs, skipped
+}
+
 // MaintenanceRun runs a one-time `git maintenance run --auto` (commit-graph +
 // prefetch) so common history ops (blame, log -p) do not trigger per-object
 // lazy fetches on a blobless clone (GIT-06). It is best-effort: older git or a

@@ -1081,6 +1081,26 @@ func TestJitterDelayFullJitterBounded(t *testing.T) {
 	}
 }
 
+func TestParseLsRemoteWipRefsSkipsHostileLines(t *testing.T) {
+	sha := strings.Repeat("a", 40)
+	out := strings.Join([]string{
+		sha + "\trefs/devstrap/wip/dev_ok/project",
+		"notasha\trefs/devstrap/wip/dev_bad/project",
+		sha + "\trefs/heads/main",
+		sha + "\trefs/devstrap/wip/-evil/project",
+		sha + "\trefs/devstrap/wip/dev_bad/project extra",
+		"",
+		sha + "\trefs/devstrap/wip/dev_tail/project",
+	}, "\n") + "\n"
+	refs, skipped := parseLsRemoteWipRefs(out)
+	if len(refs) != 2 || refs[0].SHA != sha || refs[0].Ref != "refs/devstrap/wip/dev_ok/project" {
+		t.Fatalf("refs = %+v, want the two valid WIP refs", refs)
+	}
+	if skipped != 5 {
+		t.Fatalf("skipped = %d, want 5", skipped)
+	}
+}
+
 func TestCloneArgsSubmodules(t *testing.T) {
 	cases := []struct {
 		name string

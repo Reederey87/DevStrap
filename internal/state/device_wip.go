@@ -169,3 +169,37 @@ ORDER BY observed_at_hlc DESC;
 	}
 	return out, nil
 }
+
+// DeviceWipAll reads every live WIP mirror row workspace-wide. Age filtering
+// happens in Go and cardinality is only devices x projects (normally tens to
+// hundreds), so observed_at_hlc deliberately has no dedicated index.
+func (s *Store) DeviceWipAll(ctx context.Context) ([]DeviceWip, error) {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.reader().QueryContext(ctx, `
+SELECT device_id, path, path_key, ref, sha, base_sha, captured_at,
+       observed_at_hlc, source_event_id, updated_at
+FROM device_wip
+WHERE workspace_id = ? AND `+deviceWipLivePredicate+`
+ORDER BY path_key, observed_at_hlc DESC;
+`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("read all device wip: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []DeviceWip
+	for rows.Next() {
+		var w DeviceWip
+		if err := rows.Scan(&w.DeviceID, &w.Path, &w.PathKey, &w.Ref, &w.SHA, &w.BaseSHA, &w.CapturedAt,
+			&w.ObservedAtHLC, &w.SourceEventID, &w.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan device wip: %w", err)
+		}
+		out = append(out, w)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate device wip: %w", err)
+	}
+	return out, nil
+}
