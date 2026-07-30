@@ -31,6 +31,40 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-30 — No DevStrap git call leaves a detached maintenance child (#174/#176)
+
+Changed:
+
+- `secureArgs` (`internal/git/git.go`) now appends `-c gc.autoDetach=false -c maintenance.autoDetach=false` to **every** `Runner.Run`, so automatic housekeeping runs synchronously and cannot outlive the call that triggered it.
+- Hermeticized the `internal/hub` direct-git test helpers (`runGit`/`gitOutput`), which were bare `exec.Command` inheriting ambient env: they now pin `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_TERMINAL_PROMPT=0`, `gc.auto=0`, `maintenance.auto=false`, `core.fsmonitor=false`, and a fixed identity. A maintainer with global `core.fsmonitor` gets a `git fsmonitor--daemon` holding `.git` open — a second, independent producer of the same failure that the production `Runner` is already immune to.
+- `newGitCarrierTestHub` registers a cleanup that removes the hub dir and, on failure, reports the **surviving entries** by path and size, turning an anonymous cleanup panic into a named diagnostic. Deliberately NOT a retrying `RemoveAll`, which would hide the defect.
+- `forceParentlessWithRetention` now asserts the committed blob equals the manifest bytes it was handed. It rewrites `retention.json` with **identical-length** bytes and commits without `--allow-empty` — the classic same-second/same-size stat-cache scenario. `--allow-empty` was rejected as the fix: it converts a loud failure into a silently wrong tree.
+
+**Both open flake issues are one root cause.** #176's assertion is provably timing-independent (fixed integers; `h.sleep` is a no-op stub), and its reported failure carried no assertion output — consistent with #174's `TempDir RemoveAll cleanup: unlinkat …/repo/.git: directory not empty`. The carrier's `git fetch` spawns detached auto-maintenance that keeps writing after the test body returns.
+
+**The obvious fix would have been a silent regression, and that shaped the change.** `-c gc.auto=0` was rejected: `secureArgs` applies to *every* `Runner.Run`, including `gitGCAuto`'s deliberate `git gc --auto`, which under `gc.auto=0` becomes a **no-op** — retiring `P7-HUB-03`'s unbounded-growth control while every test stays green. `-c maintenance.auto=false` was rejected for the mirror-image reason: modern git triggers post-command housekeeping *only* through `maintenance.auto`, so setting it false here would stop every DevStrap-managed clone — materialized project clones included — from ever running auto-gc again. Only the carrier has an explicit `gitGCAuto`; everything else would grow unbounded. Both forbidden keys are named in the code comment so the next reader does not "simplify" them back in.
+
+**The mechanism is verified empirically, not assumed** (coordinator, on git 2.50.1). `GIT_TRACE=1 git -c gc.auto=1 fetch origin` against a repo seeded with one loose object in `.git/objects/17` shows git running `git maintenance run --auto --no-quiet --detach`. With either `-c gc.autoDetach=false` or `-c maintenance.autoDetach=false` the same invocation becomes `--no-detach`. That is the whole fix, observed directly. Both keys ship because the version semantics differ — pre-2.47 the detach happens inside `maintenance run`'s own `gc --auto` task governed by `gc.autoDetach`, while 2.47+ falls back from `maintenance.autoDetach` to `gc.autoDetach` when unset — and unknown `-c` keys are inert on older git, so there is no version floor.
+
+**A proposed behavioral test was written and then deleted, because it could not fail.** `TestRunnerLeavesNoBackgroundWriterInGitDir` seeded the auto-gc trigger, ran a fetch, removed the repo, and polled for the directory reappearing; with the detach keys reverted it still passed. On a repo this small the detached child finishes before the assertion can observe it. Rather than keep a test named for a regression it cannot detect — the exact defect class this corpus has caught twice in recent waves — it was removed, and `TestSecureArgsDisablesDetachedAutoMaintenance` stands as the sole pin: both keys present, caller args still at the tail, and **`gc.auto`/`maintenance.auto` absent**, which is the assertion that actually guards the two rejected shortcuts above. The behavioural claim rests on the trace evidence recorded here instead.
+
+- **Post-review (Codex — one blocker and two should-fixes accepted, one finding rejected with evidence):**
+  - **The invariant as first written was false on the cancellation path.** `exec.CommandContext` kills only the direct Git process, so a call cancelled or timed out while attached maintenance is running can still leave that grandchild alive; `WaitDelay` keeps it from blocking `Wait` forever but does not reap the group. Bounding it properly needs a process group and a group signal — out of scope for a flake fix — so `spec/15` now says "process-bounded on the paths that complete normally" and carries the cancellation residual explicitly, rather than asserting "no DevStrap git call may leave a live maintenance child".
+  - **The policy is a default, not an enforcement.** `secureArgs` PREPENDS, so a caller's own `-c` wins under Git's last-wins rule. That is relied upon (`gitGCAuto` passes its own `gc.autoDetach=false`), so the fix is documentation rather than rejection of caller keys — the code comment now says so plainly instead of implying every call is protected against override.
+  - **`spec/16` claimed the production `Runner` test "proves the no-live-child invariant".** It does not: it pins the ARGUMENT POLICY, and the behavioral test was deleted for passing either way. Narrowed there and in the ledger note.
+  - **REJECTED with evidence:** the claim that appending pinned vars to `os.Environ()` leaves an ambiguous duplicate that ambient config might win. Go's `os/exec` deduplicates `Cmd.Env` keeping the LAST occurrence; verified directly with a probe binary (ambient `PROBE_VAR=ambient`, appended `PROBE_VAR=pinned`, child observed `pinned`). The helpers are hermetic as written, and filtering first would add code for a hazard that does not exist.
+
+Validated:
+
+- `gofmt -l cmd internal` (empty); `go build ./...`; pinned golangci-lint v2.12.0 (`0 issues`); `go run ./cmd/spec-drift --base origin/main --head HEAD`; `git diff --check`.
+- `go test -race -count=1 ./...` re-run **natively** by the coordinator: all packages pass. The delegated worker's sandbox rejected Unix-socket binds and Seatbelt probes and also tripped `TestNativeWatcherCoalescesBurstIntoBoundedHints` (54 hints vs ≤50) under load — all three are sandbox artifacts, confirmed clean natively, and none were accepted on report.
+- `go test -race -count=20 ./internal/git/` passes (273s). The same repeat over all of `./internal/hub/` exceeds Go's 10-minute per-package timeout, so the two named flakes were repeated directly instead: `-count=20` over `TestGitCarrierFutureSweepLockIsBreakableAfterObservedTTL` and `TestGitCarrierFloorRegressionOnNonDescendantRefused` passes (38.6s).
+- Mutation checks run: re-adding `gc.auto=0`, and separately `maintenance.auto=false`, each fails `TestSecureArgsDisablesDetachedAutoMaintenance`; reverting the retention blob assertion and writing wrong bytes fails `TestGitCarrierFloorRegressionOnNonDescendantRefused` with the manifest mismatch.
+
+Follow-ups:
+
+- Neither flake is *proven* fixed by a test — they were rare, and the pin is the config plus the trace evidence above. If either recurs, the next suspect is the tests' own `runGit` clones rather than the production `Runner`, and the surviving-entries diagnostic added here will name what is holding the directory open.
+
 ## 2026-07-29 — M5D-07 FSEvents measurement and Milestone 5 wave close
 
 Changed:

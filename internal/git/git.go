@@ -1102,6 +1102,29 @@ func secureArgs(args []string) []string {
 		"-c", "protocol.file.allow=always",
 		"-c", "protocol.ext.allow=never",
 		"-c", "core.sshCommand=ssh -oBatchMode=yes",
+		// Keep Git's automatic housekeeping ATTACHED so it finishes before this
+		// call returns instead of detaching into a background writer that
+		// outlives it — the #174/#176 flake, where gc.log / tmp_pack_* / *.lock
+		// appeared in a directory the caller had already finished with.
+		//
+		// Two keys are deliberately absent, and both are traps:
+		//   - gc.auto=0 would make internal/hub's deliberate `git gc --auto`
+		//     (gitGCAuto) a no-op, silently retiring the P7-HUB-03 carrier
+		//     growth control while every test stayed green.
+		//   - maintenance.auto=false would stop EVERY managed clone from running
+		//     auto-gc at all, since modern Git triggers post-command
+		//     housekeeping only through it — trading an unbounded background
+		//     writer for an unbounded repository.
+		// TestSecureArgsDisablesDetachedAutoMaintenance asserts both are absent.
+		//
+		// These are PREPENDED, so a caller's own -c wins under Git's last-wins
+		// rule. That is intentional and relied upon — gitGCAuto passes its own
+		// gc.autoDetach=false beside the call whose lock-hold guarantee needs
+		// it — so this is a default applied to every call, not an enforcement
+		// against callers. A cancelled call can also still outlive its
+		// maintenance grandchild; see spec/15's stated residual.
+		"-c", "gc.autoDetach=false",
+		"-c", "maintenance.autoDetach=false",
 	}
 	return append(secure, args...)
 }
