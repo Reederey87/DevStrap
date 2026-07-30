@@ -6,6 +6,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -113,6 +116,40 @@ type slowFailWatcher struct {
 
 	mu       sync.Mutex
 	attempts int
+}
+
+type countingWatcher struct {
+	mu     sync.Mutex
+	counts map[string]int
+	live   map[string]int
+}
+
+func (w *countingWatcher) Name() string { return "counting" }
+
+func (w *countingWatcher) Watch(ctx context.Context, root string, _ chan<- platform.FSEvent) error {
+	w.mu.Lock()
+	if w.live == nil {
+		w.live = make(map[string]int)
+	}
+	w.live[root] = w.counts[root]
+	w.mu.Unlock()
+	defer func() {
+		w.mu.Lock()
+		delete(w.live, root)
+		w.mu.Unlock()
+	}()
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (w *countingWatcher) WatchedDirs() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	total := 0
+	for _, count := range w.live {
+		total += count
+	}
+	return total
 }
 
 func (w *slowFailWatcher) Name() string { return w.name }
@@ -573,6 +610,83 @@ func TestWatchHealthIdleIsVisibleOnTheWire(t *testing.T) {
 			t.Fatalf("%s absent from idle watch health JSON: %s", field, payload)
 		}
 	}
+	if _, ok := fields["watched_dirs"]; ok {
+		t.Fatalf("watched_dirs present for unknown idle count: %s", payload)
+	}
+
+	knownZero := WatchHealth{}
+	field := reflect.ValueOf(&knownZero).Elem().FieldByName("WatchedDirs")
+	switch field.Kind() {
+	case reflect.Pointer:
+		zero := 0
+		field.Set(reflect.ValueOf(&zero))
+	case reflect.Int:
+		field.SetInt(0)
+	default:
+		t.Fatalf("WatchedDirs kind = %s, want pointer or int", field.Kind())
+	}
+	payload, err = json.Marshal(knownZero)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := fields["watched_dirs"]; !ok || got != float64(0) {
+		t.Fatalf("watched_dirs = %#v, present = %v; want present 0 in %s", got, ok, payload)
+	}
+}
+
+func TestWatchHealthReportsWatchedDirectoriesSummedAcrossRoots(t *testing.T) {
+	roots := []string{t.TempDir(), t.TempDir()}
+	if err := os.Mkdir(filepath.Join(roots[0], "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(roots[1], "child", "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	watcher := &platform.NativeWatcher{}
+	plane := newWatchPlane(watcher, nil, stubSource{}, nil, quietLogger(), nil)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- plane.watchAll(ctx, watcher, roots, make(chan platform.FSEvent)) }()
+	waitFor(t, func() bool { return watcher.WatchedDirs() == 5 })
+	plane.watching(watcher, len(roots))
+
+	state := plane.snapshot()
+	if !state.DirsKnown || state.WatchedDirs != 5 {
+		t.Fatalf("snapshot dirs = %d, known = %v; want summed 5, true", state.WatchedDirs, state.DirsKnown)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("watchAll after cancellation: %v", err)
+	}
+}
+
+func TestPollBackendReportsWatchedDirsAsUnknown(t *testing.T) {
+	poll := platform.PollWatcher{Interval: time.Hour}
+	plane := newWatchPlane(nil, poll, stubSource{}, nil, quietLogger(), nil)
+	plane.setState(func(s *watchState) {
+		s.Phase = watchPhaseDegraded
+		s.Backend = poll.Name()
+		s.Roots = 2
+		s.counter, _ = any(poll).(platform.WatchedDirCounter)
+	})
+	state := plane.snapshot()
+	if state.DirsKnown {
+		t.Fatalf("poll directory count known as %d, want unknown", state.WatchedDirs)
+	}
+}
+
+func TestDegradedPlaneDoesNotReportAStaleDirCount(t *testing.T) {
+	watcher := &countingWatcher{}
+	plane := newWatchPlane(watcher, nil, stubSource{}, nil, quietLogger(), nil)
+	plane.watching(watcher, 1)
+	plane.degrade("native failed")
+	state := plane.snapshot()
+	if state.DirsKnown || state.counter != nil {
+		t.Fatalf("degraded state retained stale directory counter: %+v", state)
+	}
 }
 
 func drainEvents(events <-chan Event) []Event {
@@ -612,4 +726,52 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("condition never became true")
+}
+
+// blockingCounter lets a test park inside WatchedDirs() so a plane transition
+// can be forced while the counter call is in flight — the exact window
+// snapshot() re-validates against.
+type blockingCounter struct {
+	entered chan struct{}
+	release chan struct{}
+	dirs    int
+}
+
+func (c *blockingCounter) Name() string { return "blocking" }
+
+func (c *blockingCounter) Watch(context.Context, string, chan<- platform.FSEvent) error {
+	return nil
+}
+
+func (c *blockingCounter) WatchedDirs() int {
+	close(c.entered)
+	<-c.release
+	return c.dirs
+}
+
+// TestSnapshotDoesNotPublishACountThePlaneNoLongerSupports pins the TOCTOU that
+// the lock-release in snapshot() opens: the counter is read outside p.mu (it
+// reaches into the platform adapter's own lock), so a concurrent degrade can
+// land while the call is in flight. Publishing the returned count anyway would
+// report watched_dirs beside a degraded state — precisely the stale-count
+// confusion the field exists to avoid.
+func TestSnapshotDoesNotPublishACountThePlaneNoLongerSupports(t *testing.T) {
+	counter := &blockingCounter{entered: make(chan struct{}), release: make(chan struct{}), dirs: 5639}
+	plane := newWatchPlane(counter, nil, stubSource{}, nil, quietLogger(), nil)
+	plane.watching(counter, 1)
+
+	done := make(chan watchState, 1)
+	go func() { done <- plane.snapshot() }()
+
+	<-counter.entered              // snapshot() is parked inside WatchedDirs()
+	plane.degrade("native failed") // ...and the plane degrades underneath it
+	close(counter.release)
+
+	state := <-done
+	if state.DirsKnown {
+		t.Fatalf("published a directory count captured before a degrade: %+v", state)
+	}
+	if state.WatchedDirs != 0 {
+		t.Fatalf("degraded snapshot carried WatchedDirs=%d, want 0", state.WatchedDirs)
+	}
 }

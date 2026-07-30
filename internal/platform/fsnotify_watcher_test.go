@@ -24,7 +24,7 @@ import (
 // startWatcher runs w.Watch in a goroutine. Watch blocks until the context is
 // cancelled, so every test drives it this way and reads its terminal error off
 // the returned channel.
-func startWatcher(ctx context.Context, w NativeWatcher, root string, buffer int) (chan FSEvent, chan error) {
+func startWatcher(ctx context.Context, w *NativeWatcher, root string, buffer int) (chan FSEvent, chan error) {
 	events := make(chan FSEvent, buffer)
 	errs := make(chan error, 1)
 	go func() { errs <- w.Watch(ctx, root, events) }()
@@ -68,6 +68,49 @@ func drain(events <-chan FSEvent, quiet time.Duration) int {
 	}
 }
 
+func TestNativeWatcherReportsWatchedDirectoryCount(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{
+		"kept",
+		filepath.Join("kept", "nested"),
+		filepath.Join("node_modules", "pkg", "nested"),
+	} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "kept", "file.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	watcher := &NativeWatcher{}
+	ctx, cancel := context.WithCancel(t.Context())
+	_, errs := startWatcher(ctx, watcher, root, 1)
+
+	// root, kept, and kept/nested are watched. node_modules and all files are
+	// excluded, pinning that WatchList counts un-pruned directories.
+	const want = 3
+	deadline := time.Now().Add(10 * time.Second)
+	for watcher.WatchedDirs() != want && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := watcher.WatchedDirs(); got != want {
+		t.Fatalf("WatchedDirs() = %d, want %d un-pruned directories", got, want)
+	}
+
+	cancel()
+	assertContextCanceled(t, errs)
+	if got := watcher.WatchedDirs(); got != 0 {
+		t.Fatalf("WatchedDirs() after Watch returned = %d, want 0", got)
+	}
+	watcher.mu.Lock()
+	live := len(watcher.live)
+	watcher.mu.Unlock()
+	if live != 0 {
+		t.Fatalf("live watcher registry after Watch returned = %d, want 0", live)
+	}
+}
+
 // TestNativeWatcherCoalescesBurstIntoBoundedHints is the indexer-hydration-storm
 // gate condition. It asserts two things: that a large burst collapses into a
 // small number of hints, and — structurally — that a hint cannot name the file
@@ -85,7 +128,7 @@ func TestNativeWatcherCoalescesBurstIntoBoundedHints(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	watcher := NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
+	watcher := &NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
 	events, errs := startWatcher(ctx, watcher, root, 4096)
 	awaitWatcherReady(t, root, events)
 
@@ -152,7 +195,7 @@ func TestNativeWatcherSkipsGeneratedDirCreatedAfterStart(t *testing.T) {
 			root := t.TempDir()
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			watcher := NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
+			watcher := &NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
 			events, errs := startWatcher(ctx, watcher, root, 1024)
 			awaitWatcherReady(t, root, events)
 
@@ -208,7 +251,7 @@ func TestWatcherPrunesCompilerIgnoredDirectories(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	watcher := NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
+	watcher := &NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
 	events, errs := startWatcher(ctx, watcher, root, 1024)
 	awaitWatcherReady(t, root, events)
 
@@ -245,7 +288,7 @@ func TestWatcherPrunesDirectoryRenamedIntoPlace(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	watcher := NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
+	watcher := &NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
 	events, errs := startWatcher(ctx, watcher, root, 1024)
 	awaitWatcherReady(t, root, events)
 
@@ -297,7 +340,7 @@ func TestWatcherDropsWatchesForDirectoryRenamedOutOfTree(t *testing.T) {
 	defer cancel()
 	events := make(chan FSEvent, 1024)
 	errs := make(chan error, 1)
-	watcher := NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
+	watcher := &NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
 	go func() {
 		errs <- watcher.watch(ctx, root, events, raw, ignore.DefaultMatcher())
 	}()
@@ -337,7 +380,7 @@ func TestWatcherIgnoresChmodOnlyEvents(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	watcher := NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
+	watcher := &NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
 	events, errs := startWatcher(ctx, watcher, root, 1024)
 	awaitWatcherReady(t, root, events)
 
@@ -381,7 +424,7 @@ func TestWatcherIgnoresOSJunkFiles(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	watcher := NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
+	watcher := &NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
 	events, errs := startWatcher(ctx, watcher, root, 1024)
 	awaitWatcherReady(t, root, events)
 
@@ -419,7 +462,7 @@ func TestWatcherIgnoresOSJunkFiles(t *testing.T) {
 // watcher. Every design decision downstream of this gate depends on that split.
 func TestNativeWatcherRestartAfterBulkChangeMakesNoCompletenessClaim(t *testing.T) {
 	root := t.TempDir()
-	watcher := NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
+	watcher := &NativeWatcher{Debounce: 30 * time.Millisecond, MaxLatency: 150 * time.Millisecond}
 
 	firstCtx, firstCancel := context.WithCancel(t.Context())
 	events, errs := startWatcher(firstCtx, watcher, root, 1024)
@@ -471,7 +514,7 @@ func TestNativeWatcherStopReleasesGoroutinesAndReturnsContextError(t *testing.T)
 	baseline := runtime.NumGoroutine()
 
 	ctx, cancel := context.WithCancel(t.Context())
-	watcher := NativeWatcher{Debounce: 20 * time.Millisecond, MaxLatency: 100 * time.Millisecond}
+	watcher := &NativeWatcher{Debounce: 20 * time.Millisecond, MaxLatency: 100 * time.Millisecond}
 	events, errs := startWatcher(ctx, watcher, root, 64)
 	awaitWatcherReady(t, root, events)
 	if err := os.WriteFile(filepath.Join(root, "activity.txt"), []byte("x"), 0o600); err != nil {
@@ -514,7 +557,7 @@ func TestNativeWatcherBlocksOnSlowConsumerAndUnblocksOnCancel(t *testing.T) {
 	// Unbuffered, and deliberately never read.
 	events := make(chan FSEvent)
 	errs := make(chan error, 1)
-	watcher := NativeWatcher{Debounce: 20 * time.Millisecond, MaxLatency: 100 * time.Millisecond}
+	watcher := &NativeWatcher{Debounce: 20 * time.Millisecond, MaxLatency: 100 * time.Millisecond}
 	go func() { errs <- watcher.Watch(ctx, root, events) }()
 
 	stopWrites := make(chan struct{})
@@ -618,7 +661,7 @@ func TestWatcherSurvivesTransientDirectories(t *testing.T) {
 	root := t.TempDir()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	watcher := NativeWatcher{Debounce: 20 * time.Millisecond, MaxLatency: 100 * time.Millisecond}
+	watcher := &NativeWatcher{Debounce: 20 * time.Millisecond, MaxLatency: 100 * time.Millisecond}
 	events, errs := startWatcher(ctx, watcher, root, 4096)
 	awaitWatcherReady(t, root, events)
 
@@ -668,7 +711,7 @@ func TestWatcherReportsDeletionOfFileNamedLikeAPrunedDirectory(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	watcher := NativeWatcher{Debounce: 20 * time.Millisecond, MaxLatency: 100 * time.Millisecond}
+	watcher := &NativeWatcher{Debounce: 20 * time.Millisecond, MaxLatency: 100 * time.Millisecond}
 	events, errs := startWatcher(ctx, watcher, root, 1024)
 	awaitWatcherReady(t, root, events)
 

@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-29
+last_reviewed: 2026-07-30
 tracks_code: [internal/platform/**, internal/cli/open.go, internal/cli/hydrate.go, .github/**]
 ---
 # Mac-First Implementation Guide
@@ -172,7 +172,7 @@ Three things in that table matter more than the headline.
 
 **Reconsider at a number, not at a feeling.** Either of these flips the verdict: (a) **watched directories exceed ~20,000** on a representative managed tree — ~135,000 descriptors at the measured ratio, ~55% of the observed limit, chosen so the decision is made with headroom rather than at the edge; or (b) the kqueue backend demonstrably drops or duplicates events across sleep/wake or volume remount in a way periodic reconciliation cannot absorb. Neither holds today at 5,639, roughly 3.5× below (a).
 
-**Condition (a) is NOT observable from `/v1/health` today, and the earlier draft of this section wrongly said it was.** `watch.roots` is the count of watched **projects** — `WatchRoots` returns one path per materialized project (`internal/cli/daemon_converge.go`) — not the recursively watched directory count, and the two differ by orders of magnitude: a workspace with a dozen projects reports `roots: 12` while holding thousands of descriptors. Nothing in `WatchHealth` exports the directory or descriptor count. So until a counter is exported (`len(watcher.WatchList())` is available inside the adapter; plumbing it through the `Watcher` seam into `WatchHealth` is the tracked follow-up in `14_MVP_ROADMAP_AND_BACKLOG.md`), evaluating (a) means re-running the harness described above. The threshold is still stated in watched directories because that is the quantity the cost actually tracks — multiply by ~7 for descriptors — but it must not be checked by reading `roots`.
+**Condition (a) is now observable from `/v1/health`, but not through `watch.roots`.** `watch.roots` remains the count of watched **projects** — `WatchRoots` returns one path per materialized project (`internal/cli/daemon_converge.go`) — while optional `watch.watched_dirs` is the live recursively-watched directory count across every concurrent native `Watch` call. Absent means the active backend cannot report that quantity; present `0` is a genuine zero. The threshold is stated in watched directories because that is the stable quantity the cost tracks; on the measured proxy tree, multiply by ~6.8 for the approximate darwin descriptor bill. **That measurement remains a proxy:** `~/Code` was empty, so it was taken against the maintainer's real `~/Developer` working tree, on one machine and one macOS version, not against a representative managed namespace. Evaluate (a) from `watched_dirs`, never from `roots`, and carry this proxy caveat whenever restating the 5,639-directory measurement.
 
 If (a) is ever hit, exhaust the cheaper lever first: `M5D-06` bought a 3.6× reduction for no distribution cost, and per-project `.devstrapignore` tuning plus `AGEN-05` are not obviously spent.
 

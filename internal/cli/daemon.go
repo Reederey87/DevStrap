@@ -75,6 +75,7 @@ type daemonStatusResult struct {
 	WatchDegraded *bool  `json:"watch_degraded,omitempty"`
 	WatchReason   string `json:"watch_reason,omitempty"`
 	WatchRoots    int    `json:"watch_roots,omitempty"`
+	WatchDirs     *int   `json:"watch_dirs,omitempty"`
 }
 
 type daemonStartResult struct {
@@ -370,6 +371,7 @@ func runDaemonStatus(cmd *cobra.Command, stdout io.Writer, opts *options) error 
 			result.WatchDegraded = &degraded
 			result.WatchReason = health.Watch.Reason
 			result.WatchRoots = health.Watch.Roots
+			result.WatchDirs = health.Watch.WatchedDirs
 		}
 		if v, verr := client.Version(cmd.Context()); verr == nil {
 			result.Version = v.Version
@@ -468,7 +470,11 @@ func runDaemonStatus(cmd *cobra.Command, stdout io.Writer, opts *options) error 
 				return ferr
 			}
 		} else if result.WatchDegraded != nil {
-			if _, ferr := fmt.Fprintf(w, "watch: %s, %d root(s)\n", result.WatchBackend, result.WatchRoots); ferr != nil {
+			if result.WatchDirs != nil {
+				if _, ferr := fmt.Fprintf(w, "watch: %s, %d root(s), %d directories\n", result.WatchBackend, result.WatchRoots, *result.WatchDirs); ferr != nil {
+					return ferr
+				}
+			} else if _, ferr := fmt.Fprintf(w, "watch: %s, %d root(s)\n", result.WatchBackend, result.WatchRoots); ferr != nil {
 				return ferr
 			}
 		}

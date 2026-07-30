@@ -6,12 +6,14 @@ env DEVSTRAP_NO_KEYCHAIN=1
 exec devstrap --home=$SHORTHOME --root=$WORK/Code init
 
 exec devstrap --home=$SHORTHOME --root=$WORK/Code --json daemon status
+! stdout 'watch_dirs'
 stdout '"running": *false'
 
 exec devstrap --home=$SHORTHOME --root=$WORK/Code daemon start --hub-file=$WORK/hub.json --interval=0 &daemon&
 waitfile $SHORTHOME/devstrapd.sock
 
 exec devstrap --home=$SHORTHOME --root=$WORK/Code --json daemon status
+! stdout 'watch_dirs'
 stdout '"running": *true'
 
 exec devstrap --home=$SHORTHOME --root=$WORK/Code daemon stop

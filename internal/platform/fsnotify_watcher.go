@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Reederey87/DevStrap/internal/ignore"
@@ -17,16 +18,30 @@ import (
 type NativeWatcher struct {
 	Debounce   time.Duration
 	MaxLatency time.Duration
+	mu         sync.Mutex
+	live       map[*fsnotify.Watcher]struct{}
 }
 
-func (w NativeWatcher) Name() string { return "fsnotify" }
+func (w *NativeWatcher) Name() string { return "fsnotify" }
 
-func (w NativeWatcher) Watch(ctx context.Context, root string, events chan<- FSEvent) error {
+func (w *NativeWatcher) Watch(ctx context.Context, root string, events chan<- FSEvent) error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("create fsnotify watcher: %w", err)
 	}
 	defer func() { _ = watcher.Close() }()
+
+	w.mu.Lock()
+	if w.live == nil {
+		w.live = make(map[*fsnotify.Watcher]struct{})
+	}
+	w.live[watcher] = struct{}{}
+	w.mu.Unlock()
+	defer func() {
+		w.mu.Lock()
+		delete(w.live, watcher)
+		w.mu.Unlock()
+	}()
 
 	matcher, err := ignore.CompileFromDir(root, true)
 	if err != nil {
@@ -35,7 +50,7 @@ func (w NativeWatcher) Watch(ctx context.Context, root string, events chan<- FSE
 	return w.watch(ctx, root, events, watcher, matcher)
 }
 
-func (w NativeWatcher) watch(
+func (w *NativeWatcher) watch(
 	ctx context.Context,
 	root string,
 	events chan<- FSEvent,
@@ -183,6 +198,18 @@ func (w NativeWatcher) watch(
 			}
 		}
 	}
+}
+
+// WatchedDirs reports the directories currently registered across every live
+// Watch call on this instance.
+func (w *NativeWatcher) WatchedDirs() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	total := 0
+	for watcher := range w.live {
+		total += len(watcher.WatchList())
+	}
+	return total
 }
 
 // eventPathUnderRoot reports whether an event path names a location at or below
