@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-04
+last_reviewed: 2026-07-28
 tracks_code: [**]
 ---
 # Work Log
@@ -30,6 +30,38 @@ Follow-ups:
 ```
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
+
+## 2026-07-28 — M5D-06 watcher descriptor and noise hardening
+
+Changed:
+
+- Routed fsnotify recursive registration through the canonical root-compiled `.devstrapignore` matcher, including root-relative anchored-pattern semantics and rename-into-place pruning.
+- Released watched directory subtrees on delete/rename without making already-removed watch errors terminal; dropped chmod-only events and OS/editor scratch before debounce.
+- Kept the watcher's prior directory exclusions (`vendor/`, `.devstrap/`, plus `.Trash/`) in a small watcher-local layer and left the canonical defaults **untouched**.
+- Added watcher regressions for compiler-pruned trees and custom patterns, rename-into-place, descriptor release on rename-out, chmod-only filtering, unconditional junk filtering, and continued reporting of real changes.
+
+- **Scope correction, in two rounds — the canonical `internal/ignore` defaults are not watcher configuration.** They drive `internal/scan` adoption and `internal/cli/draft.go` bundle contents, so editing them changes what gets **synced**.
+  - Before commit: the first cut moved `vendor/` and the whole `.devstrap/` tree into those defaults. `vendor/` is committed source in many Go projects, and a non-git draft folder containing one would have stopped carrying it; collapsing `**/.devstrap/tmp/` + `**/.devstrap/cache/` into an anchored `.devstrap/` also reverted `P6-XP-02`, which `spec/11` records as a deliberate behavior-preserving fix keeping those pruned at ANY depth. Both moved to a watcher-local layer.
+  - **Post-review (Codex, merge blocker):** `.Trash/`, `4913`, and `*~` were nonetheless *kept* in the canonical defaults, on the reasoning that they "sit in the same family as `.DS_Store`". That was inconsistent with the correction above and wrong about `*~` in particular: `.DS_Store` is a **fixed name** that is never user content, while `*~` is a **glob over user filenames**, so a draft legitimately named `proposal~` would have silently stopped syncing — the same defect as pruning `vendor/` there. All three reverted; the canonical table is now byte-identical to trunk.
+  - **Post-review (Codex, merge blocker):** with junk filtering riding the compiled matcher, a user `.devstrapignore` negation (`!*~`) re-admitted the noise, because defaults are applied before user patterns — so `PLAT-04`'s adapter-level filtering was not in fact unconditional. Junk is now an unconditional name check in the adapter (`isWatcherJunk`), which is both where `PLAT-04` asks for it and the only place the user's *content* policy cannot switch it off: wanting `foo~` synced is not a request to be woken whenever an editor writes a backup. Pinned by a test whose `.devstrapignore` negates all three patterns.
+  - **Post-review (Codex, should-fix):** `TestWatcherDropsWatchForRemovedDirectory` could not fail. Both inotify and kqueue drop a watch when the watched inode is unlinked, so it passed with or without the new `removeWatchTree` call. Rewritten as `TestWatcherDropsWatchesForDirectoryRenamedOutOfTree`, because a rename-out leaves the inode alive outside the tree — and reverting the fix now fails it, showing the leak is specifically the **descendant** watch (`removed/nested` survives while the kernel drops `removed` itself).
+  - **Post-review (Codex, should-fix):** `spec/05` still said registration prunes only the old four entries, that `PLAT-01` was unfixed, and that `NativeWatcher` "has no consumer" — the last stale since `#232` and self-contradictory with claims elsewhere in the same file. Corrected; the missing FSEvents *measurement* stays open as the wave-close deliverable.
+
+- **Post-review (a second Claude pass, which found the most consequential defect in this PR — a MERGE BLOCKER plus two more):**
+  - **A transient directory killed the watcher outright, after two mkdir+rmdir cycles.** `addRecursiveWatch` propagated `ENOENT` from the walk, and the event loop returns any such error, so a directory created and deleted before the walk reached it was terminal. Any `go test`, `npm`, `git`, or build run inside a watched project does exactly that: the plane degraded to polling within seconds of arming, and the 60s re-arm re-died immediately, forever. The native watcher was therefore effectively never alive on a machine in use — which would have made **every other benefit in this change unobservable**, and would have made the FSEvents measurement `spec/05` now gates on a reading of a watcher that keeps dying. A vanished path is no longer an error anywhere in registration. Pinned by `TestWatcherSurvivesTransientDirectories` (verified against the old behaviour: dead after 2).
+  - **Chasing the fix surfaced a worse latent bug of my own making.** With descriptor release wired in, the transient test still failed ~40% of runs, and the instrumented event loop showed why: after `removeWatchTree`, fsnotify's kqueue backend emits events whose `Name` is **empty or `"."`**. The create branch then called `addRecursiveWatch(watcher, ".", …)` — and `"."` resolves against the **process working directory**, so a supervised daemon would have recursively watched its own cwd instead of anything in the workspace. Raw fsnotify was ruled out as the cause first (4/4 clean in isolation), so this was mine. Events are now ignored unless their path resolves at or below the watch root (`eventPathUnderRoot`, tabled by `TestEventPathUnderRoot`).
+  - **The `PLAT-01` behaviour was not actually pinned.** Mutation-checked: restoring the old hardcoded `.git`/`node_modules`/`.devstrap`/`vendor` switch left the whole package green, `TestWatcherPrunesCompilerIgnoredDirectories` included — because the file-event filter suppresses hints from inside an ignored directory even while that directory is still watched, so the descriptor exhaustion `PLAT-01` names comes straight back undetected. `TestWatchSetIsExactlyTheCompilerSurvivors` now asserts the watch set itself (3 watches; 13 when reverted).
+  - **A deleted file named like a pruned directory was silently swallowed.** `isDir || statErr != nil` gave every vanished path the *directory* reading, so deleting a content file named `build`, `bin`, `dist`, `target` or `env` produced no hint at all — while writes to that same file did. An unknown path now needs BOTH readings to agree before it is ignored, so the ambiguity errs toward one redundant hint rather than toward silence.
+  - Also fixed: `isWatcherJunk` had already re-created the divergence `PLAT-01` is about (it re-listed 7 of the 8 canonical OS-junk names and dropped `ehthumbs.db`) — the names now come from one exported table, `ignore.IsOSJunkName`, with only the genuinely watcher-local globs (`*~`, `#…#`, `.#…`, vim's `4913`) kept in the adapter; junk-named *directories* are pruned at registration; the dead `shouldSkipWatchDir` helper and its test are gone (`spec/16` advertised that test as "tabling the prune set" while it guarded nothing); the nil-matcher guard moved ahead of its first use; and `spec/05`'s remaining four stale claims plus `spec/06` and `spec/16` are corrected (both `last_reviewed` bumped).
+  - Rejected: a test asserting that suppressing a junk-named path's hint does not skip its descriptor bookkeeping. It passed either way — a rename event carries the *pre*-rename path, so renaming to a junk name never produces a junk-named event, and junk-named directories are now pruned before anything beneath them is watched. The ordering fix stays as the correct shape, documented as defense in depth rather than a live bug; asserting it would have been exactly the empty test this round removed elsewhere.
+
+Validated:
+
+- `gofmt -l cmd internal`; native/Linux/Windows `go build ./...`; `go test -race -count=1 ./...`; `go test -race -count=5 ./internal/platform/`; `go test -count=8 -run TestWatcherSurvivesTransientDirectories ./internal/platform/` (0 failures; the flake that exposed the empty-event-name bug reproduced at ~40% before the guard); pinned golangci-lint v2.12.0 (`0 issues`); and `go run ./cmd/spec-drift --base origin/main --head HEAD`. Every claim above was mutation-checked by reverting the fix and confirming the named test fails.
+
+Follow-ups:
+
+- None.
 
 ## 2026-07-28 — M5D-05 daemon build-skew visibility
 

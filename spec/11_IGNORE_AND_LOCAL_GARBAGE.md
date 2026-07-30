@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-12
+last_reviewed: 2026-07-28
 tracks_code: [internal/ignore/**, internal/draftbundle/**, internal/scan/**, .gitignore]
 ---
 # Ignore Rules and Local Garbage
@@ -82,8 +82,8 @@ data/raw/
 data/interim/
 
 # DevStrap internals
-.devstrap/tmp/
-.devstrap/cache/
+**/.devstrap/tmp/
+**/.devstrap/cache/
 ```
 
 > **Warning: the shipped defaults contain NO secret patterns** — no `.env`, `.aws/credentials`, `*.pem`, `id_rsa`, or `id_ed25519`. Do not assume the default policy keeps secrets out of draft bundles; secret exclusion in draft sync is enforced separately by a hardcoded detector (see "Draft sync" below and `P6-XP-06`). The defaults also prune `env/` and `bin/` at any depth, which was the source of the now-fixed `P6-XP-06` scan discovery blind spot: a workspace-root `.devstrapignore` negation (e.g. `!bin/`) now overrides this on the scan path too.
@@ -184,9 +184,16 @@ Use the compiled `.devstrapignore` output directly to exclude files from encrypt
 
 Current state: the compiler output drives directory/artifact exclusion in `draftbundle.Pack`, but secret exclusion is enforced by a separate hardcoded secret-name detector (`draftbundle.isSecretPath`, duplicated from `internal/scan`) because the shipped compiler defaults carry no secret patterns. Folding that detector's patterns into the canonical compiler table — so scan, draft sync, and the future agent denylist read one source — is the open follow-up (extends `PLAT-01`/`AGEN-05`).
 
-### Watcher exclusion set (unbuilt — `PLAT-01`/`PLAT-04`)
+### Watcher exclusion set (built — `PLAT-01`/`PLAT-04`)
 
-Compile the same source into the FSEvents/inotify watcher's exclusion set so the watcher never raises change events for ignored or generated trees. Today the watcher carries its own hardcoded list (`PLAT-01`/`PLAT-04`); it must consume the compiler instead. Not yet built.
+The fsnotify watcher now compiles the watch root's `.devstrapignore` with the canonical defaults once per `Watch`, passes true root-relative slash paths into `ShouldPruneDir`, and applies the same matcher to initial registration and to create/rename registration. A compile/read failure falls back to `DefaultMatcher`, so callers that construct `NativeWatcher{}` keep the default policy and a malformed user file cannot disable pruning altogether. Rename/delete events best-effort remove the affected watch subtree **including descendants** — the leak that actually mattered, since the kernel drops a renamed directory's own watch but keeps every watch below it. `PLAT-01` and `PLAT-04` are built.
+
+**Two layers, and the split is load-bearing rather than an inconsistency.** The compiler's defaults answer *"is this project content?"* — they drive `internal/scan` adoption and what rides a draft bundle, so adding to them changes what gets **synced**. A small watcher-local layer answers only *"is it worth a watch descriptor, or a wakeup?"*, a budget question local to that adapter. `M5D-06` therefore changed **nothing** in the canonical defaults.
+
+- **Directories the watcher skips that the compiler does not:** `vendor/`, `.devstrap/`, `.Trash/`. `vendor/` is committed source in many Go projects, and putting it in the canonical set would silently drop it from a non-git draft folder's bundle; skipping it in the watcher costs only hints for files that change when dependencies are re-vendored, which the periodic cycle catches anyway. `.devstrap/` is DevStrap's own state home — the compiler prunes its `tmp/` and `cache/` subtrees at any depth (`P6-XP-02`) and keeps the rest visible on purpose, while the watcher has no reason to watch any of it. `.Trash/` is the OS's, not the project's.
+- **Event noise the watcher drops unconditionally:** `Chmod`-only events (they cannot change the namespace) and OS/editor scratch *by name* — `.DS_Store`, `Thumbs.db`, `desktop.ini`, `.AppleDouble`, `.LSOverride`, `4913`, trailing-`~` backups, and emacs `#foo#`/`.#foo` files — dropped **before** the debounce and the 5s trigger floor, so a save-storm's worth of backup files cannot spend the floor a real change needs.
+
+  Two properties of that second bullet are deliberate. It does **not** run through the matcher, because the matcher applies the user's `.devstrapignore`, and a negation (`!*~`) would switch noise filtering back on — asking for `foo~` to be *synced* is a content choice, not a request to be woken every time an editor writes a backup. And `*~` must not be canonical content policy at all: unlike the fixed names beside it, it is a glob over **user filenames**, so putting it in the defaults would silently stop syncing a draft legitimately named `proposal~` — the same class of mistake as pruning `vendor/` there. Dropping a hint is safe by construction: a hint is an optimization, so the cost is at most one interval of latency before periodic convergence notices, and the file itself still syncs.
 
 ### Agent denylist (unbuilt — `AGEN-05`)
 
@@ -337,7 +344,7 @@ Loose:
 
 ## Audit follow-ups (2026-06-27)
 
-**The single `.devstrapignore` compiler is now built** as `internal/ignore` (DRAFT-03). It compiles *gitignore-inspired* patterns from a project's `.devstrapignore` file plus a canonical default OS-junk/build-artifact table, and feeds the draft-bundle allow-list from one source; a `GitignoreFragment` API exists but has no consumer yet (no code writes a managed `.gitignore` block). The compiler now follows gitignore semantics (`P6-XP-02`, shipped 2026-07-04, differential-tested against `git check-ignore`): it anchors on a leading **or** middle separator, translates bracket classes, degrades an unclosed `[` to a literal, and treats non-standalone `**` as a single `*`. The scanner prune predicate is now fixed too (`P6-XP-06`, shipped 2026-07-04): `scan.Walk` calls `ignore.CompileFromDir` once per walk, offers an `Options.Ignore` test-injection seam, falls back to the default matcher with a warning on compile error, and sources pruning from `internal/ignore`, matching the draft-bundle path. The watcher and agent deny-list still carry some hardcoded entries to be folded in as follow-up.
+**The single `.devstrapignore` compiler is now built** as `internal/ignore` (DRAFT-03). It compiles *gitignore-inspired* patterns from a project's `.devstrapignore` file plus a canonical default OS-junk/build-artifact table, and feeds the draft-bundle allow-list from one source; a `GitignoreFragment` API exists but has no consumer yet (no code writes a managed `.gitignore` block). The compiler now follows gitignore semantics (`P6-XP-02`, shipped 2026-07-04, differential-tested against `git check-ignore`): it anchors on a leading **or** middle separator, translates bracket classes, degrades an unclosed `[` to a literal, and treats non-standalone `**` as a single `*`. The scanner prune predicate is now fixed too (`P6-XP-06`, shipped 2026-07-04): `scan.Walk` calls `ignore.CompileFromDir` once per walk, offers an `Options.Ignore` test-injection seam, falls back to the default matcher with a warning on compile error, and sources pruning from `internal/ignore`, matching the draft-bundle path. The watcher now consumes the same compiler (`PLAT-01`/`PLAT-04`, shipped 2026-07-28), including project-local patterns and descriptor release when watched directories leave the tree; OS/editor event noise is filtered in the adapter rather than added to the canonical table, for the reasons under *Watcher exclusion set* above. The agent deny-list remains to be folded in as follow-up.
 
 ## Audit follow-ups (2026-06-28)
 

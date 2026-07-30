@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-25
+last_reviewed: 2026-07-28
 tracks_code: [internal/platform/**, internal/devicekeys/**, .github/**]
 ---
 # Linux Compatibility Plan
@@ -262,7 +262,7 @@ Current repository implementation covers the portable CLI pieces for init, scan/
 
 ## Audit follow-ups (2026-06-27)
 
-The platform findings in `05_MAC_FIRST_IMPLEMENTATION.md` (`PLAT-01..05`) apply equally to the Linux adapters: unify watcher exclusions with the `spec/11` ignore compiler, add inotify `ENOSPC`/`max_user_watches` handling + polling fallback + periodic reconciliation, filter OS junk, and make the `ServiceSpec` seam rich enough to render the systemd user unit. Keep all Linux specifics behind `internal/platform` adapters.
+The platform findings in `05_MAC_FIRST_IMPLEMENTATION.md` (`PLAT-01..05`) apply equally to the Linux adapters. `PLAT-01`/`PLAT-04` shipped 2026-07-28 (`M5D-06`) and are inherently shared: `NativeWatcher` is one fsnotify-backed adapter for both platforms, so compiler-driven exclusion, descriptor release, and OS-junk/chmod filtering all apply to inotify exactly as to kqueue (only the descriptor economics differ — inotify watches directories, kqueue needs an fd per entry). Still open for Linux: inotify `ENOSPC`/`max_user_watches` handling plus polling fallback and periodic reconciliation. The `ServiceSpec` seam is rich enough to render the systemd user unit (`PLAT-05`, resolved). Keep all Linux specifics behind `internal/platform` adapters.
 
 ## Audit follow-ups (2026-06-28)
 

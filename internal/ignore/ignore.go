@@ -329,17 +329,45 @@ func appendBracketClass(sb *strings.Builder, body string, start int) (int, bool)
 // defaultPatterns is the canonical OS-junk and build-artifact table (DRAFT-03).
 // Every consumer (scanner prune, watcher skip, bundle walker, agent deny,
 // generated gitignore) reads from this single table.
+// osJunkNames are fixed filenames written by an OS or file manager, never by a
+// user who means to keep them. They are exported through IsOSJunkName so a
+// consumer needing the same judgement WITHOUT compiling a matcher — the
+// filesystem watcher, deciding whether an event deserves a wakeup — reads this
+// list instead of duplicating it. `PLAT-01` is the finding that these lists must
+// not diverge, so its fix must not start a second one.
+//
+// Note what does NOT belong here: anything glob-shaped over user filenames, such
+// as `*~`. These are fixed names that are never content; a glob would change what
+// gets synced. See internal/platform's isWatcherJunk.
+var osJunkNames = []string{
+	".DS_Store",
+	"Thumbs.db",
+	"ehthumbs.db",
+	".AppleDouble",
+	".LSOverride",
+	"desktop.ini",
+}
+
+// IsOSJunkName reports whether a bare filename is canonical OS junk. It is a
+// membership test over the fixed names above, deliberately not a pattern match: a
+// caller wanting full policy (including the user's .devstrapignore) compiles a
+// Matcher instead.
+func IsOSJunkName(base string) bool {
+	for _, name := range osJunkNames {
+		if base == name {
+			return true
+		}
+	}
+	return false
+}
+
 var defaultPatterns = func() []Pattern {
-	lines := []string{
+	// OS junk comes from osJunkNames so the table and IsOSJunkName cannot drift.
+	lines := append([]string{
 		// VCS metadata — never synced or bundled.
 		".git/",
-		// OS junk.
-		".DS_Store",
-		"Thumbs.db",
-		"ehthumbs.db",
-		".AppleDouble",
-		".LSOverride",
-		"desktop.ini",
+	}, osJunkNames...)
+	lines = append(lines, []string{
 		// Language/runtime build artifacts — rebuilt on hydrate, never synced (DRAFT-05).
 		"node_modules/",
 		"dist/",
@@ -377,7 +405,7 @@ var defaultPatterns = func() []Pattern {
 		// DevStrap internal dirs (pruned at any depth, see above).
 		"**/.devstrap/tmp/",
 		"**/.devstrap/cache/",
-	}
+	}...)
 	patterns := make([]Pattern, 0, len(lines))
 	for _, line := range lines {
 		p, ok, err := parseLine(line)
