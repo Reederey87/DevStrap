@@ -239,8 +239,8 @@ func TestMigrateEnsureSummaryAndVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 30 {
-		t.Fatalf("schema version = %d, want 30", version)
+	if version != 31 {
+		t.Fatalf("schema version = %d, want 31", version)
 	}
 
 	var tableCount int
@@ -462,8 +462,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 29 {
-		t.Fatalf("schema version after down = %d, want 29", version)
+	if version != 30 {
+		t.Fatalf("schema version after down = %d, want 30", version)
 	}
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
@@ -472,8 +472,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 30 {
-		t.Fatalf("schema version after re-migrate = %d, want 30", version)
+	if version != 31 {
+		t.Fatalf("schema version after re-migrate = %d, want 31", version)
 	}
 }
 
@@ -505,6 +505,9 @@ func TestMigration00029RoundTripsDeviceGitstateTable(t *testing.T) {
 		t.Fatalf("upsert device gitstate before down: %v", err)
 	}
 
+	if err := st.Down(); err != nil { // 31 -> 30 (drops WIP tombstone columns)
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 30 -> 29 (drops device_wip, unrelated here)
 		t.Fatal(err)
 	}
@@ -573,6 +576,9 @@ func TestMigration00030RoundTripsDeviceWipTable(t *testing.T) {
 		t.Fatalf("upsert device wip before down: %v", err)
 	}
 
+	if err := st.Down(); err != nil { // 31 -> 30 (drops WIP tombstone columns)
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 30 -> 29 (drops device_wip)
 		t.Fatal(err)
 	}
@@ -606,6 +612,68 @@ func TestMigration00030RoundTripsDeviceWipTable(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].SHA != "def456" {
 		t.Fatalf("rows=%#v, want one row from the post-remigrate insert", rows)
+	}
+}
+
+func TestMigration00031RoundTripsDroppedAtColumn(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureWorkspace(ctx, "personal", "/tmp/Code"); err != nil {
+		t.Fatal(err)
+	}
+	// Two rows: one still LIVE, one tombstoned. Schema 30 encodes "dropped" as
+	// row ABSENCE, so the down rebuild must preserve the first and delete the
+	// second. Carrying the dead row across would resurrect it as a fully
+	// live-looking row holding a REAL sha for a ref that is gone from the
+	// remote — the fleet's entire drop history re-surfacing in `wip status`
+	// and `doctor`, with `wip apply` then failing on fetch.
+	if err := st.WithTx(ctx, func(tx *Tx) error {
+		if err := tx.UpsertDeviceWipTx(ctx, "dev_live", "work/acme/live", "work/acme/live",
+			WipParams{SHA: "live999"}, Event{ID: "evt_live_push", HLC: 1000}); err != nil {
+			return err
+		}
+		if err := tx.UpsertDeviceWipTx(ctx, "dev_peer", "work/acme/api", "work/acme/api",
+			WipParams{SHA: "abc123"}, Event{ID: "evt_push", HLC: 1000}); err != nil {
+			return err
+		}
+		return tx.TombstoneDeviceWipTx(ctx, "dev_peer", "work/acme/api", "work/acme/api",
+			"abc123", Event{ID: "evt_drop", HLC: 2000})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Down(); err != nil {
+		t.Fatal(err)
+	}
+	var sha string
+	if err := st.db.QueryRowContext(ctx, `SELECT sha FROM device_wip WHERE device_id = 'dev_live'`).Scan(&sha); err != nil {
+		t.Fatalf("live schema-30 row was not preserved by down rebuild: %v", err)
+	}
+	if sha != "live999" {
+		t.Fatalf("preserved sha = %q, want live999", sha)
+	}
+	var dead int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM device_wip WHERE device_id = 'dev_peer'`).Scan(&dead); err != nil {
+		t.Fatal(err)
+	}
+	if dead != 0 {
+		t.Fatalf("tombstoned row survived the down rebuild as a live schema-30 row (count=%d); schema 30 encodes dropped as absence", dead)
+	}
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	var droppedAt any
+	if err := st.db.QueryRowContext(ctx, `SELECT dropped_at_hlc FROM device_wip WHERE device_id = 'dev_live'`).Scan(&droppedAt); err != nil {
+		t.Fatalf("re-added dropped_at_hlc unreadable: %v", err)
+	}
+	if droppedAt != nil {
+		t.Fatalf("dropped_at_hlc after down/up = %v, want NULL", droppedAt)
 	}
 }
 
@@ -645,7 +713,10 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
-	// Steps from 30 down to 23 are unrelated and must remain unaffected.
+	// Steps from 31 down to 23 are unrelated and must remain unaffected.
+	if err := st.Down(); err != nil { // 31 -> 30
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 30 -> 29
 		t.Fatal(err)
 	}
@@ -723,6 +794,9 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
+	if err := st.Down(); err != nil { // 31 -> 30
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 30 -> 29
 		t.Fatal(err)
 	}

@@ -4,6 +4,10 @@ tracks_code: [cmd/**, internal/**, internal/specdrift/**, .github/**, go.mod, go
 ---
 # Test Plan
 
+`cmd/devstrap/testdata/script/wip_drop_propagates.txtar` proves the two-device
+Layer-B retraction path: B first observes A's pushed WIP row, drops A's leased
+ref, syncs `repo.wip.dropped`, and A then reports no pending/stale WIP.
+
 ## Test philosophy
 
 This project can destroy trust if it loses code, leaks secrets, or creates stale agent branches. Tests must focus on safety invariants.

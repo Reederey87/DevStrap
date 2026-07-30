@@ -627,6 +627,14 @@ func newWipDropCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// already gone (idempotent success — report dropped, clear the
 			// mirror) vs. the ref moved to an unknown sha (refuse; `devstrap
 			// sync` pulls the newer record, then retry).
+			// leasedSHA is the sha this delete PROVED it removed, and it is what
+			// the tombstone's sha-inequality escape is evaluated against. The
+			// already-gone path leases nothing, so it must publish "": this
+			// device's mirror may be stale, and asserting row.SHA there would
+			// name a sha that was never deleted, resurrecting the row
+			// fleet-wide as a permanent phantom. "" is the sha-agnostic
+			// "observed absent" tombstone — see state.TombstoneDeviceWipTx.
+			leasedSHA := row.SHA
 			if err := r.DeleteRef(cmd.Context(), project.LocalPath, "origin", ref, row.SHA); err != nil {
 				if !errors.Is(err, dsgit.ErrNonFastForward) {
 					return appError{code: exitGit, err: err}
@@ -640,14 +648,27 @@ func newWipDropCommand(stdout io.Writer, opts *options) *cobra.Command {
 						"remote WIP ref for device %s has moved past the last synced record (expected %s, found %s); run `devstrap sync` to pull the newer record, then retry",
 						row.DeviceID, shortSHA(row.SHA), shortSHA(got))}
 				}
-				// Already gone: fall through to clear the mirror row.
+				// Already gone: idempotent success, but nothing was leased.
+				leasedSHA = ""
 			}
-			// Clears only THIS device's own local device_wip mirror row. This
-			// does NOT propagate to other devices' mirrors — there is no
-			// repo.wip.dropped event, and fleet-wide WIP-ref GC is explicitly
-			// out of scope for this feature (spec/07); other devices learn the
-			// ref is gone only the next time they try to fetch it.
-			if err := store.DeleteDeviceWip(cmd.Context(), row.DeviceID, project.PathKey); err != nil {
+			payload := dssync.WipDroppedPayload{
+				Path:     project.Path,
+				DeviceID: row.DeviceID,
+				SHA:      leasedSHA,
+			}
+			raw, err := json.Marshal(payload)
+			if err != nil {
+				return err
+			}
+			if err := store.WithTx(cmd.Context(), func(tx *state.Tx) error {
+				// As with wip push, mirror the emitting device's own event in
+				// the same transaction: its re-delivered event is deduped.
+				ev, err := store.InsertLocalEventTx(cmd.Context(), tx, dssync.NewWipDroppedEvent(string(raw)))
+				if err != nil {
+					return err
+				}
+				return tx.TombstoneDeviceWipTx(cmd.Context(), row.DeviceID, project.PathKey, project.Path, leasedSHA, ev)
+			}); err != nil {
 				return err
 			}
 			out := wipDropResult{Path: project.Path, DeviceID: row.DeviceID, Ref: ref, Dropped: true}
