@@ -52,6 +52,23 @@ type checkResult struct {
 	Remedy string      `json:"remedy,omitempty"`
 }
 
+// scrubbed renders an error for a checkResult's user-visible Detail/Remedy.
+//
+// doctor's graded output is the one place that deliberately surfaces raw
+// subsystem errors — hub open/reachability, git and store failures, key
+// custody — and Detail carries a `json:"detail,omitempty"` tag, so whatever it
+// holds reaches BOTH the human table and the --json document. Those errors can
+// carry a hub remote URL with userinfo, a token-shaped fragment, or a PEM body.
+// Every construction site must therefore route through here rather than calling
+// err.Error() directly; TestDoctorDetailsNeverCarryRawErrorStrings parses this
+// file and fails on any that does not.
+func scrubbed(err error) string {
+	if err == nil {
+		return ""
+	}
+	return redact.Scrub(err.Error())
+}
+
 func newDoctorCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var fixFlag bool
 	var remoteFlag bool
@@ -105,21 +122,21 @@ func checkHubHealth(ctx context.Context, opts *options, hubFile string) []checkR
 	}
 	store, err := opts.openState(ctx)
 	if err != nil {
-		return []checkResult{{Name: "hub", Status: checkError, Detail: err.Error()}}
+		return []checkResult{{Name: "hub", Status: checkError, Detail: scrubbed(err)}}
 	}
 	defer closeStore(store)
 	var out []checkResult
 	if wsID, werr := store.WorkspaceID(ctx); werr == nil {
 		out = append(out, checkResult{Name: "workspace id", Status: checkOK, Detail: wsID})
 	} else {
-		out = append(out, checkResult{Name: "workspace id", Status: checkWarn, Detail: werr.Error()})
+		out = append(out, checkResult{Name: "workspace id", Status: checkWarn, Detail: scrubbed(werr)})
 	}
 	hub, hubID, err := hubFromOptions(ctx, opts, store, hubFile)
 	if err != nil {
-		return append(out, checkResult{Name: "hub", Status: checkError, Detail: err.Error(), Remedy: "pass --hub-file or set 'hub' in config"})
+		return append(out, checkResult{Name: "hub", Status: checkError, Detail: scrubbed(err), Remedy: "pass --hub-file or set 'hub' in config"})
 	}
 	if _, err := hub.ListBlobs(ctx); err != nil {
-		return append(out, checkResult{Name: "hub reachable", Status: checkError, Detail: err.Error()})
+		return append(out, checkResult{Name: "hub reachable", Status: checkError, Detail: scrubbed(err)})
 	}
 	out = append(out, checkResult{Name: "hub reachable", Status: checkOK, Detail: hubID})
 
@@ -152,7 +169,7 @@ func checkHubHealth(ctx context.Context, opts *options, hubFile string) []checkR
 			}
 		}
 	} else if !errors.Is(rerr, dssync.ErrRetentionNotFound) {
-		out = append(out, checkResult{Name: "retention manifest version", Status: checkWarn, Detail: rerr.Error()})
+		out = append(out, checkResult{Name: "retention manifest version", Status: checkWarn, Detail: scrubbed(rerr)})
 	}
 
 	// P5-SYNC-01: the push watermark is the Seq-keyed row (with its one-time
@@ -277,7 +294,7 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 	if _, err := os.Stat(paths.StateDB()); err == nil {
 		store, err := opts.openState(ctx)
 		if err != nil {
-			results = append(results, checkResult{Name: "state database", Status: checkError, Detail: err.Error()})
+			results = append(results, checkResult{Name: "state database", Status: checkError, Detail: scrubbed(err)})
 		} else {
 			defer closeStore(store)
 			serviceStore = store
@@ -304,7 +321,7 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 	} else if os.IsNotExist(err) {
 		results = append(results, checkResult{Name: "state database", Status: checkWarn, Detail: "missing", Remedy: "run `devstrap init` (or doctor --fix)"})
 	} else {
-		results = append(results, checkResult{Name: "state database", Status: checkError, Detail: err.Error()})
+		results = append(results, checkResult{Name: "state database", Status: checkError, Detail: scrubbed(err)})
 	}
 	results = append(results, checkRepoLocks(paths.Home)...)
 	results = append(results, checkService(ctx, opts, serviceStore)...)
@@ -320,14 +337,14 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 func checkHubHashChainConflicts(ctx context.Context, store *state.Store) []checkResult {
 	conflicts, err := store.OpenConflictsByType(ctx, dssync.ConflictEventHashChain)
 	if err != nil {
-		return []checkResult{{Name: "hub hash-chain integrity", Status: checkError, Detail: err.Error()}}
+		return []checkResult{{Name: "hub hash-chain integrity", Status: checkError, Detail: scrubbed(err)}}
 	}
 	if len(conflicts) == 0 {
 		return []checkResult{{Name: "hub hash-chain integrity", Status: checkOK, Detail: "0 open hash-chain breaks"}}
 	}
 	pendingPredecessors, err := devicesAwaitingPredecessorGrant(ctx, store)
 	if err != nil {
-		return []checkResult{{Name: "hub hash-chain integrity", Status: checkError, Detail: err.Error()}}
+		return []checkResult{{Name: "hub hash-chain integrity", Status: checkError, Detail: scrubbed(err)}}
 	}
 	explained := 0
 	for _, conflict := range conflicts {
@@ -423,14 +440,14 @@ func checkDurabilityExport(ctx context.Context, opts *options, store *state.Stor
 	}
 	interval, err := durabilityExportInterval(opts)
 	if err != nil {
-		return []checkResult{{Name: "hub durability export", Status: checkWarn, Detail: err.Error(), Remedy: "set durability.export_interval to a duration such as 24h, or 0 to disable"}}
+		return []checkResult{{Name: "hub durability export", Status: checkWarn, Detail: scrubbed(err), Remedy: "set durability.export_interval to a duration such as 24h, or 0 to disable"}}
 	}
 	if interval == 0 {
 		return []checkResult{{Name: "hub durability export", Status: checkOK, Detail: "disabled by durability.export_interval=0"}}
 	}
 	record, ok, err := readDurabilityExportRecord(ctx, store)
 	if err != nil {
-		return []checkResult{{Name: "hub durability export", Status: checkWarn, Detail: err.Error(), Remedy: "run `devstrap sync` or `devstrap run-loop --once` to replace the invalid record"}}
+		return []checkResult{{Name: "hub durability export", Status: checkWarn, Detail: scrubbed(err), Remedy: "run `devstrap sync` or `devstrap run-loop --once` to replace the invalid record"}}
 	}
 	if !ok || record.Replica != replica {
 		return []checkResult{{Name: "hub durability export", Status: checkWarn, Detail: "no successful export recorded for the configured replica", Remedy: "run `devstrap hub compact`, then `devstrap sync` or `devstrap run-loop --once`"}}
@@ -455,7 +472,7 @@ func checkRestoreJournal(home string) []checkResult {
 	if _, err := os.Stat(journalPath); err == nil {
 		return []checkResult{{Name: "restore journal", Status: checkError, Detail: "interrupted restore detected at " + journalPath, Remedy: "run `devstrap db restore --recover`"}}
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return []checkResult{{Name: "restore journal", Status: checkError, Detail: err.Error(), Remedy: "run `devstrap db restore --recover`"}}
+		return []checkResult{{Name: "restore journal", Status: checkError, Detail: scrubbed(err), Remedy: "run `devstrap db restore --recover`"}}
 	}
 	return nil
 }
@@ -489,7 +506,7 @@ func checkService(ctx context.Context, opts *options, store *state.Store) []chec
 		if errors.Is(err, platform.ErrUnsupported) {
 			return nil
 		}
-		return []checkResult{{Name: name, Status: checkWarn, Detail: err.Error()}}
+		return []checkResult{{Name: name, Status: checkWarn, Detail: scrubbed(err)}}
 	}
 	if !status.Installed {
 		return []checkResult{{Name: name, Status: checkOK, Detail: "not installed (optional; `devstrap service install` for unattended sync)"}}
@@ -498,7 +515,7 @@ func checkService(ctx context.Context, opts *options, store *state.Store) []chec
 	if store != nil {
 		recorded, custodyErr := store.KeyCustody(ctx)
 		if custodyErr != nil {
-			custodyResult = append(custodyResult, checkResult{Name: custodyName, Status: checkWarn, Detail: custodyErr.Error()})
+			custodyResult = append(custodyResult, checkResult{Name: custodyName, Status: checkWarn, Detail: scrubbed(custodyErr)})
 		} else if state.EffectiveKeyCustody(recorded) == devicekeys.CustodyKeychain {
 			detail := "keychain-custody store under an unattended service; a locked keychain makes ticks fail closed"
 			remedy := fmt.Sprintf("re-initialize with %s=1 and migrate the key files to file custody", platform.NoKeychainEnv)
@@ -532,7 +549,7 @@ func checkAgentRunSweep(ctx context.Context, opts *options, store *state.Store) 
 	_ = opts
 	reconciled, stillRunning, err := sweepStaleAgentRuns(ctx, store)
 	if err != nil {
-		return []checkResult{{Name: "agent run sweep", Status: checkWarn, Detail: err.Error()}}
+		return []checkResult{{Name: "agent run sweep", Status: checkWarn, Detail: scrubbed(err)}}
 	}
 	status := checkOK
 	if reconciled > 0 {
@@ -571,7 +588,7 @@ func checkSandboxViolations(ctx context.Context, store *state.Store) []checkResu
 func checkFailedMaterializations(ctx context.Context, store *state.Store) []checkResult {
 	projects, err := store.ListProjects(ctx)
 	if err != nil {
-		return []checkResult{{Name: "failed materializations", Status: checkWarn, Detail: err.Error()}}
+		return []checkResult{{Name: "failed materializations", Status: checkWarn, Detail: scrubbed(err)}}
 	}
 	var out []checkResult
 	for _, p := range projects {
@@ -624,13 +641,13 @@ const gitstateStaleAfter = 7 * 24 * time.Hour
 func checkGitstateFreshness(ctx context.Context, store *state.Store) []checkResult {
 	projects, err := store.ListProjects(ctx)
 	if err != nil {
-		return []checkResult{{Name: "gitstate", Status: checkWarn, Detail: err.Error()}}
+		return []checkResult{{Name: "gitstate", Status: checkWarn, Detail: scrubbed(err)}}
 	}
 	var out []checkResult
 	for _, p := range projects {
 		rows, err := store.DeviceGitstateForProject(ctx, p.PathKey)
 		if err != nil {
-			out = append(out, checkResult{Name: "gitstate: " + p.Path, Status: checkWarn, Detail: err.Error()})
+			out = append(out, checkResult{Name: "gitstate: " + p.Path, Status: checkWarn, Detail: scrubbed(err)})
 			continue
 		}
 		if len(rows) == 0 {
@@ -683,14 +700,14 @@ const wipStaleAfter = 48 * time.Hour
 func checkPendingWip(ctx context.Context, store *state.Store) []checkResult {
 	projects, err := store.ListProjects(ctx)
 	if err != nil {
-		return []checkResult{{Name: "pending wip", Status: checkWarn, Detail: err.Error()}}
+		return []checkResult{{Name: "pending wip", Status: checkWarn, Detail: scrubbed(err)}}
 	}
 	var out []checkResult
 	now := time.Now()
 	for _, p := range projects {
 		rows, err := store.DeviceWipForProject(ctx, p.PathKey)
 		if err != nil {
-			out = append(out, checkResult{Name: "wip: " + p.Path, Status: checkWarn, Detail: err.Error()})
+			out = append(out, checkResult{Name: "wip: " + p.Path, Status: checkWarn, Detail: scrubbed(err)})
 			continue
 		}
 		for _, row := range rows {
@@ -728,7 +745,7 @@ func checkStateHome(paths config.Paths) []checkResult {
 			out = append(out, checkResult{Name: "state home", Status: checkWarn, Detail: "missing", Remedy: "run `devstrap init` (or doctor --fix)"})
 			return out
 		}
-		out = append(out, checkResult{Name: "state home", Status: checkError, Detail: err.Error()})
+		out = append(out, checkResult{Name: "state home", Status: checkError, Detail: scrubbed(err)})
 		return out
 	}
 	out = append(out, checkResult{Name: "state home", Status: checkOK, Detail: fmt.Sprintf("%s (mode %s)", paths.Home, stat.Mode().Perm())})
@@ -749,7 +766,7 @@ func checkDaemonSocketPath(paths config.Paths) []checkResult {
 		return []checkResult{{
 			Name:   "daemon socket path",
 			Status: checkWarn,
-			Detail: err.Error() + "\n`devstrap daemon start` and `service install --daemon` will refuse; convergence via `devstrap sync`, `run-loop`, and a non-daemon service unit is unaffected",
+			Detail: scrubbed(err) + "\n`devstrap daemon start` and `service install --daemon` will refuse; convergence via `devstrap sync`, `run-loop`, and a non-daemon service unit is unaffected",
 		}}
 	}
 	return []checkResult{{Name: "daemon socket path", Status: checkOK, Detail: paths.SocketPath()}}
@@ -770,7 +787,7 @@ func checkDaemonVersion(ctx context.Context, paths config.Paths) []checkResult {
 		if errors.Is(err, daemon.ErrUnavailable) {
 			return []checkResult{{Name: "daemon version", Status: checkOK, Detail: "daemon not running; skipped"}}
 		}
-		return []checkResult{{Name: "daemon version", Status: checkWarn, Detail: redact.Scrub(err.Error())}}
+		return []checkResult{{Name: "daemon version", Status: checkWarn, Detail: scrubbed(err)}}
 	}
 	daemonVersion := client.DaemonVersion()
 	if !versionsSkew(daemonVersion, version) {
@@ -801,12 +818,12 @@ func checkDB(ctx context.Context, store *state.Store) []checkResult {
 	var out []checkResult
 	version, err := store.Version()
 	if err != nil {
-		return []checkResult{{Name: "schema", Status: checkError, Detail: err.Error()}}
+		return []checkResult{{Name: "schema", Status: checkError, Detail: scrubbed(err)}}
 	}
 	out = append(out, checkResult{Name: "schema", Status: checkOK, Detail: fmt.Sprintf("version %d", version)})
 	check, err := store.QuickCheck(ctx)
 	if err != nil {
-		out = append(out, checkResult{Name: "sqlite quick_check", Status: checkError, Detail: err.Error(), Remedy: "restore from a `devstrap db backup --full` archive (only a full backup recovers the encrypted secrets alongside the database)"})
+		out = append(out, checkResult{Name: "sqlite quick_check", Status: checkError, Detail: scrubbed(err), Remedy: "restore from a `devstrap db backup --full` archive (only a full backup recovers the encrypted secrets alongside the database)"})
 	} else if check != "ok" {
 		out = append(out, checkResult{Name: "sqlite quick_check", Status: checkError, Detail: check, Remedy: "restore from a `devstrap db backup --full` archive (only a full backup recovers the encrypted secrets alongside the database)"})
 	} else {
@@ -814,7 +831,7 @@ func checkDB(ctx context.Context, store *state.Store) []checkResult {
 	}
 	fkCheck, err := store.ForeignKeyCheck(ctx)
 	if err != nil {
-		out = append(out, checkResult{Name: "foreign_key_check", Status: checkError, Detail: err.Error()})
+		out = append(out, checkResult{Name: "foreign_key_check", Status: checkError, Detail: scrubbed(err)})
 	} else if fkCheck != "ok" {
 		out = append(out, checkResult{Name: "foreign_key_check", Status: checkError, Detail: fkCheck})
 	} else {
@@ -1067,7 +1084,7 @@ func checkDeviceKeys(ctx context.Context, paths config.Paths, store *state.Store
 	}
 	recorded, err := store.KeyCustody(ctx)
 	if err != nil {
-		return []checkResult{{Name: "key custody", Status: checkError, Detail: err.Error()}}
+		return []checkResult{{Name: "key custody", Status: checkError, Detail: scrubbed(err)}}
 	}
 	keyStore := devicekeys.NewHybridStore(paths.KeyDir(), keychainBackend()).
 		WithCustody(state.EffectiveKeyCustody(recorded))
@@ -1124,7 +1141,7 @@ func checkRepoLocks(home string) []checkResult {
 		if os.IsNotExist(err) {
 			return []checkResult{{Name: "repo locks", Status: checkOK, Detail: "none held"}}
 		}
-		return []checkResult{{Name: "repo locks", Status: checkError, Detail: err.Error()}}
+		return []checkResult{{Name: "repo locks", Status: checkError, Detail: scrubbed(err)}}
 	}
 	held := 0
 	var out []checkResult
@@ -1136,7 +1153,7 @@ func checkRepoLocks(home string) []checkResult {
 		projectID := strings.TrimSuffix(name, ".lock")
 		info, exists, stale, err := readRepoLock(home, projectID)
 		if err != nil {
-			out = append(out, checkResult{Name: "repo lock " + projectID, Status: checkError, Detail: err.Error()})
+			out = append(out, checkResult{Name: "repo lock " + projectID, Status: checkError, Detail: scrubbed(err)})
 			continue
 		}
 		if !exists {
