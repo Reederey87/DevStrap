@@ -17,6 +17,7 @@ import (
 	"github.com/Reederey87/DevStrap/internal/daemon"
 	"github.com/Reederey87/DevStrap/internal/logging"
 	"github.com/Reederey87/DevStrap/internal/platform"
+	"github.com/Reederey87/DevStrap/internal/redact"
 )
 
 // daemonPIDFile records the running daemon's identity next to its socket. The
@@ -43,12 +44,18 @@ type daemonRecord struct {
 
 // daemonStatusResult is the `daemon status` --json shape.
 type daemonStatusResult struct {
-	Socket  string `json:"socket"`
-	Running bool   `json:"running"`
-	PID     int    `json:"pid,omitempty"`
-	Version string `json:"version,omitempty"`
-	Uptime  string `json:"uptime,omitempty"`
-	Detail  string `json:"detail,omitempty"`
+	Socket      string `json:"socket"`
+	Running     bool   `json:"running"`
+	PID         int    `json:"pid,omitempty"`
+	Version     string `json:"version,omitempty"`
+	CLIVersion  string `json:"cli_version,omitempty"`
+	VersionSkew bool   `json:"version_skew,omitempty"`
+	// APIMismatch names a protocol version this CLI cannot interpret. Set
+	// instead of failing: status must still answer when the daemon is the
+	// thing that is wrong.
+	APIMismatch string `json:"api_mismatch,omitempty"`
+	Uptime      string `json:"uptime,omitempty"`
+	Detail      string `json:"detail,omitempty"`
 	// Convergence health, distinct from Running. A supervised daemon never
 	// exits on convergence failure — it backs off and keeps serving — so
 	// "running" says nothing about whether the workspace is converging, and
@@ -366,6 +373,31 @@ func runDaemonStatus(cmd *cobra.Command, stdout io.Writer, opts *options) error 
 		}
 		if v, verr := client.Version(cmd.Context()); verr == nil {
 			result.Version = v.Version
+		} else {
+			// An unsupported protocol is REPORTED, not returned. `daemon
+			// status` exits 0 whatever the run state — the same contract
+			// `service status` has — and that is exactly the contract a user
+			// leans on when something is wrong. Failing here would make the
+			// one command that can explain the situation the one command that
+			// refuses to run.
+			var apiErr *daemon.UnsupportedAPIVersionError
+			if errors.As(verr, &apiErr) {
+				result.APIMismatch = redact.Scrub(apiErr.APIVersion)
+			}
+			// The body was unreadable, but the build version rode the response
+			// HEADER, which is the same value from the same field. Without this
+			// fallback the two things a user needs most in exactly this
+			// situation go missing: the running line loses the daemon's
+			// version, and the skew line renders as "daemon , CLI 0.1.3".
+			result.Version = redact.Scrub(client.DaemonVersion())
+		}
+		if versionsSkew(client.DaemonVersion(), version) {
+			result.CLIVersion = version
+			result.VersionSkew = true
+			// Deliberately no stderr warning here. `status` IS the report: it
+			// renders the skew on stdout and in --json. The warning exists for
+			// commands that would otherwise say nothing about it, and emitting
+			// both would report one condition twice on two streams.
 		}
 		if record, rerr := readDaemonRecord(paths.Home); rerr == nil {
 			result.PID = record.PID
@@ -398,6 +430,19 @@ func runDaemonStatus(cmd *cobra.Command, stdout io.Writer, opts *options) error 
 		}
 		if _, ferr := fmt.Fprintf(w, ")\nsocket: %s\n", result.Socket); ferr != nil {
 			return ferr
+		}
+		if result.VersionSkew {
+			if _, ferr := fmt.Fprintf(w, "version skew: daemon %s, CLI %s\n", result.Version, result.CLIVersion); ferr != nil {
+				return ferr
+			}
+		}
+		if result.APIMismatch != "" {
+			if _, ferr := fmt.Fprintf(w,
+				"protocol mismatch: the daemon speaks %s, this CLI speaks %s;"+
+					" restart the daemon so both run the same build\n",
+				result.APIMismatch, daemon.APIVersion()); ferr != nil {
+				return ferr
+			}
 		}
 		if result.LastSuccess != "" {
 			if _, ferr := fmt.Fprintf(w, "last successful convergence: %s\n", result.LastSuccess); ferr != nil {
@@ -440,6 +485,41 @@ func daemonClient(opts *options) (*daemon.Client, string, error) {
 		return nil, socket, appError{code: exitInvalidConfig, err: err}
 	}
 	return daemon.NewClient(socket), socket, nil
+}
+
+func knownBuildVersion(v string) bool {
+	return v != "" && v != "unknown" && v != "dev"
+}
+
+func versionsSkew(daemonVersion, cliVersion string) bool {
+	return knownBuildVersion(daemonVersion) && knownBuildVersion(cliVersion) && daemonVersion != cliVersion
+}
+
+// warnDaemonVersionSkew reports a build mismatch without claiming a direction.
+// The comparison is equality-only, so which side is stale is unknown — the usual
+// cause is an upgrade that left the LaunchAgent/systemd unit on the old binary,
+// but a stale CLI earlier on $PATH produces the identical comparison, and naming
+// the wrong one would send an operator looking in the wrong place.
+//
+// The remedy names both supervision modes because they need DIFFERENT commands
+// and the wrong one makes things worse. `daemon stop && daemon start` against a
+// SUPERVISED daemon stops it cleanly — so neither launchd's
+// KeepAlive{SuccessfulExit:false} nor systemd's Restart=on-failure brings it
+// back — and then runs a foreground daemon in the operator's shell, so closing
+// the terminal leaves convergence off until next login. That is precisely the
+// state spec/13 warns about under "daemon stop against a supervised daemon".
+// Re-running `service install --daemon` replaces the unit and restarts it, which
+// is the honest fix there.
+func warnDaemonVersionSkew(stderr io.Writer, daemonVersion, cliVersion string) {
+	if !versionsSkew(daemonVersion, cliVersion) {
+		return
+	}
+	_, _ = fmt.Fprintf(stderr,
+		"warning: the running daemon is version %s but this CLI is %s\n"+
+			"  they are different builds; restart the daemon so it runs this binary:\n"+
+			"    supervised (see `devstrap service status`): devstrap service install --daemon\n"+
+			"    hand-started:                               devstrap daemon stop && devstrap daemon start\n",
+		redact.Scrub(daemonVersion), cliVersion)
 }
 
 // daemonUnavailable is the shared mapping for "no daemon is listening". Only
@@ -598,6 +678,13 @@ func newDaemonEventsCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if _, err := client.Version(cmd.Context()); err != nil {
+				if errors.Is(err, daemon.ErrUnavailable) {
+					return daemonUnavailable(socket)
+				}
+				return err
+			}
+			warnDaemonVersionSkew(cmd.ErrOrStderr(), client.DaemonVersion(), version)
 			err = client.Events(cmd.Context(), func(event daemon.Event) {
 				line := fmt.Sprintf("%s  %s", event.At.Format(time.RFC3339), event.Kind)
 				if event.Detail != "" {
@@ -637,6 +724,22 @@ func newDaemonSyncCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Preflight the protocol, exactly as `daemon events` does: a
+			// command that must SPEAK to the daemon cannot interpret a result
+			// document from a protocol it does not know. Preflighting rather
+			// than checking afterwards also means an uninterpretable daemon is
+			// never asked to start a convergence cycle whose outcome this CLI
+			// would then have to discard.
+			if _, verr := client.Version(cmd.Context()); verr != nil {
+				if errors.Is(verr, daemon.ErrUnavailable) {
+					return daemonUnavailable(socket)
+				}
+				return verr
+			}
+			// Warn BEFORE the cycle, not after: a full sync can run for minutes
+			// while it clones, and a skew notice that arrives at the end is one
+			// the operator reads after deciding the command worked.
+			warnDaemonVersionSkew(cmd.ErrOrStderr(), client.DaemonVersion(), version)
 			result, err := client.Sync(cmd.Context(), mode)
 			// A full request that arrives mid-cycle JOINS the weaker cycle
 			// already running and returns its result: coalesced, mode

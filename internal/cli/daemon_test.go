@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Reederey87/DevStrap/internal/config"
 	"github.com/Reederey87/DevStrap/internal/daemon"
 )
 
@@ -42,7 +46,7 @@ func shortTestDir(t *testing.T) string {
 	return home
 }
 
-func startDaemonForCLITest(t *testing.T, converger daemon.Converger) string {
+func startDaemonForCLITest(t *testing.T, converger daemon.Converger, advertisedVersion ...string) string {
 	t.Helper()
 	home, err := os.MkdirTemp("", "dh")
 	if err != nil {
@@ -50,7 +54,11 @@ func startDaemonForCLITest(t *testing.T, converger daemon.Converger) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(home) })
 	socket := filepath.Join(home, "devstrapd.sock")
-	server, err := daemon.New(daemon.Config{SocketPath: socket, Version: "test", Converger: converger})
+	daemonVersion := "test"
+	if len(advertisedVersion) > 0 {
+		daemonVersion = advertisedVersion[0]
+	}
+	server, err := daemon.New(daemon.Config{SocketPath: socket, Version: daemonVersion, Converger: converger})
 	if err != nil {
 		t.Fatalf("daemon.New: %v", err)
 	}
@@ -70,6 +78,258 @@ func startDaemonForCLITest(t *testing.T, converger daemon.Converger) string {
 		}
 	})
 	return home
+}
+
+func withCLIVersion(t *testing.T, value string) {
+	t.Helper()
+	previous := version
+	version = value
+	t.Cleanup(func() { version = previous })
+}
+
+func TestDaemonCommandWarnsOnVersionSkew(t *testing.T) {
+	withCLIVersion(t, "0.1.3")
+	home := startDaemonForCLITest(t, daemonTestConverger{}, "0.1.2")
+
+	_, stderr, err := executeForTest("--home", home, "daemon", "sync")
+	if err != nil {
+		t.Fatalf("daemon sync: %v", err)
+	}
+	if !strings.Contains(stderr, "daemon is version 0.1.2 but this CLI is 0.1.3") ||
+		!strings.Contains(stderr, "devstrap daemon stop && devstrap daemon start") {
+		t.Fatalf("stderr = %q, want both versions and restart remedy", stderr)
+	}
+}
+
+// TestVersionsSkewSilenceRules pins the exact silence contract spec/13 commits
+// to: "equal, empty, unknown, and development versions are silent". Only the
+// equal case had coverage, and the untested ones are the dangerous ones — a
+// daemon started without a version normalizes to "unknown", so treating that as
+// a real version would warn on every single command.
+func TestVersionsSkewSilenceRules(t *testing.T) {
+	cases := []struct {
+		daemon, cli string
+		want        bool
+	}{
+		{"0.1.3", "0.1.3", false}, // equal
+		{"", "0.1.3", false},      // no header advertised
+		{"0.1.3", "", false},      // CLI built without a version
+		{"unknown", "0.1.3", false},
+		{"0.1.3", "unknown", false},
+		{"dev", "0.1.3", false},
+		{"0.1.3", "dev", false},
+		{"0.1.2", "0.1.3", true}, // the only warning case
+		{"0.1.3", "0.1.2", true}, // and it is symmetric: no ordering is implied
+	}
+	for _, tc := range cases {
+		if got := versionsSkew(tc.daemon, tc.cli); got != tc.want {
+			t.Errorf("versionsSkew(%q, %q) = %v, want %v", tc.daemon, tc.cli, got, tc.want)
+		}
+	}
+}
+
+// startForeignProtocolDaemon serves the daemon's read routes while advertising an
+// api_version this CLI does not know. The real server cannot do that — it always
+// reports its own compiled-in protocol — so testing the unsupported-protocol path
+// needs a hand-rolled listener. Peer credentials are deliberately not enforced:
+// the CLIENT is under test, and it does not check them.
+func startForeignProtocolDaemon(t *testing.T, buildVersion, apiVersion string) string {
+	t.Helper()
+	home := shortTestDir(t)
+	socket := filepath.Join(home, "devstrapd.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen %s: %v", socket, err)
+	}
+
+	write := func(w http.ResponseWriter, body string) {
+		w.Header().Set("Devstrap-Daemon-Version", buildVersion)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, body)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, _ *http.Request) {
+		write(w, `{"uptime":"1m0s","converging":false}`)
+	})
+	mux.HandleFunc("GET /v1/version", func(w http.ResponseWriter, _ *http.Request) {
+		write(w, `{"version":"`+buildVersion+`","api_version":"`+apiVersion+`"}`)
+	})
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	go func() { _ = srv.Serve(listener) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return home
+}
+
+// TestDaemonStatusReportsProtocolMismatchWithoutFailing pins the contract that
+// `daemon status` exits 0 whatever the run state. A protocol the CLI cannot
+// interpret is exactly when a user reaches for status — making it the one
+// command that refuses to run would be backwards. The field is reported, not
+// returned as an error.
+//
+// An earlier version of this test asserted `api_mismatch == ""` against a normal
+// v1 daemon, so it could never have caught the regression it is named for.
+func TestDaemonStatusReportsProtocolMismatchWithoutFailing(t *testing.T) {
+	withCLIVersion(t, "0.1.3")
+	home := startForeignProtocolDaemon(t, "0.9.9", "v2")
+
+	stdout, stderr, err := executeForTest("--home", home, "--json", "daemon", "status")
+	if err != nil {
+		t.Fatalf("daemon status err = %v, want nil (status must exit 0 even here)", err)
+	}
+	var result daemonStatusResult
+	if jerr := json.Unmarshal([]byte(stdout), &result); jerr != nil {
+		t.Fatalf("stdout is not a single JSON document: %v\n%s", jerr, stdout)
+	}
+	if !result.Running {
+		t.Fatal("running = false against a live daemon")
+	}
+	if result.APIMismatch != "v2" {
+		t.Fatalf("api_mismatch = %q, want %q", result.APIMismatch, "v2")
+	}
+	// The build version rode the response HEADER even though the body was
+	// uninterpretable, so neither the version nor the skew may go missing in
+	// exactly the situation a user runs `status` to understand.
+	if result.Version != "0.9.9" {
+		t.Fatalf("version = %q, want the header-advertised %q", result.Version, "0.9.9")
+	}
+	if !result.VersionSkew {
+		t.Fatal("version_skew = false for a 0.9.9 daemon against a 0.1.3 CLI")
+	}
+	// `status` IS the report: it renders the skew itself, so it must not ALSO
+	// emit the stderr warning that exists for commands which would otherwise say
+	// nothing. One condition, one place.
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want silence: status reports the skew in its own output", stderr)
+	}
+
+	// And the human path must carry both facts, since suppressing the stderr
+	// warning leaves this as the only place a non-JSON user sees them.
+	human, _, herr := executeForTest("--home", home, "daemon", "status")
+	if herr != nil {
+		t.Fatalf("human daemon status err = %v, want nil", herr)
+	}
+	for _, want := range []string{"version skew: daemon 0.9.9, CLI 0.1.3", "protocol mismatch", "v2"} {
+		if !strings.Contains(human, want) {
+			t.Fatalf("human status = %q, want %q", human, want)
+		}
+	}
+}
+
+// TestDaemonStatusReportsNoMismatchForItsOwnProtocol is the negative half: the
+// field must stay absent rather than defaulting to something a consumer would
+// read as a mismatch.
+func TestDaemonStatusReportsNoMismatchForItsOwnProtocol(t *testing.T) {
+	home := startDaemonForCLITest(t, daemonTestConverger{})
+
+	stdout, _, err := executeForTest("--home", home, "--json", "daemon", "status")
+	if err != nil {
+		t.Fatalf("daemon status err = %v, want nil", err)
+	}
+	var result daemonStatusResult
+	if jerr := json.Unmarshal([]byte(stdout), &result); jerr != nil {
+		t.Fatalf("stdout is not a single JSON document: %v\n%s", jerr, stdout)
+	}
+	if result.APIMismatch != "" {
+		t.Fatalf("api_mismatch = %q against a same-protocol daemon", result.APIMismatch)
+	}
+}
+
+// TestDaemonSyncRefusesAnUnsupportedProtocol pins the other half of the
+// reported-vs-returned split. A command that must actually SPEAK to the daemon
+// cannot interpret a result document from a protocol it does not know, so it
+// fails instead of reporting a cycle it cannot read — the distinction spec/13
+// draws between `daemon status` and `daemon events`/`daemon sync`.
+func TestDaemonSyncRefusesAnUnsupportedProtocol(t *testing.T) {
+	home := startForeignProtocolDaemon(t, "0.9.9", "v2")
+
+	_, _, err := executeForTest("--home", home, "daemon", "sync")
+	if err == nil {
+		t.Fatal("daemon sync succeeded against an uninterpretable protocol")
+	}
+	var apiErr *daemon.UnsupportedAPIVersionError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v, want UnsupportedAPIVersionError", err)
+	}
+	if apiErr.APIVersion != "v2" {
+		t.Fatalf("APIVersion = %q, want %q", apiErr.APIVersion, "v2")
+	}
+}
+
+func TestDaemonCommandSilentWhenVersionsMatch(t *testing.T) {
+	withCLIVersion(t, "0.1.3")
+	home := startDaemonForCLITest(t, daemonTestConverger{}, "0.1.3")
+
+	_, stderr, err := executeForTest("--home", home, "daemon", "sync")
+	if err != nil {
+		t.Fatalf("daemon sync: %v", err)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want completely silent happy path", stderr)
+	}
+}
+
+func TestDaemonStatusJSONCarriesSkew(t *testing.T) {
+	withCLIVersion(t, "0.1.3")
+	skewedHome := startDaemonForCLITest(t, nil, "0.1.2")
+	stdout, stderr, err := executeForTest("--home", skewedHome, "--json", "daemon", "status")
+	if err != nil {
+		t.Fatalf("skewed daemon status: %v", err)
+	}
+	var skewed daemonStatusResult
+	if err := json.Unmarshal([]byte(stdout), &skewed); err != nil {
+		t.Fatalf("decode skewed status: %v", err)
+	}
+	if skewed.CLIVersion != "0.1.3" || !skewed.VersionSkew {
+		t.Fatalf("skewed status = %+v, want cli_version and version_skew", skewed)
+	}
+	if strings.Contains(stdout, "warning:") {
+		t.Fatalf("stdout = %q, warning must not corrupt JSON", stdout)
+	}
+	// `status` reports the skew in its own document rather than duplicating it as
+	// a stderr warning; see TestDaemonStatusReportsProtocolMismatchWithoutFailing.
+	if stderr != "" {
+		t.Fatalf("stderr = %q, want status to report the skew only in its output", stderr)
+	}
+
+	matchedHome := startDaemonForCLITest(t, nil, "0.1.3")
+	stdout, stderr, err = executeForTest("--home", matchedHome, "--json", "daemon", "status")
+	if err != nil {
+		t.Fatalf("matched daemon status: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
+		t.Fatalf("decode matched status: %v", err)
+	}
+	if _, ok := raw["cli_version"]; ok {
+		t.Fatalf("matched JSON contains cli_version: %s", stdout)
+	}
+	if _, ok := raw["version_skew"]; ok {
+		t.Fatalf("matched JSON contains version_skew: %s", stdout)
+	}
+	if stderr != "" {
+		t.Fatalf("matched stderr = %q, want silent happy path", stderr)
+	}
+}
+
+func TestDoctorWarnsOnDaemonVersionSkew(t *testing.T) {
+	withCLIVersion(t, "0.1.3")
+	home := startDaemonForCLITest(t, nil, "0.1.2")
+
+	got := checkDaemonVersion(t.Context(), config.Paths{Home: home})
+	if len(got) != 1 || got[0].Status != checkWarn ||
+		!strings.Contains(got[0].Detail, "0.1.2") ||
+		!strings.Contains(got[0].Detail, "0.1.3") ||
+		got[0].Remedy != "devstrap daemon stop && devstrap daemon start" {
+		t.Fatalf("checkDaemonVersion = %+v, want warning with both versions and exact remedy", got)
+	}
+}
+
+func TestDoctorSkipsDaemonVersionWhenNotRunning(t *testing.T) {
+	home := shortTestDir(t)
+	got := checkDaemonVersion(t.Context(), config.Paths{Home: home})
+	if len(got) != 1 || got[0].Status != checkOK || !strings.Contains(got[0].Detail, "skipped") {
+		t.Fatalf("checkDaemonVersion = %+v, want OK/skipped", got)
+	}
 }
 
 // TestDaemonStatusReportsNotRunning covers the common case — no daemon — and

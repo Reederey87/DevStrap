@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -32,7 +33,9 @@ const clientTimeout = 10 * time.Second
 
 // Client talks to a local daemon over its Unix domain socket.
 type Client struct {
-	http *http.Client
+	http          *http.Client
+	versionMu     sync.RWMutex
+	daemonVersion string
 }
 
 // NewClient builds a client for the daemon at socketPath. It performs no I/O —
@@ -62,7 +65,54 @@ func (c *Client) Health(ctx context.Context) (Health, error) {
 func (c *Client) Version(ctx context.Context) (Version, error) {
 	var out Version
 	err := c.request(ctx, c.http, http.MethodGet, "/v1/version", &out)
+	if err == nil && out.APIVersion != "" && out.APIVersion != apiVersion {
+		return Version{}, &UnsupportedAPIVersionError{APIVersion: out.APIVersion}
+	}
 	return out, err
+}
+
+// DaemonVersion reports the version the daemon advertised on the most recent
+// response, or "" if no request has completed yet.
+func (c *Client) DaemonVersion() string {
+	c.versionMu.RLock()
+	defer c.versionMu.RUnlock()
+	return c.daemonVersion
+}
+
+// maxDaemonVersionLen bounds what is retained from the advertised header. A
+// build version is a handful of characters; Go's transport would accept
+// megabytes.
+const maxDaemonVersionLen = 64
+
+// recordDaemonVersion stores the advertised build version. A response without the
+// header leaves the last known value alone rather than erasing it: the value is
+// reported to the user, and forgetting it would silently switch a real skew
+// warning off.
+func (c *Client) recordDaemonVersion(version string) {
+	version = sanitizeVersionHeader(version)
+	if version == "" {
+		return
+	}
+	c.versionMu.Lock()
+	c.daemonVersion = version
+	c.versionMu.Unlock()
+}
+
+// sanitizeVersionHeader clamps the header to something safe to print. The value
+// is written straight to a terminal and into `--json`, and it arrives over the
+// wire: a same-uid process squatting the socket could otherwise inject ANSI
+// escapes into an operator's terminal. redact.Scrub does not cover this — it
+// scrubs token shapes, not control bytes.
+func sanitizeVersionHeader(version string) string {
+	if len(version) > maxDaemonVersionLen {
+		version = version[:maxDaemonVersionLen]
+	}
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, version)
 }
 
 func (c *Client) request(ctx context.Context, requester *http.Client, method, path string, out any) error {
@@ -82,6 +132,7 @@ func (c *Client) request(ctx context.Context, requester *http.Client, method, pa
 		return fmt.Errorf("daemon: request %s: %w", path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	c.recordDaemonVersion(resp.Header.Get(versionHeader))
 
 	if resp.StatusCode != http.StatusOK {
 		// Bound the error body: a wedged or hostile peer must not be able to
@@ -183,6 +234,7 @@ func (c *Client) Events(ctx context.Context, fn func(Event)) error {
 		return fmt.Errorf("daemon: stream events: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	c.recordDaemonVersion(resp.Header.Get(versionHeader))
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("daemon: /v1/events: status %d", resp.StatusCode)
 	}

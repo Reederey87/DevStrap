@@ -16,9 +16,11 @@ import (
 	"time"
 
 	"github.com/Reederey87/DevStrap/internal/config"
+	"github.com/Reederey87/DevStrap/internal/daemon"
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/hub"
 	"github.com/Reederey87/DevStrap/internal/platform"
+	"github.com/Reederey87/DevStrap/internal/redact"
 	"github.com/Reederey87/DevStrap/internal/state"
 	dssync "github.com/Reederey87/DevStrap/internal/sync"
 	"github.com/spf13/cobra"
@@ -270,6 +272,7 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 	results = append(results, checkTool("go", false))
 	results = append(results, checkStateHome(paths)...)
 	results = append(results, checkDaemonSocketPath(paths)...)
+	results = append(results, checkDaemonVersion(ctx, paths)...)
 	results = append(results, checkRestoreJournal(paths.Home)...)
 	if _, err := os.Stat(paths.StateDB()); err == nil {
 		store, err := opts.openState(ctx)
@@ -750,6 +753,48 @@ func checkDaemonSocketPath(paths config.Paths) []checkResult {
 		}}
 	}
 	return []checkResult{{Name: "daemon socket path", Status: checkOK, Detail: paths.SocketPath()}}
+}
+
+func checkDaemonVersion(ctx context.Context, paths config.Paths) []checkResult {
+	// Dialing an over-long socket path fails with a bare EINVAL, which
+	// isUnavailable deliberately refuses to read as "not running". Without this
+	// guard the check would warn with a raw transport error, duplicating
+	// checkDaemonSocketPath's already-graded warning and reintroducing exactly
+	// the bare EINVAL that spec/13 says a user must never be shown. That check
+	// owns this condition; this one has nothing to add.
+	if err := paths.ValidateSocketPath(); err != nil {
+		return []checkResult{{Name: "daemon version", Status: checkOK, Detail: "skipped; see the daemon socket path check"}}
+	}
+	client := daemon.NewClient(paths.SocketPath())
+	if _, err := client.Health(ctx); err != nil {
+		if errors.Is(err, daemon.ErrUnavailable) {
+			return []checkResult{{Name: "daemon version", Status: checkOK, Detail: "daemon not running; skipped"}}
+		}
+		return []checkResult{{Name: "daemon version", Status: checkWarn, Detail: redact.Scrub(err.Error())}}
+	}
+	daemonVersion := client.DaemonVersion()
+	if !versionsSkew(daemonVersion, version) {
+		return []checkResult{{Name: "daemon version", Status: checkOK, Detail: "no build skew"}}
+	}
+	// doctor already talks to the service manager elsewhere, so unlike the
+	// stderr warning it can name the ONE correct remedy instead of both: a
+	// supervised daemon must be replaced through `service install --daemon`,
+	// because `daemon stop` on a supervised unit stops convergence rather than
+	// restarting it (spec/13), while `stop && start` is right for a hand-started
+	// foreground daemon.
+	remedy := "devstrap daemon stop && devstrap daemon start"
+	if status, err := serviceBackend().Status(ctx, serviceBackend().DefaultLabel()); err == nil && status.Installed {
+		remedy = "devstrap service install --daemon (replaces and restarts the supervised unit)"
+	}
+	return []checkResult{{
+		Name:   "daemon version",
+		Status: checkWarn,
+		// No direction is claimed: the comparison is equality-only, so which
+		// side is stale is precisely what it cannot tell.
+		Detail: fmt.Sprintf("the running daemon is version %s but this CLI is %s — different builds",
+			redact.Scrub(daemonVersion), version),
+		Remedy: remedy,
+	}}
 }
 
 func checkDB(ctx context.Context, store *state.Store) []checkResult {

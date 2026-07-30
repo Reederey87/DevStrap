@@ -108,6 +108,30 @@ func TestServerServesHealthAndVersion(t *testing.T) {
 	}
 }
 
+func TestClientRecordsAdvertisedDaemonVersion(t *testing.T) {
+	socket := startServer(t, "v9.9.9-test")
+
+	client := NewClient(socket)
+	if _, err := client.Health(t.Context()); err != nil {
+		t.Fatalf("Health: %v", err)
+	}
+	if got := client.DaemonVersion(); got != "v9.9.9-test" {
+		t.Fatalf("DaemonVersion() = %q, want %q", got, "v9.9.9-test")
+	}
+}
+
+func TestVersionEndpointCarriesAPIVersion(t *testing.T) {
+	socket := startServer(t, "test")
+
+	got, err := NewClient(socket).Version(t.Context())
+	if err != nil {
+		t.Fatalf("Version: %v", err)
+	}
+	if got.APIVersion != "v1" {
+		t.Fatalf("api_version = %q, want %q", got.APIVersion, "v1")
+	}
+}
+
 // TestSocketAndDirectoryPermissions pins the layered access control: the 0700
 // directory is the real gate (a peer that cannot traverse it never reaches the
 // socket), and the 0600 socket is defense in depth.
