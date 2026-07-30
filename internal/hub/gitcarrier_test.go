@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -21,7 +22,27 @@ import (
 
 func newGitCarrierTestHub(t *testing.T, remote string, name string) *GitCarrierHub {
 	t.Helper()
-	h, err := NewGitCarrierHub(remote, "main", "ws_test", filepath.Join(t.TempDir(), name))
+	parent := t.TempDir()
+	dir := filepath.Join(parent, name)
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			var survivors []string
+			walkErr := filepath.Walk(dir, func(path string, info os.FileInfo, walkErr error) error {
+				if walkErr != nil {
+					survivors = append(survivors, path+" ("+walkErr.Error()+")")
+					return nil
+				}
+				survivors = append(survivors, fmt.Sprintf("%s (%d bytes)", path, info.Size()))
+				return nil
+			})
+			if walkErr != nil {
+				survivors = append(survivors, "walk error: "+walkErr.Error())
+			}
+			t.Errorf("remove git-carrier test hub %s: %v; surviving entries:\n%s",
+				dir, err, strings.Join(survivors, "\n"))
+		}
+	})
+	h, err := NewGitCarrierHub(remote, "main", "ws_test", dir)
 	if err != nil {
 		t.Fatalf("NewGitCarrierHub(%s): %v", name, err)
 	}
@@ -509,10 +530,22 @@ func gitRevListCount(t *testing.T, remote string, branch string) string {
 
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
+	args = append([]string{
+		"-c", "gc.auto=0",
+		"-c", "maintenance.auto=false",
+		"-c", "core.fsmonitor=false",
+		"-c", "user.name=test",
+		"-c", "user.email=test@localhost",
+	}, args...)
 	cmd := exec.Command("git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_TERMINAL_PROMPT=0",
+	)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
 	}

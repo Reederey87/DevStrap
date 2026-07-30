@@ -205,7 +205,9 @@ func (g *GitCarrierHub) HubMetrics() (MetricsSnapshot, bool) {
 // and could `git prune` the last-verified head object concurrently with a LATER
 // refresh's checkHeadContinuityLocked — making the prior head look "not locally
 // known" and silently skipping the anti-rewind content gate. Keeping gc inside
-// the lock hold removes that race entirely.
+// the lock hold removes that race entirely. Runner also disables detached
+// auto-maintenance repo-wide; this local setting remains beside the call whose
+// synchronous lock-hold guarantee depends on it.
 //
 // A package var so tests can observe invocations without a git double.
 var gitGCAuto = func(ctx context.Context, runner git.Runner, dir string) {

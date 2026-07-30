@@ -16,10 +16,22 @@ import (
 
 func gitOutput(t *testing.T, dir string, args ...string) string {
 	t.Helper()
+	args = append([]string{
+		"-c", "gc.auto=0",
+		"-c", "maintenance.auto=false",
+		"-c", "core.fsmonitor=false",
+		"-c", "user.name=test",
+		"-c", "user.email=test@localhost",
+	}, args...)
 	cmd := exec.Command("git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_TERMINAL_PROMPT=0",
+	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
@@ -298,6 +310,9 @@ func forceParentlessWithRetention(t *testing.T, remote string, manifest []byte) 
 	runGit(t, scratch,
 		"-c", "user.name=test", "-c", "user.email=test@localhost",
 		"commit", "--quiet", "-m", "staged rewrite")
+	if got := gitOutput(t, scratch, "show", "HEAD:workspaces/ws_test/meta/retention.json"); got != string(manifest) {
+		t.Fatalf("committed retention manifest = %q, want %q", got, manifest)
+	}
 	tree := gitOutput(t, scratch, "rev-parse", "HEAD^{tree}")
 	sha := gitOutput(t, scratch,
 		"-c", "user.name=test", "-c", "user.email=test@localhost",

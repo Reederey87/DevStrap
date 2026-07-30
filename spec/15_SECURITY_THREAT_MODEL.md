@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-24
+last_reviewed: 2026-07-30
 tracks_code: [internal/agentsecrets/**, internal/childenv/**, internal/cli/**, internal/devicekeys/**, internal/envbundle/**, internal/git/**, internal/hub/**, internal/redact/**, internal/state/**, internal/sync/**, internal/logging/**, internal/workspacekeys/**]
 ---
 # Security Threat Model
@@ -9,6 +9,20 @@ tracks_code: [internal/agentsecrets/**, internal/childenv/**, internal/cli/**, i
 DevStrap is dangerous if designed casually because it touches code, secrets, Git credentials, and AI agents.
 
 The product should be safe by default and explicit when convenience weakens security.
+
+DevStrap Git invocations are process-bounded on the paths that complete normally:
+the shared runner forces Git's automatic GC and maintenance work to remain
+attached and finish before the invoking call returns, rather than detaching into
+a background writer. It does NOT disable automatic housekeeping — suppressing it
+would trade an unbounded writer for an unbounded repository.
+
+**Stated residual — cancellation.** `exec.CommandContext` kills only the direct
+Git process, so a call cancelled or timed out while attached maintenance is
+running can still leave that grandchild alive; `Runner` sets a `WaitDelay`
+backstop so this cannot block `Wait` forever, but it does not reap the group.
+Bounding that would require running Git in its own process group and signalling
+the group on cancellation — deliberately out of scope here, and the reason this
+section says "on the paths that complete normally" rather than "never".
 
 Local repo-lock, folder-hub lock, and agent-run crash reconciliation route process existence through the shared build-tagged `platform.ProcessAlive` adapter (`P4-QUAL-04`) and pair each recorded PID with an opaque platform process start-time identity when available (`P7-GIT-03`). Only an explicit absent-process result is dead; permission denial or another ambiguous response stays alive, including Windows `OpenProcess` access denial, so DevStrap never steals a live-but-inaccessible holder's lock. A recycled PID therefore cannot impersonate the crashed holder and indefinitely preserve a repo lock or a `running` agent row; an unavailable/failed identity lookup remains fail-safe and does not break a lock it cannot disprove.
 

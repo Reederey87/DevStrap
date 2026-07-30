@@ -144,6 +144,26 @@ func TestSecureArgsAppliesProtocolPolicyToEveryGitInvocation(t *testing.T) {
 	}
 }
 
+func TestSecureArgsDisablesDetachedAutoMaintenance(t *testing.T) {
+	caller := []string{"fetch", "origin", "--prune"}
+	got := secureArgs(caller)
+	for _, want := range []string{"gc.autoDetach=false", "maintenance.autoDetach=false"} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("secureArgs() = %#v, want %s", got, want)
+		}
+	}
+	if !slices.Equal(got[len(got)-len(caller):], caller) {
+		t.Fatalf("secureArgs() tail = %#v, want caller args %#v", got[len(got)-len(caller):], caller)
+	}
+	for _, forbidden := range []string{"gc.auto", "maintenance.auto"} {
+		for _, arg := range got {
+			if arg == forbidden || strings.HasPrefix(arg, forbidden+"=") {
+				t.Fatalf("secureArgs() = %#v, forbidden key %s must not be set", got, forbidden)
+			}
+		}
+	}
+}
+
 func TestClassifyGitErrorReturnsTypedSentinels(t *testing.T) {
 	cases := []struct {
 		name string
