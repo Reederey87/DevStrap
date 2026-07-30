@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -195,31 +196,39 @@ func TestWalkDevstrapignoreNegationReincludesDefaultPrunedDirectory(t *testing.T
 	}
 }
 
-func TestIsSecretName(t *testing.T) {
-	cases := []struct {
-		name, rel string
-		want      bool
-	}{
-		{".env", "work/api/.env", true},
-		{".env.production", "work/api/.env.production", true},
-		{".env.local", "work/api/.env.local", true},
-		{".env.example", "work/api/.env.example", false},
-		{".env.template", "work/api/.env.template", false},
-		{".env.schema", "work/api/.env.schema", false},
-		{"key.pem", "work/api/key.pem", true},
-		{"id_rsa", "work/api/id_rsa", true},
-		{"credentials.json", "work/api/credentials.json", true},
-		{"credentials", "work/api/.aws/credentials", true},
-		{"config.toml", "work/api/.snowflake/config.toml", true},
-		{"README.md", "work/api/README.md", false},
-		{"main.go", "work/api/main.go", false},
+// TestScanReportsSecretsThroughCanonicalPredicate pins the WIRING: the scanner
+// reads ignore.IsSecretPath rather than a local clone. The detection table
+// itself moved to internal/ignore's TestIsSecretPath when the two equivalent
+// clones (this one and draftbundle's) were unified (AGEN-05).
+//
+// The .aws/credentials fixture is load-bearing: `credentials` is an
+// unremarkable BASENAME, so only the path-level anchored-suffix half of
+// IsSecretPath can catch it. Without it, swapping the call site for a bare
+// IsSecretName(path.Base(...)) would still pass.
+func TestScanReportsSecretsThroughCanonicalPredicate(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "work", "api")
+	awsDir := filepath.Join(project, ".aws")
+	if err := os.MkdirAll(awsDir, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	for _, c := range cases {
-		t.Run(c.name+"|"+c.rel, func(t *testing.T) {
-			if got := isSecretName(c.name, c.rel); got != c.want {
-				t.Fatalf("isSecretName(%q,%q)=%v want %v", c.name, c.rel, got, c.want)
-			}
-		})
+	for _, name := range []string{".env", ".env.example", "README.md"} {
+		if err := os.WriteFile(filepath.Join(project, name), []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(awsDir, "credentials"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Walk(context.Background(), root, Options{})
+	if err != nil {
+		t.Fatalf("Walk: %v", err)
+	}
+	want := []string{"work/api/.aws/credentials", "work/api/.env"}
+	got := append([]string(nil), result.Secrets...)
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("result.Secrets = %v, want %v (.env.example and README.md must not be reported)", got, want)
 	}
 }
 

@@ -1,6 +1,8 @@
 package ignore
 
 import (
+	"path"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -250,5 +252,136 @@ func TestNegationWinsAfterNormalization(t *testing.T) {
 	}
 	if m.ShouldPruneDir("keep", keep) {
 		t.Errorf(`ShouldPruneDir("keep", %q) = true, want false`, keep)
+	}
+}
+
+// TestIsSecretPath is the table migrated VERBATIM from internal/scan's
+// TestIsSecretName when the scanner's isSecretName and draftbundle's
+// isSecretPath — byte-identical clones of each other — were unified here
+// (AGEN-05). Every case moved unchanged; the table is the proof that the
+// unification changed no detection outcome.
+func TestIsSecretPath(t *testing.T) {
+	cases := []struct {
+		name, rel string
+		want      bool
+	}{
+		{".env", "work/api/.env", true},
+		{".env.production", "work/api/.env.production", true},
+		{".env.local", "work/api/.env.local", true},
+		{".env.example", "work/api/.env.example", false},
+		{".env.template", "work/api/.env.template", false},
+		{".env.schema", "work/api/.env.schema", false},
+		{"key.pem", "work/api/key.pem", true},
+		{"id_rsa", "work/api/id_rsa", true},
+		{"credentials.json", "work/api/credentials.json", true},
+		{"credentials", "work/api/.aws/credentials", true},
+		{"config.toml", "work/api/.snowflake/config.toml", true},
+		{"README.md", "work/api/README.md", false},
+		{"main.go", "work/api/main.go", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name+"|"+c.rel, func(t *testing.T) {
+			if got := IsSecretPath(c.rel); got != c.want {
+				t.Fatalf("IsSecretPath(%q)=%v want %v", c.rel, got, c.want)
+			}
+		})
+	}
+}
+
+// TestIsSecretName covers the basename-only half, including the service-account
+// substring rule and the fact that the directory-anchored suffixes are NOT part
+// of it (a bare "credentials" is an unremarkable filename).
+func TestIsSecretName(t *testing.T) {
+	cases := []struct {
+		base string
+		want bool
+	}{
+		{".env", true},
+		{".env.local", true},
+		{".env.example", false},
+		{"id_ed25519", true},
+		{"service-account.json", true},
+		{"my-service-account-key.json", true},
+		{"key.pem", true},
+		{"credentials", false},
+		{"config.toml", false},
+		{"main.go", false},
+	}
+	for _, c := range cases {
+		t.Run(c.base, func(t *testing.T) {
+			if got := IsSecretName(c.base); got != c.want {
+				t.Fatalf("IsSecretName(%q)=%v want %v", c.base, got, c.want)
+			}
+		})
+	}
+}
+
+// legacyScanIsSecretName is a verbatim copy of internal/scan's deleted
+// isSecretName, kept here solely as the differential oracle below.
+func legacyScanIsSecretName(name, rel string) bool {
+	switch name {
+	case ".env", "credentials.json", "service-account.json", "id_rsa", "id_ed25519":
+		return true
+	}
+	if strings.HasPrefix(name, ".env.") && name != ".env.example" && name != ".env.template" && name != ".env.schema" {
+		return true
+	}
+	if strings.HasSuffix(name, ".pem") {
+		return true
+	}
+	return strings.HasSuffix(rel, "/.snowflake/config.toml") || strings.HasSuffix(rel, "/.aws/credentials") || strings.Contains(name, "service-account")
+}
+
+// legacyDraftIsSecretPath is a verbatim copy of internal/draftbundle's deleted
+// isSecretPath, the other half of the differential oracle.
+func legacyDraftIsSecretPath(rel string) bool {
+	base := filepath.Base(rel)
+	switch base {
+	case ".env", "credentials.json", "service-account.json", "id_rsa", "id_ed25519":
+		return true
+	}
+	if strings.HasPrefix(base, ".env.") && base != ".env.example" && base != ".env.template" && base != ".env.schema" {
+		return true
+	}
+	if strings.HasSuffix(base, ".pem") {
+		return true
+	}
+	return strings.HasSuffix(rel, "/.snowflake/config.toml") || strings.HasSuffix(rel, "/.aws/credentials") || strings.Contains(base, "service-account")
+}
+
+// TestIsSecretPathMatchesBothLegacyDetectors is the real neutrality proof. The
+// migrated table shows the documented cases still hold; this shows the new
+// function agrees with BOTH deleted implementations across a deliberately
+// hostile input space — empty paths, trailing slashes, native separators, the
+// root-level anchored-suffix cases that document the preserved gap, and the
+// .env template exceptions. A disagreement here is a behavior change, which
+// this PR claims not to make.
+func TestIsSecretPathMatchesBothLegacyDetectors(t *testing.T) {
+	inputs := []string{
+		"", ".", "/", "work/api/.env", ".env", "/.env", "work/api/.env.example",
+		"work/api/.env.local", ".env.", "work/api/", "work/api/.aws/credentials",
+		".aws/credentials", "/.aws/credentials", "aws/credentials",
+		".snowflake/config.toml", "work/.snowflake/config.toml", "config.toml",
+		"work/api/key.pem", "key.pem", ".pem", "work/my-service-account-x.json",
+		"service-account", "work/api/id_rsa", "id_ed25519", "work/api/README.md",
+		"work/api/.env.template", "work/api/.env.schema", "deep/a/b/c/.env",
+		"work/api/credentials", "credentials.json/", "work\\api\\.env",
+		".aws/credentials/extra", "x/.aws/credentials",
+	}
+	for _, in := range inputs {
+		t.Run(in, func(t *testing.T) {
+			got := IsSecretPath(in)
+			// The scanner passed the basename separately; its call site always
+			// derived it from the same slash path, so reproduce that here.
+			slash := filepath.ToSlash(in)
+			wantScan := legacyScanIsSecretName(path.Base(slash), in)
+			wantDraft := legacyDraftIsSecretPath(in)
+			if got != wantScan {
+				t.Errorf("IsSecretPath(%q)=%v, legacy scan detector=%v", in, got, wantScan)
+			}
+			if got != wantDraft {
+				t.Errorf("IsSecretPath(%q)=%v, legacy draftbundle detector=%v", in, got, wantDraft)
+			}
+		})
 	}
 }
