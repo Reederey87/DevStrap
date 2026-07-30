@@ -19,8 +19,10 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"golang.org/x/text/unicode/norm"
@@ -355,6 +357,85 @@ var osJunkNames = []string{
 func IsOSJunkName(base string) bool {
 	for _, name := range osJunkNames {
 		if base == name {
+			return true
+		}
+	}
+	return false
+}
+
+// secretBaseNames are exact filenames that are a plaintext secret or private key
+// wherever they appear.
+var secretBaseNames = []string{
+	".env",
+	"credentials.json",
+	"service-account.json",
+	"id_rsa",
+	"id_ed25519",
+}
+
+// envTemplateNames are the `.env.`-prefixed names conventionally checked in as
+// documentation, carrying no secret.
+var envTemplateNames = []string{
+	".env.example",
+	".env.template",
+	".env.schema",
+}
+
+// secretAnchoredSuffixes are credential files identified by the DIRECTORY they
+// sit in rather than by their own name — `config.toml` and `credentials` are
+// unremarkable basenames anywhere else.
+var secretAnchoredSuffixes = []string{
+	"/.snowflake/config.toml",
+	"/.aws/credentials",
+}
+
+// IsSecretName reports whether a bare filename is a plaintext secret or private
+// key. Like IsOSJunkName this is a membership test rather than a pattern, and
+// for the same reason plus a stronger one: these names deliberately do NOT live
+// in defaultPatterns, because the consumers use this judgement to ACT, not to
+// skip. internal/scan REPORTS a hit (appending to both result.Warnings and
+// result.Secrets, so the user learns a secret is sitting in the tree), and
+// internal/draftbundle HARD-REFUSES the bundle with a named error — deliberately
+// ordered after matcher.Match, so a user-ignored secret is skipped quietly
+// instead. Folding `.env` into the ignore table would silently turn the first
+// into prune-and-never-report, destroying the signal that is the whole point,
+// and the second into a silent skip. The M5D-06 cycle records two rounds of
+// scope correction on exactly this hazard: defaultPatterns drives what gets
+// SYNCED, so a name added there changes user data flow.
+func IsSecretName(base string) bool {
+	if slices.Contains(secretBaseNames, base) {
+		return true
+	}
+	if strings.HasPrefix(base, ".env.") && !slices.Contains(envTemplateNames, base) {
+		return true
+	}
+	if strings.HasSuffix(base, ".pem") {
+		return true
+	}
+	return strings.Contains(base, "service-account")
+}
+
+// IsSecretPath applies IsSecretName to relSlash's basename and then the
+// directory-anchored credential suffixes. relSlash is a path relative to the
+// scan or bundle root; both call sites pass a slash-separated form, and the
+// ToSlash below makes a native-separator path behave identically rather than
+// silently missing. That matters on Windows, where the `filepath.Base` this
+// replaced would find the basename of `dir\.env` while a bare `path.Base`
+// would not — the one input class on which the unification would otherwise
+// not have been behavior-preserving.
+//
+// Known gap, preserved deliberately from the two detectors this replaced: the
+// anchored suffixes require a leading `/`, so a `.aws/credentials` sitting
+// directly AT the root is not matched. Widening it is a behavior change tracked
+// separately — this function is a behavior-preserving unification, and changing
+// detection here would have made that property unprovable.
+func IsSecretPath(relSlash string) bool {
+	relSlash = filepath.ToSlash(relSlash)
+	if IsSecretName(path.Base(relSlash)) {
+		return true
+	}
+	for _, suffix := range secretAnchoredSuffixes {
+		if strings.HasSuffix(relSlash, suffix) {
 			return true
 		}
 	}

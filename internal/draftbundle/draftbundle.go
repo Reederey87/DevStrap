@@ -143,7 +143,7 @@ func Pack(dir string, matcher *ignore.Matcher, limits Limits, recipients []strin
 		if matcher != nil && matcher.Match(relSlash, false) {
 			return nil
 		}
-		if isSecretPath(relSlash) {
+		if ignore.IsSecretPath(relSlash) {
 			return fmt.Errorf("refusing to bundle secret-looking file %s; add it to .devstrapignore or remove it", relSlash)
 		}
 		info, err := d.Info()
@@ -339,21 +339,4 @@ func pathWithin(root, path string) bool {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
-}
-
-// isSecretPath mirrors the scanner's secret-looking detector so a bundle never
-// carries a plaintext secret or private key (DRAFT-02).
-func isSecretPath(rel string) bool {
-	base := filepath.Base(rel)
-	switch base {
-	case ".env", "credentials.json", "service-account.json", "id_rsa", "id_ed25519":
-		return true
-	}
-	if strings.HasPrefix(base, ".env.") && base != ".env.example" && base != ".env.template" && base != ".env.schema" {
-		return true
-	}
-	if strings.HasSuffix(base, ".pem") {
-		return true
-	}
-	return strings.HasSuffix(rel, "/.snowflake/config.toml") || strings.HasSuffix(rel, "/.aws/credentials") || strings.Contains(base, "service-account")
 }

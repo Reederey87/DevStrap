@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	dsgit "github.com/Reederey87/DevStrap/internal/git"
 	"github.com/Reederey87/DevStrap/internal/ignore"
@@ -131,7 +130,7 @@ func Walk(ctx context.Context, root string, opts Options) (Result, error) {
 			prunedDirs++
 			return filepath.SkipDir
 		}
-		if !d.IsDir() && isSecretName(name, relSlash) {
+		if !d.IsDir() && ignore.IsSecretPath(relSlash) {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("secret-looking file found: %s", relSlash))
 			result.Secrets = append(result.Secrets, relSlash)
 		}
@@ -210,20 +209,6 @@ func Walk(ctx context.Context, root string, opts Options) (Result, error) {
 	sort.Slice(result.Findings, func(i, j int) bool { return result.Findings[i].Path < result.Findings[j].Path })
 	sort.Slice(result.Duplicates, func(i, j int) bool { return result.Duplicates[i].RemoteKey < result.Duplicates[j].RemoteKey })
 	return result, err
-}
-
-func isSecretName(name, rel string) bool {
-	switch name {
-	case ".env", "credentials.json", "service-account.json", "id_rsa", "id_ed25519":
-		return true
-	}
-	if strings.HasPrefix(name, ".env.") && name != ".env.example" && name != ".env.template" && name != ".env.schema" {
-		return true
-	}
-	if strings.HasSuffix(name, ".pem") {
-		return true
-	}
-	return strings.HasSuffix(rel, "/.snowflake/config.toml") || strings.HasSuffix(rel, "/.aws/credentials") || strings.Contains(name, "service-account")
 }
 
 func looksLikeProject(path string) bool {

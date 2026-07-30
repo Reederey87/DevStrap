@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-28
+last_reviewed: 2026-07-30
 tracks_code: [internal/ignore/**, internal/draftbundle/**, internal/scan/**, .gitignore]
 ---
 # Ignore Rules and Local Garbage
@@ -86,7 +86,7 @@ data/interim/
 **/.devstrap/cache/
 ```
 
-> **Warning: the shipped defaults contain NO secret patterns** — no `.env`, `.aws/credentials`, `*.pem`, `id_rsa`, or `id_ed25519`. Do not assume the default policy keeps secrets out of draft bundles; secret exclusion in draft sync is enforced separately by a hardcoded detector (see "Draft sync" below and `P6-XP-06`). The defaults also prune `env/` and `bin/` at any depth, which was the source of the now-fixed `P6-XP-06` scan discovery blind spot: a workspace-root `.devstrapignore` negation (e.g. `!bin/`) now overrides this on the scan path too.
+> **Warning: the shipped defaults contain NO secret patterns** — no `.env`, `.aws/credentials`, `*.pem`, `id_rsa`, or `id_ed25519`. Do not assume the default policy keeps secrets out of draft bundles; secret exclusion is enforced separately by `ignore.IsSecretName`/`IsSecretPath`, a membership test alongside the table rather than an entry in it, and deliberately so (see "Draft sync" below and `P6-XP-06`). The defaults also prune `env/` and `bin/` at any depth, which was the source of the now-fixed `P6-XP-06` scan discovery blind spot: a workspace-root `.devstrapignore` negation (e.g. `!bin/`) now overrides this on the scan path too.
 
 ## Recommended per-project `.devstrapignore` (target)
 
@@ -180,9 +180,13 @@ Generate `.dockerignore` block to avoid huge Docker build contexts. Not yet buil
 
 ### Draft sync (built)
 
-Use the compiled `.devstrapignore` output directly to exclude files from encrypted draft bundles. This consumer is load-bearing for confidentiality: anything not pruned here is what gets age-encrypted into an `age_blob:<sha256>` blob and pushed to the hub, so the draft-sync exclusion set MUST be the exact compiler output (not a re-derived list) and MUST cover secrets, `node_modules`, build artifacts, and OS junk.
+Use the compiled `.devstrapignore` output directly to exclude files from encrypted draft bundles. This consumer is load-bearing for confidentiality: anything not pruned here is what gets age-encrypted into an `age_blob:<sha256>` blob and pushed to the hub. The effective exclusion policy is therefore **the exact compiler output plus `ignore.IsSecretPath`** — never a re-derived list — and between them the two must cover secrets, `node_modules`, build artifacts, and OS junk. The split is deliberate and explained below: the compiler's `defaultPatterns` deliberately carry no secret names, because a bundle must *refuse* on a secret rather than silently skip it.
 
-Current state: the compiler output drives directory/artifact exclusion in `draftbundle.Pack`, but secret exclusion is enforced by a separate hardcoded secret-name detector (`draftbundle.isSecretPath`, duplicated from `internal/scan`) because the shipped compiler defaults carry no secret patterns. Folding that detector's patterns into the canonical compiler table — so scan, draft sync, and the future agent denylist read one source — is the open follow-up (extends `PLAT-01`/`AGEN-05`).
+Current state: the compiler output drives directory/artifact exclusion in `draftbundle.Pack`, and secret exclusion now reads the canonical `ignore.IsSecretPath`. The two hardcoded clones — `draftbundle.isSecretPath` and `internal/scan`'s `isSecretName` — are retired. They were not literally byte-identical (different signatures, and one took the basename as a separate argument while the other derived it with `filepath.Base`), but they applied **equivalent detection rules** for the slash-normalized paths both call sites actually pass. Their shared table now lives in `internal/ignore`, with the scanner's own case-for-case test moved alongside it, plus a differential test asserting the unified function agrees with verbatim copies of *both* retired implementations across a hostile input space (empty paths, trailing slashes, native separators, root-level anchored-suffix cases).
+
+**The secret names are a membership test (`IsSecretName`/`IsSecretPath`), deliberately NOT entries in the compiler's `defaultPatterns`** — the same shape as `IsOSJunkName`, for a stronger reason. Both consumers use this judgement to **act**, not to skip: `internal/scan` *reports* a hit into `Warnings` and `Secrets` so the user learns a secret is sitting in the tree, and `draftbundle.Pack` *hard-refuses* the bundle with a named error, ordered after `matcher.Match` so a user-ignored secret is skipped quietly instead. Folding `.env` into the ignore table would silently convert the first into prune-and-never-report — destroying the signal that is the entire point — and the second into a silent skip.
+
+One detection gap is carried over unchanged rather than fixed here, so the unification stays provably behavior-neutral: the directory-anchored suffixes (`/.snowflake/config.toml`, `/.aws/credentials`) require a leading `/`, so a `.aws/credentials` sitting directly at the scan root is not matched. Closing it is a behavior change and belongs with the agent-denylist work below.
 
 ### Watcher exclusion set (built — `PLAT-01`/`PLAT-04`)
 
@@ -197,7 +201,7 @@ The fsnotify watcher now compiles the watch root's `.devstrapignore` with the ca
 
 ### Agent denylist (unbuilt — `AGEN-05`)
 
-Translate secret patterns to agent file-deny policy from the same compiled source (`AGEN-05`). Not yet built.
+Translate secret patterns to agent file-deny policy from the same compiled source (`AGEN-05`). Not yet built: `internal/cli/agent.go` still carries its own `agentTokenLooksSensitive`/`agentPathLooksSensitive` basename rules and its own `denyParts` credential-directory list, which diverge from both the canonical predicate above and `internal/platform`'s `sensitiveHomeDirs`/`sensitiveHomeFiles`. The canonical half now exists for it to read; repointing the agent (and resolving the drifts that repointing exposes, including the leading-slash gap noted under *Draft sync*) is the remaining `AGEN-05` work.
 
 ## OS-specific local garbage
 
