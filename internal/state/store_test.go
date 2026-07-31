@@ -2698,3 +2698,33 @@ UPDATE draft_snapshots SET created_at = ? WHERE source_event_id = ?;
 		t.Fatalf("surviving blob after prune = %q, want %q (must match the dry-run preview)", gotBlob, winnerBlob)
 	}
 }
+
+// TestWorktreeByPathSignalsNotFoundDistinguishably pins the sentinel that lets
+// `worktree adopt` tell genuine absence from a failed read. Absence is the ONLY
+// signal that licenses inserting a new row; if a real query failure were
+// indistinguishable, a transient I/O error or a corrupt database would be
+// silently reinterpreted as "not registered yet" and adopt would insert instead
+// of surfacing the fault. Mutation check: drop the %w wrap in WorktreeByPath and
+// this fails.
+func TestWorktreeByPathSignalsNotFoundDistinguishably(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = st.WorktreeByPath(ctx, "ns_does_not_exist", "/nowhere/at/all")
+	if err == nil {
+		t.Fatal("WorktreeByPath returned no error for a path that was never registered")
+	}
+	if !errors.Is(err, ErrWorktreeNotFound) {
+		t.Fatalf("absence must be reported as ErrWorktreeNotFound so callers can branch on it; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "/nowhere/at/all") {
+		t.Errorf("error should name the path it looked for; got %q", err)
+	}
+}

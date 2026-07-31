@@ -49,6 +49,11 @@ Two reap-safety bugs closed, both of which destroy user work:
 
 Also: `agent pr` gains a `branch == ""` refusal **before** the stale-base fetch, because `PushBranch` performs no branch validation and a branchless run would otherwise have died on a raw `git push -u origin ""` after a pointless network round trip. And `worktree new` now normalizes its stored path exactly as `adopt` does — without parity, the same physical worktree gets two spellings on macOS (`/var` vs `/private/var`) and the unique index cannot see the alias.
 
+Post-review (Codex; two findings, both taken):
+
+- **A failed lookup no longer reads as "not registered yet".** `WorktreeByPath` wrapped `sql.ErrNoRows` and any other query failure identically, and `adopt` branched on `lookupErr == nil` to decide whether to INSERT — so a transient I/O error or a corrupt database would have been silently reinterpreted as absence, inserting a row for a worktree that may already be registered. Absence is now the sentinel `state.ErrWorktreeNotFound` and is the ONLY signal that licenses the insert; every other error surfaces. Mutation-checked. Note this is the one place in the codebase that treats a `WorktreeBy*` error as a branch rather than a hard failure — every `WorktreeByID` caller propagates — which is exactly why it needed a distinguishable signal.
+- **`adopt` now holds the project repo lock across its read-then-write**, the same P7-GIT-01/02 discipline every other worktree mutation follows. `idx_worktrees_active_path` already made a duplicate row impossible, so this was never a corruption risk; without the lock a concurrent `adopt`/`new` on one path surfaced as a raw `UNIQUE constraint failed` mapped to `exitGeneric`. The insert path additionally translates that constraint into `exitConflict` with a readable message, as defense for the case where something registers outside the lock.
+
 Validated:
 
 - `gofmt -l cmd internal` clean; `golangci-lint run` — 0 issues.

@@ -48,6 +48,13 @@ var ErrEventVerification = errors.New("event verification failed")
 // home and re-run `devstrap init --join --workspace-id <id>` (P4-SEC-07).
 var ErrWorkspaceIDMismatch = errors.New("workspace id mismatch")
 
+// ErrWorktreeNotFound distinguishes "no such active worktree row" from a real
+// query failure. WorktreeByPath's caller (`worktree adopt`) branches on absence
+// to decide whether to INSERT, so without a distinguishable signal a transient
+// I/O error or a corrupt database would be silently reinterpreted as "not
+// registered yet" and the command would insert instead of surfacing the fault.
+var ErrWorktreeNotFound = errors.New("no active worktree registered at that path")
+
 const (
 	hlcLogicalBits  = 16
 	hlcLogicalMask  = (1 << hlcLogicalBits) - 1
@@ -4472,7 +4479,7 @@ WHERE namespace_id = ? AND path = ? AND status = 'active';
 `, namespaceID, path).Scan(&wt.ID, &wt.NamespaceID, &wt.DeviceID, &wt.Path, &wt.Branch, &wt.BaseRef, &wt.BaseSHA, &wt.CreatedBy, &wt.Status, &wt.DirtyState)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return Worktree{}, fmt.Errorf("unknown active worktree at %q", path)
+			return Worktree{}, fmt.Errorf("%w: %q", ErrWorktreeNotFound, path)
 		}
 		return Worktree{}, fmt.Errorf("read worktree: %w", err)
 	}

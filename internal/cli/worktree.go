@@ -407,7 +407,26 @@ func newWorktreeAdoptCommand(stdout io.Writer, opts *options) *cobra.Command {
 				dirty = dsgit.DirtyUnknown
 			}
 
+			// The read-then-write below runs under the project repo lock, the
+			// same P7-GIT-01/02 discipline every other worktree mutation
+			// follows. idx_worktrees_active_path already makes a duplicate row
+			// impossible, but without the lock a concurrent adopt/new on the
+			// same path surfaces as a raw SQLite constraint error instead of a
+			// clear refusal.
+			unlockAdopt, err := acquireRepoLock(opts.paths().Home, project.ID)
+			if err != nil {
+				return err
+			}
+			defer unlockAdopt()
+
 			existing, lookupErr := store.WorktreeByPath(cmd.Context(), project.ID, resolvedPath)
+			// Absence is the ONLY signal that licenses an insert. Any other
+			// lookup failure (I/O error, corruption, timeout) must surface:
+			// reinterpreting it as "not registered yet" would silently insert a
+			// second row for a worktree that may already be registered.
+			if lookupErr != nil && !errors.Is(lookupErr, state.ErrWorktreeNotFound) {
+				return lookupErr
+			}
 			if lookupErr == nil {
 				if existing.CreatedBy != "adopted" {
 					// Adoption is registration, never base-resolution: a row
@@ -445,6 +464,13 @@ func newWorktreeAdoptCommand(stdout io.Writer, opts *options) *cobra.Command {
 				DirtyState:  string(dirty),
 			})
 			if err != nil {
+				// The repo lock above serializes adopt against adopt/new for
+				// this project, so reaching the unique index means another
+				// process registered this path outside that lock. Report it as
+				// a conflict rather than leaking raw SQLite text.
+				if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+					return appError{code: exitConflict, err: fmt.Errorf("%s is already registered as an active worktree; run `devstrap worktree list` to see it", resolvedPath)}
+				}
 				return err
 			}
 			out := worktreeAdoptResult{Worktree: wt, ProjectPath: project.Path, Warnings: warnings}
