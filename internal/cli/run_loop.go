@@ -83,7 +83,27 @@ func runLoopJitterBound(interval time.Duration) int64 {
 	return bound
 }
 
+// skipScanAdopt suppresses the per-tick scan+adopt. It is set ONLY for a
+// watcher-hint-triggered convergence (P9-DAEMON-02). The scan is a full
+// scan.Walk of the workspace root that shells out to git twice per discovered
+// repo; P6-XP-03/P6-XP-05 judged that "cheap enough to run every tick" against
+// run-loop's 5-MINUTE default interval, but the watcher's trigger floor is 5
+// SECONDS, so a hint-driven cycle was paying a 60x-more-frequent full-workspace
+// cost. That silently undid the entry-gate review's own argument for the daemon
+// — "converge when something actually changed, so the fleet can hold a long,
+// cheap safe-interval AND low latency" — which only holds if a hint-triggered
+// cycle is cheaper than the periodic one it pre-empts.
+//
+// Skipping it costs nothing in correctness: adoption of a newly-created local
+// project is picked up by the next PERIODIC tick, and the watcher is a latency
+// optimization that makes no completeness claim (spec/14, Milestone 5 entry
+// gate). `--namespace-only` on run-loop still scans, because there the scan is
+// exactly what feeds the namespace.
 func runLoopTick(ctx context.Context, stdout, stderr io.Writer, opts *options, hubFile string, namespaceOnly, once bool) error {
+	return runLoopTickOpts(ctx, stdout, stderr, opts, hubFile, namespaceOnly, once, false)
+}
+
+func runLoopTickOpts(ctx context.Context, stdout, stderr io.Writer, opts *options, hubFile string, namespaceOnly, once, skipScanAdopt bool) error {
 	unlock, err := acquireMaintenanceLock(opts.paths().Home)
 	if err != nil {
 		if !once {
@@ -104,8 +124,10 @@ func runLoopTick(ctx context.Context, stdout, stderr io.Writer, opts *options, h
 	// manual `scan --adopt`. The scan runs even under --namespace-only because it
 	// FEEDS the namespace. P6-XP-05 made scan offline, so the per-tick cost is a
 	// filesystem walk plus local git ref reads — cheap enough to run every tick.
-	if err := runLoopScanAdopt(ctx, stderr, opts); err != nil {
-		return err
+	if !skipScanAdopt {
+		if err := runLoopScanAdopt(ctx, stderr, opts); err != nil {
+			return err
+		}
 	}
 	return runSyncCycle(ctx, stdout, stderr, opts, hubFile, namespaceOnly, false)
 }

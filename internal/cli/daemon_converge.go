@@ -38,7 +38,15 @@ type cliConverger struct {
 // working against a running daemon exactly as they do against run-loop.
 func (c cliConverger) Converge(ctx context.Context, mode daemon.TickMode) (daemon.Result, error) {
 	namespaceOnly := c.forceNamespaceOnly || mode == daemon.TickNamespaceOnly
-	err := runLoopTick(ctx, c.stdout, c.stderr, c.opts, c.hubFile, namespaceOnly, true)
+	// A TickNamespaceOnly cycle is what the watcher's hints produce, and only
+	// what they produce (watch.go floors them at 5s and always requests this
+	// mode). Skip the full-workspace scan+adopt for it — P9-DAEMON-02 — so a
+	// hint-driven convergence is genuinely cheaper than the periodic tick it
+	// pre-empts, which is the entire cost argument the Milestone 5 entry gate
+	// made for having a watcher at all. A daemon configured namespace-only for
+	// other reasons (forceNamespaceOnly) keeps scanning.
+	skipScanAdopt := mode == daemon.TickNamespaceOnly
+	err := runLoopTickOpts(ctx, c.stdout, c.stderr, c.opts, c.hubFile, namespaceOnly, true, skipScanAdopt)
 	return daemon.Result{}, err
 }
 
