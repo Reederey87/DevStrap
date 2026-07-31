@@ -154,6 +154,23 @@ accepts exactly zero or all five secrets below, failing before GoReleaser and na
 and missing secret names if configuration is partial. With all five present, the existing
 `isEnvSet "MACOS_SIGN_P12"` expression activates notarization; nothing else changes.
 
+**The cutoff is enforced, not just documented.** The `Enforce the Homebrew Gatekeeper cutoff`
+step (`cmd/release-gate`, decision in `internal/releasegate`) runs after the 0-or-5 check and
+before GoReleaser:
+
+| Tag | Date | Notarization | Result |
+|---|---|---|---|
+| stable `vX.Y.Z` | on/after 2026-09-01 | dormant | **release refused** |
+| `-rc.N` | on/after 2026-09-01 | dormant | warns that promotion will be refused |
+| any | before 2026-09-01 | dormant | warns, with the remaining runway in days |
+| any | any | active | passes silently |
+
+The date lives in `releasegate.GatekeeperCutoff` and this section is the other half of that
+one fact; `TestGatekeeperCutoffMatchesRunbook` is where the two are reconciled if it moves.
+Before the cutoff nothing is blocked — every release simply reports the countdown, so the
+deadline cannot pass unnoticed. **The gate cannot do the enrollment**; it only guarantees the
+failure is loud and early rather than a cask users cannot install.
+
 One-time enrollment checklist:
 
 1. Enroll in the [Apple Developer Program](https://developer.apple.com/programs/) ($99/yr).

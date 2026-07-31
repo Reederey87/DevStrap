@@ -116,6 +116,21 @@ jobs:
             echo "macOS notarization secrets must be set 0-or-5; set: ${set_list%, }; missing: ${missing_list%, }" >&2
             exit 1
           fi
+      - name: Enforce the Homebrew Gatekeeper cutoff
+        # P4-SEC-05. The 0-or-5 step above proves the notarization secrets are
+        # CONSISTENT; it does not care whether they exist. This step does: past
+        # the Homebrew Gatekeeper cutoff, a stable tag with notarization still
+        # dormant would publish a cask Homebrew refuses, and every job here
+        # would report success. Before the cutoff it only warns, so each
+        # release reports the remaining runway unprompted.
+        #
+        # The decision lives in internal/releasegate and is unit-tested across
+        # its whole truth table — a gate proven only by waiting for September
+        # is a gate nobody has verified.
+        env:
+          DEVSTRAP_RELEASE_STABLE: ${{ steps.release-mode.outputs.stable }}
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+        run: go run ./cmd/release-gate
       - name: GoReleaser
         # P4-SEC-05: SHA-pin the one remaining unpinned action in this
         # contents:write release job. The trailing version comment lets
@@ -325,6 +340,26 @@ jobs:
       group: homebrew-tap-publish
       cancel-in-progress: false
     steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Re-enforce the Homebrew Gatekeeper cutoff
+        # P4-SEC-05. The goreleaser job runs this too, but THIS job is the one
+        # that actually pushes the cask to the tap, and it is concurrency-
+        # grouped so it can run arbitrarily later than the build that produced
+        # the artifact. A build that passed the gate before the cutoff must not
+        # publish a Gatekeeper-failing cask after it. This is the last point at
+        # which that can be stopped.
+        env:
+          # This job only runs when `needs.goreleaser.outputs.stable == 'true'`,
+          # so the stable discriminator is a constant here.
+          DEVSTRAP_RELEASE_STABLE: "true"
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+        run: go run ./cmd/release-gate
       # Every fallible preparation happens BEFORE the user-visible draft flip:
       # a failure here leaves a consistent, still-draft release instead of a
       # published version whose tap never updated.

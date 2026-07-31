@@ -1,6 +1,6 @@
 ---
-last_reviewed: 2026-07-29
-tracks_code: [cmd/**, internal/**, internal/config/**, .github/**, .goreleaser.yaml, scripts/**]
+last_reviewed: 2026-07-31
+tracks_code: [cmd/**, internal/**, internal/config/**, internal/releasegate/**, .github/**, .goreleaser.yaml, scripts/**]
 ---
 # System Architecture
 
@@ -455,9 +455,16 @@ was configured. The distribution surface, in the order users should reach for it
    while a stable release is still a draft; shipped PR #117). A dormant
    `notarize:` block (Developer ID + notarization, the P4-SEC-05 remainder) keeps its existing
    `isEnvSet "MACOS_SIGN_P12"` activation, while the release workflow enforces that exactly
-   zero or all five `MACOS_*` secrets are set before GoReleaser runs. Because the publisher
+   zero or all five `MACOS_*` secrets are set before GoReleaser runs. That check proves the
+   secrets are *consistent*, not that they *exist*; a second step (`cmd/release-gate`,
+   decision in `internal/releasegate`) enforces the deadline itself. Homebrew drops
+   Gatekeeper-failing casks on **2026-09-01**; past that date a stable tag with notarization
+   still dormant is **refused** before GoReleaser runs, a prerelease warns that promotion
+   will be refused, and before the date every release reports the remaining runway. Without
+   it the deadline existed only in prose, so a stable tag cut after the cutoff would have
+   published a cask Homebrew refuses while every job reported success. Because the publisher
    runs on Ubuntu and cannot execute `spctl`, Gatekeeper assessment of the published darwin
-   binary on a Mac is a required manual post-release smoke step — see `RELEASING.md`
+   binary on a Mac remains a required manual post-release smoke step — see `RELEASING.md`
    "Enabling notarization".
 3. **`curl | sh` installer (P7-QUAL-02)** — `scripts/install.sh`, served raw from `main`
    (with a tag-pinned script URL documented for high-assurance installs). POSIX sh; picks
