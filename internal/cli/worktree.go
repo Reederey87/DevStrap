@@ -395,6 +395,27 @@ func adoptWorktreeAt(ctx context.Context, stderr io.Writer, opts *options, store
 	}
 
 	baseRef := baseRefFlag
+	// P8-ADOPT-03: validate the SHAPE at record time. MergeBase accepts any
+	// committish, so an unvalidated --base-ref was stored verbatim and only
+	// rejected much later — by BaseDrift's "remote/branch" split, with no remedy
+	// named — leaving the worktree adopted but permanently unusable by
+	// `worktree status`, `finalize`, and `agent pr`. `--base-ref main` is the
+	// natural mistake and hit exactly that.
+	//
+	// refs/devstrap/* is refused outright: that namespace is the human
+	// working-state plane (gitstate/WIP), and `spec/10`'s independence rule
+	// keeps it strictly separate from anything an agent's base resolves from.
+	// Nothing AUTOMATIC reads it — the invariant is intact — but an explicit
+	// flag should not be the one door into that separation either.
+	if baseRef != "" {
+		if strings.HasPrefix(baseRef, "refs/devstrap/") {
+			return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, appError{code: exitUsage, err: fmt.Errorf("--base-ref %s names the DevStrap working-state plane (refs/devstrap/*), which is the human device-mirroring plane and is deliberately never a base for agent work; pass a real remote branch such as origin/main", baseRef)}
+		}
+		remote, branch, ok := strings.Cut(baseRef, "/")
+		if !ok || remote == "" || branch == "" {
+			return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, appError{code: exitUsage, err: fmt.Errorf("--base-ref must be <remote>/<branch> (e.g. origin/main or origin/gh-pages), got %q; a bare branch name records but then fails every later freshness check", baseRef)}
+		}
+	}
 	if baseRef == "" {
 		defaultBranch, err := resolveWorktreeDefaultBranch(ctx, stderr, r, resolvedPath, project.DefaultBranch)
 		if err != nil {

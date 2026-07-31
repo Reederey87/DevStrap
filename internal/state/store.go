@@ -1609,9 +1609,27 @@ func (s *Store) GCTombstones(ctx context.Context, beforeHLC int64) (int, error) 
 	if err != nil {
 		return 0, err
 	}
+	// P8-SEC-01: NEVER purge a tombstone whose project still has a registered
+	// worktree. `worktrees.namespace_id` is ON DELETE CASCADE, so this DELETE
+	// silently erased live worktree rows — including dirty, adopted ones with
+	// uncommitted work — and `agent_runs.worktree_id` (ON DELETE SET NULL) left
+	// orphaned runs behind. The checkout and its diff survive on disk, but
+	// DevStrap loses all record of them: gone from `worktree list`/`status`/
+	// `doctor`, and the stale-base gate and `agent pr` base provenance can no
+	// longer be applied to it.
+	//
+	// This is a routine path, not an exotic one — `hub compact --gc-tombstones`
+	// defaults to true. The dirty-guard on the delete decision does not help
+	// either: it inspects only the MAIN checkout's dirty state, so a dirty
+	// LINKED worktree never blocks the tombstone in the first place.
+	//
+	// Retaining a tombstone is cheap and safe: it is bounded by devices ×
+	// projects, and the next GC reclaims it once the worktree is finalized or
+	// removed. Losing a registration is not recoverable.
 	res, err := s.db.ExecContext(ctx, `
 DELETE FROM namespace_entries
-WHERE workspace_id = ? AND status = 'deleted' AND tombstone_hlc IS NOT NULL AND tombstone_hlc < ?;
+WHERE workspace_id = ? AND status = 'deleted' AND tombstone_hlc IS NOT NULL AND tombstone_hlc < ?
+  AND id NOT IN (SELECT namespace_id FROM worktrees);
 `, workspaceID, beforeHLC)
 	if err != nil {
 		return 0, fmt.Errorf("gc tombstones: %w", err)

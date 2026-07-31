@@ -698,3 +698,52 @@ func TestWorktreeAdoptRefreshesBranchAfterSwitch(t *testing.T) {
 		t.Fatalf("PERSISTED branch = %q, want feature/fix-login; the adoption UPDATE must write the column, not just the returned struct", persisted)
 	}
 }
+
+// TestWorktreeAdoptValidatesBaseRefShape pins P8-ADOPT-03's record-time half.
+// MergeBase accepts any committish, so an unvalidated --base-ref was stored
+// verbatim and only rejected much later by BaseDrift's remote/branch split —
+// leaving the worktree adopted but permanently unusable by `worktree status`,
+// `finalize`, and `agent pr`, with no remedy named. `--base-ref main` is the
+// natural mistake and hit exactly that.
+func TestWorktreeAdoptValidatesBaseRefShape(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	localPath := setupFreshWorktreeRepo(t, home, root, "auto", false)
+
+	head := strings.TrimSpace(runGitOutput(t, localPath, "rev-parse", "HEAD"))
+	extWT := filepath.Join(t.TempDir(), "external-wt")
+	runGit(t, localPath, "worktree", "add", "--detach", extWT, head)
+
+	for _, tc := range []struct {
+		name, baseRef, wantMsg string
+	}{
+		{"bare branch name", "main", "<remote>/<branch>"},
+		{"devstrap working-state plane", "refs/devstrap/wip/dev_x/work-proj", "working-state plane"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, stderr, err := executeForTest("--home", home, "--root", root,
+				"worktree", "adopt", extWT, "--base-ref", tc.baseRef)
+			if err == nil {
+				t.Fatalf("want a refusal for --base-ref %q", tc.baseRef)
+			}
+			if !strings.Contains(stderr, tc.wantMsg) {
+				t.Fatalf("stderr = %q, want it to explain %q", stderr, tc.wantMsg)
+			}
+			// And nothing may have been registered.
+			listOut, _, lerr := executeForTest("--home", home, "--root", root, "--json", "worktree", "list")
+			if lerr != nil {
+				t.Fatal(lerr)
+			}
+			if strings.Contains(listOut, extWT) {
+				t.Fatalf("a refused adopt must register nothing; worktree list contains %s", extWT)
+			}
+		})
+	}
+
+	// The qualified form still works — the validation must not refuse the
+	// legitimate orphan-branch case the error message elsewhere recommends.
+	if _, stderr, err := executeForTest("--home", home, "--root", root,
+		"worktree", "adopt", extWT, "--base-ref", "origin/main"); err != nil {
+		t.Fatalf("origin/main must be accepted: stderr=%q err=%v", stderr, err)
+	}
+}

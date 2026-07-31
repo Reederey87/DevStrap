@@ -853,3 +853,24 @@ opts.Git = dsgit.Runner{Timeout: 5 * time.Second} // only if remote repair must 
 g, ctx := errgroup.WithContext(ctx)
 g.SetLimit(8) // bounded fan-out instead of serial per-repo calls
 ```
+
+> **WIP mirror safety contract (`P9-WIP-01`, 2026-07-31).** `wip drop` and the automatic
+> `wip gc` delete a peer's recovery ref with an explicit-value lease —
+> `--force-with-lease=<ref>:<sha>` against the sha the synced mirror row promised — so a
+> stale local record can never destroy a newer snapshot the owner force-pushed. That
+> guarantee has a sharp edge: `git.Runner.DeleteRef` adds the lease only when the expected
+> sha is non-empty, so an **empty** sha silently degrades the compare-and-delete into an
+> unconditional `git push origin :<ref>`.
+>
+> The mirror must therefore never hold an empty sha. `device_wip.sha` is
+> `NOT NULL DEFAULT ''` and the live-row predicate does not exclude one, so the guarantee
+> is enforced at apply time: a `repo.wip.pushed` event whose payload carries no sha is an
+> `ErrEventVerification` and quarantines, exactly as a malformed path already did. The
+> path was validated from the start; the sha is the other half of the same contract.
+> `dropWipRef` additionally refuses to issue an unleased delete, so a row predating that
+> validation cannot arm one either.
+>
+> The general rule this encodes: **a safety mechanism with an "off" state reachable by
+> omission is not a safety mechanism.** Where a lease, a signature, or a gate can be
+> skipped by an empty value, the empty value must be rejected upstream rather than
+> tolerated downstream.

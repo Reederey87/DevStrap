@@ -31,6 +31,69 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — an empty mirror sha degraded the WIP compare-and-delete into an unconditional one (P9-WIP-01)
+
+Found by auditing the WIP plane directly after **two** commissioned reviewers went idle on it — Pass 8's and Pass 9's. Two consecutive passes would otherwise have recorded this plane as unaudited, and the defect below is exactly the kind that silence hides.
+
+Changed:
+
+- **`wip drop` and the automatic `wip gc` lease their delete to the mirror row's sha** — `--force-with-lease=<ref>:<sha>` — which is the single mechanism protecting a peer's recovery snapshot from being destroyed by a stale local record. But `git.Runner.DeleteRef` builds that argument only `if expectedSHA != ""`; an **empty** sha silently omits the lease and issues an unconditional `git push origin :<ref>`, destroying whatever the remote currently holds. That is precisely the loss the compare-and-delete exists to prevent, and `wip gc` runs unattended on every convergence cycle.
+- **The mirror could hold such a row.** `device_wip.sha` is `NOT NULL DEFAULT ''`, the live-row predicate does not exclude an empty sha, and the apply handler validated the payload's **path** but never its **sha** — so a `repo.wip.pushed` event from an approved device carrying `sha: ""` (a buggy peer, a truncated payload) mirrored cleanly and armed the unleased delete.
+- Fixed at both ends. Apply-time: an empty sha is now an `ErrEventVerification` and the event quarantines, exactly as a malformed path already did — the sha is the other half of the mirror's safety contract. Drop-time, as defense in depth: `dropWipRef` refuses rather than issue an unleased delete, so a row predating this validation, or arriving by any future path, still cannot trigger one. The refusal names the remedy (`devstrap sync`, then retry).
+
+Severity is P2, not P1: reaching it requires an approved, signature-verifying device to emit a malformed event, so it is a robustness and defense-in-depth gap rather than a remote exploit. But it defeats the only safeguard on user recovery data, on a path that runs automatically.
+
+**A vacuous gate in my own tooling, caught here.** The formatting check used throughout this session was `gofmt -l cmd internal && echo "gofmt clean"` — and `gofmt -l` **lists** unformatted files while exiting **0**, so the success message printed regardless. It had been reporting "clean" over a genuinely unformatted file. The gate now tests the output: `OUT=$(gofmt -l …); [ -n "$OUT" ] && exit 1`. This is the ninth vacuous-green check recorded this session and the first one located in the verification tooling itself rather than in the code under test.
+
+Validated:
+
+- Mutation-checked the apply-time validation in both directions: removing it makes the event mirror rather than quarantine.
+- `golangci-lint run` — 0 issues; `go test -race ./...` exit 0; gofmt verified with a gate that can actually fail.
+
+## 2026-07-31 — `--base-ref` is validated when recorded, and `agent adopt` takes the lock (P8-ADOPT-03/04)
+
+Changed:
+
+- **`P8-ADOPT-03` (record-time half).** `MergeBase` accepts any committish, so `--base-ref` was stored verbatim and rejected only much later by `BaseDrift`'s `remote/branch` split — with no remedy named — leaving the worktree adopted but permanently unusable by `worktree status`, `finalize`, and `agent pr`. `--base-ref main`, the natural mistake, hit exactly that. The shape is now validated where it is recorded. `refs/devstrap/*` is refused outright: that namespace is the human working-state plane, and while nothing *automatic* reads it (the `spec/10` independence invariant is intact and was re-verified this pass), an explicit flag should not be the one door into that separation either.
+- **`P8-ADOPT-04` (the real half).** `agent adopt` inserted its `agent_runs` row **without the project repo lock**, breaking the `P7-GIT-01/02` discipline `agent run` observes by holding it from worktree creation through `InsertAgentRun`. Between provisioning and registration a concurrent `worktree cleanup --merged` could reap the very worktree the run was about to bind to — the harness's workspace vanishing mid-session, and a `running` run left bound to a removed worktree. The lock now spans the insert.
+
+**A fix I wrote, tested, and then reverted, because the existing tests were right.** The finding also suggested skipping a *pristine* worktree (tip == `base_sha`) during cleanup, since `git branch --merged` reports it merged precisely because the tip is an ancestor. I implemented that — and it broke `TestWorktreeCleanupJSONStaysPure` and `TestWorktreeCleanupSkipsRunningAgentRunThenReapsAfterFinish`. Those tests are correct: an **abandoned** empty worktree is exactly the thing `cleanup --merged` should reclaim, and the guard would have leaked every one of them forever. The repo lock closes the actual race window; the pristine guard traded a narrow race for a permanent leak. Reverted, and recorded here rather than silently dropped, because "two tests failed so I changed the tests" is the tempting move and would have been wrong.
+
+Residual, stated rather than implied: a worktree created outside DevStrap and never registered is still reap-eligible — no lock can cover a row that does not exist yet. `docs/agents.md` already tells harnesses to call `agent adopt` promptly, which is the mitigation.
+
+`P8-ADOPT-07` (pre-`00032` rows holding unresolved path spellings) stays open as the pass's only remaining row: it is self-healing via cleanup's path-missing prune, P3, and a migration to rewrite historical paths carries more risk than the aliasing it would remove.
+
+Validated:
+
+- Mutation-checked the `--base-ref` validation in both directions.
+- `gofmt` clean; `golangci-lint run` — 0 issues; `go test -race ./...` exit 0.
+
+Follow-ups:
+
+- **Pass 8 is down to 1 open of 8** (`P8-ADOPT-07`, P3). Every P1 and every data-loss finding is closed.
+- Pass 9's WIP dimension has still not reported. If it does not, that plane is unaudited across two consecutive passes and must be recorded as exactly that.
+
+## 2026-07-31 — tombstone GC no longer erases live worktree registrations (P8-SEC-01)
+
+Changed:
+
+- **A routine `hub compact` silently deleted live worktree rows.** `worktrees.namespace_id` is `ON DELETE CASCADE`, and `GCTombstones` hard-`DELETE`s tombstoned `namespace_entries` without ever consulting `worktrees`. `--gc-tombstones` **defaults to true**, so this was the ordinary path, not an exotic one. Reproduced before fixing: an adopted worktree with `dirty_state='dirty'`, its project tombstoned, GC run past the HLC — `worktrees` rows went **1 → 0**. `agent_runs.worktree_id` is `ON DELETE SET NULL`, so runs pointing at it were orphaned in the same instant.
+- The checkout and its uncommitted diff survive on disk; DevStrap's *record* of them does not. The worktree disappears from `worktree list`, `status`, and `doctor`, and the stale-base gate plus `agent pr`'s base-provenance guarantee — the core `AD-5` invariant — can no longer be applied to it. The sync-side delete-vs-dirty guard offers no protection either: it inspects only the MAIN checkout's `device_project_state.dirty_state`, so a dirty **linked** worktree never blocks the tombstone in the first place.
+- **Fix: the GC skips any tombstone whose project still has a `worktrees` row.** Retaining a tombstone is cheap and bounded by devices × projects, and the next GC reclaims it once the worktree is finalized or removed. Losing a registration is not recoverable, so the asymmetry is the whole argument.
+- **Attribution stays honest.** This is structurally pre-existing — the FK dates to migration `00001` and the GC was wired ~2026-07-04 — but `AD5-02` widened the blast radius materially: before adoption only `worktree new` created rows, and those are short-lived, whereas adoption makes long-lived externally-created registrations common for the first time. The wave that shipped this month is what turned a latent schema hazard into a reachable one.
+
+Validated:
+
+- Mutation-checked both directions: removing the `NOT IN (SELECT namespace_id FROM worktrees)` clause makes the new test fail with `worktree rows for the held project = 0, want 1`.
+- The test also asserts the *other* half — a tombstone with no worktree is still reclaimed — so the guard cannot be satisfied by simply never collecting anything.
+- `gofmt` clean; `golangci-lint run` — 0 issues; `go test -race ./...` exit 0.
+
+Follow-ups:
+
+- Pass 8 drops to **3 open of 8**: `P8-ADOPT-03` (record-time `--base-ref` validation), `P8-ADOPT-04` (provision→register gap), `P8-ADOPT-07` (legacy path spellings). All P2/P3.
+- The `decideDelete` half of this finding — consulting `worktrees` for an active dirty row before accepting a delete at all — is deliberately NOT done here. This change makes the data-loss impossible; that one would additionally make the *decision* better-informed, and belongs with the sync-plane work rather than bolted onto a GC guard.
+- Pass 9's WIP dimension remains outstanding across two consecutive passes if it does not report.
+
 ## 2026-07-31 — the watch plane stops failing whole-device, and hints get cheaper (P9-DAEMON-01/02)
 
 Pass 9's first slice. Both findings come from the daemon plane **Pass 8 commissioned and never reached** — its reviewer went idle — which is the concrete payoff of Pass 8 having *declared* that gap instead of reading as complete: Pass 9 knew exactly where to look, and found two real defects in a subsystem that would otherwise have been assumed sound.

@@ -2728,3 +2728,76 @@ func TestWorktreeByPathSignalsNotFoundDistinguishably(t *testing.T) {
 		t.Errorf("error should name the path it looked for; got %q", err)
 	}
 }
+
+// TestGCTombstonesRetainsProjectsWithRegisteredWorktrees pins P8-SEC-01, which
+// was reproduced before it was fixed: `worktrees.namespace_id` is ON DELETE
+// CASCADE and GCTombstones hard-deletes tombstoned namespace_entries, so a
+// routine `hub compact` (--gc-tombstones defaults to TRUE) silently erased live
+// worktree registrations — including dirty, adopted ones with uncommitted work.
+// The checkout survives on disk; DevStrap's record of it does not, so the
+// stale-base gate and agent pr's base provenance stop applying to it.
+//
+// Mutation check: drop the NOT IN (SELECT namespace_id FROM worktrees) clause
+// and this fails with the worktree row count at 0.
+func TestGCTombstonesRetainsProjectsWithRegisteredWorktrees(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.EnsureWorkspace(ctx, "ws", t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	dev, err := st.EnsureDevice(ctx, "devA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsID, err := st.WorkspaceID(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mk := func(id, path string) {
+		t.Helper()
+		if _, err := st.db.ExecContext(ctx, `
+INSERT INTO namespace_entries (id, workspace_id, path, path_key, type, status, tombstone_hlc, created_at, updated_at)
+VALUES (?, ?, ?, ?, 'git_repo', 'deleted', 100, 't', 't');`, id, wsID, path, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// One tombstoned project WITH a live adopted worktree, one without.
+	mk("ns_held", "work/held")
+	mk("ns_free", "work/free")
+	if _, err := st.InsertWorktree(ctx, Worktree{
+		NamespaceID: "ns_held", DeviceID: dev.ID, Path: "/tmp/ext-wt",
+		Branch: "", BaseRef: "origin/main", BaseSHA: "abc",
+		CreatedBy: "adopted", DirtyState: "dirty",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := st.GCTombstones(ctx, 200); err != nil {
+		t.Fatal(err)
+	}
+
+	var worktrees int
+	if err := st.db.QueryRowContext(ctx, `SELECT count(*) FROM worktrees WHERE namespace_id='ns_held';`).Scan(&worktrees); err != nil {
+		t.Fatal(err)
+	}
+	if worktrees != 1 {
+		t.Fatalf("worktree rows for the held project = %d, want 1; tombstone GC cascade-deleted a live adopted worktree registration", worktrees)
+	}
+	var held, free int
+	_ = st.db.QueryRowContext(ctx, `SELECT count(*) FROM namespace_entries WHERE id='ns_held';`).Scan(&held)
+	_ = st.db.QueryRowContext(ctx, `SELECT count(*) FROM namespace_entries WHERE id='ns_free';`).Scan(&free)
+	if held != 1 {
+		t.Errorf("the tombstone guarding a live worktree must be RETAINED, not purged")
+	}
+	if free != 0 {
+		t.Errorf("a tombstone with no worktree must still be reclaimed; got %d rows", free)
+	}
+}
