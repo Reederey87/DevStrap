@@ -2068,6 +2068,10 @@ CLI (Phase 1):  devstrap wip push|status|fetch|show|apply|drop <project> [--devi
 - **Layer A doesn't move bytes** — ship Layer B in Phase 1; don't ship validation alone and call the request done.
 - **Attributed-but-unverified** remote snapshots until Phase-2 enrollment — a spoofed peer could publish a false/scary snapshot; flag clearly, gate trust on Phase 2.
 - **WIP refs accumulate** on origin (one per device per project) and leak branch-name/intent — need TTL/GC of `refs/devstrap/wip/*`; confirm the forge doesn't auto-create PRs/notifications for non-default refs.
+
+  **Resolved 2026-07-30 (`P7-WIP-07`/`P7-WIP-08`).** Manual and automatic
+  TTL/GC are shipped. The dated forge-behavior discharge, including the
+  unfiltered-push-webhook residual, is recorded in spec/07 Layer B.
 - **Capture cost** on large/many worktrees — gate behind mtime/FSEvents incremental triggers; `--no-optional-locks` avoids lock contention but not CPU.
 - **Scope creep toward Design 4** — hold the line; document the rejection in `spec/04`.
 

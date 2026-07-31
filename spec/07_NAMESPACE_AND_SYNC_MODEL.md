@@ -4,10 +4,13 @@ tracks_code: [internal/pathkey/**, internal/scan/**, internal/state/**, internal
 ---
 # Namespace and Sync Model
 
-## Layer B WIP expiry (`P7-WIP-07`)
+## Layer B WIP expiry (`P7-WIP-07`/`P7-WIP-08`)
 
-`devstrap wip gc` bounds `refs/devstrap/wip/*` with a 720h default TTL.
-Automatic sweeps may reap only this device's rows and rows owned by
+`devstrap wip gc` bounds `refs/devstrap/wip/*` with a 720h default TTL. The
+same extracted sweep runs automatically after pull and eager materialization
+on the one `runSyncCycle` convergence path, interval-gated by
+`wip.gc_interval` (default 24h; `0` disables) and `wip.ttl` (default 720h;
+`0` disables). Automatic sweeps may reap only this device's rows and rows owned by
 `revoked`/`lost` devices, always after the same TTL; approved live peers
 require explicit `--device`. Age is the `device_wip.observed_at_hlc` physical
 time, stamped only by explicit `wip push`, never gitstate-derived liveness.
@@ -21,6 +24,14 @@ workspaces may share an origin. The policy can lose recovery data when a
 device remains offline beyond the TTL and its worktree copy is also gone;
 live-but-absent peers and unknown-device orphans are the deliberately
 never-reaped residual.
+
+**Forge-notification clause, checked 2026-07-30 (external behavior).** Refs
+outside `refs/heads/*` and `refs/tags/*` are invisible in the GitHub/GitLab
+branch/tag UI and raise no PR prompts, compare banners, or notifications.
+GitHub Actions `push` events are defined only for heads and tags, so
+`refs/devstrap/wip/*` cannot trigger CI — a protocol-design property, not
+forge courtesy. Unfiltered push webhooks can still fire for any ref; automatic
+GC bounds that residual.
 
 ## Core abstraction
 

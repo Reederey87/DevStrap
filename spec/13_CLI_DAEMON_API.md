@@ -23,6 +23,13 @@ Warnings are fields in that document, never loose stdout. A nominated object
 newer than its mirror record is retained with reason
 `"object is newer than its mirror record; not deleted"`.
 
+Plain full `sync` runs this exact sweep after pull and materialization, beside
+local blob GC. `wip.gc_interval` defaults to `24h`; `wip.ttl` defaults to
+`720h`; `0` disables either gate, while negative/malformed values fail as
+invalid config. Operational origin/auth failures warn per project and never
+fail convergence. Sync JSON adds `wip_refs_gcd`. Doctor reports last-success
+age, warns past twice the interval, and reports disabled when either is zero.
+
 ## CLI principles
 
 - dry-run available for mutating commands;
@@ -282,6 +289,8 @@ sync.key_grant_grace  # config: how long a not-yet-granted workspace key defers 
                       # Parsed strictly: a malformed value warns and falls back to the default (never 0).
 keys.rotate_max_age   # config: age-triggered periodic WCK rotation deadline (P4-SEC-07). Default 2160h
                       # (90d); 0 disables. Strictly parsed like sync.key_grant_grace.
+wip.gc_interval      # automatic post-materialization WIP sweep cadence; default 24h; 0 disables
+wip.ttl              # minimum WIP-ref age; default 720h; 0 disables automatic sweep
 ```
 
 The file-backed test hub uses `--hub-file` (or `hub: file:<path>`); the zero-infrastructure git carrier — the documented quickstart default since the `AD-1` swap (2026-07-04) — is selected via `hub: git+ssh://…` / `git+https://…` / `git+file://…` / scp-like `git@host:path.git` with optional `?branch=` (`GitCarrierHub` in `internal/hub`, local clone cache under `~/.devstrap/hub-git/`, hub id `git:<workspace_id>`; the carrier design is canonical in `03_SYSTEM_ARCHITECTURE.md`); the local-folder / cloud-drive-folder carrier (`AD-1` final slice, 2026-07-05) is selected via `hub: folder:<abs-path>` (a Dropbox/iCloud/Drive folder or network mount; the path must be absolute and carries no `?`-parameters — `FolderHub` in `internal/hub`, hub id `folder:<workspace_id>`, per-device lock + observation cache under `~/.devstrap/hub-folder/<hash>/` while only ciphertext objects live in the shared folder; `hub init` remains git-only, so the folder scheme is set in `config.yaml`/`DEVSTRAP_HUB` directly); the R2/S3 scale-up backend is selected via `hub: r2://<bucket>` (or `s3://`). Git-carrier auth is the user's existing git credentials, running non-interactively (a missing/denied key fails fast with the auth exit class and git's own stderr instead of prompting, followed by a second stderr line `hint: git authentication failed — check ssh key / repo access (load your key: ssh-add ~/.ssh/<key>)` — the single error sink prints it for every auth-class failure, including ones wrapped in an app exit code, shipped 2026-07-05); R2/S3 credentials resolve most-explicit-first (`P6-HUB-02`): `DEVSTRAP_HUB_S3_ACCESS_KEY_ID`/`DEVSTRAP_HUB_S3_SECRET_ACCESS_KEY` env/config — where either value may be a 1Password `op://` reference resolved via `op read` at sync time — then `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` literals, then the per-workspace OS-keychain slot written by `devstrap hub login` (0600 file fallback under `DEVSTRAP_NO_KEYCHAIN`); `hub_s3_endpoint` and `hub_s3_region` (default `auto`) stay env/config. Plaintext env remains the CI/override fallback; the keychain/op:// path is the recommended custody on developer machines. Both backends push local events past the push cursor, pull hub events from the pull cursor, apply namespace events idempotently, and support `--namespace-only` and `--dry-run`.

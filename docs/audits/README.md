@@ -36,6 +36,10 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 > remote-SHA, commit-date, and leased-delete corroboration. This is not an
 > audit-ledger finding: no rows move and no pass counts change.
 
+> **2026-07-30 — P7-WIP-08 note:** automatic WIP-ref GC now rides the single
+> sync/run-loop/daemon convergence path. The forge-notification clause is
+> discharged as a dated spec/07 note. No rows move and no pass counts change.
+
 > **2026-07-30 — watched-directory health note:** the recursively watched
 > directory count is now exported through `WatchHealth`, closing the spec-space
 > FSEvents observability follow-up. No audit rows move and no pass counts change.

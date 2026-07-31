@@ -307,6 +307,7 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 			results = append(results, checkSkippedEvents(ctx, store)...)
 			results = append(results, checkHubHashChainConflicts(ctx, store)...)
 			results = append(results, checkDurabilityExport(ctx, opts, store, time.Now())...)
+			results = append(results, checkWipGCFreshness(ctx, opts, store, time.Now())...)
 			results = append(results, checkWorkspaceKeyAge(ctx, opts, store)...)
 			results = append(results, checkWCKRotationPending(ctx, store)...)
 			results = append(results, checkRevokeContainmentPending(ctx, store)...)
@@ -465,6 +466,47 @@ func checkDurabilityExport(ctx context.Context, opts *options, store *state.Stor
 		return []checkResult{{Name: "hub durability export", Status: checkWarn, Detail: detail, Remedy: "re-run `devstrap sync` or `devstrap run-loop --once`; verify replica credentials and reachability if it fails"}}
 	}
 	return []checkResult{{Name: "hub durability export", Status: checkOK, Detail: detail}}
+}
+
+func checkWipGCFreshness(ctx context.Context, opts *options, store *state.Store, now time.Time) []checkResult {
+	interval, err := wipGCInterval(opts)
+	if err != nil {
+		return []checkResult{{Name: "automatic WIP GC", Status: checkWarn, Detail: scrubbed(err), Remedy: "set wip.gc_interval to a duration such as 24h, or 0 to disable"}}
+	}
+	ttl, err := wipTTL(opts)
+	if err != nil {
+		return []checkResult{{Name: "automatic WIP GC", Status: checkWarn, Detail: scrubbed(err), Remedy: "set wip.ttl to a duration such as 720h, or 0 to disable"}}
+	}
+	if interval == 0 || ttl == 0 {
+		return []checkResult{{Name: "automatic WIP GC", Status: checkOK, Detail: "disabled by wip.gc_interval=0 or wip.ttl=0"}}
+	}
+	raw, ok, err := store.GetLocalMeta(ctx, wipGCLastSuccessKey)
+	if err != nil {
+		return []checkResult{{Name: "automatic WIP GC", Status: checkWarn, Detail: scrubbed(err), Remedy: "run `devstrap sync` or `devstrap run-loop --once`"}}
+	}
+	if !ok {
+		return []checkResult{{Name: "automatic WIP GC", Status: checkWarn, Detail: "no successful automatic sweep recorded", Remedy: "run `devstrap sync` or `devstrap run-loop --once`"}}
+	}
+	var last time.Time
+	if err := json.Unmarshal([]byte(raw), &last); err != nil || last.IsZero() {
+		if err == nil {
+			err = errors.New("last-success timestamp is empty")
+		}
+		return []checkResult{{Name: "automatic WIP GC", Status: checkWarn, Detail: scrubbed(fmt.Errorf("parse WIP GC last success: %w", err)), Remedy: "run `devstrap sync` or `devstrap run-loop --once` to replace the invalid record"}}
+	}
+	age := now.Sub(last)
+	detail := fmt.Sprintf("last success %s ago (interval %s; TTL %s)", age.Round(time.Second), interval, ttl)
+	if age < 0 {
+		return []checkResult{{Name: "automatic WIP GC", Status: checkWarn, Detail: fmt.Sprintf("last success timestamp is %s in the future", last.UTC().Format(time.RFC3339)), Remedy: "correct the system clock, then re-run `devstrap sync`"}}
+	}
+	staleAfter := interval * 2
+	if interval > time.Duration(math.MaxInt64/2) {
+		staleAfter = time.Duration(math.MaxInt64)
+	}
+	if age > staleAfter {
+		return []checkResult{{Name: "automatic WIP GC", Status: checkWarn, Detail: detail, Remedy: "run `devstrap sync` or `devstrap run-loop --once`; inspect project warnings if origins or push credentials are unavailable"}}
+	}
+	return []checkResult{{Name: "automatic WIP GC", Status: checkOK, Detail: detail}}
 }
 
 func checkRestoreJournal(home string) []checkResult {
@@ -696,7 +738,7 @@ const wipStaleAfter = 48 * time.Hour
 // expected-to-be-resolved-soon snapshot is not something doctor needs to
 // interrupt about); only a ref older than wipStaleAfter produces a row, naming
 // the device and age with a remedy pointing at `wip show` (and, once
-// inspected, `wip apply` or `wip drop` to resolve it).
+// inspected, `wip apply`, `wip drop`, or explicit-device `wip gc` to resolve it).
 func checkPendingWip(ctx context.Context, store *state.Store) []checkResult {
 	projects, err := store.ListProjects(ctx)
 	if err != nil {
@@ -719,7 +761,7 @@ func checkPendingWip(ctx context.Context, store *state.Store) []checkResult {
 				Name:   fmt.Sprintf("wip: %s (%s)", p.Path, row.DeviceID),
 				Status: checkWarn,
 				Detail: fmt.Sprintf("pending WIP %s old (device %s)", age.Round(time.Second), row.DeviceID),
-				Remedy: fmt.Sprintf("review with `devstrap wip show %s --device %s` and apply or discard it", p.Path, row.DeviceID),
+				Remedy: fmt.Sprintf("review with `devstrap wip show %s --device %s`; apply/drop it, or expire an absent peer with `devstrap wip gc %s --device %s`", p.Path, row.DeviceID, p.Path, row.DeviceID),
 			})
 		}
 	}
