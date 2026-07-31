@@ -745,3 +745,77 @@ External survey (2026-07-31) confirms the primitive is genuinely unbuilt elsewhe
 **Two reap-safety interactions `AD5-02` must close, recorded here because both destroy user work if they slip.** `worktree cleanup --merged` iterates every row from `ListWorktrees` with no `created_by` filter and runs `git branch -D` on what it reaps, and `worktree remove` deletes the checkout — neither is acceptable by default against a worktree DevStrap did not create, so adopted rows must be opt-in for both. Worse, and found only by adversarial review of this decomposition: the merged test is `strings.Contains(mergedOut, wt.Branch)`, and **`strings.Contains(x, "")` is vacuously true in Go**. A detached-HEAD adopted row carries `branch=""` (the representation `AD5-02` requires, since `worktrees.branch` is `NOT NULL`), so such a row would be judged "merged" and reaped the moment the opt-in flag is passed — deleting precisely the externally-created checkouts the opt-in exists to protect, in precisely the detached-HEAD case that is the common one. **Branchless rows are never merge-eligible**, and that must be pinned by a test rather than left to the reader.
 
 **Deliberately NOT in this decomposition**, so a future reader does not mistake the omission for an oversight: per-harness engine adapters (`cursor-cli`/`codex-cli`/`copilot-cli`) — AD-5's entire argument is that these are the wrong shape, and `AD5-05` withdraws the promise rather than deferring it; and any change that would let the adoption plane influence the fresh-worktree base resolver, which the invariant above forbids outright.
+
+### Commercial-tier backlog — decomposed, and deliberately NOT started (2026-07-31)
+
+With Passes 8, 9, and 10 closed, **every open finding that remains is in the commercial/hosted-tier cluster**: `P7-PROD-02`, `P7-PROD-04`, `P7-PROD-05`, `P7-PROD-06`, plus Pass 4's `P4-SEC-08` and `P4-HUB-15`, which they extend. `20_COMMERCIALIZATION_AND_PRICING.md` § *Sequencing* argues the order; what has never existed is the decomposition — the same gap that made `AD-5` citable only as a reason to refuse work until it was written up as `AD5-*` rows.
+
+These rows exist so that gap does not repeat. **They are explicitly not scheduled.** Every one is gated on a demand signal this project does not yet have, and the gate is stated on each row rather than left to a reader's judgement — because the failure mode here is not building the wrong thing, it is building a control plane *speculatively* and then owning its operational surface forever.
+
+**The gate, stated once.** `spec/20` § *Sequencing* step 1 is "ship the website with a waitlist; measure demand before building any control plane." No row below starts until that measurement exists and the maintainer decides the answer is yes. A row whose gate is unmet is not "next" — it is not work.
+
+```text
+[ ] CT-01  Demand measurement — the gate itself, and the only row that is
+           actionable today. Ship the waitlist (spec/21), define what signal
+           counts BEFORE collecting it (a number and a window, written down in
+           advance so it cannot be rationalized afterwards), and record the
+           result either way. A recorded "not enough demand" is a successful
+           outcome of this row, not a failed one.                                [S]
+           Gate: none. Accept: a dated signal definition exists before any
+           signup is counted, and a dated verdict exists after the window.
+
+[ ] CT-02  Control-plane identity (P7-PROD-04, extends P4-SEC-08). `workspace_id`
+           is client-minted with no account/device/quota binding, so nothing can
+           attribute usage or authorize a scoped credential. This is the
+           prerequisite for EVERY other row here — billing, quotas, and teams all
+           reduce to "whose workspace is this?".                                 [L]
+           Gate: CT-01 verdict is yes. Accept: a workspace is bound to an account
+           at creation, an existing OSS workspace can adopt a binding without
+           re-initializing, and NOTHING about the zero-knowledge property changes
+           — the control plane learns identity, never content.
+
+[ ] CT-03  Credential broker — short-lived, prefix-scoped S3 credentials issued
+           per workspace, replacing the bucket-wide long-lived keys that are
+           acceptable only in single-owner self-hosted mode (P4-SEC-08's own
+           framing). Must work for a runner too, per spec/19's separation rule.  [M]
+           Gate: CT-02 shipped. Accept: a leaked broker-issued credential cannot
+           read another workspace's prefix, and expires without operator action.
+
+[ ] CT-04  Operated lifecycle + quota enforcement (P7-PROD-02, extends
+           P4-HUB-15). A key-less operator cannot today bound a tenant's object
+           count, byte volume, or request rate — the hub is zero-knowledge, so
+           enforcement must work on metadata alone.                              [L]
+           Gate: CT-02 + CT-03 shipped. Accept: a workspace exceeding its quota
+           is refused at write with an actionable error, existing data is never
+           deleted to enforce a quota, and the enforcement path reads no
+           plaintext.
+
+[ ] CT-05  Opt-in client telemetry seam (P7-PROD-05, extends P4-HUB-14's
+           already-shipped server-side counters). MAU and sync-health metrics
+           for a managed tier, honoring the observability gate above:
+           off by default, per-device opt-in, DEVSTRAP_TELEMETRY=off always
+           wins.                                                                 [M]
+           Gate: CT-01 verdict is yes. Independent of CT-02 — it measures the
+           free product too, which is the funnel the whole model rests on.
+           Accept: a device that never opts in emits nothing, provably.
+
+[ ] CT-06  Org/team trust surface (P7-PROD-06, extends P4-SYNC-08). An org
+           concept, `devstrap audit export`, and SSO. spec/20 puts this last and
+           sales-led on purpose; it is the largest row and the least validated.  [L]
+           Gate: CT-02 + CT-04 shipped AND a named prospective customer.
+           Accept: an org's device-trust decisions are auditable without the
+           operator reading workspace content.
+
+[ ] CT-07  The open-core boundary, written down before the first paid line ships
+           rather than after. spec/20 §2 sketches it; this row makes it a
+           committed statement — what stays MIT forever, what is managed-only,
+           and the promise that self-hosting never loses a capability it has
+           today. The Docker Hub and Gitpod precedents in spec/20 §3 are the
+           argument for stating it early and in public.                          [S]
+           Gate: CT-01 verdict is yes; must land BEFORE CT-02 so the boundary is
+           a constraint on the design, not a rationalization of it.
+```
+
+**Work item / model picker.** `CT-01` and `CT-07` are judgement and prose — **opus-5**, taste ≥ 7, reviewed by **fable-5**; neither is delegable to a cheaper tier because both are commitments the project will be held to. `CT-02`, `CT-03`, and `CT-04` touch the trust plane and belong with **gpt-5.6** on a written line-level spec, dual-reviewed (Codex + **fable-5** escalated, matching the treatment `AD5-02` got for base resolution). `CT-05` is clear-spec mechanical work — **grok-4.5** in background write mode — provided the opt-in semantics are pinned by a test that fails when the default flips. `CT-06` should not be planned in detail until its gate is met; estimating it now would be fiction.
+
+**What this decomposition deliberately does not do:** it does not schedule anything, does not choose the hosting stack (`spec/19`'s Fly.io + Neon sketch stays provisional), and does not resolve `spec/20`'s open questions — the free-tier storage cap, per-workspace vs per-seat, and managed COGS all need measurement that does not exist. Writing rows for work nobody has decided to do is useful; pretending the decision is made is not.
