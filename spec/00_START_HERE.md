@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-30
+last_reviewed: 2026-07-31
 tracks_code: [cmd/**, internal/**, .github/**, AGENTS.md, README.md, go.mod, go.sum, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28_PASS4.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # DevStrap — Start Here
@@ -120,7 +120,7 @@ Why Go: one portable binary, good process management, solid cross-platform files
 
 ## Current repository state
 
-Last validated: `2026-07-05`.
+Last validated: `2026-07-31`.
 
 Implemented in this repository:
 
