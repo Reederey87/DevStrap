@@ -107,6 +107,86 @@ func TestWorktreeSandboxWriteDirsNonRepo(t *testing.T) {
 	}
 }
 
+// TestWorktreeSandboxDenyFiles proves the P8-SEC-02 deny list names exactly
+// the three git-dir pointer files (commondir, gitdir, config.worktree) inside
+// a linked worktree's per-worktree admin dir — the files
+// WorktreeSandboxWriteDirs grants writable wholesale but that must stay
+// read-only, since rewriting commondir relocates git's whole configuration
+// into attacker-controlled space.
+func TestWorktreeSandboxDenyFiles(t *testing.T) {
+	repo, r := initSquashMergeRepo(t)
+	ctx := context.Background()
+
+	wt := filepath.Join(t.TempDir(), "wt")
+	if err := r.WorktreeAdd(ctx, repo, wt, "agent/deny", "main"); err != nil {
+		t.Fatalf("WorktreeAdd: %v", err)
+	}
+
+	writeDirs, err := r.WorktreeSandboxWriteDirs(ctx, wt)
+	if err != nil {
+		t.Fatalf("WorktreeSandboxWriteDirs: %v", err)
+	}
+	denyFiles, err := r.WorktreeSandboxDenyFiles(ctx, wt)
+	if err != nil {
+		t.Fatalf("WorktreeSandboxDenyFiles: %v", err)
+	}
+	if len(denyFiles) != 3 {
+		t.Fatalf("want 3 deny files (commondir, gitdir, config.worktree), got %d: %v", len(denyFiles), denyFiles)
+	}
+	var bases []string
+	for _, f := range denyFiles {
+		bases = append(bases, filepath.Base(f))
+	}
+	for _, want := range []string{"commondir", "gitdir", "config.worktree"} {
+		if !contains(bases, want) {
+			t.Errorf("missing deny file %s; bases=%v", want, bases)
+		}
+	}
+	// Every deny file must live inside one of the granted per-worktree admin
+	// write dirs — otherwise the deny would be denying a path that was never
+	// writable in the first place, proving nothing.
+	var worktreeAdmin string
+	for _, d := range writeDirs {
+		if strings.Contains(d, string(os.PathSeparator)+"worktrees"+string(os.PathSeparator)) {
+			worktreeAdmin = d
+		}
+	}
+	if worktreeAdmin == "" {
+		t.Fatal("no per-worktree admin dir found in write grants; cannot verify deny files are inside it")
+	}
+	for _, f := range denyFiles {
+		if filepath.Dir(f) != worktreeAdmin {
+			t.Errorf("deny file %q is not inside the granted admin dir %q", f, worktreeAdmin)
+		}
+	}
+}
+
+// TestWorktreeSandboxDenyFilesMainCheckoutAndNonRepo pins the nil-for-non-linked
+// contract: a main checkout (no per-worktree admin dir exists to protect) and a
+// plain non-repo dir both yield an empty deny list with no error, mirroring
+// WorktreeSandboxWriteDirs.
+func TestWorktreeSandboxDenyFilesMainCheckoutAndNonRepo(t *testing.T) {
+	repo, r := initSquashMergeRepo(t)
+	ctx := context.Background()
+
+	denyFiles, err := r.WorktreeSandboxDenyFiles(ctx, repo)
+	if err != nil {
+		t.Fatalf("WorktreeSandboxDenyFiles (main checkout): %v", err)
+	}
+	if denyFiles != nil {
+		t.Fatalf("want nil deny list for the main checkout, got %v", denyFiles)
+	}
+
+	r2 := Runner{Bin: gitBinOrSkip(t), Timeout: 5 * time.Second}
+	denyFiles, err = r2.WorktreeSandboxDenyFiles(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatalf("WorktreeSandboxDenyFiles (non-repo): %v", err)
+	}
+	if denyFiles != nil {
+		t.Fatalf("want nil deny list outside a git worktree, got %v", denyFiles)
+	}
+}
+
 func mustEval(t *testing.T, p string) string {
 	t.Helper()
 	r, err := filepath.EvalSymlinks(p)

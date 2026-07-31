@@ -68,6 +68,16 @@ type SandboxSpec struct {
 	// config that executes UNSANDBOXED on a later git operation. Also folded
 	// into the read-confinement allow-list so git reads work under --read-confine.
 	GitDirs []string
+	// GitDenyFiles are absolute paths INSIDE GitDirs that must stay read-only
+	// even though their parent directory is granted writable: a linked
+	// worktree's `commondir`/`gitdir` (the pointers to the shared .git) and
+	// `config.worktree`. Rewriting `commondir` relocates git's whole
+	// configuration into attacker-controlled space, so the next UNSANDBOXED git
+	// command in that worktree executes whatever hook/fsmonitor it names —
+	// P8-SEC-02, the same escape class P7-SANDBOX-01 closed for the common dir
+	// itself. Git writes these files only at `git worktree add` time and reads
+	// them thereafter, so denying writes costs nothing.
+	GitDenyFiles []string
 }
 
 // Sandbox wraps an agent argv in an OS-enforced confinement (AGEN-03 /

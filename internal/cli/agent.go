@@ -60,7 +60,7 @@ type agentSandboxLaunch struct {
 // empty anchor would silently drop every home-anchored credential deny while
 // still reporting the run as sandboxed (post-merge review, PR #107).
 // `--sandbox off` is the explicit escape hatch.
-func agentSandboxSpec(worktreeDir, perRunTmp, logDir string, gitDirs []string, launch agentSandboxLaunch, runID string) (platform.SandboxSpec, error) {
+func agentSandboxSpec(worktreeDir, perRunTmp, logDir string, gitDirs, gitDenyFiles []string, launch agentSandboxLaunch, runID string) (platform.SandboxSpec, error) {
 	userHome, err := os.UserHomeDir()
 	if err != nil {
 		return platform.SandboxSpec{}, fmt.Errorf("resolve user home for sandbox credential denies (use --sandbox off to run unconfined): %w", err)
@@ -78,6 +78,12 @@ func agentSandboxSpec(worktreeDir, perRunTmp, logDir string, gitDirs []string, l
 		ReadConfine:           launch.readConfine,
 		ReadAllowExtra:        launch.readAllow,
 		GitDirs:               gitDirs,
+		// GitDenyFiles keeps commondir/gitdir/config.worktree read-only inside
+		// the just-granted per-worktree admin dir (P8-SEC-02): rewriting
+		// commondir relocates git's whole config into attacker-controlled
+		// space, letting the next UNSANDBOXED git command execute a planted
+		// hook/fsmonitor.
+		GitDenyFiles: gitDenyFiles,
 	}, nil
 }
 
@@ -435,6 +441,7 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// failure leaves the grant empty rather than blocking the run
 			// (P7-SANDBOX-01).
 			var sandboxGitDirs []string
+			var sandboxGitDenyFiles []string
 			if sandboxLaunch.enabled {
 				sandboxGitDirs, _ = gitRunner(opts).WorktreeSandboxWriteDirs(cmd.Context(), wt.Path)
 				if len(sandboxGitDirs) == 0 {
@@ -444,12 +451,18 @@ func newAgentRunCommand(stdout io.Writer, opts *options) *cobra.Command {
 					// Warn rather than fail silently (review: P7-SANDBOX-01).
 					_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "warning: could not resolve the worktree's git dirs for the sandbox; git commits inside the run may be blocked (use --sandbox off if the agent must commit)")
 				}
+				// P8-SEC-02: the deny list closes the commondir/gitdir escape
+				// left open in the write grant above. Best-effort like the grant
+				// itself — an empty deny list here just means no linked worktree
+				// admin dir was granted in the first place (main checkout or a
+				// resolution failure already warned about above).
+				sandboxGitDenyFiles, _ = gitRunner(opts).WorktreeSandboxDenyFiles(cmd.Context(), wt.Path)
 			}
 			agentSecrets, err := resolveAgentSecrets(cmd.Context(), store, opts, project, wt, cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
-			commandErr := runAgentProcess(cmd.Context(), wt, run, agentCommand, stdout, sandboxLaunch, sandboxGitDirs, agentSecrets)
+			commandErr := runAgentProcess(cmd.Context(), wt, run, agentCommand, stdout, sandboxLaunch, sandboxGitDirs, sandboxGitDenyFiles, agentSecrets)
 			collectSandboxViolations(cmd.Context(), cmd.ErrOrStderr(), store, run, sandboxLaunch, runStart)
 			diffSummary := agentDiffSummary(cmd.Context(), wt.Path, wt.BaseSHA)
 			status := "complete"
@@ -895,7 +908,7 @@ func pathWithin(root, path string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
-func runAgentProcess(ctx context.Context, wt state.Worktree, run state.AgentRun, args []string, stdout io.Writer, sandboxLaunch agentSandboxLaunch, gitDirs []string, agentSecrets map[string]string) error {
+func runAgentProcess(ctx context.Context, wt state.Worktree, run state.AgentRun, args []string, stdout io.Writer, sandboxLaunch agentSandboxLaunch, gitDirs, gitDenyFiles []string, agentSecrets map[string]string) error {
 	if err := os.MkdirAll(filepath.Dir(run.LogPath), 0o700); err != nil {
 		return fmt.Errorf("create agent log dir: %w", err)
 	}
@@ -929,7 +942,7 @@ func runAgentProcess(ctx context.Context, wt state.Worktree, run state.AgentRun,
 		// gitDirs (resolved by the caller, which holds *options) grants the
 		// linked worktree's git storage dirs so the agent's `git add`/`commit`
 		// are not EPERM'd by the sandbox (P7-SANDBOX-01).
-		spec, err := agentSandboxSpec(wt.Path, perRunTmp, filepath.Dir(run.LogPath), gitDirs, sandboxLaunch, run.ID)
+		spec, err := agentSandboxSpec(wt.Path, perRunTmp, filepath.Dir(run.LogPath), gitDirs, gitDenyFiles, sandboxLaunch, run.ID)
 		if err != nil {
 			return err
 		}

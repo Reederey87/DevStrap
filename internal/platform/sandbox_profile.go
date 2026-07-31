@@ -75,6 +75,27 @@ func sbplProfile(spec SandboxSpec, denyReadDirs, denyReadFiles []string) string 
 	b.WriteString("  (regex #\"^/dev/ttys[0-9]+$\")\n")
 	b.WriteString(")\n")
 
+	// P8-SEC-02: GitDenyFiles carves commondir/gitdir/config.worktree back out
+	// of the write-allow block above even though their parent (a GitDirs entry)
+	// is granted wholesale. SBPL is last-match-wins, so this deny — emitted
+	// AFTER the allow block — out-ranks it; emitted before it would do nothing.
+	// Rewriting commondir relocates git's whole config into attacker-controlled
+	// space, letting the next unsandboxed git command execute a planted
+	// hook/fsmonitor (the same escape class P7-SANDBOX-01 closed for the common
+	// dir itself). Git only ever writes these at `git worktree add` time, so the
+	// deny costs nothing.
+	if len(spec.GitDenyFiles) > 0 {
+		b.WriteString("(deny file-write*\n")
+		for _, f := range spec.GitDenyFiles {
+			if f == "" {
+				continue
+			}
+			b.WriteString("  (literal " + sbplQuote(f) + ")\n")
+		}
+		b.WriteString(sbplWithMessage(spec.ViolationTag))
+		b.WriteString(")\n")
+	}
+
 	// Read confinement: deny all reads, re-allow the sanctioned roots, and keep
 	// a global metadata allow so stat/traversal/symlink-resolution still works
 	// (a deliberate, documented path-existence leak — the alternative breaks

@@ -33,5 +33,12 @@ func landlockLimitations(abi int) []string {
 	} else {
 		lims = append(lims, "network deny NOT enforced (kernel Landlock ABI < 4)")
 	}
+	// P8-SEC-02: Landlock is additive-allow only, so it cannot subtract a
+	// single file (commondir/gitdir) from a directory it already granted
+	// read-write — unlike Seatbelt/bubblewrap, which layer a later deny on
+	// top. Enumerating the dir's other children instead would break real git
+	// operations (index.lock, MERGE_MSG, rebase-merge/, sequencer/ all need to
+	// be creatable there), so this is a documented gap rather than a fix.
+	lims = append(lims, "a linked worktree's commondir/gitdir stay writable (Landlock cannot subtract a file from a granted directory), so a hostile agent can relocate git's config; the fs/network boundary is otherwise intact")
 	return lims
 }

@@ -79,6 +79,19 @@ func bwrapArgs(spec SandboxSpec, maskDirs, maskFiles []string, opts bwrapOptions
 			args = append(args, "--bind-try", dir, dir)
 		}
 	}
+	// P8-SEC-02: GitDenyFiles re-masks commondir/gitdir/config.worktree
+	// read-only even though their parent GitDirs entry was just bound
+	// read-write above. Mount ops are processed sequentially and later mounts
+	// override earlier ones (same mechanism the credential masks below rely
+	// on), so this MUST come after the GitDirs --bind-try loop. Rewriting
+	// commondir relocates git's whole config into attacker-controlled space,
+	// letting the next unsandboxed git command execute a planted
+	// hook/fsmonitor. --ro-bind-try tolerates an absent config.worktree.
+	for _, f := range spec.GitDenyFiles {
+		if f != "" {
+			args = append(args, "--ro-bind-try", f, f)
+		}
+	}
 	// Mount ops are processed sequentially and later mounts override earlier
 	// ones, so credential masks MUST come after the read-write binds. Under
 	// read confinement the credential paths are already outside the exposed
