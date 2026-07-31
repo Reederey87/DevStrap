@@ -120,7 +120,22 @@ func newAgentAdoptCommand(stdout io.Writer, opts *options) *cobra.Command {
 				startedAt, _ := processStartTime(pid)
 				run.RunnerStartedAt = startedAt
 			}
+			// P8-ADOPT-04: hold the project's repo lock across the insert, the
+			// same P7-GIT-01/02 discipline `agent run` observes by holding it
+			// from worktree creation through InsertAgentRun. Without it there is
+			// a window in which `worktree cleanup --merged` can reap the very
+			// worktree this run is about to bind to — a freshly-provisioned
+			// worktree has tip == base_sha, so `git branch --merged` reports it
+			// merged (it IS an ancestor) and it is reap-eligible from creation
+			// until a run row exists. The harness's workspace would vanish
+			// mid-session, and a `running` run would be left bound to a removed
+			// worktree.
+			unlockRun, lockErr := acquireRepoLock(opts.paths().Home, wt.NamespaceID)
+			if lockErr != nil {
+				return lockErr
+			}
 			run, err = store.InsertAgentRun(cmd.Context(), run)
+			unlockRun()
 			if err != nil {
 				return err
 			}

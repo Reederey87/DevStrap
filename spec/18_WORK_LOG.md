@@ -31,6 +31,29 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — `--base-ref` is validated when recorded, and `agent adopt` takes the lock (P8-ADOPT-03/04)
+
+Changed:
+
+- **`P8-ADOPT-03` (record-time half).** `MergeBase` accepts any committish, so `--base-ref` was stored verbatim and rejected only much later by `BaseDrift`'s `remote/branch` split — with no remedy named — leaving the worktree adopted but permanently unusable by `worktree status`, `finalize`, and `agent pr`. `--base-ref main`, the natural mistake, hit exactly that. The shape is now validated where it is recorded. `refs/devstrap/*` is refused outright: that namespace is the human working-state plane, and while nothing *automatic* reads it (the `spec/10` independence invariant is intact and was re-verified this pass), an explicit flag should not be the one door into that separation either.
+- **`P8-ADOPT-04` (the real half).** `agent adopt` inserted its `agent_runs` row **without the project repo lock**, breaking the `P7-GIT-01/02` discipline `agent run` observes by holding it from worktree creation through `InsertAgentRun`. Between provisioning and registration a concurrent `worktree cleanup --merged` could reap the very worktree the run was about to bind to — the harness's workspace vanishing mid-session, and a `running` run left bound to a removed worktree. The lock now spans the insert.
+
+**A fix I wrote, tested, and then reverted, because the existing tests were right.** The finding also suggested skipping a *pristine* worktree (tip == `base_sha`) during cleanup, since `git branch --merged` reports it merged precisely because the tip is an ancestor. I implemented that — and it broke `TestWorktreeCleanupJSONStaysPure` and `TestWorktreeCleanupSkipsRunningAgentRunThenReapsAfterFinish`. Those tests are correct: an **abandoned** empty worktree is exactly the thing `cleanup --merged` should reclaim, and the guard would have leaked every one of them forever. The repo lock closes the actual race window; the pristine guard traded a narrow race for a permanent leak. Reverted, and recorded here rather than silently dropped, because "two tests failed so I changed the tests" is the tempting move and would have been wrong.
+
+Residual, stated rather than implied: a worktree created outside DevStrap and never registered is still reap-eligible — no lock can cover a row that does not exist yet. `docs/agents.md` already tells harnesses to call `agent adopt` promptly, which is the mitigation.
+
+`P8-ADOPT-07` (pre-`00032` rows holding unresolved path spellings) stays open as the pass's only remaining row: it is self-healing via cleanup's path-missing prune, P3, and a migration to rewrite historical paths carries more risk than the aliasing it would remove.
+
+Validated:
+
+- Mutation-checked the `--base-ref` validation in both directions.
+- `gofmt` clean; `golangci-lint run` — 0 issues; `go test -race ./...` exit 0.
+
+Follow-ups:
+
+- **Pass 8 is down to 1 open of 8** (`P8-ADOPT-07`, P3). Every P1 and every data-loss finding is closed.
+- Pass 9's WIP dimension has still not reported. If it does not, that plane is unaudited across two consecutive passes and must be recorded as exactly that.
+
 ## 2026-07-31 — tombstone GC no longer erases live worktree registrations (P8-SEC-01)
 
 Changed:
