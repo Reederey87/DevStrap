@@ -15,6 +15,7 @@ This directory holds DevStrap's chronological design & implementation audits. **
 | 5 | 2026-06-29 | [`AUDIT_RECOMMENDATIONS_2026-06-29_PASS5.md`](AUDIT_RECOMMENDATIONS_2026-06-29_PASS5.md) | Fifth pass: adversarial review of the PASS4 batch + under-examined dimensions + new features | 36 (P1=1, P2=12, P3=23) | 36 shipped (`P5-CLI-01` 2026-07-16) — **PASS CLOSED**, see below |
 | 6 | 2026-07-01 | [`AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`](AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md) | Sixth pass: adversarial audit of the PR #24/#25 batch (live R2 hub + envelope-encryption foundation) + under-examined dimensions | 43 (P1=5, P2=25, P3=13) | Closed — 43/43 shipped |
 | 7 | 2026-07-10 | [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md`](AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md) | Seventh pass: adversarial audit of the post-Pass-6 waves (git/folder hub carriers, OS sandbox, device-trust + env-sync propagation, distribution/service install) + commercial readiness | 47 (P1=1, P2=25, P3=21) | Open — see below |
+| 8 | 2026-07-31 | [`AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md`](AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md) | Eighth pass: the post-Pass-7 waves — AD-5 agent substrate, Milestone 5 daemon, working-state plane, plus security/data across all of it | 8 (P1=1, P2=5, P3=2) | Open — 7 of 8 open (`P8-ADOPT-01` shipped PR #258); **coverage is partial by declaration**, see below |
 
 ## Conventions (going forward)
 
@@ -27,6 +28,42 @@ This directory holds DevStrap's chronological design & implementation audits. **
 ## Open backlog — single source of truth for "what's left"
 
 Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely implemented or superseded (see `spec/18_WORK_LOG.md` for the shipped history); Passes 5 and 6 are fully closed; the open backlog is concentrated in passes 4 and 7.
+
+> **2026-07-31 — Pass 8 landed.** The eighth pass
+> ([`AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md`](AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md))
+> audited trunk `a7938dd` — the 111 commits / 244 files / +38k lines that landed
+> after Pass 7's snapshot and had never been reviewed. **8 findings (P1=1, P2=5,
+> P3=2).**
+>
+> Headline `P8-SEC-02` (P1): the OS sandbox grants a linked worktree's git admin
+> directory **wholesale**, and that directory contains `commondir` — the pointer
+> to the shared `.git`. An agent rewrites it, relocating git's configuration into
+> its own writable space, and the next **unsandboxed** `git status` executes what
+> it planted. DevStrap issues that `git status` itself from `worktree cleanup`.
+> Same class as `P7-SANDBOX-01`, which closed the hole for the common dir while
+> leaving the pointer to it writable. **Demonstrated working**, not inferred.
+>
+> `P8-SEC-01` (P2): tombstone GC hard-deletes `namespace_entries` and
+> `worktrees.namespace_id` is `ON DELETE CASCADE`, so a routine `hub compact`
+> silently erases live worktree registrations — reproduced at 1→0 rows with a
+> dirty adopted worktree. Structurally pre-existing; `AD5-02` widened the blast
+> radius by making long-lived adopted registrations common.
+>
+> **Two things this pass declares rather than hides.** First, **coverage is
+> partial**: the working-state (WIP) dimension did not report, so Layer A/Layer B
+> are **unaudited** and head Pass 9; the daemon dimension's report was outstanding
+> at write-up. A gap recorded is worth more than a gap invisible. Second, every
+> CONFIRMED finding was **reproduced by the coordinator independently** rather than
+> accepted on a reviewer's report — two by executing the defect, one of which
+> changed severity (P2 → P1).
+>
+> `P8-ADOPT-01` is already **shipped** (PR #258): `docs/agents.md` — the `AD5-04`
+> deliverable that five specs asserted had shipped — had never been committed,
+> silently swallowed because `.gitignore`'s `AGENTS.md` rule matches by basename at
+> any depth and `core.ignorecase` is true on macOS. The check that missed it was
+> `test -f`, which passes for an untracked file.
+
+<!-- MD028 separator between adjacent dated blockquotes -->
 
 > **2026-07-31 — AD-5 decomposition note, and a standing read of what "open" now
 > means.** The `AD-5` substrate direction is decomposed into backlog rows
@@ -82,6 +119,7 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | ID | Sev | Shipped | Note |
 |---|---|---|---|
 | AGEN-05 | medium | `feat/agen-05-agent-deny-canonical` (2026-07-30) | Agent token/path guardrails and every OS sandbox backend now read canonical defensive-copy credential home lists from `internal/ignore`; checked-in `.env` templates are passable, `~/.snowflake` is masked, `*.key` stays agent-local, and root-level `.aws/credentials`/`.snowflake/config.toml` are detected. This is a Pass-2 finding, so moving it here does not alter any currently tabulated Pass-4–7 open count. |
+| P8-ADOPT-01 | P2 | `fix/p8-adopt-01-agents-guide` (2026-07-31, PR #258) | `docs/agents.md` — the `AD5-04` deliverable — had never been committed, while `README.md`, `spec/00` (×3), `spec/10` (×2), `spec/14`'s own acceptance criterion, and `spec/18` all asserted it had shipped. `.gitignore`'s `AGENTS.md` rule matches by basename at any depth and `core.ignorecase` is true on macOS/Windows, so `docs/agents.md` matched it and `git add -A` skipped the file **silently**, as `add` does with ignored paths; the repo's own root `AGENTS.md` was unaffected only because an ignore rule never untracks an already-tracked file, which is why the rule looked harmless for months. Fixed with an explicit `!docs/agents.md` negation, the guide restored and **proven present in the commit** (`git cat-file -e HEAD:<path>`) rather than on disk, and the trap plus the prefer-anchored-patterns lesson documented in `spec/11`. The verification that failed is the transferable part: the post-rebase check was `test -f`, which passes for an untracked file in the working tree. |
 | P5-CLI-01 | P2 | nine PRs, `fix/p4-hub-16-ledger-reconciliation` through `fix/p5-cli-01-part-b-final` (2026-07-16, PR #204 + #205–#212) | `--json` support (the `Renderer` seam, `internal/cli/render.go`) is now wired into every command that offers a coherent one-shot JSON contract; only two are documented exemptions (`run`, `pair` — both interactive/passthrough by design). Part A (PR #196) had migrated the first 15 call sites plus the seam itself. Part B closed the rest across nine serial PRs: PR #204 (ledger reconciliation, unblocking the wave), PR #205 `hub *` (init/login/logout/gc/compact/migrate-events), PR #206 `devices *` (enroll/pairing-code/approve-revoke-lost/rename/recipient), PR #207 `agent run`/`agent pr`/`conflicts resolve`, PR #208 `worktree new/finalize/remove/cleanup`, PR #209 `env capture/rotate/hydrate/bind` + `draft snapshot create` + `keys rotate` (with an explicit no-secret-leak test per command), PR #210 `db migrate/status/backup/down`, PR #211 `sync`/`run-loop --once` (`run` documented exempt), and PR #212 (final) `init/add/clone/hydrate/open/version/service install/service uninstall/up/join` (`pair` documented exempt). The final PR also resolved a real nested-render risk: `runInit` backs both standalone `init` and internal use by `up`/`join`, so it never self-renders on those internal calls (the outer command owns the single JSON document) — `up --json` inherits `syncResult` "for free" from its terminal `runSyncCycle` call, and a related pre-existing purity bug (`up`'s human-only closing summary printing under `--json`) was found and fixed in the same PR. Every PR in the wave surfaced and fixed at least one real stdout-purity bug (diagnostic/warning text printed to the JSON stdout stream) during independent verification beyond the implementer's own self-reported validation. |
 | P7-PROD-01 | P2 | `feat/p7-prod-01-pairing-join` + `feat/p7-prod-01-pair-wizard-up` (2026-07-15, slices 1+2) | The two-device pairing ceremony's onboarding cliff (8 cross-machine commands, 2 codes, 2 out-of-band fingerprints) is closed. Slice 1: the pairing-code wire format is versioned (`devstrap-pair2:`, old `devstrap-pair1:` blobs still decode unchanged) and now optionally carries the founder's fingerprint + hub URI; `devstrap join <code>` folds `init --join --code` + `hub init` (remote schemes only — a carried `file:`/`folder:` hub is never auto-applied from the unauthenticated blob) + generating the joiner's own code into one command, auto-trusting the embedded fingerprint by default (paste-channel trust, not cryptographic authentication) with `--fingerprint <fp>` for the original out-of-band high-assurance compare-or-refuse. Slice 2: `devstrap up --hub <url>` folds `init` + `scan --adopt` + hub configuration + `sync` into one founder-side bootstrap (each step already independently idempotent, so a mid-sequence failure — e.g. an unreachable hub — leaves prior steps in place and a re-run continues from there); `devstrap pair` is a founder-side guided wizard that prints this device's code + the exact `devstrap join` command for the second device, then blocks on one line of interactive stdin (the joiner's pasted-back code) bounded by `--timeout` (default 15m) and interruptible by Ctrl-C/SIGINT via context cancellation — a non-TTY invocation fails fast rather than hanging, and nothing is written to persistent state before a valid code is received, so an interrupted wizard never leaves a half-completed ceremony. `pair` reuses the exact same `confirmDeviceFingerprint`/`runDeviceEnroll` approval path `devices enroll --approve` already used (via a shared `*bufio.Reader` so the pasted-code read and the "yes" confirmation share one stdin buffer), and publishes the grant via the existing `sync`. (Slice 1 shipped as `fix/p7-prod-01-join-review-fixups`/PR #201 after a dual-review pass fixed a misleading "pinned the founder" status message, added the local-hub-scheme auto-apply block described above, and restored a base64-padding backward-compat tolerance the v2 rewrite had dropped.) |
 | P7-PROD-03 | P2 | `fix/p7-prod-03-version-skew` (2026-07-17) | Closes the version-skew gap: fail-closed snapshot/envelope checks would wedge a `brew`-upgraded mixed-version fleet on a retention manifest one version behind. `retentionManifestVersionOK` (`internal/sync/snapshot.go`) is now a genuine inclusive range `[minReadableRetentionManifestVersion, snapshotVersion]` against two named constants instead of a hardcoded `v == 1 \|\| v == snapshotVersion`, so a future version bump only moves one constant. Added an optional, **signed** `RetentionManifest.MinReaderVersion` field (folded into `retentionSignaturePayload`'s alphabetical canonical form — an unsigned floor would let a hub-writer-but-not-signer force every reader to self-reject a legitimately-readable manifest) so a future producer can explicitly declare "readers below N must upgrade"; both `ParseRetentionManifest`/`VerifyRetentionManifest` fail closed if this binary's own version is below a manifest's declared floor. `doctor --remote` gains a WARNING-only "retention manifest version" check surfacing skew in either direction. **Deliberately untouched:** the snapshot DOCUMENT's exact-equality version check stays exact-equality fail-closed — that is the `P7-SYNC-01` trust boundary (an old-version snapshot document silently lacks the terminal device-trust projection), and this policy widening applies only to the trust-neutral retention manifest. Documents the N-1 policy in `spec/07`, citing `devstrap hub migrate-events` as this repo's existing in-place-migrator precedent for any future genuinely-breaking manifest change. Dual-reviewed (Codex + fable-5, escalated given the trust-plane adjacency); the review pass caught one real gap — the tamper-test matrix didn't cover `MinReaderVersion` stripping post-signing — closed with `TestRetentionManifestTamperFailsVerification`'s new "min reader version dropped" case before merge. |
@@ -192,6 +230,22 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P7-CLI-02 | P2 | `fix/p7-git-01-cleanup-safety` (2026-07-11) | `worktree cleanup` sets `Args: usageArgs(cobra.NoArgs)` so a stray positional cannot be silently discarded on a fleet-wide destructive sweep. |
 | P7-SEC-04 | P3 | `fix/p7-sec-04-osroot` (2026-07-11) | Carrier object access is confined by per-operation `os.Root` handles (per-component O_NOFOLLOW + symlink-target recheck) instead of the check-then-use Lstat-walk `safePath`: reads, writes (incl. the P7-HUB-05 atomic temp+fsync+rename, now `writeRootFileAtomic`), stats, deletes, and timestamp sidecars all resolve through the handle, and the folder carrier additionally pins root identity (`os.SameFile` against the construction-time directory) after each `OpenRoot`, closing the swap window on a concurrently-writable shared root. Both carriers covered by post-construction symlink-swap refusal tests. |
 | P7-HUB-02 | P2 | `fix/p7-hub-02-head-continuity` (2026-07-11) | The git carrier persists the last verified head + retention-manifest fingerprint in `head.json`; a non-descendant head is accepted only as plausible compaction (byte-identical or strictly-advancing manifest AND, when the prior head is locally known, no event object at or above the new floors deleted — the content gate); a rewound or deleted branch is refused with a named `rm -rf <cache>` recovery path instead of being silently re-founded. `CommandError` gains `ExitCode()`. Review: identical-fingerprint acceptance + the content gate replaced the strict-advance-only rule that falsely refused real multi-device compaction. |
+
+### Pass 8 (2026-07-31) — 7 open of 8
+
+Full detail and `file:line` evidence in [`AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md`](AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md). The header count equals the rows below (P1=1, P2=4, P3=2 = 7; `P8-ADOPT-01` shipped in PR #258 and is listed in *Recently shipped*).
+
+| ID | Sev | Finding | Effort |
+|---|---|---|---|
+| P8-SEC-02 | **P1** | Sandbox grants the worktree gitdir wholesale, including `commondir`; rewriting it relocates git's config and the next unsandboxed `git status` executes injected code | M |
+| P8-SEC-01 | P2 | Tombstone GC cascade-deletes live worktree registrations; `decideDelete` guards only the main checkout's dirty state | M |
+| P8-ADOPT-02 | P2 | `worktrees.branch` frozen at insert, so `agent pr`'s own printed remedy can never work | S |
+| P8-ADOPT-03 | P2 | `--base-ref` recorded unvalidated (bare branch, foreign remote, and `refs/devstrap/*` all admitted) | S |
+| P8-ADOPT-04 | P2 | Provision→register gap: a pristine worktree is reap-eligible, and `agent adopt` inserts without the repo lock | M |
+| P8-ADOPT-06 | P3 | `agent finish` captures the diff summary only when `--test-summary` is passed | S |
+| P8-ADOPT-07 | P3 | Pre-`00032` rows hold unresolved paths the unique index cannot alias-match | S |
+
+**Not covered by Pass 8, carried to Pass 9:** the working-state plane (Layer A gitstate, Layer B WIP refs, `wip gc`) — its reviewer did not report. The plane was live-dogfooded on 2026-07-31 including a held attack on the corroboration veto, which is evidence but is not an audit.
 
 ### Pass 7 (2026-07-10) — 4 open of 47
 
