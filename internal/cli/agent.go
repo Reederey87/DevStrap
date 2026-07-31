@@ -651,6 +651,14 @@ func newAgentPRCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if p, err := store.ProjectByID(cmd.Context(), run.NamespaceID); err == nil {
 				projectForge = p.ForgeKind
 			}
+			// A branchless (detached-HEAD) worktree — the common shape for an
+			// adopted worktree — has nothing to push: PushBranch does no
+			// branch-name validation, so `git push -u origin ""` would fail
+			// bare, and only AFTER BaseDrift's network fetch below has already
+			// run. Refuse up front with an actionable remedy instead.
+			if wt.Branch == "" {
+				return appError{code: exitUsage, err: fmt.Errorf("worktree %s has no branch (detached HEAD); create one first with 'git switch -c <name>' in %s, then re-run", wt.ID, wt.Path)}
+			}
 			drift, err := finalizationBaseDrift(cmd.Context(), opts, wt)
 			if err != nil {
 				return err

@@ -1,0 +1,75 @@
+# AD5-02: `devstrap worktree adopt <path>` registers a linked worktree an
+# agent harness (Codex/Cursor/Devin) created behind DevStrap's back, WITHOUT
+# ever resolving or repairing its base (spec/10 § Independence from the
+# cross-machine sync plane). This drives `worktree new --fresh-upstream`'s
+# sibling command through the real binary against a real remote fixture,
+# mirroring worktree_never_bases_off_wip_ref.txtar's structure: adopt a
+# plain `git worktree add`-created checkout, then prove `worktree status`
+# reports the HONEST (non-fresh) base once the remote advances past what
+# adopt recorded — adopt never re-resolves anything after the fact.
+
+env DEVSTRAP_NO_KEYCHAIN=1
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+# Bare remote with one commit.
+exec git init --bare -b main $WORK/remote.git
+exec git clone $WORK/remote.git $WORK/src
+exec sh -c 'echo hello > $WORK/src/README.md'
+exec sh -c 'cd $WORK/src && git add README.md && git commit -m init && git push origin main'
+
+# init, add the project, sync (materializes a real local clone at
+# $WORK/Code/work/proj that worktree adopt's IsShallow/MergeBase reads).
+exec devstrap --home=$WORK/home --root=$WORK/Code init
+exec devstrap --home=$WORK/home --root=$WORK/Code add --path work/proj $WORK/remote.git
+exec devstrap --home=$WORK/home --root=$WORK/Code sync --hub-file=$WORK/hub.json
+stdout 'pushed 1'
+
+# Create a linked worktree the way an agent harness would: a plain `git
+# worktree add`, entirely behind DevStrap's back — devstrap has no worktree
+# row for this path yet.
+exec git -C $WORK/Code/work/proj worktree add --detach $WORK/external-wt HEAD
+
+# `worktree adopt` registers it: adopted (not refused), detached (branch
+# recorded as empty is invisible in human output, so assert via the
+# id/base-ref/base-sha line instead), and based on origin/main.
+exec sh -c 'devstrap --home=$WORK/home --root=$WORK/Code worktree adopt $WORK/external-wt > $WORK/adopt.out'
+exec grep 'Adopted worktree' $WORK/adopt.out
+exec grep 'at .*external-wt from origin/main ' $WORK/adopt.out
+exec sh -c 'sed -n "s#Adopted worktree \\([^ ]*\\) at.*#\\1#p" $WORK/adopt.out > $WORK/wt-id.txt'
+exec sh -c 'test -s $WORK/wt-id.txt'
+
+# Re-adopting the SAME path is idempotent: same id, explicit already_adopted
+# marker, and no second row (worktree list still reports exactly one).
+exec sh -c 'devstrap --home=$WORK/home --root=$WORK/Code --json worktree adopt $WORK/external-wt > $WORK/readopt.json'
+exec sh -c 'grep -q "\"already_adopted\": true" $WORK/readopt.json'
+exec sh -c 'grep -q "\"id\": \"$(cat $WORK/wt-id.txt)\"" $WORK/readopt.json'
+exec sh -c 'devstrap --home=$WORK/home --root=$WORK/Code --json worktree list > $WORK/list.json'
+exec sh -c 'test $(grep -c "\"id\":" $WORK/list.json) -eq 1'
+
+# The remote advances past what adopt recorded as base_sha.
+exec sh -c 'echo second >> $WORK/src/README.md'
+exec sh -c 'cd $WORK/src && git add README.md && git commit -m second && git push origin main'
+
+# `worktree status` must report the HONEST stale base — adopt recorded a
+# real merge-base at adoption time and never re-resolves it; only `status`
+# re-fetches and compares.
+exec sh -c 'devstrap --home=$WORK/home --root=$WORK/Code worktree status $(cat $WORK/wt-id.txt) > $WORK/status.out'
+exec grep 'stale (behind 1)' $WORK/status.out
+
+# `worktree cleanup --merged` must never reap this adopted, detached (branch
+# == "") checkout, even with --include-adopted (the AD5-02 dangerous-bug
+# regression: strings.Contains(x, "") is always true in Go, so a naive
+# merged-ness check would otherwise treat any clean detached worktree as
+# "merged").
+exec sh -c 'devstrap --home=$WORK/home --root=$WORK/Code worktree cleanup --merged --include-adopted > $WORK/cleanup.out'
+exec grep 'Cleaned up 0 worktrees (1 skipped)' $WORK/cleanup.out
+exec sh -c 'test -d $WORK/external-wt'
+
+# `worktree remove` on the adopted row deregisters only by default, leaving
+# the checkout on disk.
+exec sh -c 'devstrap --home=$WORK/home --root=$WORK/Code worktree remove $(cat $WORK/wt-id.txt) > $WORK/remove.out'
+exec grep 'Deregistered adopted worktree' $WORK/remove.out
+exec sh -c 'test -d $WORK/external-wt'

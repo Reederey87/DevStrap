@@ -4459,6 +4459,44 @@ WHERE id = ? AND status = 'active';
 	return wt, nil
 }
 
+// WorktreeByPath returns the active worktree registered for exactly (namespaceID,
+// path) — the lookup `worktree adopt` uses to detect an already-registered
+// physical worktree (idx_worktrees_active_path, migration 00032, enforces
+// there is at most one such row).
+func (s *Store) WorktreeByPath(ctx context.Context, namespaceID, path string) (Worktree, error) {
+	var wt Worktree
+	err := s.db.QueryRowContext(ctx, `
+SELECT id, namespace_id, device_id, path, branch, base_ref, base_sha, created_by, status, dirty_state
+FROM worktrees
+WHERE namespace_id = ? AND path = ? AND status = 'active';
+`, namespaceID, path).Scan(&wt.ID, &wt.NamespaceID, &wt.DeviceID, &wt.Path, &wt.Branch, &wt.BaseRef, &wt.BaseSHA, &wt.CreatedBy, &wt.Status, &wt.DirtyState)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Worktree{}, fmt.Errorf("unknown active worktree at %q", path)
+		}
+		return Worktree{}, fmt.Errorf("read worktree: %w", err)
+	}
+	return wt, nil
+}
+
+// UpdateWorktreeAdoption refreshes an already-adopted worktree row's
+// base_ref/base_sha/dirty_state in place. It is the mutation `worktree adopt`
+// is allowed to perform on re-adopting the SAME row (created_by == "adopted")
+// — never on a row this device did not create by adoption, which the caller
+// must gate before calling this.
+func (s *Store) UpdateWorktreeAdoption(ctx context.Context, id, baseRef, baseSHA, dirtyState string) error {
+	now := timestampNow()
+	_, err := s.db.ExecContext(ctx, `
+UPDATE worktrees
+SET base_ref = ?, base_sha = ?, dirty_state = ?, updated_at = ?
+WHERE id = ?;
+`, baseRef, baseSHA, dirtyState, now, id)
+	if err != nil {
+		return fmt.Errorf("update worktree adoption: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) MarkWorktreeRemoved(ctx context.Context, id string) error {
 	now := timestampNow()
 	_, err := s.db.ExecContext(ctx, `
