@@ -16,6 +16,7 @@ This directory holds DevStrap's chronological design & implementation audits. **
 | 6 | 2026-07-01 | [`AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`](AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md) | Sixth pass: adversarial audit of the PR #24/#25 batch (live R2 hub + envelope-encryption foundation) + under-examined dimensions | 43 (P1=5, P2=25, P3=13) | Closed — 43/43 shipped |
 | 7 | 2026-07-10 | [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md`](AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md) | Seventh pass: adversarial audit of the post-Pass-6 waves (git/folder hub carriers, OS sandbox, device-trust + env-sync propagation, distribution/service install) + commercial readiness | 47 (P1=1, P2=25, P3=21) | Open — see below |
 | 8 | 2026-07-31 | [`AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md`](AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md) | Eighth pass: the post-Pass-7 waves — AD-5 agent substrate, Milestone 5 daemon, working-state plane, plus security/data across all of it | 8 (P1=1, P2=5, P3=2) | Open — 7 of 8 open (`P8-ADOPT-01` shipped PR #258); **coverage is partial by declaration**, see below |
+| 9–10 | 2026-07-31 | [`AUDIT_RECOMMENDATIONS_2026-07-31_PASS9-10.md`](AUDIT_RECOMMENDATIONS_2026-07-31_PASS9-10.md) | Ninth: the working-state and daemon planes Pass 8 commissioned and never reported on. Tenth: hub carriers, blob plane, snapshot exchange — the largest surface no pass had reached | 8 (P1=0, P2=6, P3=2) + 0 | 1 open (`P9-WIP-03`, P3); Pass 10 clean, nothing above P3 |
 
 ## Conventions (going forward)
 
@@ -236,6 +237,18 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P7-CLI-02 | P2 | `fix/p7-git-01-cleanup-safety` (2026-07-11) | `worktree cleanup` sets `Args: usageArgs(cobra.NoArgs)` so a stray positional cannot be silently discarded on a fleet-wide destructive sweep. |
 | P7-SEC-04 | P3 | `fix/p7-sec-04-osroot` (2026-07-11) | Carrier object access is confined by per-operation `os.Root` handles (per-component O_NOFOLLOW + symlink-target recheck) instead of the check-then-use Lstat-walk `safePath`: reads, writes (incl. the P7-HUB-05 atomic temp+fsync+rename, now `writeRootFileAtomic`), stats, deletes, and timestamp sidecars all resolve through the handle, and the folder carrier additionally pins root identity (`os.SameFile` against the construction-time directory) after each `OpenRoot`, closing the swap window on a concurrently-writable shared root. Both carriers covered by post-construction symlink-swap refusal tests. |
 | P7-HUB-02 | P2 | `fix/p7-hub-02-head-continuity` (2026-07-11) | The git carrier persists the last verified head + retention-manifest fingerprint in `head.json`; a non-descendant head is accepted only as plausible compaction (byte-identical or strictly-advancing manifest AND, when the prior head is locally known, no event object at or above the new floors deleted — the content gate); a rewound or deleted branch is refused with a named `rm -rf <cache>` recovery path instead of being silently re-founded. `CommandError` gains `ExitCode()`. Review: identical-fingerprint acceptance + the content gate replaced the strict-advance-only rule that falsely refused real multi-device compaction. |
+
+### Pass 9 (2026-07-31) — 1 open of 8 · Pass 10 (2026-07-31) — clean
+
+Full detail in [`AUDIT_RECOMMENDATIONS_2026-07-31_PASS9-10.md`](AUDIT_RECOMMENDATIONS_2026-07-31_PASS9-10.md). Pass 9 covered the two dimensions **Pass 8 declared it had commissioned and never heard back from**; Pass 10 covered the hub/blob/snapshot planes no pass had reached. Seven of Pass 9's eight findings shipped the same day (PRs #262, #265, #266, #267) and are listed in *Recently shipped*.
+
+| ID | Sev | Finding | Effort |
+|---|---|---|---|
+| P9-WIP-03 | P3 | The WIP commit-age corroboration veto is defeatable by the ref OWNER's own wrong clock at capture: a device more than one TTL slow pushes a backdated commit, and after clock correction its own GC reaps the minutes-old ref as "past TTL" | M |
+
+Left open deliberately. It is a self-harm class needing a multi-step clock fault, the working tree is usually still intact, and — unlike `P9-WIP-06`, which had a clean asymmetry to resolve on — no correction presents itself that does not trade away the veto's independence from mirror state, which is the whole reason it exists. Complementary to the 2026-07-31 live dogfood, which attacked the forged *mirror* age and held; this is the forged *object* age axis that run did not test.
+
+**Pass 10 reported nothing above P3 and issued no findings.** That is a clean result rather than an empty one: six concrete hypotheses were chased and refuted with recorded reasoning (git-carrier CAS under compaction, snapshot-vs-blob-GC lifetime, ack-gated tombstone GC, envelope/grant fail-open, WCK owed-rotation, and the anti-rewind gate's prefix scope — the last real but documented verbatim in `spec/15` as an accepted residual). Two were independently spot-checked by the coordinator. The audit file lists what was attacked so a later pass need not re-walk it.
 
 ### Pass 8 (2026-07-31) — 1 open of 8
 

@@ -31,6 +31,26 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — Pass 9 and Pass 10 recorded; Pass 10 is clean
+
+Changed:
+
+- **`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-31_PASS9-10.md`** (new) plus ledger index row and open table. Two passes in one file, because they share a cause: **Pass 8 declared that two of the four dimensions it commissioned never reported.** Pass 9 exists to cover those; Pass 10 then took the largest surface no pass had reached.
+- That sequence is the entry's point. Pass 8 could have listed its findings and said nothing about the silent reviewers, and the document would have read as complete. Recording the gap instead produced **five real defects** across the two follow-on passes — three of them in the plane whose reviewer had gone quiet twice.
+- **Pass 10 reported nothing above P3 and issued no findings**, and the file records that as a *result* rather than an absence: six concrete hypotheses chased and refuted with reasoning, so no later pass re-walks them (git-carrier CAS under compaction's force-with-lease squash; snapshot-vs-blob-GC object lifetime; ack-gated tombstone GC on a never-acked device; envelope/grant fail-open and permanent quarantine; the WCK owed-rotation marker; and the anti-rewind gate's event-prefix scope — the last one real, but documented verbatim in `spec/15` as an accepted residual under the dumb-carrier posture). Two were independently spot-checked here rather than accepted on report: the ack gate does refuse (`ready=false`) on a never-acked approved device, and `spec/15` does carry the carrier scope boundary in those words.
+- A clean pass is worth writing down. An audit that finds nothing and says nothing leaves the next pass unable to tell "sound" from "unexamined" — which is exactly the confusion Pass 8's declared gap existed to prevent.
+
+`P9-WIP-03` is the only row left open, deliberately: the commit-age veto is defeatable by the ref owner's own wrong clock at capture, but it is a self-harm class needing a multi-step clock fault, and unlike `P9-WIP-06` there is no correction that does not trade away the veto's independence from mirror state — which is the entire reason it exists as a second, separate signal.
+
+Validated:
+
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`; ledger invariant re-checked by hand (Pass 9 header claims 1 open, table has 1 row; Pass 8's and Pass 7's are unchanged).
+- Docs-only; no Go source touched.
+
+Follow-ups:
+
+- Open across every pass: `P9-WIP-03` (P3), `P8-ADOPT-07` (P3), and Pass 7's four commercial/hosted-tier rows (business-gated). **No P1 is open in any pass.**
+
 ## 2026-07-31 — the WIP GC never deletes a ref it merely cannot see (P9-WIP-06)
 
 The Pass-9 finding I had flagged as needing a decision rather than a patch. Making it, and recording the reasoning so it can be overturned deliberately rather than drifted away from.
