@@ -31,6 +31,24 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — the adapter promise is withdrawn, and provenance is visible (AD5-05/AD5-06) — AD-5 WAVE CLOSE
+
+Changed:
+
+- **`AD5-05` — the per-harness adapter path is withdrawn, not deferred.** Four sites in the corpus still advertised `cursor-cli`/`codex-cli`/`copilot-cli`: `spec/10`'s worktree-metadata YAML comment, its implementation paragraph, its "Agent engines" section (heading them "Initial adapters", with a planned `AgentRunner` interface), and `spec/13`'s agent paragraph. All four now say the path is **withdrawn**. That distinction is the whole point: a rejected path described as "planned" is a promise the project has already decided not to keep, and `AD-5` decided against it before any of this wave was built. `agent cleanup` shares a clause in two of those sentences and is **genuinely still future work** — it was deliberately not withdrawn along with the adapters.
+- A fifth site turned up that the row had not enumerated: `spec/00`'s **"Not implemented yet"** list still carried the adapters. Leaving them in a *not-yet* list is exactly the implication `AD5-05` removes, so the bullet is gone rather than reworded; the same list now carries `AD5-07` (the deferred MCP server) in its place, which is genuinely deferred-on-evidence rather than abandoned.
+- `spec/10`'s "Agent engines" section now states the reason an adapter cannot work even in principle, rather than only that one is unwanted: the wrapper strips API keys and repoints `$HOME`, so it cannot authenticate a real harness — and a harness that *can* authenticate itself does not need wrapping. `agent_runs.engine` is therefore a free-text label the caller supplies, never validated against a list, because validating it would reintroduce exactly the per-harness coupling this removes.
+- **`AD5-06` shipped, and was NARROWED on inspection rather than padded to fit its original wording.** The row asked for adoption provenance in `worktree list --json` and `agent list --json`. Both already had it: each encodes its store type directly, `state.Worktree` has always carried `created_by`, and `agent list` already shows `engine`. Adding a derived `adopted` boolean would have been a redundant field that `spec/13`'s own rule forbids ("don't add a wrapper struct purely to give it a name"). The real gap was **human** output — `worktree list` showed no provenance at all, so a user could not tell a DevStrap-created worktree from an adopted one even though the two have different reap semantics. Fixed there; `--json` is untouched, and a test asserts it did NOT gain an `adopted` field.
+- A detached adopted worktree stores `Branch == ""` (the contract `--json` consumers see) and rendered as a blank column, which reads as a bug. Human output now labels it `(detached)`; the stored value and the JSON payload are unchanged.
+
+This closes the AD-5 substrate wave: `AD5-00` (decomposition) through `AD5-06`. `AD5-07` (the stdio MCP server) remains deferred by decision — the MCP protocol had a breaking rewrite on 2026-07-28, and adding an external dependency to a signed-release binary is a supply-chain call to make on its own evidence.
+
+Validated:
+
+- `gofmt` clean; `golangci-lint run` — 0 issues; `go test -race ./...` exit 0; `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+- The suite was re-run under a global git config containing `[user] useConfigOnly = true`, which deterministically reproduces the Linux-CI "Author identity unknown" failure this wave already hit once — green.
+- `grep` confirms no document in the corpus still promises a `cursor-cli`/`codex-cli`/`copilot-cli` adapter; the only remaining mentions are `spec/14`'s row citing the sites and `spec/10`'s paragraph recording the withdrawal.
+
 ## 2026-07-31 — `docs/agents.md`, the AD-5 reference integration (AD5-04)
 
 Changed:

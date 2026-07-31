@@ -751,7 +751,23 @@ func newWorktreeListCommand(stdout io.Writer, opts *options) *cobra.Command {
 			}
 			return opts.render(stdout, func(w io.Writer) error {
 				for _, wt := range worktrees {
-					_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", wt.ID, wt.Branch, wt.BaseRef, wt.Path)
+					// AD5-06: human output shows provenance, because a user
+					// cannot otherwise tell which worktrees DevStrap created
+					// from those it merely adopted — and the two have different
+					// reap semantics (`cleanup --merged` skips adopted rows
+					// unless --include-adopted, `remove` deregisters rather than
+					// deleting). The --json branch needs no change: it encodes
+					// state.Worktree directly, which has always carried
+					// created_by.
+					branch := wt.Branch
+					if branch == "" {
+						// An adopted detached-HEAD worktree stores "" (the
+						// contract --json consumers see). Rendering an empty
+						// column as blank reads as a bug; label it for humans
+						// only.
+						branch = "(detached)"
+					}
+					_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", wt.ID, wt.CreatedBy, branch, wt.BaseRef, wt.Path)
 				}
 				return nil
 			}, worktrees)

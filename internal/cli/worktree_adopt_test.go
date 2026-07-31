@@ -576,3 +576,57 @@ func TestWorktreeAdoptRefusesProjectMismatch(t *testing.T) {
 		t.Fatalf("stderr = %q, want a mismatch refusal explaining --project cannot reassign a worktree", stderr)
 	}
 }
+
+// TestWorktreeListShowsProvenance pins AD5-06's actual scope. `--json` already
+// carried provenance (it encodes state.Worktree, which has always had
+// created_by), so the real gap was human output: a user could not tell a
+// DevStrap-created worktree from an adopted one, even though the two have
+// different reap semantics — cleanup skips adopted rows without
+// --include-adopted, and remove deregisters rather than deleting.
+func TestWorktreeListShowsProvenance(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	localPath := setupFreshWorktreeRepo(t, home, root, "auto", false)
+
+	head := strings.TrimSpace(runGitOutput(t, localPath, "rev-parse", "HEAD"))
+	extWT := filepath.Join(t.TempDir(), "external-wt")
+	runGit(t, localPath, "worktree", "add", "--detach", extWT, head)
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "worktree", "adopt", extWT); err != nil {
+		t.Fatalf("adopt stderr=%q err=%v", stderr, err)
+	}
+
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "worktree", "list")
+	if err != nil {
+		t.Fatalf("list stderr=%q err=%v", stderr, err)
+	}
+	if !strings.Contains(stdout, "adopted") {
+		t.Errorf("human `worktree list` must show provenance so an adopted worktree is\n"+
+			"distinguishable from one DevStrap created; got:\n%s", stdout)
+	}
+	// A detached adopted worktree stores Branch == "" — the contract --json
+	// consumers see. Rendering that as a blank column reads as a bug.
+	if !strings.Contains(stdout, "(detached)") {
+		t.Errorf("a detached adopted worktree must render a labelled branch column, not a blank one; got:\n%s", stdout)
+	}
+
+	// --json must be UNCHANGED: created_by was always there, and adding a
+	// derived field would break the additive-only contract for no gain.
+	jsonOut, _, err := executeForTest("--home", home, "--root", root, "--json", "worktree", "list")
+	if err != nil {
+		t.Fatalf("list --json err=%v", err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(jsonOut), &rows); err != nil {
+		t.Fatalf("decode list --json: %v\n%s", err, jsonOut)
+	}
+	if len(rows) == 0 {
+		t.Fatal("expected at least the adopted worktree in --json output")
+	}
+	if _, ok := rows[0]["created_by"]; !ok {
+		t.Errorf("created_by must remain in --json (it is how a machine consumer reads provenance); got keys %v", rows[0])
+	}
+	if _, ok := rows[0]["adopted"]; ok {
+		t.Errorf("--json must NOT gain a derived `adopted` field: created_by already carries this, " +
+			"and spec/13 forbids wrapping a store type just to rename what it already says")
+	}
+}
