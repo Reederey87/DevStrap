@@ -874,3 +874,24 @@ g.SetLimit(8) // bounded fan-out instead of serial per-repo calls
 > omission is not a safety mechanism.** Where a lease, a signature, or a gate can be
 > skipped by an empty value, the empty value must be rejected upstream rather than
 > tolerated downstream.
+
+> **Hiding is recoverable; deletion is not (`P9-WIP-06`, 2026-07-31).** A drop published when
+> the remote ref was already gone records a **sha-agnostic** tombstone, and the live-row
+> predicate lets that outrank any sha guess so a phantom row clears. Under HLC skew — a
+> fast-clocked fleet member is enough, the dropping device's own clock need not be wrong —
+> that same rule buries a genuinely **later** push: the row is hidden on every device
+> including the owner's, and the still-live ref then looks to the automatic GC like an
+> unowned orphan to reap.
+>
+> The GC now refuses to delete any ref a sha-agnostic tombstone hides, and says so, naming
+> `wip fetch --device <id>` as the inspection path. The asymmetry is the whole argument and
+> it generalizes beyond this plane: **a hidden row is recoverable** — `wip fetch` derives
+> the ref canonically and ignores the mirror entirely — **whereas a deleted object is not.**
+> Where a visibility rule and a destruction rule disagree, a recovery system must resolve in
+> favour of the recoverable outcome, and accept the cosmetic cost of the occasional
+> unreapable ref.
+>
+> The hiding itself is deliberately left in place. Removing it would resurrect the phantom
+> rows the sha-agnostic tombstone exists to clear, and its behaviour is pinned by a test
+> that asserts the hiding is intended — so changing it is a design change requiring its own
+> evidence, not a bug fix. What is fixed here is the leg that destroys data.

@@ -31,6 +31,28 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — the WIP GC never deletes a ref it merely cannot see (P9-WIP-06)
+
+The Pass-9 finding I had flagged as needing a decision rather than a patch. Making it, and recording the reasoning so it can be overturned deliberately rather than drifted away from.
+
+**The situation.** A drop published when the remote ref was already gone records a **sha-agnostic** tombstone, and the live-row predicate lets it outrank any sha guess so a phantom row clears. Under HLC skew — a fast-clocked fleet member the dropper synced with is enough; nobody's clock need be wrong — that same rule buries a genuinely **later** push. The row is hidden on every device including the owner's, and the still-live ref then looks to the automatic GC like an unowned orphan, which after TTL it deletes.
+
+**The decision: fix the destruction leg, leave the hiding.** The GC now refuses to delete any ref a sha-agnostic tombstone hides, and its refusal names `wip fetch --device <id>` as the inspection path.
+
+The asymmetry settles it, and generalizes past this plane: **a hidden row is recoverable** — `wip fetch` derives the ref canonically and ignores the mirror entirely — **whereas a deleted object is not.** Where a visibility rule and a destruction rule disagree, a recovery system resolves toward the recoverable outcome and accepts the cosmetic cost of an occasional unreapable ref.
+
+The hiding itself stays. Removing it would resurrect the phantom rows the sha-agnostic tombstone exists to clear, and its behaviour is pinned by an existing test asserting the hiding is **intended** — so changing that is a design change needing its own evidence, not something to smuggle into a fix. Fixing only the leg that destroys data is the smaller, better-supported change, and it is the one that removes the harm.
+
+**The test carries its own control.** It first asserts the same aged orphan **is** nominated for deletion with no tombstone present, then that it is **not** once the tombstone exists. Without that control the test would pass against an implementation that simply never reaps anything — which, given this session's record of nine checks that looked green while proving nothing, is not a hypothetical concern.
+
+Validated:
+
+- `golangci-lint run` — 0 issues; `go test -race ./...` exit 0; `gofmt` via a gate that can fail.
+
+Follow-ups:
+
+- `P9-WIP-03` (the commit-age veto defeatable by the ref owner's own wrong clock at capture) remains open. It is a self-harm class, needs a multi-step clock fault, and the tree is usually still intact — genuinely P3, and unlike this one it has no obviously-correct answer that does not trade away the veto's independence.
+
 ## 2026-07-31 — a config typo stopped off-site replication, and four specs described a plane they no longer match (P9-WIP-04/05)
 
 Changed:
