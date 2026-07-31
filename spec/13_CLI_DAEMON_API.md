@@ -741,6 +741,14 @@ Future project-level status response:
 }
 ```
 
+### Watch-plane failure isolation and hint scoping (`P9-DAEMON-01`/`-02`, 2026-07-31)
+
+Two corrections to what the watcher shipped as, both found by the Pass-9 audit of a plane Pass 8 commissioned and never reached.
+
+**A per-root failure no longer takes the plane down.** `addRecursiveWatch` tolerated only `fs.ErrNotExist`, so an unreadable directory — a test fixture exercising `EACCES`, a root-owned container bind-mount — returned a hard error. The daemon's `watchAll` watched every root in its own goroutine under one shared `context.WithCancel` and returned on the **first** non-context error, so its deferred cancel tore down every *other*, healthy root's watch; the re-discovery loop then re-walked the whole tree each interval and failed identically forever. Native watching for the entire device was disabled by one project, visible only in `/v1/health`'s `watch.reason`. Permission errors now skip the subtree (in **both** the walk callback *and* the `watcher.Add` registration — the kernel refuses the watch even when the entry lists fine from a readable parent, which is the branch a `chmod 0000` directory actually trips), and `watchAll` degrades only when **no** root is watchable. A partial plane beats none: the remaining roots keep sub-interval latency, and the periodic cycle still covers the failed one.
+
+**A hint-triggered convergence is now genuinely cheaper than the periodic tick.** `runLoopTick` ran its full-workspace `scan.Walk` unconditionally, including for watcher-driven cycles. That scan shells out to git twice per discovered repo, and the "cheap enough to run every tick" judgement behind it was made against run-loop's 5-minute interval — while the watcher's trigger floor is 5 seconds. Hint-driven cycles (`TickNamespaceOnly`, which is the only mode the watcher requests) now skip scan+adopt. Adoption of a newly-created local project is picked up by the next periodic tick, which is correct: the watcher is a latency optimization and makes no completeness claim. A daemon configured namespace-only for other reasons keeps scanning, as does `run-loop --namespace-only`, where the scan is exactly what feeds the namespace.
+
 ## Daemon job types
 
 ```text

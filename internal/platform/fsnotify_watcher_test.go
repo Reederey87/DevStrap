@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -765,5 +766,52 @@ func TestEventPathUnderRoot(t *testing.T) {
 		if got := eventPathUnderRoot(root, tc.name); got != tc.want {
 			t.Errorf("eventPathUnderRoot(%q, %q) = %v, want %v", root, tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestNativeWatcherSurvivesUnreadableDirectory pins P9-DAEMON-01's lower half.
+// An unreadable directory yields a permission error from filepath.WalkDir that
+// is NOT fs.ErrNotExist, and the walk previously returned it as a hard error —
+// which propagated out of Watch, and whose caller's shared cancel then tore down
+// every other root's watch, permanently. A local, recoverable condition (a test
+// fixture exercising EACCES, a root-owned bind-mount) must not abandon the tree:
+// the subtree is skipped and the periodic cycle covers it, exactly as for a
+// directory that vanished.
+func TestNativeWatcherSurvivesUnreadableDirectory(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: permission denial is not reproducible")
+	}
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "ok", "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(root, "restricted")
+	if err := os.MkdirAll(filepath.Join(bad, "child"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(bad, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(bad, 0o755) })
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Skipf("fsnotify unavailable: %v", err)
+	}
+	defer watcher.Close()
+
+	if err := addRecursiveWatch(watcher, root, root, nil); err != nil {
+		t.Fatalf("an unreadable directory must be skipped, not fail the whole walk: %v", err)
+	}
+	// The readable siblings must still be watched — skipping must not mean
+	// abandoning the tree.
+	var sawOK bool
+	for _, w := range watcher.WatchList() {
+		if strings.Contains(w, string(filepath.Separator)+"ok") {
+			sawOK = true
+		}
+	}
+	if !sawOK {
+		t.Fatalf("readable siblings must still be watched after skipping the unreadable subtree; got %v", watcher.WatchList())
 	}
 }

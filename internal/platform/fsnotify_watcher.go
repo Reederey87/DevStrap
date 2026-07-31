@@ -250,6 +250,21 @@ func addRecursiveWatch(watcher *fsnotify.Watcher, root, watchRoot string, matche
 			if errors.Is(err, fs.ErrNotExist) {
 				return nil
 			}
+			// An unreadable directory is a local, recoverable condition — a test
+			// fixture exercising EACCES, a root-owned container bind-mount — not
+			// a reason to abandon the tree. Before P9-DAEMON-01 this returned a
+			// hard error that propagated out of Watch into watchAll, whose shared
+			// cancel then tore down every OTHER, healthy root's watch; the
+			// re-discovery loop re-walked the whole tree each interval and failed
+			// on the same directory forever. Skip the subtree instead: the
+			// periodic cycle remains the backstop for anything under it, exactly
+			// as it is for a directory that vanished.
+			if errors.Is(err, fs.ErrPermission) {
+				if entry != nil && entry.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
+			}
 			return err
 		}
 		if !entry.IsDir() {
@@ -261,6 +276,15 @@ func addRecursiveWatch(watcher *fsnotify.Watcher, root, watchRoot string, matche
 		if addErr := watcher.Add(path); addErr != nil {
 			if errors.Is(addErr, fs.ErrNotExist) {
 				return nil
+			}
+			// Same reasoning as the walk-callback case above (P9-DAEMON-01): an
+			// unreadable directory is local and recoverable, and the kernel
+			// refuses the watch registration itself even when the entry LISTS
+			// fine from a readable parent — so this branch, not just the walk
+			// error, is what a `chmod 0000` subtree actually trips. Skip it and
+			// keep watching the readable siblings.
+			if errors.Is(addErr, fs.ErrPermission) {
+				return fs.SkipDir
 			}
 			return fmt.Errorf("watch %s: %w", path, addErr)
 		}

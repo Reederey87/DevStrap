@@ -31,6 +31,27 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — the watch plane stops failing whole-device, and hints get cheaper (P9-DAEMON-01/02)
+
+Pass 9's first slice. Both findings come from the daemon plane **Pass 8 commissioned and never reached** — its reviewer went idle — which is the concrete payoff of Pass 8 having *declared* that gap instead of reading as complete: Pass 9 knew exactly where to look, and found two real defects in a subsystem that would otherwise have been assumed sound.
+
+Changed:
+
+- **`P9-DAEMON-01` — one unreadable directory disabled native watching for the whole device, permanently.** `addRecursiveWatch` tolerated only `fs.ErrNotExist`, so a `chmod 0000` directory (a test fixture exercising `EACCES`, a root-owned bind-mount) returned a hard error. `watchAll` watched every root in its own goroutine under **one shared** `context.WithCancel` and returned on the **first** non-context error, so its deferred cancel tore down every *other*, healthy root's watch — and the re-discovery loop re-walked the entire tree each interval and failed identically forever, burning a full recursive walk each time (the `M5D-07` tree was 37,799 directories). Correctness survived, since the polling fallback never touches the filesystem; latency and cost did not. Permission errors now skip the subtree and `watchAll` degrades only when **no** root is watchable.
+- **Writing the test found my fix was half a fix.** I first handled only the walk-callback error, and the new test failed — because a `chmod 0000` directory *lists* fine from a readable parent, so the branch it actually trips is the kernel refusing `watcher.Add` on it. Both paths now skip. Had I trusted the reviewer's summary (which did mention both) without running the test, this would have shipped fixing the case that does not occur and missing the one that does.
+- **`P9-DAEMON-02` — a watcher hint cost exactly as much as the tick it pre-empted.** `runLoopTick` ran its full-workspace `scan.Walk` unconditionally — two git subprocesses per discovered repo — including for hint-driven cycles. The "cheap enough to run every tick" judgement behind that (`P6-XP-03`/`P6-XP-05`) was made against run-loop's **5-minute** default; the watcher's trigger floor is **5 seconds**. So the Milestone 5 entry gate's own cost argument for having a watcher at all — *"converge when something actually changed, so the fleet can hold a long, cheap safe-interval AND low latency"* — was not true of the shipped code, because the hint-driven path was scoped identically to the periodic one. `TickNamespaceOnly` (the only mode the watcher requests) now skips scan+adopt; the next periodic tick still adopts new local projects, which is correct precisely because the watcher is a latency optimization making no completeness claim.
+- **`spec/14`'s entry-gate review is corrected in place** rather than left standing. A shipped claim that does not match the code is the exact defect class this corpus keeps catching, and it is worth fixing even where the code has now been changed to match — the reasoning is what future waves cite.
+
+Validated:
+
+- `gofmt` clean; `GOOS=linux go build ./...` clean; `golangci-lint run` — 0 issues; `go test -race ./...` exit 0 (under the `useConfigOnly` git config reproducing the Linux-CI identity failure).
+- Mutation check on `TestNativeWatcherSurvivesUnreadableDirectory` in both directions: reverting the `fs.ErrPermission` skip makes it fail with the real `permission denied` message.
+
+Follow-ups:
+
+- Pass 9's WIP-plane dimension is still outstanding; if it does not report, that plane remains unaudited across two consecutive passes and must be said so plainly rather than assumed sound.
+- Pass 8 residue: `P8-SEC-01`, `P8-ADOPT-03` (record-time half), `P8-ADOPT-04`, `P8-ADOPT-07`.
+
 ## 2026-07-31 — adoption hardening: a remedy that could not work, and a diff never captured (P8-ADOPT-02/03/06)
 
 Changed:

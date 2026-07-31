@@ -446,11 +446,27 @@ func (p *watchPlane) watchAll(ctx context.Context, w platform.Watcher, roots []s
 	for _, root := range roots {
 		go func() { errs <- w.Watch(ctx, root, events) }()
 	}
+	// P9-DAEMON-01: a per-root failure must not take the whole plane down. This
+	// previously returned on the FIRST non-context error, and the deferred
+	// cancel then killed every other root's watch — so one project with an
+	// unreadable directory silently disabled native watching for every unrelated
+	// project on the device. Collect instead, and degrade only when NO root is
+	// watchable; a partial plane is strictly better than none, since the
+	// remaining roots keep their sub-interval latency and the periodic cycle
+	// still covers the failed one.
+	var failed int
+	var firstErr error
 	for range roots {
 		err := <-errs
 		if err != nil && !errors.Is(err, context.Canceled) {
-			return err
+			failed++
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
+	}
+	if failed > 0 && failed == len(roots) {
+		return firstErr
 	}
 	return nil
 }
