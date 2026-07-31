@@ -4,6 +4,14 @@ tracks_code: [cmd/**, internal/**, internal/specdrift/**, .github/**, go.mod, go
 ---
 # Test Plan
 
+`cmd/devstrap/testdata/script/wip_gc.txtar` covers the self-delete and foreign-orphan-retention halves of the GC contract (NOT a revoked/lost owner, `--device`, a reapable-orphan reap, or an owner-pushed-newer refusal — those are unit-level in `TestPlanWipGC`) through
+the real binary: a positively-proven remote WIP ref survives dry-run, is
+leased-deleted on the real run, propagates its drop tombstone to a peer, leaves
+no local `refs/devstrap/*`, and retains a fabricated foreign-device orphan
+across repeated sweeps. Unit coverage table-tests every planner policy row and
+hostile `ls-remote` line; a real fresh commit paired with a forged ancient
+mirror age pins the load-bearing object-date veto.
+
 `cmd/devstrap/testdata/script/wip_drop_propagates.txtar` proves the two-device
 Layer-B retraction path: B first observes A's pushed WIP row, drops A's leased
 ref, syncs `repo.wip.dropped`, and A then reports no pending/stale WIP.

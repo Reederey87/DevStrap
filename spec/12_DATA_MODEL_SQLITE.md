@@ -4,6 +4,17 @@ tracks_code: [internal/state/**, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md
 ---
 # SQLite Data Model
 
+## WIP GC reads and local advisory state (`P7-WIP-07`)
+
+`Store.DeviceWipAll` reads every live `device_wip` row workspace-wide ordered
+by `path_key, observed_at_hlc DESC`. Age filtering stays in Go; the expected
+devices-times-projects cardinality is tens to hundreds, so no
+`observed_at_hlc` index is added. `local_meta.wip_gc_orphans` is a JSON map
+from ref to `{sha, first_seen}` used only as this machine's advisory orphan
+quarantine. Missing refs and refs that regain a live mirror row are pruned
+from it. The existing later-slice “TTL/GC out of scope” historical line is
+left unchanged for PR 3 as scheduled.
+
 ## Database location
 
 ```text

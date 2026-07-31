@@ -4,6 +4,24 @@ tracks_code: [internal/pathkey/**, internal/scan/**, internal/state/**, internal
 ---
 # Namespace and Sync Model
 
+## Layer B WIP expiry (`P7-WIP-07`)
+
+`devstrap wip gc` bounds `refs/devstrap/wip/*` with a 720h default TTL.
+Automatic sweeps may reap only this device's rows and rows owned by
+`revoked`/`lost` devices, always after the same TTL; approved live peers
+require explicit `--device`. Age is the `device_wip.observed_at_hlc` physical
+time, stamped only by explicit `wip push`, never gitstate-derived liveness.
+Remote/mirror SHA equality nominates a ref, but deletion additionally fetches
+that exact object, requires its own SHA-bound committer date to exceed the TTL,
+and uses an exact-SHA force-with-lease.
+
+Reapable orphans wait one full TTL from a local first-seen record. Unknown
+owners and live-peer orphans are never automatically reaped because two
+workspaces may share an origin. The policy can lose recovery data when a
+device remains offline beyond the TTL and its worktree copy is also gone;
+live-but-absent peers and unknown-device orphans are the deliberately
+never-reaped residual.
+
 ## Core abstraction
 
 The core object is a **namespace entry**.

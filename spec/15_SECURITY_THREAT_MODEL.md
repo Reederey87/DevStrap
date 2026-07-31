@@ -4,6 +4,28 @@ tracks_code: [internal/agentsecrets/**, internal/childenv/**, internal/cli/**, i
 ---
 # Security Threat Model
 
+## WIP GC deletion authority (`P7-WIP-07`)
+
+GC upgrades the accepted `P7-SEC-05` approved-device revoke DoS from denial
+to eventual destruction of a revoked device's stashed work after the TTL.
+That is a new security consequence: previously the origin ref survived trust
+revocation.
+
+Mirror events are candidate filters, never deletion authority. Every delete
+requires the remote-advertised SHA to equal the mirror, the fetched commit
+object's own SHA-bound committer date to exceed the TTL, and an exact-SHA
+force-with-lease. There is intentionally no all-peer ack floor, because one
+dead device would block the dead-device cleanup forever.
+
+The `mustVerifyEvent` tier is deliberately unchanged. Once any device is
+approved/revoked/lost, `verifyEventSignature` gates all non-local events via
+`mustVerifyEvent(type) || enrolled`; the tier affects only single-device
+pre-enrollment bootstrap, where there is no fleet peer to attack. A revoked
+signer's WIP events are in fact rejected outright once the revocation applies — `repo.wip.*` is NOT in `isTimeScopedContentEvent`'s positive allowlist, so the pre-revocation exemption never covers them; the real residual is only the delivery-order race, where a peer that has not yet applied the revoke still reads `trust_state='approved'` — and a
+compromised approved signer can tombstone then revoke another owner
+(amplification inside the already-accepted fleet revoke threat), but neither
+can bypass the object-date and leased-SHA corroboration.
+
 ## Security posture
 
 DevStrap is dangerous if designed casually because it touches code, secrets, Git credentials, and AI agents.

@@ -34,6 +34,7 @@ func newWipCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.AddCommand(newWipShowCommand(stdout, opts))
 	cmd.AddCommand(newWipApplyCommand(stdout, opts))
 	cmd.AddCommand(newWipDropCommand(stdout, opts))
+	cmd.AddCommand(newWipGCCommand(stdout, opts))
 	return cmd
 }
 
@@ -615,60 +616,8 @@ func newWipDropCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if project.Type != "git_repo" || project.LocalPath == "" {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("%s has no local git working tree to drop WIP from", project.Path)}
 			}
-			r := gitRunner(opts)
 			ref := wipRefFor(row.DeviceID, project.PathKey)
-			// COMPARE-AND-DELETE against the sha the synced record promised
-			// (explicit-value --force-with-lease): the ref is mutable and its
-			// owning device may have force-pushed a NEWER snapshot whose
-			// repo.wip.pushed event has not reached this device yet — an
-			// unconditional delete would permanently destroy that newer
-			// recovery data. A lease rejection has two causes, disambiguated
-			// by asking the remote what it actually advertises now: the ref is
-			// already gone (idempotent success — report dropped, clear the
-			// mirror) vs. the ref moved to an unknown sha (refuse; `devstrap
-			// sync` pulls the newer record, then retry).
-			// leasedSHA is the sha this delete PROVED it removed, and it is what
-			// the tombstone's sha-inequality escape is evaluated against. The
-			// already-gone path leases nothing, so it must publish "": this
-			// device's mirror may be stale, and asserting row.SHA there would
-			// name a sha that was never deleted, resurrecting the row
-			// fleet-wide as a permanent phantom. "" is the sha-agnostic
-			// "observed absent" tombstone — see state.TombstoneDeviceWipTx.
-			leasedSHA := row.SHA
-			if err := r.DeleteRef(cmd.Context(), project.LocalPath, "origin", ref, row.SHA); err != nil {
-				if !errors.Is(err, dsgit.ErrNonFastForward) {
-					return appError{code: exitGit, err: err}
-				}
-				got, lsErr := r.LsRemoteRef(cmd.Context(), project.LocalPath, "origin", ref)
-				if lsErr != nil && !errors.Is(lsErr, dsgit.ErrBranchNotFound) {
-					return appError{code: exitGit, err: lsErr}
-				}
-				if lsErr == nil {
-					return appError{code: exitGit, err: fmt.Errorf(
-						"remote WIP ref for device %s has moved past the last synced record (expected %s, found %s); run `devstrap sync` to pull the newer record, then retry",
-						row.DeviceID, shortSHA(row.SHA), shortSHA(got))}
-				}
-				// Already gone: idempotent success, but nothing was leased.
-				leasedSHA = ""
-			}
-			payload := dssync.WipDroppedPayload{
-				Path:     project.Path,
-				DeviceID: row.DeviceID,
-				SHA:      leasedSHA,
-			}
-			raw, err := json.Marshal(payload)
-			if err != nil {
-				return err
-			}
-			if err := store.WithTx(cmd.Context(), func(tx *state.Tx) error {
-				// As with wip push, mirror the emitting device's own event in
-				// the same transaction: its re-delivered event is deduped.
-				ev, err := store.InsertLocalEventTx(cmd.Context(), tx, dssync.NewWipDroppedEvent(string(raw)))
-				if err != nil {
-					return err
-				}
-				return tx.TombstoneDeviceWipTx(cmd.Context(), row.DeviceID, project.PathKey, project.Path, leasedSHA, ev)
-			}); err != nil {
+			if err := dropWipRef(cmd.Context(), store, gitRunner(opts), project, row.DeviceID, row.SHA); err != nil {
 				return err
 			}
 			out := wipDropResult{Path: project.Path, DeviceID: row.DeviceID, Ref: ref, Dropped: true}

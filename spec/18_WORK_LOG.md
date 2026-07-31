@@ -31,6 +31,38 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-30 — P7-WIP-07 aged WIP-ref GC
+
+Changed:
+
+- Added read-only remote WIP enumeration, the workspace-wide live mirror read,
+  pure TTL/orphan planner, SHA-bound commit-date corroboration, and
+  `wip gc [project] [--device] [--ttl] [--dry-run]`. Automatic policy is self
+  plus revoked/lost only; unknown/live-peer orphans are retained.
+- Factored the leased compare-and-delete/event/tombstone executor out of
+  `wip drop` so explicit drop and GC share one propagation path. JSON carries
+  every action and per-project warning in one document.
+- Added planner/parser/corroboration tests and the two-device
+  `wip_gc.txtar` end-to-end contract. Updated specs 07/12/13/15/16 and the
+  audit ledger note without moving rows or counts.
+
+- **Post-review (dual: Codex + an escalated fable-5 pass — 1 BLOCKER, 5 should-fixes, 6 nits; all actioned):**
+  - **BLOCKER — aged-orphan reaping was dead code for any project whose display path differs in case from its path key.** Orphan actions carried `Path: pathKey` while the executor resolved projects by DISPLAY path, and `pathkey.Clean` lowercases the key — so on `Work/Proj` the lookup missed and every aged orphan degraded to "project unavailable; not deleted" **forever**. Fail-closed (nothing was wrongly deleted) but the advertised feature did not run, and nothing caught it because the planner table never crosses into the executor — the unit fixture itself used exactly the divergent shape (`Path: "work/project", PathKey: "project"`) while only exercising the planner. Actions now carry `PathKey` (`json:"-"`) as the resolution key, the executor resolves by it, and the display path is backfilled for **all** actions — the delete loop skips the rest, so orphan rows would otherwise have rendered with no path and leaked the key into JSON. Pinned by `TestPlanWipGCOrphanActionCarriesThePathKey`, mutation-verified against the old shape.
+  - **A partial sweep clobbered the whole orphan quarantine.** `next` held only orphans of *visited* remotes and overwrote the entire `wip_gc_orphans` key, so a project-scoped run — or any project whose `ls-remote` failed transiently — reset every other orphan's first-seen clock, deferring reaping indefinitely under alternating scoped runs and falsifying `spec/12`'s stated pruning rule. Now merges: carries existing records forward and replaces only visited path keys. Pinned by `TestPlanWipGCKeepsUnvisitedOrphanRecords`.
+  - **The corroboration test had no positive control.** It asserted only the veto direction, so a `commitAgeExceeds` that never reads the date — `return false, nil`, or `%at` instead of `%ct` — passed it, and passed the txtar too (at `--ttl 1ms` every commit is older than the TTL). Added `TestCommitAgeCorroborationAcceptsAGenuinelyOldObject`, which backdates `GIT_COMMITTER_DATE` a year while leaving the author date fresh — so it also pins the field choice. This is the corpus's known merge-blocking defect class, caught here in my own spec's test design.
+  - **A failed delete exited 0.** A nominated deletion that then failed (lease refused, network) was demoted to a warning and the command succeeded, so an unattended caller — the sync-cycle sweep in `P7-WIP-08` is the obvious next consumer — could not distinguish "swept clean" from "failed to sweep". Now exits `exitGit` with a count. Enumeration failures stay warnings: not finding a remote is not the same as failing to delete from one.
+  - **One reason string covered three unrelated states.** `advertised != row.SHA` fired for a genuine force-push, for a ref *absent* on origin, and for a project whose enumeration *errored* — the last asserting something about the owner when the remote was never read. Split into three; this is deletion-forensics output for a data-destroying command. Pinned by `TestPlanWipGCDistinguishesUncheckedFromOutdated`.
+  - **The trust snapshot was taken once, before enumeration.** A device re-approved mid-sweep still had its aged ref destroyed under the revoked policy, and the lease cannot save it because the sha is unchanged. Trust is now re-read immediately before any trust-justified delete.
+  - Nits fixed: the `update-ref -d` comment claimed it was load-bearing for the worktree-base interlock, which it is not (bases resolve exclusively through `origin/<default_branch>`; `wip fetch` leaves identical refs by design) — it is hygiene, now said so; `spec/15` overstated the revoked-signer residual (`repo.wip.*` is not in `isTimeScopedContentEvent`, so those events are rejected outright — the real residual is the delivery-order race); `spec/00`'s canonical `Commands:` enumeration still ended the WIP family at `wip drop`; and `spec/16` claimed the txtar "proves the full GC contract" when it covers self-delete and foreign-orphan retention only.
+  - Accepted and left: duplicate/unordered action rows when two projects share one origin (cosmetic — deletion still executes at most once and never against the wrong repo); no `--ttl` floor on the explicit `--device` path (that flag *is* the consent gate); `--dry-run` reports the pre-corroboration plan, now stated in `spec/13`.
+
+Validated:
+
+- See the P7-WIP-07 task report for mutation outputs and all required gates.
+
+Follow-ups:
+
+- PR 3 owns the pre-recorded spec/12 TTL/GC closure line.
 ## 2026-07-30 — Export recursively watched directory health
 
 Changed:

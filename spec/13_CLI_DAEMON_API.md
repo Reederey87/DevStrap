@@ -4,6 +4,25 @@ tracks_code: [cmd/**, internal/cli/**, internal/daemon/**, internal/platform/**]
 ---
 # CLI and Daemon API
 
+## `wip gc`
+
+```text
+devstrap wip gc [<project>] [--device <id>] [--ttl <duration>] [--dry-run]
+```
+
+Without a project, GC visits every materialized `git_repo`; the default TTL is
+`720h`. `--device` explicitly permits an aged live peer ref. `--dry-run`
+enumerates and plans but neither deletes nor persists orphan first-seen state.
+Origin/auth/network failures are per-project warnings and do not fail the
+whole command. Invalid arguments/config use the normal usage/config exit
+class; local store failures retain the default class.
+
+`--json` emits one document:
+`{"ttl":"720h0m0s","dry_run":false,"actions":[{"path","device_id","ref","sha","reason","delete"}],"warnings":[{"path","message"}]}`.
+Warnings are fields in that document, never loose stdout. A nominated object
+newer than its mirror record is retained with reason
+`"object is newer than its mirror record; not deleted"`.
+
 ## CLI principles
 
 - dry-run available for mutating commands;
