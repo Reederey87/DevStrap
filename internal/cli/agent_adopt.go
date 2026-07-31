@@ -46,6 +46,7 @@ func newAgentAdoptCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var adoptWorktree bool
 	var projectFlag string
 	var baseRefFlag string
+	var allowShallow bool
 	cmd := &cobra.Command{
 		Use:   "adopt <worktree-path-or-id>",
 		Short: "Register an agent run against a worktree a real harness (Claude Code/Cursor/Codex) already created and ran in",
@@ -54,6 +55,13 @@ func newAgentAdoptCommand(stdout io.Writer, opts *options) *cobra.Command {
 			engine = strings.TrimSpace(engine)
 			if engine == "" {
 				return appError{code: exitUsage, err: fmt.Errorf("--engine is required")}
+			}
+			// --allow-shallow only reaches worktree adoption, so passing it
+			// without --adopt-worktree cannot do anything. Refuse rather than
+			// ignore it: a silently-inert flag reads as "shallow was allowed"
+			// and is exactly how a caller concludes a refusal is a bug.
+			if cmd.Flags().Changed("allow-shallow") && !adoptWorktree {
+				return appError{code: exitUsage, err: fmt.Errorf("--allow-shallow only applies when --adopt-worktree registers the worktree; the worktree named here is already registered, so its base was recorded when it was adopted")}
 			}
 			task = strings.TrimSpace(task)
 			if task == "" {
@@ -76,7 +84,7 @@ func newAgentAdoptCommand(stdout io.Writer, opts *options) *cobra.Command {
 				}
 				var outcome adoptOutcome
 				var adoptErr error
-				wt, _, outcome, adoptErr = adoptWorktreeAt(cmd.Context(), cmd.ErrOrStderr(), opts, store, args[0], projectFlag, baseRefFlag, false)
+				wt, _, outcome, adoptErr = adoptWorktreeAt(cmd.Context(), cmd.ErrOrStderr(), opts, store, args[0], projectFlag, baseRefFlag, allowShallow)
 				if adoptErr != nil {
 					return adoptErr
 				}
@@ -130,6 +138,7 @@ func newAgentAdoptCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().BoolVar(&adoptWorktree, "adopt-worktree", false, "register the worktree first (equivalent to 'worktree adopt') if it is not already known to DevStrap")
 	cmd.Flags().StringVar(&projectFlag, "project", "", "namespace path of the project this worktree belongs to (required when it cannot be inferred uniquely; also passed through when --adopt-worktree registers a new row)")
 	cmd.Flags().StringVar(&baseRefFlag, "base-ref", "", "explicit base ref passed through to worktree adoption when --adopt-worktree registers a new row")
+	cmd.Flags().BoolVar(&allowShallow, "allow-shallow", false, "with --adopt-worktree, adopt even though the repository is a shallow clone (recorded base_sha may be inaccurate); requires --adopt-worktree")
 	return cmd
 }
 

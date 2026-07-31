@@ -44,6 +44,8 @@ Changed:
 
 Verification note worth recording, because it nearly cost the wave a regression: this work was written against the pre-review commit of `AD5-02`, so the extraction carried a copy of `adoptWorktreeAt` that **silently lacked three of that PR's review fixes** (the `ErrWorktreeNotFound` distinction, the repo lock, and the UNIQUE-constraint translation) — a rebase alone would have kept the older body. They were re-applied by grepping for each fix by name in the extracted function rather than trusting the rebase, and the `AD5-02` mutation check (record the base tip instead of the merge-base) was **re-run against the extracted function** to confirm the guard still fails when the behavior is reverted. Re-diff after any delegated-worktree interaction; a clean rebase is not evidence that the fixes survived.
 
+Post-implementation gap closed: **`agent adopt` gains `--allow-shallow`.** Without it the one-command flow dead-ended — `agent adopt --adopt-worktree` called adoption with `allowShallow=false` hardcoded, so a shallow clone refused with no reachable override, and the only way through was to know to run `devstrap worktree adopt <path> --allow-shallow` first. An undiscoverable workaround is not an escape hatch. The flag is accepted **only** alongside `--adopt-worktree` — passing it alone is a usage error rather than a silently-inert flag, because a flag accepted-but-ignored reads as "shallow was allowed" and is exactly how a caller concludes a later refusal is a bug rather than a policy.
+
 Validated:
 
 - `gofmt -l cmd internal` clean; `golangci-lint run` — 0 issues.

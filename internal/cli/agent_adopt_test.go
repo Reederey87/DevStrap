@@ -361,3 +361,36 @@ func TestAgentPRReachableAfterAgentFinishComplete(t *testing.T) {
 		t.Fatalf("stdout = %q, want the dry-run PR preview", stdout)
 	}
 }
+
+// TestAgentAdoptAllowShallowRequiresAdoptWorktree pins that --allow-shallow is
+// not silently inert. It only reaches worktree adoption, so passing it without
+// --adopt-worktree cannot do anything — and a flag that is accepted but does
+// nothing reads as "shallow was allowed", which is exactly how a caller
+// concludes a subsequent refusal is a bug rather than a policy.
+func TestAgentAdoptAllowShallowRequiresAdoptWorktree(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	localPath := setupFreshWorktreeRepo(t, home, root, "auto", false)
+
+	head := strings.TrimSpace(runGitOutput(t, localPath, "rev-parse", "HEAD"))
+	extWT := filepath.Join(t.TempDir(), "external-wt")
+	runGit(t, localPath, "worktree", "add", "--detach", extWT, head)
+
+	_, stderr, err := executeForTest("--home", home, "--root", root,
+		"agent", "adopt", extWT, "--engine", "claude-code", "--task", "t", "--allow-shallow")
+	if err == nil {
+		t.Fatal("want a usage error for --allow-shallow without --adopt-worktree")
+	}
+	if !strings.Contains(stderr, "--adopt-worktree") {
+		t.Fatalf("stderr = %q, want the refusal to name --adopt-worktree", stderr)
+	}
+
+	// With --adopt-worktree it is accepted and reaches adoption. The fixture
+	// clone is not shallow, so this simply succeeds — the point is that the
+	// flag is wired through rather than dropped on the floor.
+	if _, stderr, err := executeForTest("--home", home, "--root", root,
+		"agent", "adopt", extWT, "--engine", "claude-code", "--task", "t",
+		"--adopt-worktree", "--allow-shallow"); err != nil {
+		t.Fatalf("adopt with --adopt-worktree --allow-shallow: stderr=%q err=%v", stderr, err)
+	}
+}
