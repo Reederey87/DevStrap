@@ -143,6 +143,7 @@ Cases:
 - secret-looking files and `.git` are always in the draft-bundle exclusion set, so they can never be age-encrypted into an `age_blob:<sha256>` blob;
 - user rules in the managed block survive a recompile;
 - the draft-bundle packer reads the compiled output, not a re-derived hardcoded list (regression guard for `PLAT-01`/`PLAT-04`/`AGEN-05`).
+- `AGEN-05` canonical credential parity: agent tests iterate both defensive-copy home lists; `head .env.example` passes through command and file policy together; `*.key` is agent-denied but canonically non-secret; ignore tables cover root-level `.aws/credentials` and `.snowflake/config.toml` while the differential test preserves all non-intentional legacy parity; read-confine anchors and the already-table-driven bubblewrap mask test include `~/.snowflake`.
 
 ### Env parser
 

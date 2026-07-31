@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/Reederey87/DevStrap/internal/childenv"
 	dsgit "github.com/Reederey87/DevStrap/internal/git"
 	"github.com/Reederey87/DevStrap/internal/id"
+	"github.com/Reederey87/DevStrap/internal/ignore"
 	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/redact"
 	"github.com/Reederey87/DevStrap/internal/state"
@@ -736,7 +738,6 @@ func enforceAgentCommandPolicy(policy string, args []string) error {
 	joined := strings.ToLower(strings.Join(args, " "))
 	deny := []string{
 		"rm -rf /",
-		"cat .env",
 		"cat ~/.snowflake/config.toml",
 		"chmod -r 777",
 		"chmod -R 777",
@@ -835,24 +836,18 @@ func resolveAgentPathToken(root, token string) (string, bool) {
 func agentTokenLooksSensitive(token string) bool {
 	token = strings.ToLower(strings.Trim(strings.TrimSpace(token), `"'`))
 	base := strings.ToLower(filepath.Base(token))
-	if base == ".env" || strings.HasPrefix(base, ".env.") {
+	if ignore.IsSecretName(base) || slices.Contains(ignore.CredentialHomeFiles(), base) {
 		return true
 	}
-	// AGEN-05: match the scan detector's sensitive-file set so the agent
-	// deny list and the scanner cannot drift.
-	switch base {
-	case ".netrc", ".npmrc", ".pypirc", ".gitconfig", ".git-credentials",
-		"id_rsa", "id_ed25519",
-		"credentials.json", "service-account.json":
-		return true
-	}
-	if strings.Contains(base, "service-account") {
-		return true
-	}
-	if strings.HasSuffix(base, ".pem") || strings.HasSuffix(base, ".key") {
-		return true
-	}
-	return false
+	return agentOnlySensitiveName(base)
+}
+
+// agentOnlySensitiveName keeps glob-shaped wrapper guardrails out of the
+// canonical secret detector. A user filename ending in .key may be sensitive,
+// but promoting that glob would make scan report ordinary files such as
+// en-US.key and make draftbundle hard-refuse the entire bundle.
+func agentOnlySensitiveName(base string) bool {
+	return strings.HasSuffix(base, ".key")
 }
 
 func agentPathLooksSensitive(root, path string) bool {
@@ -860,15 +855,12 @@ func agentPathLooksSensitive(root, path string) bool {
 	if err == nil && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
 		parts := strings.Split(filepath.ToSlash(rel), "/")
 		for _, part := range parts {
-			part = strings.ToLower(part)
-			if part == ".env" || strings.HasPrefix(part, ".env.") {
+			if ignore.IsSecretName(strings.ToLower(part)) {
 				return true
 			}
 		}
 	}
 	lower := strings.ToLower(filepath.ToSlash(path))
-	// AGEN-05: expanded deny set to match the spec and scan detector.
-	denyParts := []string{"/.ssh", "/.aws", "/.snowflake", "/.config/gh", "/.config/gcloud", "/.azure", "/.gnupg", "/.kube", "/.docker", "/.gitconfig", "/.git-credentials"}
 	for _, part := range denyParts {
 		if strings.Contains(lower, part+"/") || strings.HasSuffix(lower, part) {
 			return true
@@ -876,6 +868,14 @@ func agentPathLooksSensitive(root, path string) bool {
 	}
 	return agentTokenLooksSensitive(path)
 }
+
+var denyParts = func() []string {
+	names := append(ignore.CredentialHomeDirs(), ignore.CredentialHomeFiles()...)
+	for i := range names {
+		names[i] = "/" + names[i]
+	}
+	return names
+}()
 
 func pathWithin(root, path string) bool {
 	rel, err := filepath.Rel(root, path)

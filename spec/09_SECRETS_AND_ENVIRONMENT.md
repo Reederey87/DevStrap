@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-03
+last_reviewed: 2026-07-30
 tracks_code: [internal/childenv/**, internal/cli/devices.go, internal/cli/env.go, internal/cli/run.go, internal/devicekeys/**, internal/envbundle/**, internal/envfile/**, internal/platform/**, internal/workspacekeys/**]
 ---
 # Secrets and Environment Design
@@ -296,7 +296,15 @@ id_ed25519
 credentials.json
 service-account*.json
 .snowflake/config.toml
+.aws/credentials
 ```
+
+The credential surface shared by agent guardrails and OS sandbox masks also
+includes home directories `.ssh`, `.aws`, `.snowflake`, `.gnupg`, `.config/gh`,
+`.config/gcloud`, `.azure`, `.kube`, `.docker`, and home files `.netrc`,
+`.npmrc`, `.pypirc`, `.gitconfig`, `.git-credentials`. These fixed membership
+lists live in `internal/ignore`; `*.key` remains agent-local because it is a
+glob over arbitrary user filenames rather than a canonical secret name.
 
 Behavior:
 
