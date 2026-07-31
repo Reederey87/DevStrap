@@ -49,10 +49,14 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 > dirty adopted worktree. Structurally pre-existing; `AD5-02` widened the blast
 > radius by making long-lived adopted registrations common.
 >
-> **Two things this pass declares rather than hides.** First, **coverage is
-> partial**: the working-state (WIP) dimension did not report, so Layer A/Layer B
-> are **unaudited** and head Pass 9; the daemon dimension's report was outstanding
-> at write-up. A gap recorded is worth more than a gap invisible. Second, every
+> **Two things this pass declares rather than hides.** First, **coverage is half
+> of what was commissioned**: four dimensions were launched and **two reported**.
+> The WIP plane (Layer A/Layer B) and the daemon/socket/watch plane are
+> **entirely unaudited** — both reviewers went idle after two report-only
+> requests each — and both head Pass 9. The absence of findings in a subsystem is
+> not evidence the subsystem is sound, and an audit listing two dimensions'
+> findings while silent about the other two reads exactly like a complete one.
+> Second, every
 > CONFIRMED finding was **reproduced by the coordinator independently** rather than
 > accepted on a reviewer's report — two by executing the defect, one of which
 > changed severity (P2 → P1).
@@ -245,7 +249,7 @@ Full detail and `file:line` evidence in [`AUDIT_RECOMMENDATIONS_2026-07-31_PASS8
 | P8-ADOPT-06 | P3 | `agent finish` captures the diff summary only when `--test-summary` is passed | S |
 | P8-ADOPT-07 | P3 | Pre-`00032` rows hold unresolved paths the unique index cannot alias-match | S |
 
-**Not covered by Pass 8, carried to Pass 9:** the working-state plane (Layer A gitstate, Layer B WIP refs, `wip gc`) — its reviewer did not report. The plane was live-dogfooded on 2026-07-31 including a held attack on the corroboration veto, which is evidence but is not an audit.
+**Not covered by Pass 8, carried to Pass 9 — half the commissioned scope:** the working-state plane (Layer A gitstate, Layer B WIP refs, `wip gc`) **and** the daemon/socket API/watcher plane. Both reviewers went idle without reporting. The WIP plane was live-dogfooded on 2026-07-31 including a held attack on the corroboration veto — evidence, but not an audit. The daemon plane is a particularly poor candidate for assumed-sound: the `M5D-*` wave exists because the daemon shipped reporting a world more alive than the one it observed.
 
 ### Pass 7 (2026-07-10) — 4 open of 47
 

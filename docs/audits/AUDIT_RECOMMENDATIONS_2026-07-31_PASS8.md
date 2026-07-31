@@ -17,13 +17,15 @@ This pass concentrates on the **111 commits / 244 files / +38k lines** that land
 
 ## Methodology, and its honest limits
 
-Four dimension reviewers ran against the `a7938dd` worktree — fable-5 on the adoption plane, opus-5 on the daemon and on the WIP plane, GPT-5.6 (via Codex) on security and data. Each was told which earlier findings are shipped so it hunts **new** issues, and each was held to a four-part evidence standard: cite `file:line`; give a concrete failure scenario; **adversarially self-verify** and report what the attempt to refute found; and check novelty against this ledger.
+Four dimension reviewers were commissioned against the `a7938dd` worktree — fable-5 on the adoption plane, opus-5 on the daemon and on the WIP plane, GPT-5.6 (via Codex) on security and data. **Two of the four never reported** (see *Coverage* below). Each was told which earlier findings are shipped so it hunts **new** issues, and each was held to a four-part evidence standard: cite `file:line`; give a concrete failure scenario; **adversarially self-verify** and report what the attempt to refute found; and check novelty against this ledger.
 
 Reviewers were also told explicitly that *three verified findings beat fifteen speculative ones*, and that "nothing above P3" is a useful result. This is deliberate: Pass 7 downgraded three candidate P1s during verification, and a plausible-but-wrong finding costs a real implementation cycle.
 
 **Every finding below that is marked CONFIRMED was reproduced by the coordinator independently** — not accepted on the reviewer's report. Two were reproduced by executing the defect rather than by re-reading the code, and one of those changed its severity.
 
-**Coverage is uneven, and that is stated rather than smoothed over.** The adoption and security dimensions reported in full. The **WIP dimension did not report** and its findings are absent from this document; the working-state plane is therefore **not** covered by this pass and should be carried into Pass 9. The daemon dimension's report was outstanding at write-up. A partial audit recorded as partial is more useful than one whose gaps are invisible.
+**Coverage is HALF of what was launched, and that is stated rather than smoothed over.** Four dimensions were commissioned; **two reported**. The adoption and security dimensions reported in full and produced every finding below. The **WIP dimension and the daemon dimension both went idle without reporting**, after two report-only requests each. Their subject matter — the working-state plane (Layer A gitstate, Layer B WIP refs, `wip gc`) and the daemon/socket/watch plane — is therefore **entirely unaudited by this pass**, not lightly audited. Both head Pass 9.
+
+This is recorded prominently because the failure mode it guards against is real: an audit document that lists findings from two dimensions and says nothing about the other two reads exactly like a complete audit. The absence of findings in a subsystem is not evidence that the subsystem is sound.
 
 **Severity:** P1 = correctness/security/data-loss; P2 = significant; P3 = minor/polish. **Effort:** S ≈ <½ day, M ≈ 1–3 days, L ≈ ~1 week.
 
@@ -147,7 +149,7 @@ Recorded so the next pass does not repeat the work:
 ## Not covered by this pass
 
 - **The working-state plane (Layer A gitstate, Layer B WIP refs, `wip gc`).** Its reviewer did not report. The lease/corroboration logic in `wip drop`/`wip gc`, tombstone-vs-late-push resurrection, and `wip apply`'s deliberate lack of a dirty-tree gate are **unaudited** and should head Pass 9. Note the plane was live-dogfooded on 2026-07-31 (`spec/18`), including an attack on the corroboration veto that held — that is evidence, but it is not an audit.
-- **The daemon and watcher plane**, whose reviewer's report was outstanding at write-up.
+- **The daemon, socket API, and watcher plane** (Milestone 5 + the `M5D-*` honesty wave). Its reviewer also went idle without reporting. Note this plane's own history makes it a poor candidate for assumed-sound: the `M5D-*` wave existed precisely because the daemon shipped reporting "a world more alive than the one it observed", and that wave's reviews caught two tests named for regressions that could not fail. It is unaudited, not clean.
 - Commercial/hosted-tier readiness — unchanged since Pass 7, still business-gated.
 
 ## Recommended sequencing
