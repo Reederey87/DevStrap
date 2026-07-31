@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-10
+last_reviewed: 2026-07-31
 tracks_code: [internal/hub/**, .github/**, go.mod, go.sum, docs/audits/AUDIT_RECOMMENDATIONS.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # References
@@ -269,3 +269,28 @@ Backs the timeout/LFS/worktree/offline findings (P6-GIT-01/04/05): blobless clon
 - git-credential — non-interactive fail-fast + `git credential reject` on auth failure: https://git-scm.com/docs/git-credential
 
 Full per-finding sources: `docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`.
+
+## AD-5 substrate-wave references (2026-07-31)
+
+Sources behind the `AD-5` backlog decomposition in `14_MVP_ROADMAP_AND_BACKLOG.md` § *AD-5 backlog*. They are listed here because two rows rest on claims that **cannot be checked from this tree** — `AD5-02`'s detached-HEAD scope and `AD5-07`'s deferral — and an unauditable rationale is a rationale that rots.
+
+Agent-harness worktree models (the survey behind "no tool ships worktree adoption"):
+
+- Claude Code worktrees — `claude --worktree`, `.claude/worktrees/<name>/`, `.worktreeinclude`: https://code.claude.com/docs/en/worktrees
+- Codex app worktrees — `$CODEX_HOME/worktrees`, **detached HEAD by design** (sidesteps git's one-branch-one-worktree constraint), same `.worktreeinclude` convention: https://developers.openai.com/codex/app/worktrees
+- Cursor Cloud Agents — full VM per agent via `.cursor/environment.json`, **not** worktree-based: https://cursor.com/docs/cloud-agent
+- Dagger `container-use` — branch + linked worktree + container per environment, ships as an MCP server (`container-use stdio`); `cu checkout <id>` is the nearest analog to adoption and is still self-created-only: https://github.com/dagger/container-use
+- `uzi` — one worktree per agent plus a `state.json` registry row whose shape closely mirrors this repo's `agent_runs`: https://github.com/devflowinc/uzi
+
+Machine-contract versioning (`AD5-01`):
+
+- Terraform JSON output format — `format_version`, additive minor bumps, **consumers must ignore unrecognized properties**: https://developer.hashicorp.com/terraform/internals/json-format
+- Cargo external tooling — `cargo metadata --format-version` must be passed explicitly to avoid a forward-incompatibility hazard; the version is a plain integer, not major.minor: https://doc.rust-lang.org/cargo/reference/external-tools
+
+MCP (`AD5-07`, deferred):
+
+- Official Go SDK — `github.com/modelcontextprotocol/go-sdk`: https://github.com/modelcontextprotocol/go-sdk
+- MCP specification: https://modelcontextprotocol.io/
+- `docker agent serve mcp` — precedent for shipping an MCP server as a subcommand of the main binary rather than a second distributable: https://docs.docker.com/ai/docker-agent/features/mcp-mode
+
+Two caveats recorded deliberately rather than smoothed over. The SDK version (**v1.7.0**), its Go floor (**≥1.25**), and the date of the MCP protocol's breaking rewrite (**2026-07-28** — stateless model, `server/discover` replacing `initialize`, roots/sampling/logging deprecated on a 12-month window) come from a dated research pass, not from a source in this repository; re-verify them against the SDK's own release notes before `AD5-07` is implemented rather than trusting this line. And `AD5-07`'s deferral does **not** depend on that date being right: adding any new external dependency to a signed-release binary is a supply-chain decision for the maintainer, and "no second execution path that can drift from the CLI's" is this repo's own recorded idiom from the Milestone 5 daemon entry-gate review.

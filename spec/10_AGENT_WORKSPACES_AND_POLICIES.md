@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-30
+last_reviewed: 2026-07-31
 tracks_code: [internal/cli/agent.go, internal/cli/forge.go, internal/cli/worktree.go, internal/childenv/**, internal/git/**, internal/agentsecrets/**]
 ---
 # Agent Workspaces and Policies
@@ -156,13 +156,17 @@ Direction: move to an **allowlist + OS sandbox** model, strip credential-bearing
 
 > Forward direction, not shipped. From the sixth-pass viability review; see `docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`.
 
-Modern agent harnesses (Claude Code, Cursor, Codex, Copilot) increasingly manage their own worktrees and OS-level sandboxes, and the generic wrapper runner here cannot authenticate a real harness (it strips API keys and repoints `$HOME`). DevStrap's durable value is therefore the **substrate** agents run on — cross-machine workspace consistency plus fresh-base provenance (fetched `origin/<default_branch>`, recorded base SHA), a queryable run/worktree registry, and the stale-base gate — not the wrapper itself. Planned direction:
+Modern agent harnesses (Claude Code, Cursor, Codex, Copilot) increasingly manage their own worktrees and OS-level sandboxes, and the generic wrapper runner here cannot authenticate a real harness (it strips API keys and repoints `$HOME`). DevStrap's durable value is therefore the **substrate** agents run on — cross-machine workspace consistency plus fresh-base provenance (fetched `origin/<default_branch>`, recorded base SHA), a queryable run/worktree registry, and the stale-base gate — not the wrapper itself.
 
-- expose `devstrap worktree new --fresh-upstream --json` as a **provisioning primitive** that harnesses call to obtain an isolated, fresh-based worktree;
-- add `devstrap worktree adopt` / `devstrap agent adopt` to register externally-created worktrees so the registry and stale-base gate keep their value regardless of who runs the agent;
-- ship one reference integration — a harness hook/plugin or a small MCP server over the namespace — rather than growing the bespoke wrapper;
-- reframe the wrapper command/file policy honestly as **guardrails, not a sandbox**, and delegate real isolation to harness-native sandboxes composed *inside* a DevStrap worktree;
-- the shipped engine set is `generic` only; the `cursor`/`codex`/`copilot` adapters listed under "Agent engines" are planned, and this substrate framing is the preferred path over per-harness wrapper adapters.
+**Decomposed into backlog rows 2026-07-31** (`AD5-01`…`AD5-07`, in `14_MVP_ROADMAP_AND_BACKLOG.md` § *AD-5 backlog*). Until then this direction existed only as the prose below, restated in three other specs and decomposed in none. The prose named the build plan; what it never carried was trackable rows with acceptance criteria — which is how the 2026-07-17 wave came to cite AD-5 as a reason *not* to build a per-harness adapter while nothing decomposed what it licensed building instead. The rows carry the acceptance criteria; the direction and its reasoning stay here:
+
+- expose `devstrap worktree new --fresh-upstream --json` as a **provisioning primitive** that harnesses call to obtain an isolated, fresh-based worktree (`AD5-01` — the `--json` flag itself shipped incidentally with the `P5-CLI-01` render rollout, so the remaining work is making the payload a *designed* machine contract rather than whatever `state.Worktree` happens to hold);
+- add `devstrap worktree adopt` / `devstrap agent adopt` to register externally-created worktrees so the registry and stale-base gate keep their value regardless of who runs the agent (`AD5-02`/`AD5-03`);
+- ship one reference integration — a harness hook/plugin or a small MCP server over the namespace — rather than growing the bespoke wrapper (`AD5-04` ships the hook/docs path; `AD5-07` holds the MCP server, deliberately deferred);
+- reframe the wrapper command/file policy honestly as **guardrails, not a sandbox**, and delegate real isolation to harness-native sandboxes composed *inside* a DevStrap worktree (the "Enforcement reality" section above is that reframe; `AD5-05` finishes it by withdrawing the adapter promise the "Agent engines" section still makes);
+- the shipped engine set is `generic` only. The `cursor`/`codex`/`copilot` adapters listed under "Agent engines" are **not planned work** — this substrate framing is the chosen path *instead of* per-harness wrapper adapters, and `AD5-05` withdraws them rather than leaving them described as pending.
+
+**Adoption is a registration plane, never a base-resolution plane** (the invariant every `AD5-*` row inherits). `worktree adopt` records what a worktree was *actually* based on and never rewrites, repairs, or blesses that base; an adopted worktree that is stale must report stale. This is the same separation the *Independence from the cross-machine sync plane* section above enforces for the WIP plane, and it is proven the same way — with a check that fails when the behavior is reverted.
 
 ## Secret policy
 

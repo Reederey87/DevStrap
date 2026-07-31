@@ -28,6 +28,29 @@ This directory holds DevStrap's chronological design & implementation audits. **
 
 Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely implemented or superseded (see `spec/18_WORK_LOG.md` for the shipped history); Passes 5 and 6 are fully closed; the open backlog is concentrated in passes 4 and 7.
 
+> **2026-07-31 — AD-5 decomposition note, and a standing read of what "open" now
+> means.** The `AD-5` substrate direction is decomposed into backlog rows
+> `AD5-01`…`AD5-07` in `spec/14_MVP_ROADMAP_AND_BACKLOG.md`. **`AD5-*` are
+> spec-space IDs**, exactly like `M5D-*`, `PLAT-*`, `CLI-05`, and `ARCH2-*`
+> before them — they are **not** rows in this ledger. No rows move, no pass
+> header count changes, and every pass table below still has a header count
+> equal to its row count.
+>
+> The decomposition was triggered by re-reading this ledger's own remainder, so
+> record that reading here rather than leaving it to be re-derived each cycle:
+> **every open row in this ledger is now either business-gated or externally
+> blocked; none is waiting on engineering.** Pass 7's four (`P7-PROD-02`,
+> `P7-PROD-04`, `P7-PROD-05`, `P7-PROD-06`) plus Pass 4's `P4-SEC-08` and
+> `P4-HUB-15` are **one cluster** — hosted/commercial-tier readiness, each
+> gated on a business decision (build a managed hosted tier?) and on
+> infrastructure that does not exist (an account/billing service). `P4-SEC-05`
+> is blocked on Apple Developer enrollment, a third party. `P4-SYNC-08` is a P3
+> future. That is the whole remainder. It is why the next wave is sourced from
+> `spec/14` direction rows rather than from this ledger, and it should not be
+> mistaken for the backlog having been abandoned.
+
+<!-- MD028 separator between adjacent dated blockquotes -->
+
 > **2026-07-30 — P7-WIP-06 note:** fleet-wide `repo.wip.dropped`
 > tombstones shipped in spec space. This is not an audit-ledger finding: no
 > rows move and no pass counts change.
