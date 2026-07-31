@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-30
+last_reviewed: 2026-07-31
 tracks_code: [internal/ignore/**, internal/draftbundle/**, internal/scan/**, .gitignore]
 ---
 # Ignore Rules and Local Garbage
@@ -407,3 +407,23 @@ p.anchored = strings.Contains(body, "/")
 **Resolved.** `scan.Options` now has an `Ignore *ignore.Matcher` seam for tests, and `scan.Walk` compiles the workspace root's `.devstrapignore` once per walk via `ignore.CompileFromDir(cleanRoot, true)` when that seam is nil. A malformed ignore file emits a compile-failure warning and falls back to `ignore.DefaultMatcher()`, so default generated-tree pruning remains fail-safe. The old package-level defaults-only matcher and scan-local `shouldPruneDir` shim are gone; directory pruning now uses the per-walk matcher and counts pruned directories into `Result.PrunedDirs`, which the interactive `scan` surfaces as ONE informational line (deliberately not a `Result.Warnings` entry: `run-loop` prints scan warnings every tick, and routine default prunes like `node_modules` would become permanent per-tick chatter — the exact class `P6-CLI-04` removed). Compile failures stay real warnings. Re-include a pruned dir with a root-`.devstrapignore` negation (e.g. `!bin/`). Regression coverage: `TestWalkCompilesDevstrapignoreAndPrunesCustomPatternWithDefaults`, `TestWalkMalformedDevstrapignoreWarnsAndFallsBackToDefaults`, and `TestWalkDevstrapignoreNegationReincludesDefaultPrunedDirectory` (`internal/scan/scan_test.go`).
 
 > Repo housekeeping note (2026-07-05): the repository's own `.gitignore` gained `/completions/` — GoReleaser's `before` hook regenerates shell completions there on every release build; they are build output, never source.
+
+> Repo housekeeping note (2026-07-31): the repository's own `.gitignore` gained an explicit
+> `!docs/agents.md` negation, and it is worth recording *why*, because the trap generalizes to any
+> repo that ignores a filename rather than a path. The "# Agents files" block ignores `CLAUDE.md`
+> and `AGENTS.md` to keep local agent-instruction scratch out of the tree. Git matches such a
+> pattern by **basename at any depth**, and `core.ignorecase` is `true` on macOS and Windows — so
+> the genuinely-new user guide `docs/agents.md` matched the `AGENTS.md` rule and `git add -A`
+> skipped it **silently**, which is exactly what `add` does with an ignored path. The repository's
+> own root `AGENTS.md` was never affected, because an ignore rule does not untrack an
+> already-tracked file; that is precisely why the rule looked harmless for months and why the
+> failure surfaced only when a *new* file happened to collide.
+>
+> Two lessons this file is the right home for. First, prefer **anchored** patterns (`/AGENTS.md`)
+> when the intent is "this specific file at the repo root", since an unanchored basename pattern
+> quietly claims that name everywhere in the tree. Second, and more general: `git add` reports
+> nothing when it skips an ignored path, so "I created the file and ran `git add -A`" is not
+> evidence the file is in the commit — and neither is `test -f`, which passes for an untracked file
+> sitting in the working tree. Verify with `git diff --cached --name-only` or
+> `git cat-file -e <rev>:<path>`. This was found by the Pass-8 audit as `P8-ADOPT-01` after the file
+> had already shipped as a broken link with five specs asserting it existed.

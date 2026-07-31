@@ -30,6 +30,12 @@ promt.md
 !.env.schema
 
 
-# Agents files
+# Agents files — local agent-instruction scratch files, ignored anywhere in the
+# tree. The repo's OWN AGENTS.md/CLAUDE.md predate these rules and stay tracked
+# (an ignore rule never untracks an already-tracked file).
 CLAUDE.md
 AGENTS.md
+# ...but `core.ignorecase=true` on macOS/Windows makes the rule above match ANY
+# case, so a legitimately-new `docs/agents.md` was silently skipped by
+# `git add -A` and shipped as a broken link (P8-ADOPT-01). Negate it explicitly.
+!docs/agents.md
