@@ -632,7 +632,7 @@ These are validated forward-direction decisions from the sixth-pass viability re
 
 ### AD-5 backlog — DevStrap as the substrate agents run on (2026-07-31)
 
-`AD-5` has been recorded as direction since the sixth-pass viability review and restated in `spec/00_START_HERE.md`, `spec/02_PRODUCT_REQUIREMENTS.md`, and `10_AGENT_WORKSPACES_AND_POLICIES.md` — but, alone among this file's DIRECTION entries, it was never decomposed into rows. AD-1 got rows. AD-8 got rows. AD-5 got four restatements of the same paragraph. That gap already has a cost on the record: the 2026-07-17 wave cited AD-5 as the reason **not** to build a per-harness engine adapter, with nothing anywhere stating what AD-5 licenses building *instead*. A direction that can only be cited to refuse work is not a direction. These rows close that; the rationale stays in `10_AGENT_WORKSPACES_AND_POLICIES.md` § *Direction: DevStrap as the substrate agents run on (AD-5)*, and this section is the actionable decomposition it points at.
+`AD-5` has been recorded as direction since the sixth-pass viability review and restated in `spec/00_START_HERE.md`, `spec/02_PRODUCT_REQUIREMENTS.md`, and `10_AGENT_WORKSPACES_AND_POLICIES.md` — but, alone among this file's DIRECTION entries, it was never decomposed into rows. AD-1 got rows. AD-8 got rows. AD-5 got four restatements of the same paragraph. The paragraph did name a build plan — the `--json` provisioning primitive, `worktree adopt`/`agent adopt`, one reference integration — so the gap was never that nobody wrote down the intent; it was that the intent was never decomposed into trackable rows with acceptance criteria, which is what makes work startable. That gap already has a cost on the record: the 2026-07-17 wave cited AD-5 as the reason **not** to build a per-harness engine adapter, while nothing decomposed what it licensed building instead. A direction that is only ever actionable as a refusal is not yet a plan. These rows close that; the rationale stays in `10_AGENT_WORKSPACES_AND_POLICIES.md` § *Direction: DevStrap as the substrate agents run on (AD-5)*, and this section is the actionable decomposition it points at.
 
 The premise, restated so the rows are legible without a second file open: modern agent harnesses manage their own worktrees and OS-level sandboxes, and the generic wrapper runner here cannot authenticate a real harness (it strips API keys and repoints `$HOME`). DevStrap's durable value is therefore the **substrate** — cross-machine workspace consistency, fresh-base provenance (fetched `origin/<default_branch>` plus a recorded base SHA), a queryable worktree/run registry, and the stale-base gate. Those must keep their value **regardless of who runs the agent**. Today they only have value when `devstrap agent run` is the runner, which is the case that matters least.
 
@@ -649,8 +649,11 @@ External survey (2026-07-31) confirms the primitive is genuinely unbuilt elsewhe
             branch, main-checkout path — and pins the key set with a golden-file test.
             Records the additive-only evolution rule in `13_CLI_DAEMON_API.md` under a
             new "Machine contract surfaces" heading, following Terraform's
-            `format_version` and cargo's `--format-version` conventions (both require
-            consumers to ignore unrecognized keys; both bump minor only for additions).  [S]
+            `format_version` and cargo's `--format-version` conventions: both require
+            consumers to ignore unrecognized keys. Their versioning shapes differ and
+            the row does not conflate them — Terraform's is major.minor and bumps minor
+            for additive changes, while cargo's is a plain integer that additive fields
+            do not bump at all.                                                           [S]
             Accept: a harness goes from `worktree new --json` to a usable checkout with
             no second devstrap call, and dropping any documented key fails the test.
 
@@ -690,11 +693,20 @@ External survey (2026-07-31) confirms the primitive is genuinely unbuilt elsewhe
             Accept: the recipe published in `docs/agents.md` runs green as a testscript.
 
 [ ] AD5-05  Docs honesty pass. This corpus still advertises the per-harness adapter path
-            AD-5 REJECTS — `10_AGENT_WORKSPACES_AND_POLICIES.md`'s "Agent engines"
-            section lists `cursor-cli`/`codex-cli`/`copilot-cli` as "initial adapters",
-            and `13_CLI_DAEMON_API.md` still says "Non-generic engines remain future
-            work". Withdraw them rather than leaving them pending; a rejected path
-            described as "planned" is a promise the project has decided not to keep.      [S]
+            AD-5 REJECTS. Withdraw the promise rather than leaving it pending; a
+            rejected path described as "planned" is a promise the project has decided
+            not to keep. FOUR sites are enumerated so an implementer does not stop at
+            the obvious two — the acceptance criterion is the corpus, not this list:
+              - spec/10 line ~59, the agent-worktree-metadata YAML comment
+                "cursor/codex/copilot adapters are planned; only `generic` ships today";
+              - spec/10's implementation paragraph, "`agent cleanup` and non-generic
+                engine adapters remain future work";
+              - spec/10 § "Agent engines", which lists cursor-cli/codex-cli/copilot-cli
+                under the heading "Initial adapters";
+              - spec/13's agent-command paragraph, "Non-generic engines and
+                `agent cleanup` remain future work".
+            Note `agent cleanup` is genuinely still future work and must NOT be
+            withdrawn along with the adapters — only the adapter clause changes.          [S]
             Accept: no document in the corpus promises a cursor/codex/copilot adapter.
 
 [ ] AD5-06  `worktree list --json` and `agent list --json` surface adoption provenance,
