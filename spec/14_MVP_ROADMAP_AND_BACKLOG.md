@@ -692,7 +692,7 @@ External survey (2026-07-31) confirms the primitive is genuinely unbuilt elsewhe
             precisely AD-5's own argument.                                                [M]
             Accept: the recipe published in `docs/agents.md` runs green as a testscript.
 
-[ ] AD5-05  Docs honesty pass. This corpus still advertises the per-harness adapter path
+[x] AD5-05  SHIPPED 2026-07-31. Docs honesty pass. This corpus still advertises the per-harness adapter path
             AD-5 REJECTS. Withdraw the promise rather than leaving it pending; a
             rejected path described as "planned" is a promise the project has decided
             not to keep. FOUR sites are enumerated so an implementer does not stop at
@@ -709,7 +709,14 @@ External survey (2026-07-31) confirms the primitive is genuinely unbuilt elsewhe
             withdrawn along with the adapters — only the adapter clause changes.          [S]
             Accept: no document in the corpus promises a cursor/codex/copilot adapter.
 
-[ ] AD5-06  `worktree list --json` and `agent list --json` surface adoption provenance,
+[x] AD5-06  SHIPPED 2026-07-31, and NARROWED on inspection: `--json` already carried
+            provenance (both commands encode their store type directly, and
+            `state.Worktree` has always had `created_by`), so adding a derived
+            `adopted` bool would have been a redundant field forbidden by spec/13's
+            own "don't wrap just to name it" rule. The real gap was HUMAN output —
+            `worktree list` showed no provenance at all, and an adopted detached
+            worktree rendered a blank branch column. Both fixed; JSON untouched.
+            Original row text: `worktree list --json` and `agent list --json` surface adoption provenance,
             so the registry stays queryable by whoever populated it. Additive fields
             only, per AD5-01's evolution rule.                                            [S]
             Accept: a harness can list what it adopted and tell it apart from what
