@@ -351,6 +351,15 @@ func newWorktreeAdoptCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return appError{code: exitUsage, err: fmt.Errorf("%s is not a git worktree: %w", resolvedPath, err)}
 			}
+			// WorktreeIdentity leaves MainCheckout empty for a layout whose
+			// common dir is not "<checkout>/.git" (a bare repo, or a
+			// `--separate-git-dir` clone). Adoption needs the main checkout to
+			// map the worktree onto an adopted project, so refuse here rather
+			// than guessing — the sandbox path deliberately tolerates the same
+			// case, since it only needs the common dir.
+			if identity.MainCheckout == "" {
+				return appError{code: exitUsage, err: fmt.Errorf("cannot determine the main checkout for %s (its git-common-dir %q is not a <checkout>/.git layout — a bare repo or a --separate-git-dir clone); adopt is not supported for this layout", resolvedPath, identity.CommonDir)}
+			}
 			if !identity.IsLinked {
 				if identity.MainCheckout == resolvedPath {
 					return appError{code: exitUsage, err: fmt.Errorf("%s is the main checkout, not a linked worktree; there is nothing to adopt", resolvedPath)}
@@ -487,15 +496,37 @@ func newWorktreeAdoptCommand(stdout io.Writer, opts *options) *cobra.Command {
 }
 
 // projectForWorktreeAdopt maps a linked worktree's main checkout to the one
-// adopted project it belongs to. An explicit --project is trusted directly;
-// otherwise every project's local checkout path (resolved the same way, so a
-// /var vs /private/var spelling difference cannot hide a real match) is
-// compared against mainCheckout, refusing with a usage error naming every
-// candidate when the match is missing or ambiguous — the same shape `wip
-// show`'s resolveWipTarget uses for its multi-candidate refusal.
+// adopted project it belongs to. `--project` DISAMBIGUATES; it does not
+// override — the named project's own checkout must still be this worktree's
+// main checkout, or the row would record provenance for a repo the worktree
+// does not belong to (and `remove --prune` would later run `git worktree
+// remove` from the wrong repository). Without an explicit flag, every
+// project's local checkout path is compared against mainCheckout — resolved
+// identically, so a /var vs /private/var spelling difference cannot hide a
+// real match — refusing with a usage error naming every candidate when the
+// match is missing or ambiguous, the same shape `wip show`'s resolveWipTarget
+// uses for its multi-candidate refusal.
 func projectForWorktreeAdopt(ctx context.Context, opts *options, store *state.Store, mainCheckout, projectFlag string) (state.ProjectStatus, error) {
+	resolvedCheckout := func(p state.ProjectStatus) string {
+		repoPath := p.LocalPath
+		if repoPath == "" {
+			repoPath = filepath.Join(opts.paths().Root, filepath.FromSlash(p.Path))
+		}
+		resolved, rerr := filepath.EvalSymlinks(repoPath)
+		if rerr != nil {
+			resolved = filepath.Clean(repoPath)
+		}
+		return resolved
+	}
 	if projectFlag != "" {
-		return store.ProjectByPath(ctx, projectFlag)
+		p, err := store.ProjectByPath(ctx, projectFlag)
+		if err != nil {
+			return state.ProjectStatus{}, err
+		}
+		if got := resolvedCheckout(p); got != mainCheckout {
+			return state.ProjectStatus{}, appError{code: exitUsage, err: fmt.Errorf("--project %s is checked out at %s, but that worktree belongs to %s; --project disambiguates between matching projects, it cannot reassign a worktree to a different repository", projectFlag, got, mainCheckout)}
+		}
+		return p, nil
 	}
 	projects, err := store.ListProjects(ctx)
 	if err != nil {
@@ -506,15 +537,7 @@ func projectForWorktreeAdopt(ctx context.Context, opts *options, store *state.St
 		if p.Type != "git_repo" {
 			continue
 		}
-		repoPath := p.LocalPath
-		if repoPath == "" {
-			repoPath = filepath.Join(opts.paths().Root, filepath.FromSlash(p.Path))
-		}
-		resolved, rerr := filepath.EvalSymlinks(repoPath)
-		if rerr != nil {
-			resolved = filepath.Clean(repoPath)
-		}
-		if resolved == mainCheckout {
+		if resolvedCheckout(p) == mainCheckout {
 			matches = append(matches, p)
 		}
 	}

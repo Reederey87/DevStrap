@@ -149,9 +149,24 @@ func TestWorktreeIdentityBareRepo(t *testing.T) {
 	runRealGit(t, gitBin, bare, "init", "--bare")
 	r := Runner{Bin: gitBin, Timeout: 5 * time.Second}
 
-	_, err = r.WorktreeIdentity(context.Background(), bare)
-	if err == nil {
-		t.Fatalf("want an error for a bare repo (git-common-dir does not end in .git)")
+	identity, err := r.WorktreeIdentity(context.Background(), bare)
+	// A common dir that is not "<checkout>/.git" is NOT an error: reporting one
+	// would propagate through WorktreeSandboxWriteDirs' nil,nil contract and
+	// silently deny every git-storage write for `--separate-git-dir` layouts,
+	// breaking a sandboxed agent's own `git commit`. The identity is returned
+	// with an EMPTY MainCheckout, and callers that actually need it (`worktree
+	// adopt`) refuse on that themselves.
+	if err != nil {
+		t.Fatalf("WorktreeIdentity on a bare repo should resolve, not error: %v", err)
+	}
+	if identity.MainCheckout != "" {
+		t.Fatalf("MainCheckout = %q, want empty: it must never be guessed when the common dir is not <checkout>/.git", identity.MainCheckout)
+	}
+	if identity.CommonDir == "" {
+		t.Fatal("CommonDir must still be resolved so the sandbox path can grant storage writes")
+	}
+	if identity.IsLinked {
+		t.Fatal("a bare repo is not a linked worktree")
 	}
 }
 

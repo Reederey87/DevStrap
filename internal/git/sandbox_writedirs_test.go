@@ -133,3 +133,69 @@ func gitBinOrSkip(t *testing.T) string {
 	}
 	return bin
 }
+
+// TestWorktreeSandboxWriteDirsSeparateGitDir covers the input class the other
+// three cases in this file do not: a checkout whose git-common-dir is NOT
+// "<checkout>/.git" because it was made with `--separate-git-dir`. A linked
+// worktree of such a repo still needs its git-storage writes granted, or the
+// agent's own `git add`/`git commit` fail with EPERM under the OS sandbox.
+//
+// This exists because extracting WorktreeIdentity briefly made the main-checkout
+// derivation FATAL, which this function translated into its nil,nil "grant
+// nothing" contract — silently denying every git write for these layouts. The
+// three pre-existing cases all passed throughout, which is exactly why an
+// unchanged-and-green test file proved nothing about this input.
+func TestWorktreeSandboxWriteDirsSeparateGitDir(t *testing.T) {
+	ctx := context.Background()
+	base := t.TempDir()
+	checkout := filepath.Join(base, "checkout")
+	gitDir := filepath.Join(base, "elsewhere.git")
+	r := NewRunner()
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+	}
+	if err := os.MkdirAll(checkout, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	run(base, "init", "--separate-git-dir", gitDir, "-b", "main", checkout)
+	if err := os.WriteFile(filepath.Join(checkout, "f.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(checkout, "add", "f.txt")
+	run(checkout, "commit", "-m", "initial")
+
+	wt := filepath.Join(base, "wt")
+	if err := r.WorktreeAdd(ctx, checkout, wt, "agent/sep", "main"); err != nil {
+		t.Fatalf("WorktreeAdd on a --separate-git-dir repo: %v", err)
+	}
+
+	dirs, err := r.WorktreeSandboxWriteDirs(ctx, wt)
+	if err != nil {
+		t.Fatalf("WorktreeSandboxWriteDirs: %v", err)
+	}
+	if len(dirs) == 0 {
+		t.Fatal("granted NO write dirs for a linked worktree of a --separate-git-dir repo; " +
+			"the sandboxed agent's `git commit` would fail with EPERM")
+	}
+	var haveObjects, haveRefs bool
+	for _, d := range dirs {
+		switch filepath.Base(d) {
+		case "objects":
+			haveObjects = true
+		case "refs":
+			haveRefs = true
+		}
+	}
+	if !haveObjects || !haveRefs {
+		t.Fatalf("granted dirs must include the shared object store and refs; got %v", dirs)
+	}
+}

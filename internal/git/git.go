@@ -830,13 +830,19 @@ func (r Runner) WorktreeIdentity(ctx context.Context, dir string) (WorktreeIdent
 		}
 	}
 	// commonAbs normally ends in "/.git", so its main checkout is its parent
-	// directory. A bare repo or a relocated $GIT_COMMON_DIR does not end in
-	// ".git" — guessing the main checkout in that case would be wrong, so this
-	// refuses rather than fabricating a path.
-	if filepath.Base(commonAbs) != ".git" {
-		return WorktreeIdentity{}, fmt.Errorf("git-common-dir %q does not end in .git; cannot determine the main checkout (bare repo or relocated $GIT_COMMON_DIR)", commonAbs)
+	// directory. A bare repo, or a checkout made with `git clone/init
+	// --separate-git-dir`, does not — and guessing there would fabricate a wrong
+	// path. Such a case yields MainCheckout == "" rather than an ERROR, which
+	// matters: WorktreeSandboxWriteDirs must keep granting git-storage writes for
+	// these layouts (it only needs CommonDir and IsLinked), and turning this into
+	// an error would silently deny every git write for a --separate-git-dir
+	// project, breaking the agent's own `git commit` under the sandbox. Callers
+	// that genuinely need the main checkout — `worktree adopt` — check for "" and
+	// refuse themselves.
+	mainCheckout := ""
+	if filepath.Base(commonAbs) == ".git" {
+		mainCheckout = filepath.Dir(commonAbs)
 	}
-	mainCheckout := filepath.Dir(commonAbs)
 	branch := ""
 	if out, berr := r.Run(ctx, dir, "symbolic-ref", "--quiet", "--short", "HEAD"); berr == nil {
 		branch = strings.TrimSpace(out)

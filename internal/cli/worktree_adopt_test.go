@@ -479,3 +479,100 @@ func TestAgentPrRefusesBranchlessAdoptedWorktree(t *testing.T) {
 		t.Fatalf("stderr = %q, want a no-branch refusal naming the git switch -c remedy", stderr)
 	}
 }
+
+// TestWorktreeAdoptRecordsAncestorNotBaseTip is the test that pins AD5-02's
+// CENTRAL semantic, and it exists because the rest of the suite could not.
+//
+// Every other adopt fixture creates its worktree at the base ref's current tip,
+// so merge-base and tip are the same commit and both implementations agree. A
+// mutant that discards the merge-base and records `RevParse(baseRef)` — the raw
+// tip, i.e. the exact "every adopted worktree reports fresh forever" bug this
+// feature exists to prevent — passed every adopt test AND worktree_adopt.txtar.
+// spec/14's AD-5 invariant demands a check that fails when the behavior is
+// reverted, so this test advances the base PAST the worktree before adopting and
+// asserts the recorded base is the ancestor the work actually sits on.
+//
+// Mutation-checked: record the tip instead and this fails with tip != ancestor.
+func TestWorktreeAdoptRecordsAncestorNotBaseTip(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	localPath := setupFreshWorktreeRepo(t, home, root, "auto", false)
+
+	ancestor := strings.TrimSpace(runGitOutput(t, localPath, "rev-parse", "HEAD"))
+	extWT := filepath.Join(t.TempDir(), "external-wt")
+	runGit(t, localPath, "worktree", "add", "--detach", extWT, ancestor)
+
+	// Advance the base ref past the adopted worktree, so tip != ancestor and the
+	// two candidate implementations finally disagree.
+	if err := os.WriteFile(filepath.Join(localPath, "AFTER.md"), []byte("later\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, localPath, "add", "AFTER.md")
+	runGit(t, localPath, "commit", "-m", "advance the base past the worktree")
+	runGit(t, localPath, "push", "origin", "main")
+	runGit(t, localPath, "fetch", "origin")
+
+	tip := strings.TrimSpace(runGitOutput(t, localPath, "rev-parse", "origin/main"))
+	if tip == ancestor {
+		t.Fatalf("fixture failed to advance the base: tip == ancestor == %s; the test would prove nothing", tip)
+	}
+
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "worktree", "adopt", extWT, "--json")
+	if err != nil {
+		t.Fatalf("adopt stdout=%q stderr=%q err=%v", stdout, stderr, err)
+	}
+	var out adoptResultForTest
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("decode adopt --json: %v\n%s", err, stdout)
+	}
+	if out.BaseSHA == tip {
+		t.Fatalf("BaseSHA recorded the base ref's current TIP (%s). That makes every adopted worktree "+
+			"report fresh forever and turns the stale-base gate into a lie — the exact defect AD5-02 exists to prevent.", tip)
+	}
+	if out.BaseSHA != ancestor {
+		t.Fatalf("BaseSHA = %q, want the merge-base ancestor %q (the commit this worktree's work actually sits on)", out.BaseSHA, ancestor)
+	}
+}
+
+// TestWorktreeAdoptRefusesProjectMismatch pins that --project DISAMBIGUATES
+// rather than overrides. Trusting the flag would let a caller register a
+// worktree under a namespace whose checkout is a different repository entirely,
+// corrupting provenance — and `worktree remove --prune` would then run
+// `git worktree remove` from the wrong repo.
+func TestWorktreeAdoptRefusesProjectMismatch(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	localPath := setupFreshWorktreeRepo(t, home, root, "auto", false)
+
+	// A second, unrelated adopted project. It must live INSIDE the workspace
+	// root or `scan --adopt` refuses it — and a skipped test would prove
+	// nothing about the refusal this exercises.
+	other := filepath.Join(root, "other-src")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, other, "init")
+	runGit(t, other, "config", "user.email", "devstrap@example.test")
+	runGit(t, other, "config", "user.name", "DevStrap Test")
+	if err := os.WriteFile(filepath.Join(other, "README.md"), []byte("other\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, other, "add", "README.md")
+	runGit(t, other, "commit", "-m", "other initial")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "scan", root, "--adopt"); err != nil {
+		t.Fatalf("adopting the second project failed: %v (%s)", err, stderr)
+	}
+
+	head := strings.TrimSpace(runGitOutput(t, localPath, "rev-parse", "HEAD"))
+	extWT := filepath.Join(t.TempDir(), "external-wt")
+	runGit(t, localPath, "worktree", "add", "--detach", extWT, head)
+
+	// Name a project that is NOT this worktree's repository.
+	_, stderr, err := executeForTest("--home", home, "--root", root, "worktree", "adopt", extWT, "--project", "other-src")
+	if err == nil {
+		t.Fatal("want a refusal when --project names a different repository than the worktree's main checkout")
+	}
+	if !strings.Contains(stderr, "disambiguates") && !strings.Contains(stderr, "belongs to") {
+		t.Fatalf("stderr = %q, want a mismatch refusal explaining --project cannot reassign a worktree", stderr)
+	}
+}
