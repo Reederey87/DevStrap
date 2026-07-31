@@ -31,6 +31,26 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — the sandbox no longer grants `commondir` (P8-SEC-02)
+
+Changed:
+
+- **Closes Pass 8's only P1, a working sandbox escape.** `WorktreeSandboxWriteDirs` granted a linked worktree's per-worktree git admin dir **wholesale** so `git commit` would work (`P7-SANDBOX-01`), and that directory contains `commondir` — the pointer to the shared `.git`. A sandboxed agent rewrote it to a directory inside its own worktree, planted a `config` there, and git honoured the relocated common dir: the next **unsandboxed** `git status` executed an injected `core.fsmonitor`. DevStrap issues that `git status` itself, from `worktree cleanup`/`worktree remove` via `DirtyState`, so the escape needed no user action at all. It is precisely the class `P7-SANDBOX-01` closed for the common dir — while leaving the pointer *to* it writable.
+- **The fix carves the three pointer files back out of the grant** via a new `SandboxSpec.GitDenyFiles` (`commondir`, `gitdir`, `config.worktree`). It is safe because git writes them only at `git worktree add` time and reads them thereafter. macOS emits an SBPL `deny file-write*` **after** the allow block — SBPL is last-match-wins, so the ordering is load-bearing, and the test asserts it **by index rather than by substring**, because a deny emitted before its allow does nothing and a grep-for-the-string test would pass with the hole open. bubblewrap adds `--ro-bind-try` after the rw bind, the same later-mount-wins mechanism the credential masks already use. `WorktreeSandboxWriteDirs` itself is untouched — same signature, same grant set, same `nil, nil` non-worktree contract.
+- **Landlock is documented, not faked.** It is additive-allow and cannot subtract a child from a granted directory; enumerating existing siblings instead would break git's own transient files (`index.lock`, `MERGE_MSG`, `rebase-merge/`, `sequencer/`). The gap joins `landlockLimitations` and surfaces through `agent run`'s existing `notice: OS sandbox landlock active with reduced guarantees: ...` line. A fake fix here would be worse than the honest gap, because it would read as protection that is not there — and Landlock is already the documented reduced fallback.
+- The live Seatbelt e2e asserts **both** halves, since either alone is worthless: `git commit` in the sandboxed linked worktree still succeeds (proving the `P7-SANDBOX-01` grant was not broken), **and** the `commondir` write is refused with the file byte-unchanged.
+
+Validated:
+
+- **Negative control run independently by the coordinator, not taken on the implementer's report:** reverting only `sandbox_profile.go` to its pre-fix form makes the new e2e fail with `write to commondir SUCCEEDED under the sandbox; P8-SEC-02 escape is still open`; restoring it passes. That is the check that distinguishes a real mitigation from a test that passes for unrelated reasons.
+- `gofmt` clean; `GOOS=linux go build ./...` clean; `golangci-lint run` — 0 issues; `go test -race ./...` exit 0 (also under the `useConfigOnly` git config that reproduces the Linux-CI identity failure).
+- `TestSeatbeltAllowsLinkedWorktreeCommit` and `sandbox_gitdirs_test.go` pass **unchanged**. The one existing-test edit is `TestLandlockLimitationsPerABI`'s length assertion, which had to move 2→3 for the legitimately-added limitation.
+
+Follow-ups:
+
+- Remaining Pass-8 backlog: `P8-SEC-01` (tombstone GC cascade), `P8-ADOPT-02/03/04/06/07`. **No P1 remains open.**
+- Pass 9 must open with the two planes Pass 8 commissioned but never audited: the working-state (WIP) plane and the daemon/socket/watch plane.
+
 ## 2026-07-31 — Pass 8 audit
 
 Changed:

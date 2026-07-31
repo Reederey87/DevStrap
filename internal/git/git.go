@@ -947,6 +947,35 @@ func (r Runner) WorktreeSandboxWriteDirs(ctx context.Context, dir string) ([]str
 	return dirs, nil
 }
 
+// WorktreeSandboxDenyFiles returns the absolute paths, INSIDE the per-worktree
+// admin dir WorktreeSandboxWriteDirs grants writable, that must stay read-only:
+// `commondir` and `gitdir` (the pointers to the shared .git) and
+// `config.worktree`. Rewriting `commondir` relocates git's whole configuration
+// into attacker-controlled space, so the next UNSANDBOXED git command in that
+// worktree executes whatever hook/fsmonitor it names — P8-SEC-02, the same
+// escape class P7-SANDBOX-01 closed for the common dir itself. Git writes these
+// files only at `git worktree add` time and only reads them thereafter, so
+// denying writes costs nothing. Mirrors WorktreeSandboxWriteDirs' contract: a
+// nil slice with no error means "nothing to deny" for a main checkout or a dir
+// that is not a git worktree at all, so callers can grant the write set and
+// deny this set without special-casing either.
+func (r Runner) WorktreeSandboxDenyFiles(ctx context.Context, dir string) ([]string, error) {
+	identity, err := r.WorktreeIdentity(ctx, dir)
+	if err != nil {
+		return nil, nil
+	}
+	if !identity.IsLinked {
+		return nil, nil
+	}
+	// identity.GitDir is already symlink-resolved by WorktreeIdentity, matching
+	// WorktreeSandboxWriteDirs' resolution of the same directory.
+	return []string{
+		filepath.Join(identity.GitDir, "commondir"),
+		filepath.Join(identity.GitDir, "gitdir"),
+		filepath.Join(identity.GitDir, "config.worktree"),
+	}, nil
+}
+
 func (r Runner) WorktreeAdd(ctx context.Context, dir, path, branch, base string) error {
 	if !safeBranchName(branch) {
 		return fmt.Errorf("invalid git branch name %q", branch)
