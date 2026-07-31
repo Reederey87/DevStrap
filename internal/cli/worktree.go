@@ -318,6 +318,167 @@ type worktreeAdoptResult struct {
 	Warnings          []string `json:"warnings,omitempty"`
 }
 
+// adoptOutcome carries the idempotency markers and any non-fatal adoption
+// warnings that both `worktree adopt` and `agent adopt --adopt-worktree` need
+// in order to render their own (different) human/--json output.
+type adoptOutcome struct {
+	AlreadyAdopted    bool
+	AlreadyRegistered bool
+	Warnings          []string
+}
+
+// adoptWorktreeAt resolves an externally-created linked worktree at path and
+// registers it against the project inferred from projectFlag (or the
+// worktree's main checkout), refreshing an already-adopted row in place, or
+// leaving a row this device registered some other way untouched. This is the
+// single resolve-and-register flow behind BOTH `devstrap worktree adopt` and
+// `devstrap agent adopt --adopt-worktree` (AD5-03) — two copies of this logic
+// is a defect, not a shortcut, since the refusal matrix and the
+// read-only-on-foreign-rows rule must not be able to drift between them.
+func adoptWorktreeAt(ctx context.Context, stderr io.Writer, opts *options, store *state.Store, path, projectFlag, baseRefFlag string, allowShallow bool) (state.Worktree, state.ProjectStatus, adoptOutcome, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, appError{code: exitUsage, err: fmt.Errorf("resolve path %q: %w", path, err)}
+	}
+	// Resolved identically to `worktree new`'s stored path (P6 path
+	// normalization parity fix below) so the same physical worktree
+	// hits the same idx_worktrees_active_path row regardless of which
+	// command registered it, or which /var vs /private/var spelling
+	// the caller used.
+	resolvedPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, appError{code: exitUsage, err: fmt.Errorf("%s does not exist or is not accessible: %w", path, err)}
+	}
+	r := gitRunner(opts)
+
+	identity, err := r.WorktreeIdentity(ctx, resolvedPath)
+	if err != nil {
+		return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, appError{code: exitUsage, err: fmt.Errorf("%s is not a git worktree: %w", resolvedPath, err)}
+	}
+	// WorktreeIdentity leaves MainCheckout empty for a layout whose common dir
+	// is not "<checkout>/.git" (a bare repo, or a `--separate-git-dir` clone).
+	// Adoption needs the main checkout to map the worktree onto an adopted
+	// project, so refuse here rather than guessing — the sandbox path
+	// deliberately tolerates the same case, since it only needs the common dir.
+	if identity.MainCheckout == "" {
+		return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, appError{code: exitUsage, err: fmt.Errorf("cannot determine the main checkout for %s (its git-common-dir %q is not a <checkout>/.git layout — a bare repo or a --separate-git-dir clone); adopt is not supported for this layout", resolvedPath, identity.CommonDir)}
+	}
+	if !identity.IsLinked {
+		if identity.MainCheckout == resolvedPath {
+			return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, appError{code: exitUsage, err: fmt.Errorf("%s is the main checkout, not a linked worktree; there is nothing to adopt", resolvedPath)}
+		}
+		return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, appError{code: exitUsage, err: fmt.Errorf("%s is not a linked git worktree", resolvedPath)}
+	}
+	// Unborn HEAD (a brand new `git init`, no commits yet): there is no
+	// commit to merge-base against. Detached HEAD is NOT refused here —
+	// it is the common, expected shape for agent-harness worktrees and
+	// is adopted with Branch == "".
+	if identity.HeadSHA == "" {
+		return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, appError{code: exitUsage, err: fmt.Errorf("%s has an unborn HEAD (no commits yet); nothing to record a base against", resolvedPath)}
+	}
+
+	project, err := projectForWorktreeAdopt(ctx, opts, store, identity.MainCheckout, projectFlag)
+	if err != nil {
+		return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, err
+	}
+
+	var warnings []string
+	shallow, err := r.IsShallow(ctx, resolvedPath)
+	if err != nil {
+		return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, appError{code: exitGit, err: err}
+	}
+	if shallow {
+		if !allowShallow {
+			return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, appError{code: exitUsage, err: fmt.Errorf("%s is a shallow clone; a grafted history can make the recorded merge-base wrong at the shallow boundary — pass --allow-shallow to adopt anyway", resolvedPath)}
+		}
+		warnings = append(warnings, "repository is a shallow clone; recorded base_sha may be inaccurate at the shallow boundary")
+	}
+
+	baseRef := baseRefFlag
+	if baseRef == "" {
+		defaultBranch, err := resolveWorktreeDefaultBranch(ctx, stderr, r, resolvedPath, project.DefaultBranch)
+		if err != nil {
+			return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, appError{code: exitGit, err: err}
+		}
+		baseRef = "origin/" + defaultBranch
+	}
+
+	baseSHA, err := r.MergeBase(ctx, resolvedPath, identity.HeadSHA, baseRef)
+	if err != nil {
+		if errors.Is(err, dsgit.ErrNoMergeBase) {
+			label := identity.Branch
+			if label == "" {
+				label = "HEAD"
+			}
+			return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, appError{code: exitUsage, err: fmt.Errorf("%s and %s share no common history (adopting an orphan branch such as gh-pages is a common, legitimate case); pass an explicit --base-ref origin/<branch that shares history with %s>", label, baseRef, resolvedPath)}
+		}
+		return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, appError{code: exitGit, err: err}
+	}
+	dirty, err := r.DirtyState(ctx, resolvedPath)
+	if err != nil {
+		dirty = dsgit.DirtyUnknown
+	}
+
+	// The read-then-write below runs under the project repo lock, the same
+	// P7-GIT-01/02 discipline every other worktree mutation follows.
+	// idx_worktrees_active_path already makes a duplicate row impossible, but
+	// without the lock a concurrent adopt/new on the same path surfaces as a raw
+	// SQLite constraint error instead of a clear refusal.
+	unlockAdopt, err := acquireRepoLock(opts.paths().Home, project.ID)
+	if err != nil {
+		return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, err
+	}
+	defer unlockAdopt()
+
+	existing, lookupErr := store.WorktreeByPath(ctx, project.ID, resolvedPath)
+	// Absence is the ONLY signal that licenses an insert. Any other lookup
+	// failure (I/O error, corruption, timeout) must surface: reinterpreting it
+	// as "not registered yet" would silently insert a second row for a worktree
+	// that may already be registered.
+	if lookupErr != nil && !errors.Is(lookupErr, state.ErrWorktreeNotFound) {
+		return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, lookupErr
+	}
+	if lookupErr == nil {
+		if existing.CreatedBy != "adopted" {
+			// Adoption is registration, never base-resolution: a row
+			// this device created some other way (e.g. `worktree new`)
+			// keeps whatever base it already recorded. Mutate nothing.
+			return existing, project, adoptOutcome{AlreadyRegistered: true, Warnings: warnings}, nil
+		}
+		if err := store.UpdateWorktreeAdoption(ctx, existing.ID, baseRef, baseSHA, string(dirty)); err != nil {
+			return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, err
+		}
+		existing.BaseRef, existing.BaseSHA, existing.DirtyState = baseRef, baseSHA, string(dirty)
+		return existing, project, adoptOutcome{AlreadyAdopted: true, Warnings: warnings}, nil
+	}
+
+	device, err := store.CurrentDevice(ctx)
+	if err != nil {
+		return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, err
+	}
+	wt, err := store.InsertWorktree(ctx, state.Worktree{
+		NamespaceID: project.ID,
+		DeviceID:    device.ID,
+		Path:        resolvedPath,
+		Branch:      identity.Branch,
+		BaseRef:     baseRef,
+		BaseSHA:     baseSHA,
+		CreatedBy:   "adopted",
+		DirtyState:  string(dirty),
+	})
+	if err != nil {
+		// The repo lock above serializes adopt against adopt/new for this
+		// project, so reaching the unique index means another process registered
+		// this path outside that lock. Report it as a conflict rather than
+		// leaking raw SQLite text.
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, appError{code: exitConflict, err: fmt.Errorf("%s is already registered as an active worktree; run `devstrap worktree list` to see it", resolvedPath)}
+		}
+		return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, err
+	}
+	return wt, project, adoptOutcome{Warnings: warnings}, nil
+}
+
 func newWorktreeAdoptCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var projectFlag string
 	var baseRefFlag string
@@ -327,165 +488,28 @@ func newWorktreeAdoptCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Short: "Register an externally-created linked worktree (Codex/Cursor/Devin, etc.)",
 		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			absPath, err := filepath.Abs(args[0])
-			if err != nil {
-				return appError{code: exitUsage, err: fmt.Errorf("resolve path %q: %w", args[0], err)}
-			}
-			// Resolved identically to `worktree new`'s stored path (P6 path
-			// normalization parity fix below) so the same physical worktree
-			// hits the same idx_worktrees_active_path row regardless of which
-			// command registered it, or which /var vs /private/var spelling
-			// the caller used.
-			resolvedPath, err := filepath.EvalSymlinks(absPath)
-			if err != nil {
-				return appError{code: exitUsage, err: fmt.Errorf("%s does not exist or is not accessible: %w", args[0], err)}
-			}
 			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
 			defer closeStore(store)
-			r := gitRunner(opts)
-
-			identity, err := r.WorktreeIdentity(cmd.Context(), resolvedPath)
-			if err != nil {
-				return appError{code: exitUsage, err: fmt.Errorf("%s is not a git worktree: %w", resolvedPath, err)}
-			}
-			// WorktreeIdentity leaves MainCheckout empty for a layout whose
-			// common dir is not "<checkout>/.git" (a bare repo, or a
-			// `--separate-git-dir` clone). Adoption needs the main checkout to
-			// map the worktree onto an adopted project, so refuse here rather
-			// than guessing — the sandbox path deliberately tolerates the same
-			// case, since it only needs the common dir.
-			if identity.MainCheckout == "" {
-				return appError{code: exitUsage, err: fmt.Errorf("cannot determine the main checkout for %s (its git-common-dir %q is not a <checkout>/.git layout — a bare repo or a --separate-git-dir clone); adopt is not supported for this layout", resolvedPath, identity.CommonDir)}
-			}
-			if !identity.IsLinked {
-				if identity.MainCheckout == resolvedPath {
-					return appError{code: exitUsage, err: fmt.Errorf("%s is the main checkout, not a linked worktree; there is nothing to adopt", resolvedPath)}
-				}
-				return appError{code: exitUsage, err: fmt.Errorf("%s is not a linked git worktree", resolvedPath)}
-			}
-			// Unborn HEAD (a brand new `git init`, no commits yet): there is no
-			// commit to merge-base against. Detached HEAD is NOT refused here —
-			// it is the common, expected shape for agent-harness worktrees and
-			// is adopted with Branch == "".
-			if identity.HeadSHA == "" {
-				return appError{code: exitUsage, err: fmt.Errorf("%s has an unborn HEAD (no commits yet); nothing to record a base against", resolvedPath)}
-			}
-
-			project, err := projectForWorktreeAdopt(cmd.Context(), opts, store, identity.MainCheckout, projectFlag)
+			wt, project, outcome, err := adoptWorktreeAt(cmd.Context(), cmd.ErrOrStderr(), opts, store, args[0], projectFlag, baseRefFlag, allowShallow)
 			if err != nil {
 				return err
 			}
-
-			var warnings []string
-			shallow, err := r.IsShallow(cmd.Context(), resolvedPath)
-			if err != nil {
-				return appError{code: exitGit, err: err}
-			}
-			if shallow {
-				if !allowShallow {
-					return appError{code: exitUsage, err: fmt.Errorf("%s is a shallow clone; a grafted history can make the recorded merge-base wrong at the shallow boundary — pass --allow-shallow to adopt anyway", resolvedPath)}
-				}
-				warnings = append(warnings, "repository is a shallow clone; recorded base_sha may be inaccurate at the shallow boundary")
-			}
-
-			baseRef := baseRefFlag
-			if baseRef == "" {
-				defaultBranch, err := resolveWorktreeDefaultBranch(cmd.Context(), cmd.ErrOrStderr(), r, resolvedPath, project.DefaultBranch)
-				if err != nil {
-					return appError{code: exitGit, err: err}
-				}
-				baseRef = "origin/" + defaultBranch
-			}
-
-			baseSHA, err := r.MergeBase(cmd.Context(), resolvedPath, identity.HeadSHA, baseRef)
-			if err != nil {
-				if errors.Is(err, dsgit.ErrNoMergeBase) {
-					label := identity.Branch
-					if label == "" {
-						label = "HEAD"
-					}
-					return appError{code: exitUsage, err: fmt.Errorf("%s and %s share no common history (adopting an orphan branch such as gh-pages is a common, legitimate case); pass an explicit --base-ref origin/<branch that shares history with %s>", label, baseRef, resolvedPath)}
-				}
-				return appError{code: exitGit, err: err}
-			}
-			dirty, err := r.DirtyState(cmd.Context(), resolvedPath)
-			if err != nil {
-				dirty = dsgit.DirtyUnknown
-			}
-
-			// The read-then-write below runs under the project repo lock, the
-			// same P7-GIT-01/02 discipline every other worktree mutation
-			// follows. idx_worktrees_active_path already makes a duplicate row
-			// impossible, but without the lock a concurrent adopt/new on the
-			// same path surfaces as a raw SQLite constraint error instead of a
-			// clear refusal.
-			unlockAdopt, err := acquireRepoLock(opts.paths().Home, project.ID)
-			if err != nil {
-				return err
-			}
-			defer unlockAdopt()
-
-			existing, lookupErr := store.WorktreeByPath(cmd.Context(), project.ID, resolvedPath)
-			// Absence is the ONLY signal that licenses an insert. Any other
-			// lookup failure (I/O error, corruption, timeout) must surface:
-			// reinterpreting it as "not registered yet" would silently insert a
-			// second row for a worktree that may already be registered.
-			if lookupErr != nil && !errors.Is(lookupErr, state.ErrWorktreeNotFound) {
-				return lookupErr
-			}
-			if lookupErr == nil {
-				if existing.CreatedBy != "adopted" {
-					// Adoption is registration, never base-resolution: a row
-					// this device created some other way (e.g. `worktree new`)
-					// keeps whatever base it already recorded. Mutate nothing.
-					out := worktreeAdoptResult{Worktree: existing, ProjectPath: project.Path, AlreadyRegistered: true, Warnings: warnings}
-					return opts.render(stdout, func(w io.Writer) error {
-						_, err := fmt.Fprintf(w, "%s is already registered as worktree %s (created_by=%s); left unchanged\n", resolvedPath, existing.ID, existing.CreatedBy)
-						return err
-					}, out)
-				}
-				if err := store.UpdateWorktreeAdoption(cmd.Context(), existing.ID, baseRef, baseSHA, string(dirty)); err != nil {
-					return err
-				}
-				existing.BaseRef, existing.BaseSHA, existing.DirtyState = baseRef, baseSHA, string(dirty)
-				out := worktreeAdoptResult{Worktree: existing, ProjectPath: project.Path, AlreadyAdopted: true, Warnings: warnings}
-				return opts.render(stdout, func(w io.Writer) error {
-					_, err := fmt.Fprintf(w, "Refreshed adopted worktree %s at %s (base %s %s)\n", existing.ID, existing.Path, existing.BaseRef, existing.BaseSHA)
-					return err
-				}, out)
-			}
-
-			device, err := store.CurrentDevice(cmd.Context())
-			if err != nil {
-				return err
-			}
-			wt, err := store.InsertWorktree(cmd.Context(), state.Worktree{
-				NamespaceID: project.ID,
-				DeviceID:    device.ID,
-				Path:        resolvedPath,
-				Branch:      identity.Branch,
-				BaseRef:     baseRef,
-				BaseSHA:     baseSHA,
-				CreatedBy:   "adopted",
-				DirtyState:  string(dirty),
-			})
-			if err != nil {
-				// The repo lock above serializes adopt against adopt/new for
-				// this project, so reaching the unique index means another
-				// process registered this path outside that lock. Report it as
-				// a conflict rather than leaking raw SQLite text.
-				if strings.Contains(err.Error(), "UNIQUE constraint failed") {
-					return appError{code: exitConflict, err: fmt.Errorf("%s is already registered as an active worktree; run `devstrap worktree list` to see it", resolvedPath)}
-				}
-				return err
-			}
-			out := worktreeAdoptResult{Worktree: wt, ProjectPath: project.Path, Warnings: warnings}
+			out := worktreeAdoptResult{Worktree: wt, ProjectPath: project.Path, AlreadyAdopted: outcome.AlreadyAdopted, AlreadyRegistered: outcome.AlreadyRegistered, Warnings: outcome.Warnings}
 			return opts.render(stdout, func(w io.Writer) error {
-				_, err := fmt.Fprintf(w, "Adopted worktree %s at %s from %s %s\n", wt.ID, wt.Path, wt.BaseRef, wt.BaseSHA)
-				return err
+				switch {
+				case outcome.AlreadyRegistered:
+					_, err := fmt.Fprintf(w, "%s is already registered as worktree %s (created_by=%s); left unchanged\n", wt.Path, wt.ID, wt.CreatedBy)
+					return err
+				case outcome.AlreadyAdopted:
+					_, err := fmt.Fprintf(w, "Refreshed adopted worktree %s at %s (base %s %s)\n", wt.ID, wt.Path, wt.BaseRef, wt.BaseSHA)
+					return err
+				default:
+					_, err := fmt.Fprintf(w, "Adopted worktree %s at %s from %s %s\n", wt.ID, wt.Path, wt.BaseRef, wt.BaseSHA)
+					return err
+				}
 			}, out)
 		},
 	}
