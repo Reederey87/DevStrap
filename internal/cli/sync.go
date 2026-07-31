@@ -272,15 +272,24 @@ func runSyncCycle(ctx context.Context, stdout, stderr io.Writer, opts *options, 
 		result.BlobsGCd = removed
 	}
 	wipRefsGCd, gcErr := maybeGCWipRefsAfterSync(ctx, stderr, opts, store, time.Now())
-	if gcErr != nil {
-		return gcErr
-	}
 	result.WipRefsGCd = wipRefsGCd
 	result.MaterializedTotal = results.total
 	result.MaterializedSucceeded = results.succeeded
 	result.MaterializedSkipped = results.skipped
-	if err := exportHubDurabilityAfterSync(ctx, stderr, opts, store, hub, hubFile, time.Now()); err != nil {
-		return err
+	// P9-WIP-05: the durability export runs even when the WIP GC failed, and the
+	// GC error is returned afterwards. Returning immediately meant an unrelated
+	// config typo — `wip.gc_interval: "30d"`, which Go's ParseDuration rejects
+	// because it has no day unit — silently skipped the OFF-SITE REPLICATION of
+	// the retention snapshot on every cycle. Nothing tied the two together, so
+	// the operator saw a WIP-GC error and had no reason to suspect their
+	// durability guarantee had stopped. Two unrelated subsystems must not share
+	// a failure mode just because one runs first.
+	exportErr := exportHubDurabilityAfterSync(ctx, stderr, opts, store, hub, hubFile, time.Now())
+	if gcErr != nil {
+		return gcErr
+	}
+	if exportErr != nil {
+		return exportErr
 	}
 	return opts.render(stdout, func(w io.Writer) error {
 		for _, warning := range result.Warnings {

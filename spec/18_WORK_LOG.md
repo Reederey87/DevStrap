@@ -31,6 +31,24 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — a config typo stopped off-site replication, and four specs described a plane they no longer match (P9-WIP-04/05)
+
+Changed:
+
+- **`P9-WIP-05` — two unrelated subsystems shared a failure mode because one ran first.** `maybeGCWipRefsAfterSync` returns config-parse errors, and `runSyncCycle` returned that error immediately — **before** `exportHubDurabilityAfterSync`. So an invalid `wip.gc_interval` (`"30d"` is the natural typo; Go's `ParseDuration` has no day unit) failed every sync cycle *and* silently skipped the **off-site replication of the retention snapshot**, with nothing tying the two together. The operator sees a WIP-GC error and has no reason to suspect their durability guarantee has stopped. The export now runs regardless and the GC error is returned afterwards, so the failure is still loud but no longer contagious.
+- **`P9-WIP-04` — four present-tense status claims contradicted the shipped code, two of them inside their own files.** `spec/07` said "automatic TTL/GC remains unbuilt" while the same file's Layer-B text described the shipped expiry; `spec/13` said "remains out of scope" while `wip gc` is documented at the top of that very file; `spec/08` still described wiring gitstate capture into `sync` as an unlanded follow-up, and drew a conclusion from it ("`never synced` is expected given no producer is wired") that is now simply false — a "never synced" row means what it says; `spec/04` still listed Layer A as "planned; not yet built". All four corrected with a dated note naming the finding.
+
+Why the docs half matters as much as the code half: a stale status claim about a **data-destroying** subsystem is not cosmetic. A reader deciding whether `wip gc` can delete their refs, or whether Layer A has a producer, gets the wrong answer — and the spec-drift gate cannot catch it, because it proves only that a mapped spec was *touched*, never that its contents still match. That is exactly the gap `AGENTS.md`'s post-wave review exists to close, and this pass is the second time today it caught a shipped-but-stale claim (the first was `spec/14`'s daemon entry-gate cost argument, `P9-DAEMON-02`).
+
+Validated:
+
+- `go test -race ./...` exit 0; `golangci-lint run` — 0 issues; `gofmt` checked with a gate that can actually fail.
+- The `spec/08` correction was verified against the code rather than assumed: `internal/cli/sync.go` does call `CaptureGitstate` per materialized project.
+
+Follow-ups:
+
+- Two Pass-9 WIP findings remain open **deliberately**, because both need a decision rather than a patch: the sha-agnostic drop tombstone that can permanently hide a genuinely-newer push under HLC skew (its test currently *pins* the hiding as intended, so changing it is a design change, not a bug fix), and the commit-age veto being defeatable by the ref owner's own wrong clock at capture. Bundling either into a fix PR would ratify an answer nobody chose.
+
 ## 2026-07-31 — the recovery plane called an untracked-only tree "clean" (P9-WIP-02)
 
 The WIP dimension finally reported — after going idle in Pass 8 and again in Pass 9 — and its strongest finding is the one most directly harmful to a user:
