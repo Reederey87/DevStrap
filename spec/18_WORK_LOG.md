@@ -31,6 +31,31 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — Pass 8 audit
+
+Changed:
+
+- **`docs/audits/AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md`** (new) and the ledger reconciled: index row, dated note, and a 7-row open table whose header count matches it. Pass 8 audited trunk `a7938dd` — the 111 commits / 244 files / +38k lines that landed after Pass 7's snapshot and had never been reviewed. **8 findings (P1=1, P2=5, P3=2)**, one already shipped.
+- **Headline `P8-SEC-02` (P1), demonstrated rather than inferred:** the OS sandbox grants a linked worktree's git admin directory wholesale, and that directory contains `commondir`. An agent rewrites it to point at a directory inside its own worktree, plants a `config`, and git honours the relocated common dir — an ordinary **unsandboxed** `git status` then executed an injected `core.fsmonitor` program. DevStrap issues that `git status` itself from `worktree cleanup`'s `DirtyState` call, so the escape needs no user action. Same class as `P7-SANDBOX-01`, which closed the hole for the common dir while leaving the pointer to it writable.
+- **`P8-SEC-01` (P2), reproduced:** tombstone GC hard-deletes `namespace_entries`; `worktrees.namespace_id` is `ON DELETE CASCADE`; `hub compact --gc-tombstones` defaults on. A dirty adopted worktree's registration went 1→0 rows. Structurally pre-existing, but `AD5-02` widened the blast radius by making long-lived adopted registrations common for the first time.
+
+Two things the audit declares rather than smooths over:
+
+- **Coverage is partial.** The working-state (WIP) dimension did not report, so Layer A/Layer B are **unaudited** and head Pass 9; the daemon dimension's report was outstanding at write-up. A recorded gap is worth more than an invisible one, and an audit that implies uniform coverage it did not achieve is worse than a short one.
+- **Every CONFIRMED finding was reproduced by the coordinator independently**, not accepted on a reviewer's report — two by executing the defect. One changed severity on that evidence (`P8-SEC-02`, P2 → P1), which is the entire argument for verifying rather than collating.
+
+Also recorded: the base-resolution invariant was attacked directly and **holds**, and **no test-that-cannot-fail was found** among the AD-5 wave's new tests — notable given the base rate (that wave shipped two which review had to fix, and the daemon wave two before it).
+
+Validated:
+
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+- Ledger invariant re-checked by hand: the Pass-8 header claims 7 open and its table has 7 rows; earlier pass headers are unchanged.
+- Docs-only change; no Go source touched.
+
+Follow-ups:
+
+- Sequencing recommended in the audit: `P8-SEC-02` alone first (a working escape in shipped code deserves its own wave), then `P8-SEC-01`, then the `P8-ADOPT-02/03/04` hardening slice with `06`/`07` folded in. Pass 9 begins with the WIP plane this pass did not reach.
+
 ## 2026-07-31 — `docs/agents.md` was never actually committed (P8-ADOPT-01)
 
 Changed:
