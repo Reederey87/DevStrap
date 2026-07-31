@@ -31,6 +31,34 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — AD-5 decomposed into backlog rows before any of it is built
+
+Changed:
+
+- **`spec/14`: new § *AD-5 backlog*, rows `AD5-01`…`AD5-07`.** `AD-5` has been recorded direction since the sixth-pass viability review and restated in `spec/00`, `spec/02`, and `spec/10` — and, alone among this file's DIRECTION entries, never decomposed. AD-1 got rows; AD-8 got rows; AD-5 got four restatements of one paragraph. The cost is already on the record: the 2026-07-17 wave cited AD-5 as the reason **not** to build a per-harness engine adapter, with nothing anywhere stating what it licensed building instead. A direction that can only be cited to refuse work is not a direction. Each row carries an acceptance criterion and an effort size.
+- **`spec/10`: the five prose bullets are now ID-tagged** and point at the decomposition, with the reasoning left in place. One bullet changed meaning rather than gaining a tag: the `cursor`/`codex`/`copilot` adapters are no longer described as "planned" — they are the path AD-5 *rejects*, and `AD5-05` withdraws the promise rather than deferring it. Describing a rejected path as pending is a promise the project has decided not to keep. The adoption-plane-is-not-a-base-resolution-plane invariant is stated explicitly here, inheriting the separation the *Independence from the cross-machine sync plane* section already enforces for the WIP plane.
+- **`spec/02` and `spec/00`: pointers**, so each of the four AD-5 mentions resolves to the one decomposition instead of restating it. `spec/02`'s touch is a pure cross-reference, so its `last_reviewed` is **deliberately not bumped** — `AGENTS.md` PR-cycle step 1 makes a cross-reference explicitly non-substantive, and bumping it would fake freshness. `spec/10` and `spec/14` do change substance (a status claim and a new backlog section) and are bumped to 2026-07-31; `spec/00`'s bullet also changes a status claim, and its `last_reviewed` already reads 2026-07-31 from this morning's docs PR, so it is correct as-is rather than untouched-by-oversight.
+- **`docs/audits/README.md`: a dated note, no row movement.** `AD5-*` are spec-space IDs like `M5D-*`/`PLAT-*`/`CLI-05`/`ARCH2-*`; no pass header count changes and every table's header still equals its row count (Pass 7 verified at 4 = 4). The note also records the standing read that triggered this work: **every open row in that ledger is now business-gated or externally blocked, none waiting on engineering** — Pass 7's four plus `P4-SEC-08`/`P4-HUB-15` are one hosted-tier cluster, `P4-SEC-05` waits on Apple enrollment, `P4-SYNC-08` is a P3 future. Recording it means the next cycle does not re-derive it.
+
+Research (external, 2026-07-31) that shaped the rows rather than merely decorating them:
+
+- **No agent tool ships worktree adoption.** Claude Code (`claude --worktree`), the Codex desktop app, Cursor Cloud Agents (VMs, not worktrees), `uzi`, Devin, `claude-squad`, and Dagger's `container-use` all track only worktrees they created themselves; `cu checkout <id>` is the nearest analog and still adopts only its own output. `AD5-02` is a differentiated primitive, not catch-up.
+- **Codex and Devin create worktrees on detached HEAD by design** (Codex deliberately, to sidestep git's one-branch-one-worktree constraint). `worktrees.branch` is `NOT NULL`, so an adopt that required a branch would refuse most externally-created worktrees in the field and fail at its own purpose. `AD5-02` names detached-HEAD adoption as first-class scope.
+- **`worktrees` has no UNIQUE constraint on `(namespace_id, path)`** — verified against `00001_initial.sql`, never ALTERed. Terraform's own import documentation warns about exactly the failure this permits (one object bound twice, undetected, undefined behavior), so `AD5-02` carries the constraint rather than relying on a bypassable code check.
+- **`AD5-07` (the MCP server) is deferred on evidence, not on appetite.** The official Go SDK is real (`github.com/modelcontextprotocol/go-sdk` v1.7.0, Tier-1, needs Go ≥1.25; this repo is on 1.26.5), but the MCP protocol had a breaking rewrite on **2026-07-28** — three days before this entry. Adding an external dependency to a signed-release binary is a supply-chain decision to take deliberately. `AD5-04` therefore ships the reference integration with **no new dependency**: the plain `--json` shell-out already works in Claude Code, Cursor, and Codex today with zero integration code, which is AD-5's own argument made concrete.
+
+Validated:
+
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`
+- Pass-7 ledger invariant re-checked by hand: header claims 4 open, table has 4 rows.
+- Docs-only change: no Go source touched, so `go test` and `golangci-lint` are unchanged from trunk (both still run in CI).
+
+Follow-ups:
+
+- The wave itself: `AD5-01` (machine contract) → `AD5-02` (`worktree adopt`) → `AD5-03` (`agent adopt`/`agent finish`) → `AD5-04` (reference integration) → `AD5-05`/`AD5-06` (honesty pass + provenance). `AD5-07` stays deferred until the MCP protocol rewrite settles.
+- **Two safety interactions `AD5-02` must close and must not be allowed to slip:** `worktree cleanup --merged` iterates every worktree with no `created_by` filter and runs `git branch -D` on what it reaps, and `worktree remove` deletes the checkout — neither is acceptable by default against a worktree DevStrap did not create.
+- E2e coverage for the worktree/agent-run family is thin: **no** testscript exercises `worktree new`, `worktree status/finalize/list/remove/cleanup`, or `agent run`. The adoption e2e has no template to copy and needs its time budgeted rather than assumed.
+
 ## 2026-07-31 — Live forge dogfood of the WIP plane, and two docs that overstated reality
 
 Changed:

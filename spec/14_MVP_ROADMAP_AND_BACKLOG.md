@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-30
+last_reviewed: 2026-07-31
 tracks_code: [cmd/**, internal/**, .github/**, docs/audits/AUDIT_RECOMMENDATIONS.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # MVP Roadmap and Backlog
@@ -629,3 +629,93 @@ These are validated forward-direction decisions from the sixth-pass viability re
 - **DIRECTION — post-Pass-7 reliability & substrate wave (2026-07-17): COMPLETE.** With Pass 7's `P7-PROD-01` (guided pairing) already shipped 2026-07-15/16 and the rest of the pass's open backlog (`P7-PROD-02/04/05/06`) confirmed as the commercial/hosted-tier cluster — gated on a business decision this wave does not make, not blocked on engineering — this wave closed the one remaining purely-engineering Pass 7 finding plus three genuine, non-business-gated gaps from `00_START_HERE.md`'s "not implemented yet" list: [x] `P7-PROD-03` (SHIPPED, PR #215) — N-1 version-skew read-window for the retention manifest, a signed producer min-reader-version stamp, and a `doctor --remote` skew warning, with the snapshot document's P7-SYNC-01 trust-boundary check deliberately left exact-equality fail-closed. [x] `FORGE-05` (SHIPPED, PR #214) — hermetic PATH-shimmed `gh`/`glab`/`tea` test coverage for `createForgePR`/`checkForgeCLIs`, closing the last forge-hardening gap. [x] Git-state validation plane Layer A (SHIPPED, PRs #217/#218) — `repo.gitstate.observed` capture/event/apply, the mirror-only `device_gitstate` table, `status --all-devices`, and a `doctor` freshness check; Layer B (`refs/devstrap/wip/*`) stays genuinely unbuilt, and wiring capture into `devstrap sync`'s runtime flow is the tracked follow-up. [x] Project-env allowlists (SHIPPED, PR #216) — an opt-in project-root `.devstrapagent.yml` (`internal/agentsecrets`) filtering which captured env-profile secrets reach an `agent run` subprocess, deny-wins-on-conflict, byte-identical behavior for projects with no config file. The non-generic-engine-adapters half of the old bundled "not implemented" bullet was deliberately NOT built — `spec/10`'s own AD-5 direction already argues against growing more per-harness adapters in favor of a provisioning-primitive/MCP path, so implementing one would have contradicted the maintainer's recorded direction; the bullet was reworded instead. Daemon/socket-API/FSEvents (Milestone 5, XL) stayed explicitly out of scope, deferred to its own future wave. Six PRs (#213–#218), each independently reviewed (grok-4.5/gpt-5.6 write passes, Codex + opus-4.8/fable-5 dual review, escalated to fable-5 on the two items touching the sync/trust plane) and merged serially per this file's own rebase convention.
 - **DIRECTION — working-state sync plane Layer B wave (2026-07-17): PRs open, pending merge.** Confirmed with the maintainer up front that this wave stays purely engineering — the remaining Pass 7 backlog (`P7-PROD-02/04/05/06`, the commercial/hosted-tier cluster) is explicitly out of scope, gated on a business decision. This wave builds the tracked follow-up from the prior wave: the git-state sync-wiring gap and the entirety of Layer B (WIP refs, `refs/devstrap/wip/*`), which "stays genuinely unbuilt" was the prior wave's own closing note. Six PRs, stacked and serially rebased per this file's own convention, each independently reviewed (grok-4.5/gpt-5.6 write passes, opus-4.8/fable-5 review, escalated to fable-5 on the agent-isolation invariant): PR #221 wires `CaptureGitstate`/`NewGitstateEvent` into `devstrap sync`'s runtime flow (Layer A's own tracked gap, closed independently of Layer B). PR #220 is Layer B's foundation (`StashCreate`/`PushRef`/`safeRefPath`, the `repo.wip.pushed` event, the `device_wip` mirror). PR #222 ships `wip push`/`wip fetch`. PR #223 — planned as a test-only PR proving the non-negotiable agent-isolation invariant (a fresh worktree must never base off a WIP ref, even one already sitting locally) — grew into a real security fix after an escalated fable-5 adversarial pass found that `RemoteDefaultBranch`/`symbolicOriginHead` accepted a HEAD symref pointing outside `refs/heads/*`/`refs/remotes/origin/*` and returned it as a "branch name" with a nil error; both now fail closed, verified by mutation testing (revert the fix, confirm the new tests fail, restore). PR #224 ships `wip status`/`wip show` plus `status --all-devices`/`doctor` surfacing, deliberately asymmetric with Layer A's forced-visibility convention (no pending WIP is the normal, healthy state, not an unproven one). PR #225 ships the mutating half (`wip apply`/`wip drop`) and, during its review, surfaced a second real bug: `PushRef`/`FetchRef` both lacked a force refspec, so a device's second WIP push (or a peer's second fetch of it) for the same project — the common case, not an edge case — failed outright as a non-fast-forward update; fixed and propagated through every PR in the stack. Independent coordinator verification across every PR caught issues delegated write passes missed or introduced on their own (a golangci-lint `ineffassign` in the sync-wiring PR; two test-construction bugs — an impossible working-tree assertion and a two-device testscript enrolling a peer under an arbitrary label instead of its real device id, silently breaking cross-device signature verification — the latter now documented as a required convention in `spec/16_TEST_PLAN.md`). Automatic fleet-wide WIP-ref TTL/GC remains explicitly out of scope, as originally planned.
 - **DIRECTION closure — automatic WIP-ref TTL/GC (`P7-WIP-08`, 2026-07-30): SHIPPED.** The preceding historical out-of-scope remainder closes here: the extracted, corroborated sweep now runs after materialization on the single sync/run-loop/daemon convergence path, interval-gated and failure-isolated.
+
+### AD-5 backlog — DevStrap as the substrate agents run on (2026-07-31)
+
+`AD-5` has been recorded as direction since the sixth-pass viability review and restated in `spec/00_START_HERE.md`, `spec/02_PRODUCT_REQUIREMENTS.md`, and `10_AGENT_WORKSPACES_AND_POLICIES.md` — but, alone among this file's DIRECTION entries, it was never decomposed into rows. AD-1 got rows. AD-8 got rows. AD-5 got four restatements of the same paragraph. That gap already has a cost on the record: the 2026-07-17 wave cited AD-5 as the reason **not** to build a per-harness engine adapter, with nothing anywhere stating what AD-5 licenses building *instead*. A direction that can only be cited to refuse work is not a direction. These rows close that; the rationale stays in `10_AGENT_WORKSPACES_AND_POLICIES.md` § *Direction: DevStrap as the substrate agents run on (AD-5)*, and this section is the actionable decomposition it points at.
+
+The premise, restated so the rows are legible without a second file open: modern agent harnesses manage their own worktrees and OS-level sandboxes, and the generic wrapper runner here cannot authenticate a real harness (it strips API keys and repoints `$HOME`). DevStrap's durable value is therefore the **substrate** — cross-machine workspace consistency, fresh-base provenance (fetched `origin/<default_branch>` plus a recorded base SHA), a queryable worktree/run registry, and the stale-base gate. Those must keep their value **regardless of who runs the agent**. Today they only have value when `devstrap agent run` is the runner, which is the case that matters least.
+
+External survey (2026-07-31) confirms the primitive is genuinely unbuilt elsewhere, not a catch-up item: Claude Code (`claude --worktree`, `.claude/worktrees/<name>/`), the Codex desktop app (`$CODEX_HOME/worktrees`, detached HEAD by design), Cursor Cloud Agents (full VMs, not worktrees at all), `uzi`, Devin, `claude-squad`, and Dagger's `container-use` **all track only the worktrees they created themselves**. `container-use`'s `cu checkout <id>` is the nearest analog and is still self-created-only — it adopts its own output. Nobody adopts a worktree a third party made.
+
+**Non-negotiable invariant for every row below.** Adoption is a *registration* plane, never a base-resolution plane. `worktree adopt` records what a worktree was **actually** based on and never rewrites, repairs, or blesses that base; an adopted worktree that is stale must report stale. This is the same separation `10_AGENT_WORKSPACES_AND_POLICIES.md` § *Independence from the cross-machine sync plane* already enforces for the WIP plane, and it is proven the same way — by a check that fails when the behavior is reverted, per the `worktree_never_bases_off_wip_ref.txtar` precedent.
+
+```text
+[ ] AD5-01  `worktree new --fresh-upstream --json` becomes a documented, versioned
+            MACHINE contract rather than an incidental byproduct of the P5-CLI-01
+            render rollout (which wired the flag without ever designing the payload
+            for an external consumer). Adds a schema version plus the fields a harness
+            cannot work without — project path, redacted remote, resolved default
+            branch, main-checkout path — and pins the key set with a golden-file test.
+            Records the additive-only evolution rule in `13_CLI_DAEMON_API.md` under a
+            new "Machine contract surfaces" heading, following Terraform's
+            `format_version` and cargo's `--format-version` conventions (both require
+            consumers to ignore unrecognized keys; both bump minor only for additions).  [S]
+            Accept: a harness goes from `worktree new --json` to a usable checkout with
+            no second devstrap call, and dropping any documented key fails the test.
+
+[ ] AD5-02  `devstrap worktree adopt <path>` registers an externally-created linked git
+            worktree. Proves the path IS a linked worktree through ONE canonical helper
+            extracted from `WorktreeSandboxWriteDirs` (which already carries the
+            git-dir/common-dir comparison privately) so there is one definition rather
+            than two that can drift; maps it to an adopted project; records the base
+            HONESTLY; is idempotent; refuses a main checkout, a non-worktree, and an
+            out-of-namespace path. Adopts DETACHED-HEAD worktrees as a first-class case
+            — Codex and Devin create them that way deliberately, so requiring a branch
+            would refuse most externally-created worktrees in the field and defeat the
+            row's own purpose. Adds the `(namespace_id, path)` uniqueness the schema has
+            always lacked, so one physical worktree cannot be registered twice.          [M]
+            Accept: a worktree created behind DevStrap's back by a plain `git worktree
+            add` is adoptable, and `worktree status` immediately reports its real
+            staleness instead of a fresh-looking lie.
+
+[ ] AD5-03  `devstrap agent adopt` registers an externally-RUN agent session against a
+            worktree, adopting that worktree on demand through AD5-02's single code
+            path. Records the harness's PID so the already-shipped dead-PID ->
+            `interrupted` sweep (`P6-GIT-06`/`P7-GIT-03`) reconciles a crashed harness
+            with no new lifecycle code. Ships WITH `devstrap agent finish`: without it
+            an adopted run can never reach `complete`, `agent pr` is unreachable, and
+            the row is useless — so it is required scope, not a follow-up.               [M]
+            Accept: an externally-run session appears in `agent list`, reaches
+            `agent pr` under the same stale-base gate, and self-reconciles to
+            `interrupted` when its harness is killed.
+
+[ ] AD5-04  One reference integration proving a real harness drives the primitives end
+            to end: `docs/agents.md` (provision -> adopt -> register -> ship) plus a
+            user-owned Claude Code `SessionStart` hook recipe, pinned by an executable
+            testscript so the documented recipe cannot rot. Deliberately NO new
+            dependency and NO new server: the plain `--json` shell-out already works in
+            Claude Code, Cursor, and Codex today with zero integration code, which is
+            precisely AD-5's own argument.                                                [M]
+            Accept: the recipe published in `docs/agents.md` runs green as a testscript.
+
+[ ] AD5-05  Docs honesty pass. This corpus still advertises the per-harness adapter path
+            AD-5 REJECTS — `10_AGENT_WORKSPACES_AND_POLICIES.md`'s "Agent engines"
+            section lists `cursor-cli`/`codex-cli`/`copilot-cli` as "initial adapters",
+            and `13_CLI_DAEMON_API.md` still says "Non-generic engines remain future
+            work". Withdraw them rather than leaving them pending; a rejected path
+            described as "planned" is a promise the project has decided not to keep.      [S]
+            Accept: no document in the corpus promises a cursor/codex/copilot adapter.
+
+[ ] AD5-06  `worktree list --json` and `agent list --json` surface adoption provenance,
+            so the registry stays queryable by whoever populated it. Additive fields
+            only, per AD5-01's evolution rule.                                            [S]
+            Accept: a harness can list what it adopted and tell it apart from what
+            DevStrap provisioned.
+
+[ ] AD5-07  `devstrap mcp serve` — stdio MCP server, <=5 hand-authored tools
+            (`worktree_new`/`worktree_adopt`/`worktree_status`/`worktree_list`/
+            `agent_adopt`), no auth code (the local subprocess boundary IS the trust
+            boundary), SDK version pinned rather than floating. DEFERRED out of the
+            first wave ON PURPOSE: the MCP protocol had a breaking rewrite on
+            2026-07-28, and adding an external dependency to a signed-release binary is
+            a supply-chain decision to take deliberately, not as a wave side-effect.
+            Precedent for shipping it as a subcommand rather than a second binary:
+            `docker agent serve mcp`, `container-use stdio`.                              [M]
+            Accept: `claude mcp add devstrap -- devstrap mcp serve` yields a working
+            provisioning surface with NO second execution path — each tool calls the
+            same internal function its cobra command calls, exactly as the daemon's
+            `Converger` seam calls the same `runLoopTick` the CLI calls.
+```
+
+**Deliberately NOT in this decomposition**, so a future reader does not mistake the omission for an oversight: per-harness engine adapters (`cursor-cli`/`codex-cli`/`copilot-cli`) — AD-5's entire argument is that these are the wrong shape, and `AD5-05` withdraws the promise rather than deferring it; and any change that would let the adoption plane influence the fresh-worktree base resolver, which the invariant above forbids outright.
