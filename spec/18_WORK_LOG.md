@@ -31,6 +31,25 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — an empty mirror sha degraded the WIP compare-and-delete into an unconditional one (P9-WIP-01)
+
+Found by auditing the WIP plane directly after **two** commissioned reviewers went idle on it — Pass 8's and Pass 9's. Two consecutive passes would otherwise have recorded this plane as unaudited, and the defect below is exactly the kind that silence hides.
+
+Changed:
+
+- **`wip drop` and the automatic `wip gc` lease their delete to the mirror row's sha** — `--force-with-lease=<ref>:<sha>` — which is the single mechanism protecting a peer's recovery snapshot from being destroyed by a stale local record. But `git.Runner.DeleteRef` builds that argument only `if expectedSHA != ""`; an **empty** sha silently omits the lease and issues an unconditional `git push origin :<ref>`, destroying whatever the remote currently holds. That is precisely the loss the compare-and-delete exists to prevent, and `wip gc` runs unattended on every convergence cycle.
+- **The mirror could hold such a row.** `device_wip.sha` is `NOT NULL DEFAULT ''`, the live-row predicate does not exclude an empty sha, and the apply handler validated the payload's **path** but never its **sha** — so a `repo.wip.pushed` event from an approved device carrying `sha: ""` (a buggy peer, a truncated payload) mirrored cleanly and armed the unleased delete.
+- Fixed at both ends. Apply-time: an empty sha is now an `ErrEventVerification` and the event quarantines, exactly as a malformed path already did — the sha is the other half of the mirror's safety contract. Drop-time, as defense in depth: `dropWipRef` refuses rather than issue an unleased delete, so a row predating this validation, or arriving by any future path, still cannot trigger one. The refusal names the remedy (`devstrap sync`, then retry).
+
+Severity is P2, not P1: reaching it requires an approved, signature-verifying device to emit a malformed event, so it is a robustness and defense-in-depth gap rather than a remote exploit. But it defeats the only safeguard on user recovery data, on a path that runs automatically.
+
+**A vacuous gate in my own tooling, caught here.** The formatting check used throughout this session was `gofmt -l cmd internal && echo "gofmt clean"` — and `gofmt -l` **lists** unformatted files while exiting **0**, so the success message printed regardless. It had been reporting "clean" over a genuinely unformatted file. The gate now tests the output: `OUT=$(gofmt -l …); [ -n "$OUT" ] && exit 1`. This is the ninth vacuous-green check recorded this session and the first one located in the verification tooling itself rather than in the code under test.
+
+Validated:
+
+- Mutation-checked the apply-time validation in both directions: removing it makes the event mirror rather than quarantine.
+- `golangci-lint run` — 0 issues; `go test -race ./...` exit 0; gofmt verified with a gate that can actually fail.
+
 ## 2026-07-31 — `--base-ref` is validated when recorded, and `agent adopt` takes the lock (P8-ADOPT-03/04)
 
 Changed:

@@ -1071,6 +1071,18 @@ func applyEventTx(ctx context.Context, tx *state.Tx, event state.Event) error {
 		if err != nil {
 			return fmt.Errorf("%w: wip path %q: %w", state.ErrEventVerification, payload.Path, err)
 		}
+		// P9-WIP-01: an EMPTY sha must never enter the mirror. `wip drop` and the
+		// automatic `wip gc` lease their delete to the mirror row's sha
+		// (`--force-with-lease=<ref>:<sha>`), and git.Runner.DeleteRef omits the
+		// lease entirely when that value is empty — turning a compare-and-delete
+		// into an UNCONDITIONAL delete of whatever recovery snapshot the remote
+		// currently holds. That is precisely the loss the lease exists to
+		// prevent, and `wip gc` runs on every convergence cycle unattended.
+		// The path is already validated here; the sha is the other half of the
+		// mirror's safety contract, so it is validated the same way.
+		if strings.TrimSpace(payload.SHA) == "" {
+			return fmt.Errorf("%w: wip event %s carries no sha; the mirror's leased delete would degrade to an unconditional one", state.ErrEventVerification, event.ID)
+		}
 		return tx.UpsertDeviceWipTx(ctx, event.DeviceID, pk.Key, pk.Display, state.WipParams{
 			Ref:        payload.Ref,
 			SHA:        payload.SHA,

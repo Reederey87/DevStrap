@@ -383,3 +383,38 @@ func TestWipDroppedAppliesForPeerOwner(t *testing.T) {
 		t.Fatalf("rows=%#v, want only dropper's own live row", rows)
 	}
 }
+
+// TestApplyWipEventRejectsEmptySHA pins P9-WIP-01. `wip drop` and the automatic
+// `wip gc` lease their delete to the mirror row's sha
+// (--force-with-lease=<ref>:<sha>), and git.Runner.DeleteRef OMITS the lease
+// entirely when that value is empty — silently turning a compare-and-delete into
+// an unconditional delete of whatever recovery snapshot the remote holds. That
+// is exactly the loss the lease exists to prevent, and `wip gc` runs unattended
+// on every convergence cycle.
+//
+// The apply path already validates the payload's path; the sha is the other half
+// of the mirror's safety contract, so an empty one must never reach the mirror.
+func TestApplyWipEventRejectsEmptySHA(t *testing.T) {
+	ctx := context.Background()
+	st, _ := newSyncStore(t)
+	signing := addRemoteDeviceForApplyTest(t, st, "device-wip", "approved")
+	now := time.Now().UnixMilli()
+	ev := signedWipEvent(t, signing, "evt_wip_nosha", "device-wip", 1, now, WipPayload{
+		Path: "work/acme/proj", Ref: "refs/devstrap/wip/device-wip/work/acme/proj",
+		SHA: "", BaseSHA: "def456", CapturedAt: "2026-07-31T00:00:00Z",
+	})
+	_, stats, err := ApplyEventsWithStats(ctx, st, []state.Event{ev}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Quarantined != 1 {
+		t.Fatalf("stats=%+v, want the sha-less wip event quarantined rather than mirrored", stats)
+	}
+	rows, err := st.DeviceWipForProject(ctx, "work/acme/proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("rows=%#v, want NO mirrored row: a row with an empty sha makes the next drop/gc an unleased, unconditional delete", rows)
+	}
+}

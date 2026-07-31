@@ -198,6 +198,16 @@ func dropWipRef(ctx context.Context, store *state.Store, r dsgit.Runner, project
 	// may have force-pushed a newer snapshot whose event has not arrived.
 	// leasedSHA is the sha this delete proved it removed. Already-gone leases
 	// nothing and publishes the sha-agnostic empty tombstone.
+	// P9-WIP-01, defense in depth: refuse rather than issue an unleased delete.
+	// DeleteRef drops --force-with-lease when expectedSHA is empty, so an empty
+	// mirror sha would unconditionally destroy whatever the remote holds — the
+	// exact loss the compare-and-delete exists to prevent. Apply-time validation
+	// now keeps empty shas out of the mirror; this guard means a row that
+	// predates that validation, or arrives by any future path, still cannot
+	// trigger an unleased delete.
+	if strings.TrimSpace(expectedSHA) == "" {
+		return appError{code: exitConflict, err: fmt.Errorf("refusing to drop %s: the local record carries no sha, so the delete could not be leased and would destroy any newer recovery snapshot; run `devstrap sync` to refresh the record, then retry", ref)}
+	}
 	leasedSHA := expectedSHA
 	if err := r.DeleteRef(ctx, project.LocalPath, "origin", ref, expectedSHA); err != nil {
 		if !errors.Is(err, dsgit.ErrNonFastForward) {
