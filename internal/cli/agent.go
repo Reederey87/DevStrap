@@ -672,6 +672,20 @@ func newAgentPRCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// bare, and only AFTER BaseDrift's network fetch below has already
 			// run. Refuse up front with an actionable remedy instead.
 			if wt.Branch == "" {
+				// The stored column is frozen at adoption time, so a user who
+				// followed the remedy below would previously hit this identical
+				// refusal forever (P8-ADOPT-02). Re-read live HEAD before
+				// refusing: if a branch exists on disk now, the remedy WORKED and
+				// this run should proceed. Persist it so `worktree list` and the
+				// next command agree with reality.
+				if identity, idErr := gitRunner(opts).WorktreeIdentity(cmd.Context(), wt.Path); idErr == nil && identity.Branch != "" {
+					if err := store.UpdateWorktreeAdoption(cmd.Context(), wt.ID, identity.Branch, wt.BaseRef, wt.BaseSHA, wt.DirtyState); err != nil {
+						return err
+					}
+					wt.Branch = identity.Branch
+				}
+			}
+			if wt.Branch == "" {
 				return appError{code: exitUsage, err: fmt.Errorf("worktree %s has no branch (detached HEAD); create one first with 'git switch -c <name>' in %s, then re-run", wt.ID, wt.Path)}
 			}
 			drift, err := finalizationBaseDrift(cmd.Context(), opts, wt)
@@ -681,7 +695,16 @@ func newAgentPRCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if !drift.Fresh && !allowStaleBase {
 				return appError{code: exitConflict, err: fmt.Errorf("base %s moved %d commits; rebase or pass --allow-stale-base", wt.BaseRef, drift.Behind)}
 			}
-			baseBranch := strings.TrimPrefix(wt.BaseRef, "origin/")
+			// BaseRef is "<remote>/<branch>"; the forge wants the BRANCH. Trimming
+			// a hardcoded "origin/" left a fork-workflow base like
+			// "upstream/main" intact and sent it to the forge verbatim as a
+			// branch name that does not exist there (P8-ADOPT-03). Cut on the
+			// first separator instead, which is exactly how BaseDrift parses the
+			// same string.
+			baseBranch := wt.BaseRef
+			if _, branch, ok := strings.Cut(wt.BaseRef, "/"); ok {
+				baseBranch = branch
+			}
 			if title == "" {
 				title = run.Task
 			}

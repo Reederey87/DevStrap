@@ -4491,13 +4491,20 @@ WHERE namespace_id = ? AND path = ? AND status = 'active';
 // is allowed to perform on re-adopting the SAME row (created_by == "adopted")
 // — never on a row this device did not create by adoption, which the caller
 // must gate before calling this.
-func (s *Store) UpdateWorktreeAdoption(ctx context.Context, id, baseRef, baseSHA, dirtyState string) error {
+func (s *Store) UpdateWorktreeAdoption(ctx context.Context, id, branch, baseRef, baseSHA, dirtyState string) error {
 	now := timestampNow()
+	// `branch` is refreshed deliberately (P8-ADOPT-02). A worktree adopted while
+	// detached records "", and until this column moved with it, `agent pr`'s own
+	// printed remedy — "create one first with 'git switch -c <name>', then
+	// re-run" — could never take effect: no code path updated the column, so
+	// re-running adopt discarded the freshly-created branch name it already had
+	// in hand. A remedy that cannot work is worse than none; it sends the user
+	// in a circle.
 	_, err := s.db.ExecContext(ctx, `
 UPDATE worktrees
-SET base_ref = ?, base_sha = ?, dirty_state = ?, updated_at = ?
+SET branch = ?, base_ref = ?, base_sha = ?, dirty_state = ?, updated_at = ?
 WHERE id = ?;
-`, baseRef, baseSHA, dirtyState, now, id)
+`, branch, baseRef, baseSHA, dirtyState, now, id)
 	if err != nil {
 		return fmt.Errorf("update worktree adoption: %w", err)
 	}

@@ -31,6 +31,27 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — adoption hardening: a remedy that could not work, and a diff never captured (P8-ADOPT-02/03/06)
+
+Changed:
+
+- **`P8-ADOPT-02` — `agent pr` printed a remedy that could never take effect.** `worktrees.branch` was frozen at insert, so a worktree adopted while detached recorded `""` permanently. `agent pr` refused it with "create one first with `git switch -c <name>`, then re-run" — and the user who followed that hit the identical refusal forever, because no code path updated the column and re-running `adopt` discarded the freshly-created branch name it already had in hand. A remedy that cannot work is worse than no remedy: it sends the user in a circle instead of telling them they are stuck. `UpdateWorktreeAdoption` now refreshes `branch`, and `agent pr` re-reads live HEAD before refusing — persisting what it finds, so the next command agrees with reality.
+- **`P8-ADOPT-03` (the `agent pr` half) — the forge got a branch name that does not exist.** The base branch was derived with `strings.TrimPrefix(wt.BaseRef, "origin/")`, so a fork-workflow base like `upstream/main` passed through verbatim and was sent to the forge as a branch it has never heard of. It now cuts on the first separator — exactly how `BaseDrift` parses the same string, so the two agree. The record-time validation half (a bare `main`, or a `refs/devstrap/*` ref, still adopt without complaint and fail only much later) remains open.
+- **`P8-ADOPT-06` — the diff summary was captured only by accident.** `agent finish` recomputed it on the `--test-summary` branch only, though the surrounding comment states this is "the only chance to record it" and `finish` is deliberately non-idempotent. Any run finished without that flag kept a permanently empty diff in `agent show` and in its PR body. Now unconditional.
+
+**A vacuous test, caught by its own mutation check, and worth recording.** The first version of the `P8-ADOPT-02` regression test asserted the `adoptResult` struct returned in memory — which the fix populates directly — so it **passed with the store UPDATE reverted**. It proved the in-memory assignment, not the persistence, which is the entire point of the finding. It now reads the row back through a separate `worktree list --json` invocation and fails with `PERSISTED branch = ""` when reverted. This is the seventh instance this session of a check that looked green while proving nothing; the pattern is consistent enough that "would this fail if the behavior were reverted?" is now the default question before any test is considered done.
+
+Validated:
+
+- `gofmt` clean; `golangci-lint run` — 0 issues; `go test -race ./...` exit 0 (under the `useConfigOnly` git config that reproduces the Linux-CI identity failure).
+- Mutation check on the `P8-ADOPT-02` test in both directions, after the vacuous first version was replaced.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+
+- Pass 8 drops to **4 open of 8**: `P8-SEC-01` (tombstone GC cascade), `P8-ADOPT-03` (record-time `--base-ref` validation), `P8-ADOPT-04` (provision→register gap), `P8-ADOPT-07` (legacy path spellings). No P1 remains.
+- Pass 9 must still open with the two planes Pass 8 commissioned and never audited: the working-state/WIP plane and the daemon/socket/watch plane.
+
 ## 2026-07-31 — the sandbox no longer grants `commondir` (P8-SEC-02)
 
 Changed:
