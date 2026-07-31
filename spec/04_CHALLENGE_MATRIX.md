@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-01
+last_reviewed: 2026-07-31
 tracks_code: [cmd/**, internal/**]
 ---
 # Challenge Matrix and Viable Approaches
@@ -141,7 +141,7 @@ Problem: the user's real pain — uncommitted/unpushed work stranded on machine 
 
 Recommended solution — a git-native, three-layer human-convenience plane, strictly walled off from the agent plane (agents always base from `origin/<default_branch>`):
 
-- **Layer A — validation (planned; not yet built):** signed read-only `repo.gitstate.observed` snapshots (dirty/untracked/unmerged/ahead/behind/stash counts) so every device knows where every other device's tree stands; `status --all-devices`/`doctor` warn and always render snapshot age (never silent all-clear).
+- **Layer A — validation (SHIPPED; capture wired into `devstrap sync` since `P7-GITSTATE-01`):** signed read-only `repo.gitstate.observed` snapshots (dirty/untracked/unmerged/ahead/behind/stash counts) so every device knows where every other device's tree stands; `status --all-devices`/`doctor` warn and always render snapshot age (never silent all-clear).
 - **Layer B — WIP recovery (planned; not yet built):** `git stash create` → push to `refs/devstrap/wip/<device>/<path_key>` over git's integrity-checked transport (forge-agnostic); machine B `wip apply` on demand, never as a branch/base.
 - **Layer C — encrypted bundle (SHIPPED, `DRAFT-*`):** for non-git/draft folders only, via `draft snapshot create` + `draft.snapshot.created` + age encryption.
 

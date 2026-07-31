@@ -50,7 +50,7 @@ func TestPlanWipGC(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			actions, next := planWipGC(tc.rows, tc.remote, tc.trust, tc.self, tc.target, tc.orphans, ttl, now)
+			actions, next := planWipGC(tc.rows, tc.remote, tc.trust, tc.self, tc.target, tc.orphans, nil, ttl, now)
 			if len(actions) != 1 {
 				t.Fatalf("actions = %+v, want one", actions)
 			}
@@ -180,7 +180,7 @@ func TestPlanWipGCOrphanActionCarriesThePathKey(t *testing.T) {
 	actions, _ := planWipGC(
 		nil,
 		map[string][]dsgit.RemoteRef{"work/proj": {{Ref: ref, SHA: sha}}},
-		map[string]string{}, "self", "", seen, ttl, now,
+		map[string]string{}, "self", "", seen, nil, ttl, now,
 	)
 	if len(actions) != 1 {
 		t.Fatalf("actions = %+v, want exactly one orphan action", actions)
@@ -217,7 +217,7 @@ func TestPlanWipGCDistinguishesUncheckedFromOutdated(t *testing.T) {
 		{"owner pushed newer", map[string][]dsgit.RemoteRef{"project": {{Ref: wipRefFor("self", "project"), SHA: strings.Repeat("b", 40)}}}, "owner pushed newer, unsynced"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			actions, _ := planWipGC(rows, tc.remote, map[string]string{}, "self", "", nil, ttl, now)
+			actions, _ := planWipGC(rows, tc.remote, map[string]string{}, "self", "", nil, nil, ttl, now)
 			if len(actions) == 0 {
 				t.Fatal("no actions")
 			}
@@ -242,12 +242,55 @@ func TestPlanWipGCKeepsUnvisitedOrphanRecords(t *testing.T) {
 	seen := map[string]wipOrphanRecord{elsewhere: {SHA: strings.Repeat("d", 40), FirstSeen: now.Add(-ttl / 2)}}
 
 	// Sweep visits only "project"; the record for "other/proj" must survive.
-	_, next := planWipGC(nil, map[string][]dsgit.RemoteRef{"project": {}}, map[string]string{}, "self", "", seen, ttl, now)
+	_, next := planWipGC(nil, map[string][]dsgit.RemoteRef{"project": {}}, map[string]string{}, "self", "", seen, nil, ttl, now)
 	got, ok := next[elsewhere]
 	if !ok {
 		t.Fatal("a scoped sweep dropped an unvisited project's orphan record; its TTL would restart from zero")
 	}
 	if !got.FirstSeen.Equal(seen[elsewhere].FirstSeen) {
 		t.Fatalf("first-seen = %v, want the original %v", got.FirstSeen, seen[elsewhere].FirstSeen)
+	}
+}
+
+// TestPlanWipGCRefusesToReapShaAgnosticallyHiddenRef pins P9-WIP-06, the
+// decision this repo had to make rather than patch around.
+//
+// A sha-agnostic drop tombstone — published when the remote ref was already
+// gone — deliberately outranks any sha guess so a phantom row clears. Under HLC
+// skew that same rule buries a genuinely LATER push: the row is hidden on every
+// device including the owner's, and the still-live ref then looks like an
+// unowned orphan the GC should reap. Reaping it converts a recoverable
+// visibility bug into permanent loss of the user's recovery data.
+//
+// Hiding is recoverable — `wip fetch --device <id>` derives the ref canonically
+// and ignores the mirror entirely. Deletion is not. Where the two conflict a
+// RECOVERY plane must prefer the recoverable outcome, so the GC refuses and
+// says why.
+func TestPlanWipGCRefusesToReapShaAgnosticallyHiddenRef(t *testing.T) {
+	const self = "dev_self"
+	ref := wipRefFor(self, "work/proj")
+	now := time.Now()
+	ttl := time.Hour
+	// Long past TTL: without the guard this is a confident delete nomination.
+	seen := map[string]wipOrphanRecord{ref: {SHA: "newsha", FirstSeen: now.Add(-72 * time.Hour)}}
+	remote := map[string][]dsgit.RemoteRef{"work/proj": {{Ref: ref, SHA: "newsha"}}}
+
+	// Control: with no tombstone hiding it, the aged orphan IS reaped.
+	actions, _ := planWipGC(nil, remote, map[string]string{}, self, "", seen, nil, ttl, now)
+	if len(actions) != 1 || !actions[0].Delete {
+		t.Fatalf("control: aged own-orphan should be nominated for delete; got %+v", actions)
+	}
+
+	// With a sha-agnostic tombstone for that exact ref, it must NOT be reaped.
+	actions, _ = planWipGC(nil, remote, map[string]string{}, self, "", seen, map[string]bool{ref: true}, ttl, now)
+	if len(actions) != 1 {
+		t.Fatalf("actions = %+v, want exactly one action", actions)
+	}
+	if actions[0].Delete {
+		t.Fatalf("a ref hidden by a sha-agnostic tombstone must NEVER be deleted — it may be a newer push, "+
+			"not an orphan, and deletion is the one outcome that is not recoverable; got %+v", actions[0])
+	}
+	if !strings.Contains(actions[0].Reason, "sha-agnostic") || !strings.Contains(actions[0].Reason, "wip fetch") {
+		t.Fatalf("the refusal must say why and name the recovery path; got %q", actions[0].Reason)
 	}
 }

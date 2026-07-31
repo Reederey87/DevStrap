@@ -65,6 +65,7 @@ func planWipGC(
 	selfID string,
 	targetDevice string,
 	orphans map[string]wipOrphanRecord,
+	shaAgnosticTombstones map[string]bool,
 	ttl time.Duration,
 	now time.Time,
 ) ([]wipGCAction, map[string]wipOrphanRecord) {
@@ -134,6 +135,23 @@ func planWipGC(
 				// origin. Unknown/live-peer orphans could be another workspace's
 				// recovery data, so automatic deletion is unrecoverably unsafe.
 				a.Reason = "unknown owner; not deleted"
+				actions = append(actions, a)
+				continue
+			}
+			// P9-WIP-06: never DESTROY a ref this workspace merely cannot SEE.
+			// A sha-agnostic tombstone (a drop published when the remote ref was
+			// already gone) deliberately outranks any sha guess so a phantom row
+			// clears — but under HLC skew that same rule buries a genuinely LATER
+			// push, hiding it on every device including the owner's and making
+			// the live ref look like an unowned orphan. Reaping it here would
+			// turn a recoverable visibility bug into permanent data loss.
+			//
+			// Hiding is recoverable: `wip fetch --device <id>` derives the ref
+			// canonically and ignores the mirror entirely. Deletion is not. Where
+			// the two conflict, a RECOVERY plane must prefer the recoverable
+			// outcome, so this refuses and says why.
+			if shaAgnosticTombstones[rr.Ref] {
+				a.Reason = "a sha-agnostic drop tombstone hides this ref; it may be a newer push, not an orphan — not deleted (inspect with `devstrap wip fetch --device " + deviceID + "`)"
 				actions = append(actions, a)
 				continue
 			}
@@ -318,7 +336,11 @@ func sweepWipRefs(ctx context.Context, store *state.Store, opts *options, o wipG
 			filteredRows = append(filteredRows, row)
 		}
 	}
-	actions, nextOrphans := planWipGC(filteredRows, remote, trust, device.ID, o.TargetDevice, orphans, o.TTL, time.Now())
+	shaAgnostic, tombErr := store.ShaAgnosticTombstoneRefs(ctx)
+	if tombErr != nil {
+		return wipGCResult{}, 0, tombErr
+	}
+	actions, nextOrphans := planWipGC(filteredRows, remote, trust, device.ID, o.TargetDevice, orphans, shaAgnostic, o.TTL, time.Now())
 	for i := range actions {
 		if actions[i].Path == "" {
 			if p, ok := projectByKey[actions[i].PathKey]; ok {

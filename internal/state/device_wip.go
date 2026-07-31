@@ -203,3 +203,39 @@ ORDER BY path_key, observed_at_hlc DESC;
 	}
 	return out, nil
 }
+
+// ShaAgnosticTombstoneRefs returns the WIP refs this workspace holds a
+// SHA-AGNOSTIC tombstone for — a drop recorded with no leased sha, published
+// when the remote ref was already gone. Such a tombstone deliberately outranks
+// any sha guess so a phantom row clears, but that same rule buries a genuinely
+// LATER push whose HLC lost to clock skew: the row is hidden on every device
+// including the owner's, and the ref then looks like an unowned orphan.
+//
+// The automatic GC consults this so it can never DESTROY a ref it cannot see
+// (P9-WIP-06). Hiding a row is recoverable — `wip fetch --device <id>` derives
+// the ref canonically and ignores the mirror entirely. Deleting the object is
+// not. Where those two outcomes conflict, the recovery plane must prefer the
+// recoverable one.
+func (s *Store) ShaAgnosticTombstoneRefs(ctx context.Context) (map[string]bool, error) {
+	workspaceID, err := s.WorkspaceID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.reader().QueryContext(ctx, `
+SELECT ref FROM device_wip
+WHERE workspace_id = ? AND dropped_at_hlc IS NOT NULL AND COALESCE(dropped_sha, '') = '' AND ref <> '';
+`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("read sha-agnostic wip tombstones: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]bool{}
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, fmt.Errorf("scan sha-agnostic wip tombstone: %w", err)
+		}
+		out[ref] = true
+	}
+	return out, rows.Err()
+}
