@@ -57,7 +57,7 @@ Follow-ups:
 
 - The wave itself: `AD5-01` (machine contract) → `AD5-02` (`worktree adopt`) → `AD5-03` (`agent adopt`/`agent finish`) → `AD5-04` (reference integration) → `AD5-05`/`AD5-06` (honesty pass + provenance). `AD5-07` stays deferred until the MCP protocol rewrite settles.
 - **Two safety interactions `AD5-02` must close and must not be allowed to slip:** `worktree cleanup --merged` iterates every worktree with no `created_by` filter and runs `git branch -D` on what it reaps, and `worktree remove` deletes the checkout — neither is acceptable by default against a worktree DevStrap did not create.
-- E2e coverage for the worktree/agent-run family is thin: **no** testscript exercises `worktree new`, `worktree status/finalize/list/remove/cleanup`, or `agent run`. The adoption e2e has no template to copy and needs its time budgeted rather than assumed.
+- E2e coverage for the worktree/agent-run family is uneven, and the useful half was almost missed: `worktree_never_bases_off_wip_ref.txtar` **does** drive `worktree new --fresh-upstream` through the real binary against a real remote fixture, so the adoption e2e has a good template — one that already builds the two-device `$WORK` layout. What genuinely has no coverage is `agent run` and the other `worktree` subcommands (`status`/`finalize`/`list`/`remove`/`cleanup`), so `AD5-03`'s e2e is the one to budget time for, not `AD5-02`'s.
 
 ## 2026-07-31 — Live forge dogfood of the WIP plane, and two docs that overstated reality
 
