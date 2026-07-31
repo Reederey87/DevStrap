@@ -40,6 +40,7 @@ type syncResult struct {
 	NamespaceOnly         bool     `json:"namespace_only,omitempty"`
 	KeyRotated            bool     `json:"key_rotated,omitempty"`
 	BlobsGCd              int      `json:"blobs_gcd,omitempty"`
+	WipRefsGCd            int      `json:"wip_refs_gcd,omitempty"`
 	MaterializedTotal     int      `json:"materialized_total,omitempty"`
 	MaterializedSucceeded int      `json:"materialized_succeeded,omitempty"`
 	MaterializedSkipped   int      `json:"materialized_skipped,omitempty"`
@@ -270,6 +271,11 @@ func runSyncCycle(ctx context.Context, stdout, stderr io.Writer, opts *options, 
 	if removed, gcErr := gcUnreferencedBlobs(ctx, store, opts.paths()); gcErr == nil && removed > 0 {
 		result.BlobsGCd = removed
 	}
+	wipRefsGCd, gcErr := maybeGCWipRefsAfterSync(ctx, stderr, opts, store, time.Now())
+	if gcErr != nil {
+		return gcErr
+	}
+	result.WipRefsGCd = wipRefsGCd
 	result.MaterializedTotal = results.total
 	result.MaterializedSucceeded = results.succeeded
 	result.MaterializedSkipped = results.skipped
@@ -282,6 +288,9 @@ func runSyncCycle(ctx context.Context, stdout, stderr io.Writer, opts *options, 
 		}
 		if result.BlobsGCd > 0 {
 			opts.progressf(w, "GC'd %d unreferenced blob(s)\n", result.BlobsGCd)
+		}
+		if result.WipRefsGCd > 0 {
+			opts.progressf(w, "GC'd %d WIP recovery ref(s)\n", result.WipRefsGCd)
 		}
 		opts.progressf(w, "Synced events: pushed %d, pulled %d; materialized %d/%d projects (%d skipped)\n",
 			result.Pushed, result.Pulled, result.MaterializedSucceeded, result.MaterializedTotal, result.MaterializedSkipped)

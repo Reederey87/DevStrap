@@ -242,6 +242,150 @@ type wipGCResult struct {
 	Warnings []wipGCWarning `json:"warnings,omitempty"`
 }
 
+type wipGCOptions struct {
+	TargetDevice string
+	ProjectPath  string
+	TTL          time.Duration
+	DryRun       bool
+}
+
+func sweepWipRefs(ctx context.Context, store *state.Store, opts *options, o wipGCOptions) (wipGCResult, int, error) {
+	rows, err := store.DeviceWipAll(ctx)
+	if err != nil {
+		return wipGCResult{}, 0, err
+	}
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return wipGCResult{}, 0, err
+	}
+	if o.ProjectPath != "" {
+		p, err := store.ProjectByPath(ctx, o.ProjectPath)
+		if err != nil {
+			return wipGCResult{}, 0, err
+		}
+		projects = []state.ProjectStatus{p}
+	}
+	device, err := store.CurrentDevice(ctx)
+	if err != nil {
+		return wipGCResult{}, 0, err
+	}
+	devices, err := store.ListDevices(ctx)
+	if err != nil {
+		return wipGCResult{}, 0, err
+	}
+	trust := make(map[string]string, len(devices))
+	for _, d := range devices {
+		trust[d.ID] = d.TrustState
+	}
+	orphans := map[string]wipOrphanRecord{}
+	if raw, ok, metaErr := store.GetLocalMeta(ctx, wipGCOrphansKey); metaErr != nil {
+		return wipGCResult{}, 0, metaErr
+	} else if ok && json.Unmarshal([]byte(raw), &orphans) != nil {
+		orphans = map[string]wipOrphanRecord{}
+	}
+	r := gitRunner(opts)
+	remote := map[string][]dsgit.RemoteRef{}
+	projectByKey := map[string]state.ProjectStatus{}
+	result := wipGCResult{TTL: o.TTL.String(), DryRun: o.DryRun}
+	for _, p := range projects {
+		if p.Type != "git_repo" || p.LocalPath == "" {
+			continue
+		}
+		projectByKey[p.PathKey] = p
+		refs, skipped, listErr := r.LsRemoteWipRefs(ctx, p.LocalPath, "origin")
+		if listErr != nil {
+			result.Warnings = append(result.Warnings, wipGCWarning{Path: p.Path, Message: listErr.Error()})
+			continue
+		}
+		remote[p.PathKey] = refs
+		if skipped > 0 {
+			result.Warnings = append(result.Warnings, wipGCWarning{Path: p.Path, Message: fmt.Sprintf("skipped %d malformed remote ref line(s)", skipped)})
+		}
+	}
+	filteredRows := rows[:0]
+	for _, row := range rows {
+		if _, ok := projectByKey[row.PathKey]; ok {
+			filteredRows = append(filteredRows, row)
+		}
+	}
+	actions, nextOrphans := planWipGC(filteredRows, remote, trust, device.ID, o.TargetDevice, orphans, o.TTL, time.Now())
+	for i := range actions {
+		if actions[i].Path == "" {
+			if p, ok := projectByKey[actions[i].PathKey]; ok {
+				actions[i].Path = p.Path
+			} else {
+				actions[i].Path = actions[i].PathKey
+			}
+		}
+	}
+	failedDeletes := 0
+	for i := range actions {
+		a := &actions[i]
+		if !a.Delete || o.DryRun {
+			continue
+		}
+		p, ok := projectByKey[a.PathKey]
+		if !ok {
+			a.Delete, a.Reason = false, "project unavailable; not deleted"
+			continue
+		}
+		if err := r.FetchRef(ctx, p.LocalPath, "origin", a.Ref); err != nil {
+			a.Delete, a.Reason = false, "could not fetch candidate; not deleted"
+			result.Warnings = append(result.Warnings, wipGCWarning{Path: p.Path, Message: err.Error()})
+			continue
+		}
+		old, err := commitAgeExceeds(ctx, r, p.LocalPath, a.SHA, o.TTL, time.Now())
+		if err != nil {
+			a.Delete, a.Reason = false, "could not inspect object; not deleted"
+			result.Warnings = append(result.Warnings, wipGCWarning{Path: p.Path, Message: err.Error()})
+			continue
+		}
+		if _, err := r.Run(ctx, p.LocalPath, "update-ref", "-d", a.Ref); err != nil {
+			a.Delete, a.Reason = false, "could not remove local inspection ref; not deleted"
+			result.Warnings = append(result.Warnings, wipGCWarning{Path: p.Path, Message: err.Error()})
+			continue
+		}
+		if !corroborateCommitAge(a, old) {
+			continue
+		}
+		if strings.HasSuffix(a.Reason, "device past TTL") {
+			fresh, err := store.ListDevices(ctx)
+			if err != nil {
+				a.Delete, a.Reason = false, "could not re-verify device trust; not deleted"
+				result.Warnings = append(result.Warnings, wipGCWarning{Path: p.Path, Message: err.Error()})
+				continue
+			}
+			stillTerminal := false
+			for _, d := range fresh {
+				if d.ID == a.DeviceID {
+					stillTerminal = d.TrustState == "revoked" || d.TrustState == "lost"
+					break
+				}
+			}
+			if !stillTerminal {
+				a.Delete, a.Reason = false, "device trust changed during sweep; not deleted"
+				continue
+			}
+		}
+		if err := dropWipRef(ctx, store, r, p, a.DeviceID, a.SHA); err != nil {
+			a.Delete, a.Reason = false, "delete failed"
+			result.Warnings = append(result.Warnings, wipGCWarning{Path: p.Path, Message: err.Error()})
+			failedDeletes++
+		}
+	}
+	result.Actions = actions
+	if !o.DryRun {
+		raw, err := json.Marshal(nextOrphans)
+		if err != nil {
+			return wipGCResult{}, failedDeletes, err
+		}
+		if err := store.SetLocalMeta(ctx, wipGCOrphansKey, string(raw)); err != nil {
+			return wipGCResult{}, failedDeletes, err
+		}
+	}
+	return result, failedDeletes, nil
+}
+
 func newWipGCCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var targetDevice, ttlText string
 	var dryRun bool
@@ -259,156 +403,18 @@ func newWipGCCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			defer closeStore(store)
-			rows, err := store.DeviceWipAll(cmd.Context())
-			if err != nil {
-				return err
-			}
-			projects, err := store.ListProjects(cmd.Context())
-			if err != nil {
-				return err
-			}
+			projectPath := ""
 			if len(args) == 1 {
-				p, err := store.ProjectByPath(cmd.Context(), args[0])
-				if err != nil {
-					return err
-				}
-				projects = []state.ProjectStatus{p}
+				projectPath = args[0]
 			}
-			device, err := store.CurrentDevice(cmd.Context())
+			result, failedDeletes, err := sweepWipRefs(cmd.Context(), store, opts, wipGCOptions{
+				TargetDevice: targetDevice,
+				ProjectPath:  projectPath,
+				TTL:          ttl,
+				DryRun:       dryRun,
+			})
 			if err != nil {
 				return err
-			}
-			devices, err := store.ListDevices(cmd.Context())
-			if err != nil {
-				return err
-			}
-			trust := make(map[string]string, len(devices))
-			for _, d := range devices {
-				trust[d.ID] = d.TrustState
-			}
-			orphans := map[string]wipOrphanRecord{}
-			if raw, ok, metaErr := store.GetLocalMeta(cmd.Context(), wipGCOrphansKey); metaErr != nil {
-				return metaErr
-			} else if ok && json.Unmarshal([]byte(raw), &orphans) != nil {
-				orphans = map[string]wipOrphanRecord{}
-			}
-			r := gitRunner(opts)
-			remote := map[string][]dsgit.RemoteRef{}
-			projectByKey := map[string]state.ProjectStatus{}
-			result := wipGCResult{TTL: ttl.String(), DryRun: dryRun}
-			for _, p := range projects {
-				if p.Type != "git_repo" || p.LocalPath == "" {
-					continue
-				}
-				projectByKey[p.PathKey] = p
-				refs, skipped, listErr := r.LsRemoteWipRefs(cmd.Context(), p.LocalPath, "origin")
-				if listErr != nil {
-					result.Warnings = append(result.Warnings, wipGCWarning{Path: p.Path, Message: listErr.Error()})
-					continue
-				}
-				remote[p.PathKey] = refs
-				if skipped > 0 {
-					result.Warnings = append(result.Warnings, wipGCWarning{Path: p.Path, Message: fmt.Sprintf("skipped %d malformed remote ref line(s)", skipped)})
-				}
-			}
-			filteredRows := rows[:0]
-			for _, row := range rows {
-				if _, ok := projectByKey[row.PathKey]; ok {
-					filteredRows = append(filteredRows, row)
-				}
-			}
-			actions, nextOrphans := planWipGC(filteredRows, remote, trust, device.ID, targetDevice, orphans, ttl, time.Now())
-			// The orphan branch knows only the path key, so give every action its
-			// display path before anything renders. Done for ALL actions, not
-			// just deletable ones: the loop below skips the rest.
-			for i := range actions {
-				if actions[i].Path == "" {
-					if p, ok := projectByKey[actions[i].PathKey]; ok {
-						actions[i].Path = p.Path
-					} else {
-						actions[i].Path = actions[i].PathKey
-					}
-				}
-			}
-			failedDeletes := 0
-			for i := range actions {
-				a := &actions[i]
-				if !a.Delete || dryRun {
-					continue
-				}
-				p, ok := projectByKey[a.PathKey]
-				if !ok {
-					a.Delete, a.Reason = false, "project unavailable; not deleted"
-					continue
-				}
-				if err := r.FetchRef(cmd.Context(), p.LocalPath, "origin", a.Ref); err != nil {
-					a.Delete, a.Reason = false, "could not fetch candidate; not deleted"
-					result.Warnings = append(result.Warnings, wipGCWarning{Path: p.Path, Message: err.Error()})
-					continue
-				}
-				old, err := commitAgeExceeds(cmd.Context(), r, p.LocalPath, a.SHA, ttl, time.Now())
-				if err != nil {
-					a.Delete, a.Reason = false, "could not inspect object; not deleted"
-					result.Warnings = append(result.Warnings, wipGCWarning{Path: p.Path, Message: err.Error()})
-					continue
-				}
-				// Remove the local mirror the fetch created. This is HYGIENE,
-				// not the interlock: worktree bases resolve exclusively through
-				// origin/<default_branch> (worktree.go's RevParse), refs under
-				// refs/devstrap/* are not in that path, and `wip fetch` already
-				// leaves identical refs behind by design. So a crash between the
-				// fetch and this deletion is untidy, not unsafe — GC simply
-				// should not accumulate recovery refs it only needed to read.
-				if _, err := r.Run(cmd.Context(), p.LocalPath, "update-ref", "-d", a.Ref); err != nil {
-					a.Delete, a.Reason = false, "could not remove local inspection ref; not deleted"
-					result.Warnings = append(result.Warnings, wipGCWarning{Path: p.Path, Message: err.Error()})
-					continue
-				}
-				if !corroborateCommitAge(a, old) {
-					continue
-				}
-				// Re-read trust immediately before a trust-JUSTIFIED delete. The
-				// snapshot backing the planner was taken before enumeration, and
-				// a concurrent `devices approve` (or a sync applying one) can
-				// land in between — the lease cannot save that ref, because its
-				// sha has not changed. Seconds-wide window, but the data is a
-				// peer's only copy and re-reading one row is free.
-				if strings.HasSuffix(a.Reason, "device past TTL") {
-					fresh, err := store.ListDevices(cmd.Context())
-					if err != nil {
-						a.Delete, a.Reason = false, "could not re-verify device trust; not deleted"
-						result.Warnings = append(result.Warnings, wipGCWarning{Path: p.Path, Message: err.Error()})
-						continue
-					}
-					stillTerminal := false
-					for _, d := range fresh {
-						if d.ID == a.DeviceID {
-							stillTerminal = d.TrustState == "revoked" || d.TrustState == "lost"
-							break
-						}
-					}
-					if !stillTerminal {
-						a.Delete, a.Reason = false, "device trust changed during sweep; not deleted"
-						continue
-					}
-				}
-				if err := dropWipRef(cmd.Context(), store, r, p, a.DeviceID, a.SHA); err != nil {
-					a.Delete, a.Reason = false, "delete failed"
-					result.Warnings = append(result.Warnings, wipGCWarning{Path: p.Path, Message: err.Error()})
-					failedDeletes++
-				}
-			}
-			result.Actions = actions
-			if !dryRun {
-				raw, err := json.Marshal(nextOrphans)
-				if err != nil {
-					return err
-				}
-				// Advisory local state avoids a schema/index for a tiny,
-				// machine-specific first-seen cache.
-				if err := store.SetLocalMeta(cmd.Context(), wipGCOrphansKey, string(raw)); err != nil {
-					return err
-				}
 			}
 			renderErr := opts.render(stdout, func(w io.Writer) error {
 				for _, a := range result.Actions {

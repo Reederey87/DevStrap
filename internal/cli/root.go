@@ -189,6 +189,8 @@ func initConfig(opts *options) error {
 	opts.v.SetDefault("sync.key_grant_grace", "72h")
 	opts.v.SetDefault("keys.rotate_max_age", "2160h")
 	opts.v.SetDefault(durabilityExportConfigKey, defaultDurabilityExportInterval.String())
+	opts.v.SetDefault(wipGCIntervalKey, defaultWipGCInterval.String())
+	opts.v.SetDefault(wipTTLConfigKey, defaultWipGCTTL.String())
 
 	if opts.cfgFile != "" {
 		opts.v.SetConfigFile(opts.cfgFile)

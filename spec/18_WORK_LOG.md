@@ -31,6 +31,29 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-30 — P7-WIP-08 automatic WIP GC on convergence
+
+Changed:
+
+- Extracted `sweepWipRefs` from the manual Cobra wrapper so manual and
+  automatic callers share remote-SHA enumeration, SHA-bound committer-date
+  corroboration, trust re-read, and leased deletion.
+- Added strict `wip.gc_interval`/`wip.ttl` configuration, advisory
+  `wip_gc_last_success` scheduling, the post-materialization sync hook,
+  `wip_refs_gcd` JSON, per-project operational warning isolation, and doctor
+  freshness/escalation guidance.
+- Added config/due/interval/failure-isolation tests and
+  `sync_wip_gc.txtar`; updated the automatic-policy, forge-notification,
+  CLI/data/test/roadmap specs and audit notes without moving ledger rows.
+
+Validated:
+
+- See the P7-WIP-08 task report for mutation outputs and requested gates.
+
+Follow-ups:
+
+- None.
+
 ## 2026-07-30 — AGEN-05: `.env.example` passes and `~/.snowflake` is masked
 
 Changed:

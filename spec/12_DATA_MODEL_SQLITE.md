@@ -4,7 +4,7 @@ tracks_code: [internal/state/**, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md
 ---
 # SQLite Data Model
 
-## WIP GC reads and local advisory state (`P7-WIP-07`)
+## WIP GC reads and local advisory state (`P7-WIP-07`/`P7-WIP-08`)
 
 `Store.DeviceWipAll` reads every live `device_wip` row workspace-wide ordered
 by `path_key, observed_at_hlc DESC`. Age filtering stays in Go; the expected
@@ -12,8 +12,8 @@ devices-times-projects cardinality is tens to hundreds, so no
 `observed_at_hlc` index is added. `local_meta.wip_gc_orphans` is a JSON map
 from ref to `{sha, first_seen}` used only as this machine's advisory orphan
 quarantine. Missing refs and refs that regain a live mirror row are pruned
-from it. The existing later-slice “TTL/GC out of scope” historical line is
-left unchanged for PR 3 as scheduled.
+from it. `local_meta.wip_gc_last_success` records the last completed automatic
+sweep; a corrupt advisory timestamp means due-now so it cannot wedge GC.
 
 ## Database location
 
@@ -646,7 +646,7 @@ CREATE TABLE device_wip (
 );
 ```
 
-`device_wip` (migrations `00030_device_wip.sql` and `00031_device_wip_dropped_at.sql`) is the apply-side mirror for `repo.wip.pushed` (`07`, working-state validation plane Layer B — "did I forget to push a WIP-only change, and is it recoverable from another machine"). The mechanism: `git stash create` produces a commit object WITHOUT touching the worktree or index, and that object is pushed to `refs/devstrap/wip/<device_id>/<path_key>` via a raw refspec (`git push <remote> <sha>:<ref>`, `Runner.PushRef`). Apply is MIRROR-ONLY, exactly like `device_gitstate` — `UpsertDeviceWipTx` `INSERT ... ON CONFLICT DO UPDATE`s the row for `(device_id, path_key)`, guarded by `WHERE excluded.observed_at_hlc >= device_wip.observed_at_hlc` so an out-of-order redelivery of a stale push cannot regress a newer one — this table holds "the last-pushed WIP ref," never a history log. The storage layer landed with the git primitives (`Runner.StashCreate`/`Runner.PushRef`) and the `repo.wip.pushed` event; the full CLI that emits and consumes it — `wip push`/`fetch`/`status`/`show`/`apply`/`drop` — shipped across `P7-WIP-02`–`P7-WIP-05` (see `13_CLI_DAEMON_API.md` § *WIP commands*). Successful drops emit `repo.wip.dropped` and permanently tombstone the owner row; reads retain a racing different-SHA push even at a lower or equal cross-stream HLC. Automatic fleet-wide WIP-ref TTL/GC remains out of scope and unbuilt.
+`device_wip` (migrations `00030_device_wip.sql` and `00031_device_wip_dropped_at.sql`) is the apply-side mirror for `repo.wip.pushed` (`07`, working-state validation plane Layer B — "did I forget to push a WIP-only change, and is it recoverable from another machine"). The mechanism: `git stash create` produces a commit object WITHOUT touching the worktree or index, and that object is pushed to `refs/devstrap/wip/<device_id>/<path_key>` via a raw refspec (`git push <remote> <sha>:<ref>`, `Runner.PushRef`). Apply is MIRROR-ONLY, exactly like `device_gitstate` — `UpsertDeviceWipTx` `INSERT ... ON CONFLICT DO UPDATE`s the row for `(device_id, path_key)`, guarded by `WHERE excluded.observed_at_hlc >= device_wip.observed_at_hlc` so an out-of-order redelivery of a stale push cannot regress a newer one — this table holds "the last-pushed WIP ref," never a history log. The storage layer landed with the git primitives (`Runner.StashCreate`/`Runner.PushRef`) and the `repo.wip.pushed` event; the full CLI that emits and consumes it — `wip push`/`fetch`/`status`/`show`/`apply`/`drop` — shipped across `P7-WIP-02`–`P7-WIP-05` (see `13_CLI_DAEMON_API.md` § *WIP commands*). Successful drops emit `repo.wip.dropped` and permanently tombstone the owner row; reads retain a racing different-SHA push even at a lower or equal cross-stream HLC. Automatic fleet-wide WIP-ref TTL/GC is shipped on the sync convergence path (`P7-WIP-08`); `local_meta` remains advisory scheduling/orphan state, never deletion authority.
 
 No FK to `devices` or `namespace_entries`, for exactly the same reasons as `device_gitstate` (`00029`): remote devices are not enrolled in the local device registry until Phase 2, and this plane does not need the pushed project to exist locally before the mirror can apply (no `env_pending_project`-style quarantine class for `repo.wip.pushed`). This plane is strictly separate from agent worktree-base resolution — `refs/devstrap/wip/*` must NEVER be read by `worktree new --fresh-upstream`'s base resolution, which always bases from `origin/<default_branch>`. No secret material is stored.
 

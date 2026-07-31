@@ -186,6 +186,16 @@ Cases:
 
 `cmd/devstrap/testdata/script/worktree_never_bases_off_wip_ref.txtar` pins spec/07's agent-plane invariant end-to-end through the real binary: device A pushes a WIP ref carrying a unique marker; device B mirrors it locally via `wip fetch` so the ref genuinely exists in the SAME repo that will host a fresh worktree; `worktree new --fresh-upstream` must then base off `origin/<default_branch>` — the marker absent from the checkout, the recorded base sha distinct from the WIP sha, and the WIP ref itself untouched. The unit half (`internal/git`) additionally pins that a `refs/remotes/origin/HEAD` symref or `ls-remote` HEAD advertisement pointing outside `refs/heads/*` (e.g. at `refs/devstrap/wip/*`) is rejected by the default-branch resolvers rather than passed through.
 
+### Automatic WIP GC convergence (`P7-WIP-08`)
+
+Config tables pin empty/default, zero/disabled, and invalid negative/malformed
+durations. Unit/integration tests pin corrupt-marker due-now behavior, the
+long-interval no-enumeration gate, and failure isolation when an origin
+disappears. `sync_wip_gc.txtar` uses two devices enrolled under their captured
+device identities, proves the WIP ref exists on the bare origin, runs plain
+sync with a 1ms interval/TTL, proves the ref is deleted, then proves the
+fleet mirror and doctor warning clear.
+
 ### Phase 0 CLI scaffold
 
 ```bash
