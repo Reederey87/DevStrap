@@ -31,6 +31,26 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — the commercial cluster is decomposed, and deliberately not scheduled
+
+Changed:
+
+- **`spec/14`: new § *Commercial-tier backlog*, rows `CT-01`…`CT-07`**, decomposing what is now the entire remaining open backlog outside two P3s: `P7-PROD-02`/`-04`/`-05`/`-06` plus the Pass-4 rows they extend (`P4-SEC-08`, `P4-HUB-15`). `spec/20` § *Sequencing* already argued the order; what never existed was the decomposition — the exact gap that made `AD-5` citable only as a reason to **refuse** work until `AD5-00` wrote it up. Doing this now means the next reader inherits rows with gates and acceptance criteria rather than a paragraph.
+- **The rows are explicitly not a schedule, and each carries its own gate.** The failure mode here is not building the wrong thing; it is building a control plane *speculatively* and then owning its operational surface forever. `CT-01` — define and measure the demand signal — is the only row actionable today, and it requires the threshold to be written down **before** collection so it cannot be rationalized afterwards. A recorded "not enough demand" is a successful outcome of that row, not a failed one; saying so on the row is what makes it safe to run honestly.
+- **`CT-07` (state the open-core boundary) is ordered before `CT-02`** deliberately, so the boundary is a constraint on the design rather than a rationalization of it. `spec/20` §3's own Docker Hub and Gitpod precedents are the argument for committing to it early and in public.
+- Ledger note added: `CT-*` are spec-space IDs like `AD5-*` and `M5D-*`, so **no finding moves, no severity changes, and every pass header still equals its row count.**
+
+What this deliberately does **not** do: schedule anything, choose the hosting stack (`spec/19`'s Fly.io + Neon sketch stays provisional), or resolve `spec/20`'s open questions — the free-tier storage cap, per-workspace vs per-seat, and managed COGS all need measurement that does not exist. Writing rows for work nobody has decided to do is useful; pretending the decision is made is not, and a backlog that quietly implies a commitment is worse than no backlog.
+
+Validated:
+
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`; ledger invariants re-checked by hand.
+- Docs-only; no Go source touched.
+
+Follow-ups:
+
+- Nothing is scheduled. The engineering backlog is empty of actionable rows: `P9-WIP-03` and `P8-ADOPT-07` are P3s left open with recorded reasons, and everything else here is gated on `CT-01`.
+
 ## 2026-07-31 — Pass 9 and Pass 10 recorded; Pass 10 is clean
 
 Changed:

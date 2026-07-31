@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-10
+last_reviewed: 2026-07-31
 tracks_code: [README.md]
 ---
 # DevStrap — Commercialization & Pricing
@@ -119,6 +119,10 @@ Until these exist, the managed tier is a plan and a waitlist, not a product. Tha
 - **CLA:** if a second maintainer or outside contributors arrive, a lightweight CLA or DCO keeps the licensing story clean enough to later carve an open-core boundary without chasing signatures. Not urgent while solo-maintained; worth deciding before the contributor base grows.
 
 ## 7. Sequencing and open questions
+
+> **Decomposed 2026-07-31.** The sequencing below is the argument; the actionable rows are `CT-01`…`CT-07` in `14_MVP_ROADMAP_AND_BACKLOG.md` § *Commercial-tier backlog*, each with its own gate and a work-item/model-picker note. They are deliberately **not scheduled** — the failure mode here is not building the wrong thing, it is building a control plane speculatively and then owning its operational surface forever. `CT-01` (define and measure the demand signal, threshold written down before collection) is the only row actionable today, and `CT-07` (state the open-core boundary) must land before `CT-02` so the boundary constrains the design rather than rationalizing it.
+
+> **Decomposed 2026-07-31.** The sequencing below is the *argument*; the actionable rows are `CT-01`…`CT-07` in `14_MVP_ROADMAP_AND_BACKLOG.md` § *Commercial-tier backlog*, each with its own gate and a work-item/model-picker note. They are deliberately **not scheduled** — the failure mode here is not building the wrong thing, it is building a control plane speculatively and then owning its operational surface forever. `CT-01` (define and measure the demand signal, with the threshold written down *before* collection) is the only row actionable today, and `CT-07` (state the open-core boundary) must land before `CT-02` so the boundary constrains the design rather than rationalizing it.
 
 Sequencing:
 

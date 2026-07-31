@@ -238,6 +238,27 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 | P7-SEC-04 | P3 | `fix/p7-sec-04-osroot` (2026-07-11) | Carrier object access is confined by per-operation `os.Root` handles (per-component O_NOFOLLOW + symlink-target recheck) instead of the check-then-use Lstat-walk `safePath`: reads, writes (incl. the P7-HUB-05 atomic temp+fsync+rename, now `writeRootFileAtomic`), stats, deletes, and timestamp sidecars all resolve through the handle, and the folder carrier additionally pins root identity (`os.SameFile` against the construction-time directory) after each `OpenRoot`, closing the swap window on a concurrently-writable shared root. Both carriers covered by post-construction symlink-swap refusal tests. |
 | P7-HUB-02 | P2 | `fix/p7-hub-02-head-continuity` (2026-07-11) | The git carrier persists the last verified head + retention-manifest fingerprint in `head.json`; a non-descendant head is accepted only as plausible compaction (byte-identical or strictly-advancing manifest AND, when the prior head is locally known, no event object at or above the new floors deleted — the content gate); a rewound or deleted branch is refused with a named `rm -rf <cache>` recovery path instead of being silently re-founded. `CommandError` gains `ExitCode()`. Review: identical-fingerprint acceptance + the content gate replaced the strict-advance-only rule that falsely refused real multi-device compaction. |
 
+> **2026-07-31 — commercial cluster decomposed, not scheduled.** With Passes 8,
+> 9, and 10 closed, every remaining open row in this ledger except two P3s is the
+> commercial/hosted-tier cluster: `P7-PROD-02`, `P7-PROD-04`, `P7-PROD-05`,
+> `P7-PROD-06`, and the Pass-4 rows they extend (`P4-SEC-08`, `P4-HUB-15`).
+>
+> Those are now decomposed into rows `CT-01`…`CT-07` in
+> `spec/14_MVP_ROADMAP_AND_BACKLOG.md` § *Commercial-tier backlog*, each with a
+> stated gate and a work-item/model-picker note. **This changes no finding, no
+> severity, and no count** — `CT-*` are spec-space IDs like `AD5-*` and `M5D-*`
+> before them, and every pass header below still equals its row count.
+>
+> The decomposition exists for the reason `AD5-00` did: an un-decomposed
+> direction can only be cited to *refuse* work. It is explicitly **not** a
+> schedule. Every row is gated on a demand signal that does not yet exist, and
+> `CT-01` — defining and measuring that signal, with the threshold written down
+> *before* collection so it cannot be rationalized afterwards — is the only row
+> actionable today. A recorded "not enough demand" is a successful outcome of
+> `CT-01`, not a failed one.
+
+<!-- MD028 separator between adjacent dated blockquotes -->
+
 ### Pass 9 (2026-07-31) — 1 open of 8 · Pass 10 (2026-07-31) — clean
 
 Full detail in [`AUDIT_RECOMMENDATIONS_2026-07-31_PASS9-10.md`](AUDIT_RECOMMENDATIONS_2026-07-31_PASS9-10.md). Pass 9 covered the two dimensions **Pass 8 declared it had commissioned and never heard back from**; Pass 10 covered the hub/blob/snapshot planes no pass had reached. Seven of Pass 9's eight findings shipped the same day (PRs #262, #265, #266, #267) and are listed in *Recently shipped*.
