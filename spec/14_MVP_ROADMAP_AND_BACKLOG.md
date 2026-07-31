@@ -683,7 +683,7 @@ External survey (2026-07-31) confirms the primitive is genuinely unbuilt elsewhe
             `agent pr` under the same stale-base gate, and self-reconciles to
             `interrupted` when its harness is killed.
 
-[ ] AD5-04  One reference integration proving a real harness drives the primitives end
+[x] AD5-04  SHIPPED 2026-07-31. One reference integration proving a real harness drives the primitives end
             to end: `docs/agents.md` (provision -> adopt -> register -> ship) plus a
             user-owned Claude Code `SessionStart` hook recipe, pinned by an executable
             testscript so the documented recipe cannot rot. Deliberately NO new

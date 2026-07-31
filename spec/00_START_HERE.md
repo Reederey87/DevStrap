@@ -226,9 +226,12 @@ The user-facing tier lives outside `spec/` (`AD-8`, shipped 2026-07-05):
   corpus: the managed-physical-namespace decision, the Workspace Passport promise, the two-plane
   zero-knowledge hub and its carriers, compaction/snapshot bootstrap, device trust, agent
   workspaces, and what is deliberately not built. Each section links back here for depth.
-- `../docs/install.md`, `../docs/quickstart.md`, `../docs/self-hosting.md` — task-oriented user
+- `../docs/install.md`, `../docs/quickstart.md`, `../docs/self-hosting.md`, `../docs/agents.md` — task-oriented user
   guides (all install paths; the first-run loop + pairing + agent loop; choosing and operating a
-  hub). `../docs/audits/` holds the audit archive and open backlog.
+  hub; and — `AD5-04` — running coding agents on DevStrap, covering both directions: DevStrap
+  provisions a fresh-based worktree via `worktree new --json`, or adopts the one a harness already
+  made, with a Claude Code `SessionStart` hook recipe. Both directions are executed end to end by
+  testscripts, so the documented sequences cannot silently rot). `../docs/audits/` holds the audit archive and open backlog.
 
 The design corpus:
 

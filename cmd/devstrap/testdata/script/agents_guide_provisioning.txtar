@@ -1,0 +1,66 @@
+# AD5-04: pins the provisioning half of docs/agents.md — "Direction 1", the
+# `worktree new --fresh-upstream --json` payload a harness reads to obtain a
+# fresh-based worktree with no DevStrap integration code at all.
+#
+# The guide prints that payload and tells third-party programs which keys they
+# may depend on. Documentation of a machine contract that nothing executes is
+# documentation that rots silently, so every key the guide shows is asserted
+# here against the real binary. agent_adopt_roundtrip.txtar pins the other
+# half of the guide (Direction 2: adopt an externally-created worktree, register
+# the run, finish it).
+
+[!exec:git] skip
+[windows] skip
+
+env DEVSTRAP_NO_KEYCHAIN=1
+env GIT_AUTHOR_NAME=DevStrap
+env GIT_AUTHOR_EMAIL=devstrap@example.test
+env GIT_COMMITTER_NAME=DevStrap
+env GIT_COMMITTER_EMAIL=devstrap@example.test
+
+# Bare remote with one commit, cloned and pushed the same way the sibling
+# scripts build their fixture.
+exec git init --bare -b main $WORK/remote.git
+exec git clone $WORK/remote.git $WORK/src
+exec sh -c 'echo hello > $WORK/src/README.md'
+exec sh -c 'cd $WORK/src && git add README.md && git commit -m init && git push origin main'
+
+exec devstrap --home=$WORK/home --root=$WORK/Code init
+exec devstrap --home=$WORK/home --root=$WORK/Code add --path work/proj $WORK/remote.git
+exec devstrap --home=$WORK/home --root=$WORK/Code sync --hub-file=$WORK/hub.json
+
+# Direction 1: one command, JSON on stdout, no integration code.
+exec sh -c 'devstrap --home=$WORK/home --root=$WORK/Code --json worktree new work/proj --fresh-upstream --name fix-login > $WORK/wt.json'
+
+# stdout must be exactly ONE JSON document: a harness parses it whole, so a
+# stray diagnostic line printed to stdout would break every consumer.
+exec sh -c 'head -c 1 $WORK/wt.json | grep -q "{"'
+exec sh -c 'tail -c 2 $WORK/wt.json | tr -d "\n" | grep -q "}"'
+exec sh -c 'grep -c "^{" $WORK/wt.json | grep -q "^1$"'
+
+# Every key docs/agents.md shows a harness reading. Dropping any of these is a
+# breaking change to the documented contract, not a refactor.
+exec sh -c 'grep -q "\"schema_version\": 1" $WORK/wt.json'
+exec sh -c 'grep -q "\"project_path\": \"work/proj\"" $WORK/wt.json'
+exec sh -c 'grep -q "\"default_branch\": \"main\"" $WORK/wt.json'
+exec sh -c 'grep -q "\"base_ref\": \"origin/main\"" $WORK/wt.json'
+exec sh -c 'grep -q "\"repo_path\"" $WORK/wt.json'
+exec sh -c 'grep -q "\"remote_url\"" $WORK/wt.json'
+exec sh -c 'grep -q "\"base_sha\"" $WORK/wt.json'
+exec sh -c 'grep -q "\"path\"" $WORK/wt.json'
+exec sh -c 'grep -q "\"branch\"" $WORK/wt.json'
+
+# The guide's core promise: `.path` is a real checkout on disk, and the branch
+# is based on the FETCHED remote default branch — so base_sha equals what
+# origin/main actually points at, not whatever a local branch had drifted to.
+exec sh -c 'sed -n "s#.*\"path\": \"\\([^\"]*\\)\".*#\\1#p" $WORK/wt.json | head -1 > $WORK/wt-path.txt'
+exec sh -c 'test -d "$(cat $WORK/wt-path.txt)"'
+exec sh -c 'test -e "$(cat $WORK/wt-path.txt)/README.md"'
+exec sh -c 'sed -n "s#.*\"base_sha\": \"\\([^\"]*\\)\".*#\\1#p" $WORK/wt.json | head -1 > $WORK/base-sha.txt'
+exec sh -c 'git -C $WORK/Code/work/proj rev-parse origin/main > $WORK/origin-main.txt'
+exec sh -c 'diff $WORK/base-sha.txt $WORK/origin-main.txt'
+
+# The worktree the guide provisioned is registered, so the registry and the
+# stale-base gate cover it from the moment it exists.
+exec sh -c 'devstrap --home=$WORK/home --root=$WORK/Code --json worktree list > $WORK/list.json'
+exec sh -c 'grep -q "\"created_by\": \"agent\"" $WORK/list.json'
