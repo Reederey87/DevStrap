@@ -275,7 +275,9 @@ func TestIsSecretPath(t *testing.T) {
 		{"id_rsa", "work/api/id_rsa", true},
 		{"credentials.json", "work/api/credentials.json", true},
 		{"credentials", "work/api/.aws/credentials", true},
+		{"root credentials", ".aws/credentials", true},
 		{"config.toml", "work/api/.snowflake/config.toml", true},
+		{"root config.toml", ".snowflake/config.toml", true},
 		{"README.md", "work/api/README.md", false},
 		{"main.go", "work/api/main.go", false},
 	}
@@ -285,6 +287,19 @@ func TestIsSecretPath(t *testing.T) {
 				t.Fatalf("IsSecretPath(%q)=%v want %v", c.rel, got, c.want)
 			}
 		})
+	}
+}
+
+func TestCredentialHomeListsAreDefensiveCopies(t *testing.T) {
+	dirs := CredentialHomeDirs()
+	files := CredentialHomeFiles()
+	dirs[0] = "mutated"
+	files[0] = "mutated"
+	if got := CredentialHomeDirs()[0]; got != ".ssh" {
+		t.Fatalf("CredentialHomeDirs()[0] = %q after mutation, want .ssh", got)
+	}
+	if got := CredentialHomeFiles()[0]; got != ".netrc" {
+		t.Fatalf("CredentialHomeFiles()[0] = %q after mutation, want .netrc", got)
 	}
 }
 
@@ -349,13 +364,8 @@ func legacyDraftIsSecretPath(rel string) bool {
 	return strings.HasSuffix(rel, "/.snowflake/config.toml") || strings.HasSuffix(rel, "/.aws/credentials") || strings.Contains(base, "service-account")
 }
 
-// TestIsSecretPathMatchesBothLegacyDetectors is the real neutrality proof. The
-// migrated table shows the documented cases still hold; this shows the new
-// function agrees with BOTH deleted implementations across a deliberately
-// hostile input space — empty paths, trailing slashes, native separators, the
-// root-level anchored-suffix cases that document the preserved gap, and the
-// .env template exceptions. A disagreement here is a behavior change, which
-// this PR claims not to make.
+// TestIsSecretPathMatchesBothLegacyDetectors preserves the differential proof
+// except for the two intentional root-level anchored-path fixes.
 func TestIsSecretPathMatchesBothLegacyDetectors(t *testing.T) {
 	inputs := []string{
 		"", ".", "/", "work/api/.env", ".env", "/.env", "work/api/.env.example",
@@ -376,6 +386,12 @@ func TestIsSecretPathMatchesBothLegacyDetectors(t *testing.T) {
 			slash := filepath.ToSlash(in)
 			wantScan := legacyScanIsSecretName(path.Base(slash), in)
 			wantDraft := legacyDraftIsSecretPath(in)
+			if in == ".aws/credentials" || in == ".snowflake/config.toml" {
+				if !got || wantScan || wantDraft {
+					t.Errorf("IsSecretPath(%q)=%v, want intentional true divergence from legacy scan=%v draft=%v", in, got, wantScan, wantDraft)
+				}
+				return
+			}
 			if got != wantScan {
 				t.Errorf("IsSecretPath(%q)=%v, legacy scan detector=%v", in, got, wantScan)
 			}

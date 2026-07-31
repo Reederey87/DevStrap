@@ -8,7 +8,7 @@ import (
 
 // readConfineHomeCaches are the $HOME toolchain/build caches kept readable
 // under read-confinement so compilers and package managers keep working. The
-// credential dirs (.ssh, .aws, .gnupg, .config/gh, .kube, .docker) are
+// credential dirs (.ssh, .aws, .snowflake, .gnupg, .config/gh, .kube, .docker) are
 // deliberately absent — they stay masked/denied on top — so no read root ever
 // contains a credential path.
 var readConfineHomeCaches = []string{

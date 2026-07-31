@@ -186,7 +186,7 @@ Current state: the compiler output drives directory/artifact exclusion in `draft
 
 **The secret names are a membership test (`IsSecretName`/`IsSecretPath`), deliberately NOT entries in the compiler's `defaultPatterns`** — the same shape as `IsOSJunkName`, for a stronger reason. Both consumers use this judgement to **act**, not to skip: `internal/scan` *reports* a hit into `Warnings` and `Secrets` so the user learns a secret is sitting in the tree, and `draftbundle.Pack` *hard-refuses* the bundle with a named error, ordered after `matcher.Match` so a user-ignored secret is skipped quietly instead. Folding `.env` into the ignore table would silently convert the first into prune-and-never-report — destroying the signal that is the entire point — and the second into a silent skip.
 
-One detection gap is carried over unchanged rather than fixed here, so the unification stays provably behavior-neutral: the directory-anchored suffixes (`/.snowflake/config.toml`, `/.aws/credentials`) require a leading `/`, so a `.aws/credentials` sitting directly at the scan root is not matched. Closing it is a behavior change and belongs with the agent-denylist work below.
+The original behavior-neutral unification preserved one leading-slash gap. `AGEN-05` closes it deliberately: directory-anchored suffix matching evaluates `"/"+relSlash`, so `.snowflake/config.toml` and `.aws/credentials` are detected even when they sit directly at the scan or bundle root. The differential test still compares every other input with both retired implementations and encodes these two intended divergences explicitly.
 
 ### Watcher exclusion set (built — `PLAT-01`/`PLAT-04`)
 
@@ -199,9 +199,9 @@ The fsnotify watcher now compiles the watch root's `.devstrapignore` with the ca
 
   Two properties of that second bullet are deliberate. It does **not** run through the matcher, because the matcher applies the user's `.devstrapignore`, and a negation (`!*~`) would switch noise filtering back on — asking for `foo~` to be *synced* is a content choice, not a request to be woken every time an editor writes a backup. And `*~` must not be canonical content policy at all: unlike the fixed names beside it, it is a glob over **user filenames**, so putting it in the defaults would silently stop syncing a draft legitimately named `proposal~` — the same class of mistake as pruning `vendor/` there. Dropping a hint is safe by construction: a hint is an optimization, so the cost is at most one interval of latency before periodic convergence notices, and the file itself still syncs.
 
-### Agent denylist (unbuilt — `AGEN-05`)
+### Agent denylist (built — `AGEN-05`)
 
-Translate secret patterns to agent file-deny policy from the same compiled source (`AGEN-05`). Not yet built: `internal/cli/agent.go` still carries its own `agentTokenLooksSensitive`/`agentPathLooksSensitive` basename rules and its own `denyParts` credential-directory list, which diverge from both the canonical predicate above and `internal/platform`'s `sensitiveHomeDirs`/`sensitiveHomeFiles`. The canonical half now exists for it to read; repointing the agent (and resolving the drifts that repointing exposes, including the leading-slash gap noted under *Draft sync*) is the remaining `AGEN-05` work.
+`internal/ignore` now exposes defensive-copy `CredentialHomeDirs` and `CredentialHomeFiles` membership lists. The agent builds its slash-prefixed `denyParts` from them, while the sandbox sources `sensitiveHomeDirs`/`sensitiveHomeFiles` from the same APIs; Seatbelt, Landlock, bubblewrap, and read-allow conflict anchors inherit the table. Agent basename checks reuse `IsSecretName`, including the checked-in `.env` template exceptions. `*.key` remains in a documented agent-only predicate because it is a glob over user filenames, not a fixed credential name: making it canonical would report ordinary `en-US.key` files and hard-refuse a whole draft bundle over one fixture.
 
 ## OS-specific local garbage
 
@@ -356,7 +356,7 @@ The 2026-06-28 cloud-sync design **promotes the single `.devstrapignore` compile
 
 Required follow-ups (workstream `DRAFT-*` in `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`):
 
-- build the one canonical compiler and route every consumer through it — `internal/scan`, the draft-bundling/encrypted-blob layer, the platform watcher, and the agent deny-list — retiring the divergent hardcoded lists behind `PLAT-01`, `PLAT-04`, and `AGEN-05`;
+- build the one canonical compiler and route every consumer through it — **shipped**, including `internal/scan`, draft bundling, the platform watcher, the agent deny-list, and sandbox credential masks (`PLAT-01`, `PLAT-04`, `AGEN-05`);
 - guarantee OS junk (`.DS_Store`, `.AppleDouble`, `Thumbs.db`, `Icon?`, `desktop.ini`) is compiled into every consumer, especially draft sync, so it never enters an encrypted blob or the namespace map;
 - treat this compiler as a blocking prerequisite for shipping non-git content sync: no draft bundle is created until its exclusion set is sourced from the compiler.
 

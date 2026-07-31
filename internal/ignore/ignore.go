@@ -389,6 +389,40 @@ var secretAnchoredSuffixes = []string{
 	"/.aws/credentials",
 }
 
+var credentialHomeDirs = []string{
+	".ssh",
+	".aws",
+	".snowflake",
+	".gnupg",
+	".config/gh",
+	".config/gcloud",
+	".azure",
+	".kube",
+	".docker",
+}
+
+var credentialHomeFiles = []string{
+	".netrc",
+	".npmrc",
+	".pypirc",
+	".gitconfig",
+	".git-credentials",
+}
+
+// CredentialHomeDirs returns a copy of the canonical credential directories
+// at the home root. Callers may mutate the returned slice without changing the
+// shared table.
+func CredentialHomeDirs() []string {
+	return slices.Clone(credentialHomeDirs)
+}
+
+// CredentialHomeFiles returns a copy of the canonical credential files at the
+// home root. Callers may mutate the returned slice without changing the shared
+// table.
+func CredentialHomeFiles() []string {
+	return slices.Clone(credentialHomeFiles)
+}
+
 // IsSecretName reports whether a bare filename is a plaintext secret or private
 // key. Like IsOSJunkName this is a membership test rather than a pattern, and
 // for the same reason plus a stronger one: these names deliberately do NOT live
@@ -423,19 +457,13 @@ func IsSecretName(base string) bool {
 // replaced would find the basename of `dir\.env` while a bare `path.Base`
 // would not — the one input class on which the unification would otherwise
 // not have been behavior-preserving.
-//
-// Known gap, preserved deliberately from the two detectors this replaced: the
-// anchored suffixes require a leading `/`, so a `.aws/credentials` sitting
-// directly AT the root is not matched. Widening it is a behavior change tracked
-// separately — this function is a behavior-preserving unification, and changing
-// detection here would have made that property unprovable.
 func IsSecretPath(relSlash string) bool {
 	relSlash = filepath.ToSlash(relSlash)
 	if IsSecretName(path.Base(relSlash)) {
 		return true
 	}
 	for _, suffix := range secretAnchoredSuffixes {
-		if strings.HasSuffix(relSlash, suffix) {
+		if strings.HasSuffix("/"+relSlash, suffix) {
 			return true
 		}
 	}

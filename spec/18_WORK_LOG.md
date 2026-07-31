@@ -31,6 +31,21 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-30 — AGEN-05: `.env.example` passes and `~/.snowflake` is masked
+
+Changed:
+
+- Added defensive-copy `ignore.CredentialHomeDirs`/`CredentialHomeFiles` and routed the agent's slash-prefixed deny paths plus the sandbox's Seatbelt, Landlock, bubblewrap, and read-allow anchors through them. `~/.snowflake` is now sandbox-masked, so guarded agents driving `snow` lose the user's credentials; `--policy yolo-local` and `--sandbox off` are the explicit escape hatches. Rebuilding `denyParts` from both canonical lists has no user-visible delta: it adds `.netrc`/`.npmrc`/`.pypirc` there, but their basenames were already denied, and removes nothing.
+- Narrowed `.env.*` wrapper handling to canonical secret-name semantics, so `devstrap agent run -- head .env.example` (and `.template`/`.schema`) is passable while a destination token named `.env` remains denied. Deleted the redundant literal `cat .env` substring rule: the argv-aware file policy now owns the decision and no longer falsely catches `.env.example`.
+- Kept `*.key` in documented `agentOnlySensitiveName`, not `ignore.IsSecretName`: it is a glob over arbitrary user filenames, and canonical promotion would make scan warn on `en-US.key` translations and make `draftbundle.Pack` hard-refuse a whole bundle over one fixture. Fixed the deliberate leading-slash gap so root-level `.aws/credentials` and `.snowflake/config.toml` are detected.
+- Closed `AGEN-05` in `spec/10`/`spec/11` and moved the Pass-2 finding to the audit ledger's Recently shipped table. Named the two user-visible changes above in the specs and updated the credential surface/test inventory.
+
+- **Post-review (coordinator): removing the `"cat .env"` substring pattern was not paired with a test that the REAL case is still denied.** The narrowing's own test only proves `.env.example` is now allowed; nothing pinned that `cat .env`, `config/.env`, `.env.production`, or `cp .env.example .env` (whose destination token is the secret) still fail. Deleting a guard is only safe if something else demonstrably catches the case, so `TestAgentStillDeniesRealEnvAfterDroppingTheSubstringPattern` now asserts all four. Mutation-checking it surfaced something better than expected: breaking `agentTokenLooksSensitive` alone does NOT fail it, because `agentPathLooksSensitive`'s per-component check catches `.env` independently — both layers had to be broken together. That is real defense in depth, and the test's docstring says so rather than implying it pins either layer.
+
+Validated:
+
+- Focused canonical tests pass. The first full race run failed only because the managed execution sandbox forbade Unix-socket binds and macOS `sandbox-exec`; the approved unsandboxed rerun passed every package.
+- All four requested mutation checks failed for the intended assertion. Formatting, native and Linux builds, isolated-cache pinned golangci-lint (`0 issues`), race tests, and spec drift pass.
 ## 2026-07-30 — P7-WIP-07 aged WIP-ref GC
 
 Changed:
@@ -81,6 +96,7 @@ Validated:
 Follow-ups:
 
 - None.
+
 ## 2026-07-30 — doctor never puts a raw error string in Detail
 
 Changed:
