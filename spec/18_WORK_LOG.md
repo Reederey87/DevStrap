@@ -31,6 +31,33 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — `agent adopt` / `agent finish` (AD5-03)
+
+Changed:
+
+- **`devstrap agent adopt <worktree-path-or-id> --engine <name> --task <text>`** registers an externally-RUN agent session against a worktree, adopting the worktree on demand with `--adopt-worktree`. **`devstrap agent finish <run-id> [--status complete|failed]`** closes it. Together they complete the substrate half of `AD-5`: `agent list`, the stale-base gate, and `agent pr` now keep their value when a real harness ran the agent instead of `devstrap agent run`.
+- **`--engine` is free text and is deliberately NOT validated against a list.** DevStrap is the registry, not the gatekeeper; a validated engine set would smuggle back the per-harness adapter list `AD-5` exists to reject.
+- **`--pid` has no default, and that is the whole point.** The obvious implementation — default it to the parent PID — is wrong: a harness invokes this by shelling out (`sh -c 'devstrap agent adopt …'`, exactly how Claude Code's Bash tool runs commands), so devstrap's PPID is a **transient shell that exits immediately**, and the next `agent list`/`agent pr`/`doctor`/`worktree cleanup` sweep would flip a perfectly healthy run to `interrupted`. A child process cannot correctly infer "the harness PID", so it does not guess. With `--pid` it records `processStartTime(<that pid>)` — not the current process's — because `processIdentityAlive` does an **exact** start-time comparison; a wrong value either falsely interrupts or, through the indeterminate branch, never sweeps at all.
+- **Omitting `--pid` has two surprising consequences, so they are documented rather than left to be discovered:** `RunningAgentRunsWithPID` selects `WHERE runner_pid IS NOT NULL`, so a pidless run is **never** swept; and `cleanupOneWorktree` skips any worktree with a `running` run, so a forgotten pidless run **blocks that worktree's cleanup indefinitely**. That is the real cost, and it is why `agent finish` is required scope rather than a nicety. (The earlier claim that `agent pr` would otherwise be unreachable overstated it — `--allow-incomplete` exists.)
+- **`agent finish` transition rules were decided before implementation, not in review.** `running` → `complete`/`failed` is ordinary and silent. `interrupted` → `failed` is silent. `interrupted` → `complete` is **allowed but warns**: the sweep merely inferred "the recorder died" from a dead PID, which is weaker evidence than the harness's own explicit report, so the harness wins while the disagreement is surfaced rather than hidden. Re-finishing a `complete`/`failed` run is refused with `exitConflict` — the run is over.
+- **The adopt flow is EXTRACTED, not duplicated.** `adoptWorktreeAt` is now the single resolve-and-register path behind both `worktree adopt` and `agent adopt --adopt-worktree`. Two copies would let the refusal matrix and the read-only-on-foreign-rows rule drift apart, which is a defect rather than a shortcut.
+
+Verification note worth recording, because it nearly cost the wave a regression: this work was written against the pre-review commit of `AD5-02`, so the extraction carried a copy of `adoptWorktreeAt` that **silently lacked three of that PR's review fixes** (the `ErrWorktreeNotFound` distinction, the repo lock, and the UNIQUE-constraint translation) — a rebase alone would have kept the older body. They were re-applied by grepping for each fix by name in the extracted function rather than trusting the rebase, and the `AD5-02` mutation check (record the base tip instead of the merge-base) was **re-run against the extracted function** to confirm the guard still fails when the behavior is reverted. Re-diff after any delegated-worktree interaction; a clean rebase is not evidence that the fixes survived.
+
+Post-implementation gap closed: **`agent adopt` gains `--allow-shallow`.** Without it the one-command flow dead-ended — `agent adopt --adopt-worktree` called adoption with `allowShallow=false` hardcoded, so a shallow clone refused with no reachable override, and the only way through was to know to run `devstrap worktree adopt <path> --allow-shallow` first. An undiscoverable workaround is not an escape hatch. The flag is accepted **only** alongside `--adopt-worktree` — passing it alone is a usage error rather than a silently-inert flag, because a flag accepted-but-ignored reads as "shallow was allowed" and is exactly how a caller concludes a later refusal is a bug rather than a policy.
+
+Validated:
+
+- `gofmt -l cmd internal` clean; `golangci-lint run` — 0 issues.
+- `go test -race ./...` — exit 0.
+- `AD5-02`'s full adopt suite re-run green on top of the extraction.
+- `agent_adopt_roundtrip.txtar` confirmed to actually RUN, not skip.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+
+- `AD5-04` (docs + Claude Code `SessionStart` hook recipe, pinned by an executable testscript) and `AD5-05`/`AD5-06` (honesty pass + provenance in list output) remain. `AD5-07` (the MCP server) stays deferred by decision.
+
 ## 2026-07-31 — `devstrap worktree adopt` (AD5-02)
 
 Changed:

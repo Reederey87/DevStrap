@@ -309,6 +309,8 @@ func newAgentCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Short: "Run agents in isolated fresh worktrees",
 	}
 	cmd.AddCommand(newAgentRunCommand(stdout, opts))
+	cmd.AddCommand(newAgentAdoptCommand(stdout, opts))
+	cmd.AddCommand(newAgentFinishCommand(stdout, opts))
 	cmd.AddCommand(newAgentListCommand(stdout, opts))
 	cmd.AddCommand(newAgentShowCommand(stdout, opts))
 	cmd.AddCommand(newAgentPRCommand(stdout, opts))

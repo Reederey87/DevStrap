@@ -1,0 +1,59 @@
+# AD5-03: `devstrap agent adopt` + `devstrap agent finish` register and
+# terminate an agent run for a worktree a real harness (Claude Code/Cursor/
+# Codex) created and ran in BEHIND DevStrap's back — mirroring
+# worktree_adopt.txtar's structure/fixture, but driving the agent (not just
+# worktree) registration through the real binary end to end.
+
+env DEVSTRAP_NO_KEYCHAIN=1
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+# Bare remote with one commit.
+exec git init --bare -b main $WORK/remote.git
+exec git clone $WORK/remote.git $WORK/src
+exec sh -c 'echo hello > $WORK/src/README.md'
+exec sh -c 'cd $WORK/src && git add README.md && git commit -m init && git push origin main'
+
+# init, add the project, sync (materializes a real local clone at
+# $WORK/Code/work/proj that agent adopt's underlying worktree-adopt code path
+# reads for IsShallow/MergeBase).
+exec devstrap --home=$WORK/home --root=$WORK/Code init
+exec devstrap --home=$WORK/home --root=$WORK/Code add --path work/proj $WORK/remote.git
+exec devstrap --home=$WORK/home --root=$WORK/Code sync --hub-file=$WORK/hub.json
+stdout 'pushed 1'
+
+# Create a linked worktree the way an agent harness would: a plain `git
+# worktree add`, entirely behind DevStrap's back — devstrap has no worktree
+# row for this path yet, and therefore no agent_runs row either.
+exec git -C $WORK/Code/work/proj worktree add --detach $WORK/external-wt HEAD
+
+# Without --adopt-worktree, `agent adopt` refuses and names the remedy.
+! exec devstrap --home=$WORK/home --root=$WORK/Code agent adopt $WORK/external-wt --engine claude-code --task 'fix failing tests'
+stderr '\-\-adopt-worktree'
+
+# `agent adopt --adopt-worktree` registers the worktree (via the exact same
+# code path `worktree adopt` uses) AND records a running agent_runs row
+# against it, in one command.
+exec sh -c 'devstrap --home=$WORK/home --root=$WORK/Code --json agent adopt $WORK/external-wt --engine claude-code --task "fix failing tests" --adopt-worktree > $WORK/adopt.json'
+exec sh -c 'grep -q "\"status\": \"running\"" $WORK/adopt.json'
+exec sh -c 'grep -q "\"engine\": \"claude-code\"" $WORK/adopt.json'
+exec sh -c 'sed -n "s#.*\"id\": \"\\(arun_[^\"]*\\)\".*#\\1#p" $WORK/adopt.json | head -1 > $WORK/run-id.txt'
+exec sh -c 'test -s $WORK/run-id.txt'
+
+# `agent list` shows the adopted run alongside the worktree registration.
+exec devstrap --home=$WORK/home --root=$WORK/Code agent list
+stdout 'running'
+stdout 'claude-code'
+
+# `agent finish` reports the harness's own terminal status.
+exec sh -c 'RUN_ID=$(cat $WORK/run-id.txt); devstrap --home=$WORK/home --root=$WORK/Code agent finish "$RUN_ID" --status complete --test-summary "42 passed"'
+stdout 'finished: complete'
+
+exec sh -c 'RUN_ID=$(cat $WORK/run-id.txt); devstrap --home=$WORK/home --root=$WORK/Code --json agent show "$RUN_ID" > $WORK/show.json'
+exec sh -c 'grep -q "\"status\": \"complete\"" $WORK/show.json'
+
+# Finishing an already-terminal run refuses (finish is not idempotent).
+! exec sh -c 'RUN_ID=$(cat $WORK/run-id.txt); devstrap --home=$WORK/home --root=$WORK/Code agent finish "$RUN_ID" --status complete'
+stderr 'already'
