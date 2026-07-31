@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-24
+last_reviewed: 2026-07-31
 tracks_code: [internal/git/**, internal/cli/add.go, internal/cli/clone.go, internal/cli/forge.go, internal/cli/hydrate.go, internal/cli/materialize.go, internal/cli/open.go, internal/cli/repo_lock.go, internal/cli/worktree.go, internal/cli/status.go, internal/cli/doctor.go]
 ---
 # Git Materialization and Worktree Design
@@ -463,3 +463,23 @@ if used, _ := dsgit.UsesLFS(ctx, localPath); used {
 **Was.** `addWorktreeWithFreshBranch` created the branch and worktree, but later `applyWorktreeLFSPolicy`, `store.CurrentDevice`, and `store.InsertWorktree` failures returned without removing them, leaking a full checkout under `~/.devstrap/worktrees/<project>/` plus an `agent/...` branch untracked by SQLite — invisible to `worktree list`/`cleanup`.
 
 **Shipped fix.** All three post-`worktree add` failure paths (and the `agent run` file-policy-denial path) now run `removeOrphanWorktree` (`internal/cli/worktree.go`), which removes the just-created checkout and deletes its `agent/...` branch under a detached, bounded context (`context.WithoutCancel` + 2m cap) so the Ctrl-C/deadline that caused the failure cannot also no-op the cleanup; removal failures surface as warnings with a manual-remedy hint, and the LFS error names the worktree path. Pinned by `TestCreateFreshWorktreeCleansUpAfterLFSPullFailure` / `...AfterInsertWorktreeFailure`. The `doctor` orphan-worktree check (on-disk worktrees with no `worktrees` row) was deliberately left out of scope and remains a candidate follow-up.
+
+> **`git stash create` and untracked files (`P9-WIP-02`, 2026-07-31).** The working-state
+> plane's Layer B captures with `git stash create`, chosen precisely because it writes a
+> commit object **without touching the worktree or index**. That choice carries a limit
+> worth stating at the primitive rather than rediscovering at each call site: `stash
+> create` does **not** include untracked files, and unlike `git stash push` it has no `-u`
+> form. Capturing them would require mutating the working tree, which is the one thing
+> this plane must never do.
+>
+> The consequence is not academic. A tree holding **only** new files produces no stash
+> object at all, so before this was handled `wip push` reported "working tree is clean" —
+> the most misleading thing a recovery feature can say, since a brand-new uncommitted file
+> is the most common thing anyone forgets. `git.Runner.UntrackedCount` now supplies the
+> count so callers never conflate "nothing to stash" with "nothing at risk": an
+> untracked-only tree is refused with the `git add` remedy, and a mixed tree pushes with an
+> explicit warning that the snapshot omits them.
+>
+> The general rule: when a primitive's blind spot is invisible in its return value —
+> `stash create` returns empty for *both* a clean tree and an untracked-only one — the
+> caller must distinguish the two, and the primitive's documentation must say so.

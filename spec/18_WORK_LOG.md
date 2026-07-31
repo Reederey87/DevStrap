@@ -31,6 +31,26 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — the recovery plane called an untracked-only tree "clean" (P9-WIP-02)
+
+The WIP dimension finally reported — after going idle in Pass 8 and again in Pass 9 — and its strongest finding is the one most directly harmful to a user:
+
+- **`git stash create`, the primitive the WIP plane captures with, does not include untracked files**, and unlike `git stash push` it has no `-u` form. So a working tree holding **only new files** produced no stash object, and `wip push` printed **"Nothing to push … (working tree is clean)"**. Verified directly: a repo with a single untracked file yields empty output from `git stash create`, and the plane reported clean. A mixed tree fared worse — it pushed successfully while silently omitting every new file, reported as unqualified success.
+- This is the "forgot to push" feature failing at exactly the case it exists for. A brand-new uncommitted file is the most common thing anyone forgets, and the plane told them it was safe. A push that silently omits work is worse than a refusal, because the user stops worrying.
+- **Fixed by reporting honestly rather than by capturing more.** Capturing untracked files would require mutating the worktree (`git stash push -u`), which this plane exists specifically not to do — so the fix is `git.Runner.UntrackedCount` plus three call-site changes: an untracked-only tree is never called clean and names the `git add` remedy; a mixed tree still pushes but warns the snapshot omits them; and `wip push --json` carries `untracked_not_captured` alongside the `P7-CLI-01` warnings array so machine consumers can see the capture is partial.
+- `StashCreate`'s own doc comment now states the limitation at the primitive, so the next caller does not rediscover it the same way.
+
+The test pins **both** halves deliberately: that the blind spot is real (so no future reader assumes `stash create` covers untracked), and that `UntrackedCount` sees what it misses. If git ever gains the ability, the test fails and says the warning must be revisited — rather than silently over-warning forever.
+
+Validated:
+
+- `golangci-lint run` — 0 issues; `go test -race ./...` exit 0; gofmt checked with a gate that can actually fail.
+
+Follow-ups:
+
+- The reviewer's other findings are recorded for Pass 10 rather than fixed here: a sha-agnostic drop tombstone that can permanently hide a genuinely-newer push under HLC skew (its most subtle, and it needs a design decision rather than a patch); the commit-age veto being defeatable by the ref owner's own wrong clock at capture; four present-tense spec claims contradicting the shipped plane, two inside their own files; and an invalid `wip.gc_interval` failing every sync cycle while silently skipping the hub durability export.
+- Its verdict on the core: the lease is **sound** against stale mirrors — a newer snapshot is a different sha, the lease rejects, and `dropWipRef` disambiguates and refuses. `wip apply` cannot silently lose work. The agent-isolation invariant holds, including through `worktree adopt`. And it found **no** test that cannot fail.
+
 ## 2026-07-31 — an empty mirror sha degraded the WIP compare-and-delete into an unconditional one (P9-WIP-01)
 
 Found by auditing the WIP plane directly after **two** commissioned reviewers went idle on it — Pass 8's and Pass 9's. Two consecutive passes would otherwise have recorded this plane as unaudited, and the defect below is exactly the kind that silence hides.
