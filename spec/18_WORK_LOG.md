@@ -64,6 +64,11 @@ Post-review (fable-5, escalated because this touches base-resolution adjacency).
 
 Note the repo-lock finding from the same review was already closed by the preceding Codex pass on this branch.
 
+Post-CI (Linux-only failure, and a verification method worth recording):
+
+- Two adopt tests failed on `ubuntu-latest` with `git commit` exit 128 while passing on macOS. Cause: the hydrated clone carries no committer identity, and a CI runner has no global git config — so any test committing there hits "Author identity unknown". Fixed once in the shared `setupFreshWorktreeRepo` fixture rather than per-test, so every current and future test that commits in that clone is immune.
+- **The first attempt to verify the fix was invalid and would have shipped a false claim.** Simulating CI with `HOME=/tmp/empty GIT_CONFIG_GLOBAL=/dev/null` proves nothing on macOS: git silently auto-detects an identity from the OS user and hostname (`Reederey <reederey@…local>`), so the test passed even with the fix REVERTED. The deterministic reproduction is a global config containing `[user] useConfigOnly = true`, which makes git refuse an auto-detected identity exactly as the Linux runner does — verified failing with the fix reverted (`fatal: no email was given and auto-detection is disabled`) and passing with it restored. The whole `internal/cli`, `internal/git`, and `cmd/...` suite then re-ran green under that config, confirming no other test carries the same latent assumption.
+
 Validated:
 
 - `gofmt -l cmd internal` clean; `golangci-lint run` — 0 issues.
