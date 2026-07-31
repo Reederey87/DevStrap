@@ -31,6 +31,24 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — `docs/agents.md`, the AD-5 reference integration (AD5-04)
+
+Changed:
+
+- **`docs/agents.md`** (new, in the AD-8 user-facing tier) documents both directions of the substrate story and, deliberately, adds **no new dependency and no new server**. Direction 1: `worktree new --fresh-upstream --json` is a provisioning primitive that already works in every harness today, because every harness can run a shell command and read JSON — that is AD-5's own argument made concrete, and it is why a per-harness adapter was never the right shape. Direction 2: `worktree adopt` / `agent adopt` register the worktree a harness made on its own, keeping the registry and stale-base gate regardless of who ran the agent.
+- **A Claude Code `SessionStart` hook recipe**, presented as a snippet the reader pastes into their **own** `~/.claude/settings.json`. DevStrap never writes to a harness's configuration. The recipe ends in `|| true` on purpose: most directories are not linked worktrees, adoption refusing is the normal case, and a hook that fails a session because someone opened an ordinary folder is worse than no hook.
+- **The guide is executable, not prose.** `agents_guide_provisioning.txtar` (new) drives Direction 1 through the real binary and asserts every JSON key the guide shows a harness reading, that stdout is exactly one document, that `.path` is a real checkout on disk, and that `base_sha` equals what `origin/main` actually points at. `agent_adopt_roundtrip.txtar` (shipped with `AD5-03`) covers Direction 2. Documentation of a machine contract that nothing executes is documentation that rots silently.
+- The guide states plainly what DevStrap does **not** promise: the wrapper's command/file policy is guardrails, not a sandbox (argv-substring matching is bypassable by any interpreter); DevStrap does not sandbox a process it did not launch, and adopting a run does not confine it; and there are no `cursor-cli`/`codex-cli`/`copilot-cli` adapters and none are planned. It also names the one thing CI cannot prove — that Claude Code actually fires the hook — rather than implying the integration is verified end to end. It is verified up to the harness boundary.
+
+Validated:
+
+- `go test ./cmd/devstrap/ -run TestScripts/agents_guide_provisioning` — passes, and **mutation-checked**: changing one asserted value makes the script fail at that line. The first attempt at that check was itself vacuous (a `sed` that silently matched nothing because the txtar escapes its quotes), which is exactly the failure it exists to rule out.
+- Full `go test -race ./...`; `gofmt`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+
+- `AD5-05`/`AD5-06` (withdraw the adapter promise from the four remaining sites; surface adoption provenance in `worktree list`/`agent list`) close the wave. `AD5-07` (the MCP server) stays deferred by decision.
+
 ## 2026-07-31 — `agent adopt` / `agent finish` (AD5-03)
 
 Changed:
