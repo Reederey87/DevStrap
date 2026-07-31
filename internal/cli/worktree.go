@@ -15,6 +15,7 @@ import (
 
 	dsgit "github.com/Reederey87/DevStrap/internal/git"
 	"github.com/Reederey87/DevStrap/internal/logging"
+	"github.com/Reederey87/DevStrap/internal/redact"
 	"github.com/Reederey87/DevStrap/internal/state"
 	"github.com/spf13/cobra"
 )
@@ -124,15 +125,70 @@ func newWorktreeNewCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			result := newWorktreeProvisionResult(opts.paths().Root, project, wt)
 			return opts.render(stdout, func(w io.Writer) error {
 				_, err := fmt.Fprintf(w, "Created worktree %s at %s from %s %s\n", wt.Branch, wt.Path, wt.BaseRef, wt.BaseSHA)
 				return err
-			}, wt)
+			}, result)
 		},
 	}
 	cmd.Flags().BoolVar(&freshUpstream, "fresh-upstream", false, "base the worktree on fetched remote default branch")
 	cmd.Flags().StringVar(&taskName, "name", "", "task name for branch slug")
 	return cmd
+}
+
+// worktreeProvisionResult is the machine contract for `worktree new --json`
+// (AD5-01). It EMBEDS state.Worktree so every field that shipped before keeps
+// its exact name and position — this is an additive extension, not a reshape,
+// so existing --json consumers are unaffected (spec/13's P5-CLI-01
+// migration/compat rule). The added fields are the ones an external agent
+// harness cannot proceed without: it receives an opaque namespace_id today and
+// has no way to learn the project path, the remote, the branch that was
+// resolved, or where the main checkout lives.
+type worktreeProvisionResult struct {
+	state.Worktree
+	SchemaVersion int      `json:"schema_version"`
+	ProjectPath   string   `json:"project_path"`
+	RemoteURL     string   `json:"remote_url,omitempty"`
+	DefaultBranch string   `json:"default_branch,omitempty"`
+	RepoPath      string   `json:"repo_path,omitempty"`
+	Warnings      []string `json:"warnings,omitempty"`
+}
+
+// worktreeProvisionSchemaVersion is the contract version for
+// worktreeProvisionResult. Bump ONLY for an additive change; a field rename or
+// removal is a breaking change that needs a deliberate decision, not a bump.
+const worktreeProvisionSchemaVersion = 1
+
+// newWorktreeProvisionResult assembles the machine contract from the pieces the
+// command already has. It exists as a separate function so the contract tests
+// exercise the REAL assembly — in particular the redaction of remote_url. A test
+// that called redact.StripURLUserinfo itself and then asserted the output is
+// clean would pass even if this function stopped redacting, which is the
+// can-never-fail test class this project has caught in review twice.
+func newWorktreeProvisionResult(root string, project state.ProjectStatus, wt state.Worktree) worktreeProvisionResult {
+	repoPath := project.LocalPath
+	if repoPath == "" {
+		repoPath = filepath.Join(root, filepath.FromSlash(project.Path))
+	}
+	// BaseRef is always "origin/<default_branch>"; if it does not cut, leave the
+	// field empty rather than guessing at a branch name.
+	var defaultBranch string
+	if _, branch, ok := strings.Cut(wt.BaseRef, "/"); ok {
+		defaultBranch = branch
+	}
+	return worktreeProvisionResult{
+		Worktree:      wt,
+		SchemaVersion: worktreeProvisionSchemaVersion,
+		ProjectPath:   project.Path,
+		// A remote URL can carry credentials, and this payload is designed to be
+		// read by third-party programs. StripURLUserinfo (not redact.URL) keeps
+		// the URL USABLE — it drops the whole userinfo for http/https and keeps
+		// only the SSH login name for ssh/git — which is what a harness needs.
+		RemoteURL:     redact.StripURLUserinfo(project.RemoteURL),
+		DefaultBranch: defaultBranch,
+		RepoPath:      repoPath,
+	}
 }
 
 func createFreshWorktree(ctx context.Context, stdout, stderr io.Writer, opts *options, store *state.Store, project state.ProjectStatus, taskName, createdBy string) (state.Worktree, error) {
@@ -222,7 +278,7 @@ func createFreshWorktreeLocked(ctx context.Context, stdout, stderr io.Writer, op
 // default branch, and only falls back to the local origin/HEAD + stored
 // fallback resolution when the remote query is unavailable. A non-authoritative
 // resolution is surfaced to the user so a wrong base never happens silently.
-func resolveWorktreeDefaultBranch(ctx context.Context, stdout io.Writer, r dsgit.Runner, localPath, fallback string) (string, error) {
+func resolveWorktreeDefaultBranch(ctx context.Context, warn io.Writer, r dsgit.Runner, localPath, fallback string) (string, error) {
 	if branch, err := r.RemoteDefaultBranch(ctx, localPath, "origin"); err == nil {
 		return branch, nil
 	}
@@ -231,12 +287,12 @@ func resolveWorktreeDefaultBranch(ctx context.Context, stdout io.Writer, r dsgit
 		return "", err
 	}
 	if source != dsgit.DefaultBranchRemote {
-		_, _ = fmt.Fprintf(stdout, "warning: could not confirm origin default branch from the remote; using %q (source: %s)\n", branch, source)
+		_, _ = fmt.Fprintf(warn, "warning: could not confirm origin default branch from the remote; using %q (source: %s)\n", branch, source)
 	}
 	return branch, nil
 }
 
-func applyWorktreeLFSPolicy(ctx context.Context, stdout io.Writer, r dsgit.Runner, project state.ProjectStatus, wtPath string) error {
+func applyWorktreeLFSPolicy(ctx context.Context, warn io.Writer, r dsgit.Runner, project state.ProjectStatus, wtPath string) error {
 	usesLFS, err := dsgit.UsesLFS(ctx, wtPath)
 	if err != nil {
 		return appError{code: exitGit, err: err}
@@ -254,7 +310,7 @@ func applyWorktreeLFSPolicy(ctx context.Context, stdout io.Writer, r dsgit.Runne
 			return appError{code: exitGit, err: fmt.Errorf("worktree created at %s but LFS pull failed; objects may remain pointer files: %w", wtPath, err)}
 		}
 	case "auto", "never":
-		_, _ = fmt.Fprintf(stdout, "warning: %s uses Git LFS; worktree %s may contain pointer files (lfs_policy=%s)\n", project.Path, wtPath, policy)
+		_, _ = fmt.Fprintf(warn, "warning: %s uses Git LFS; worktree %s may contain pointer files (lfs_policy=%s)\n", project.Path, wtPath, policy)
 	default:
 		return appError{code: exitInvalidConfig, err: fmt.Errorf("unsupported lfs_policy %q for %s", project.LFSPolicy, project.Path)}
 	}
