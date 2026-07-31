@@ -672,7 +672,7 @@ External survey (2026-07-31) confirms the primitive is genuinely unbuilt elsewhe
             add` is adoptable, and `worktree status` immediately reports its real
             staleness instead of a fresh-looking lie.
 
-[ ] AD5-03  `devstrap agent adopt` registers an externally-RUN agent session against a
+[x] AD5-03  SHIPPED 2026-07-31 (PR #254). `devstrap agent adopt` registers an externally-RUN agent session against a
             worktree, adopting that worktree on demand through AD5-02's single code
             path. Records the harness's PID so the already-shipped dead-PID ->
             `interrupted` sweep (`P6-GIT-06`/`P7-GIT-03`) reconciles a crashed harness
@@ -692,11 +692,14 @@ External survey (2026-07-31) confirms the primitive is genuinely unbuilt elsewhe
             precisely AD-5's own argument.                                                [M]
             Accept: the recipe published in `docs/agents.md` runs green as a testscript.
 
-[x] AD5-05  SHIPPED 2026-07-31. Docs honesty pass. This corpus still advertises the per-harness adapter path
-            AD-5 REJECTS. Withdraw the promise rather than leaving it pending; a
-            rejected path described as "planned" is a promise the project has decided
-            not to keep. FOUR sites are enumerated so an implementer does not stop at
-            the obvious two — the acceptance criterion is the corpus, not this list:
+[x] AD5-05  SHIPPED 2026-07-31 (PR #256). Docs honesty pass. The corpus HAD advertised the
+            per-harness adapter path AD-5 rejects; the promise is now withdrawn rather
+            than left pending, because a rejected path described as "planned" is a
+            promise the project has decided not to keep. FIVE sites were fixed — the
+            four enumerated below plus spec/00's "Not implemented yet" list, which the
+            row had NOT anticipated and which was the worst of them: leaving a withdrawn
+            path in a not-YET list is exactly the implication being removed. The
+            acceptance criterion was always the corpus, not this list:
               - spec/10 line ~59, the agent-worktree-metadata YAML comment
                 "cursor/codex/copilot adapters are planned; only `generic` ships today";
               - spec/10's implementation paragraph, "`agent cleanup` and non-generic
