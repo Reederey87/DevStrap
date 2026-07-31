@@ -52,6 +52,13 @@ type wipPushResult struct {
 	Ref    string `json:"ref,omitempty"`
 	SHA    string `json:"sha,omitempty"`
 	Pushed bool   `json:"pushed"`
+	// UntrackedNotCaptured is how many untracked files the working tree held
+	// that the snapshot does NOT contain (P9-WIP-02). `git stash create` cannot
+	// capture untracked files and has no -u form, so this is a real limit of
+	// the capture, not a transient condition — machine consumers need it to
+	// know the snapshot is partial.
+	UntrackedNotCaptured int      `json:"untracked_not_captured,omitempty"`
+	Warnings             []string `json:"warnings,omitempty"`
 }
 
 func newWipPushCommand(stdout io.Writer, opts *options) *cobra.Command {
@@ -77,9 +84,26 @@ func newWipPushCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if err != nil {
 				return appError{code: exitGit, err: err}
 			}
+			// P9-WIP-02: `git stash create` does NOT capture untracked files, so
+			// a tree holding only new files produces no stash object — and this
+			// command used to call that "working tree is clean". That is the most
+			// misleading thing the recovery plane could say, because a brand-new
+			// uncommitted file is exactly what "forgot to push" usually means.
+			// Count them and never claim clean when they exist.
+			untracked, untrackedErr := r.UntrackedCount(cmd.Context(), project.LocalPath)
+			if untrackedErr != nil {
+				untracked = 0 // best-effort: never fail the push over the advisory count
+			}
 			if !ok {
-				out := wipPushResult{Path: project.Path}
+				out := wipPushResult{Path: project.Path, UntrackedNotCaptured: untracked}
+				if untracked > 0 {
+					out.Warnings = append(out.Warnings, fmt.Sprintf("%d untracked file(s) are NOT captured by WIP snapshots", untracked))
+				}
 				return opts.render(stdout, func(w io.Writer) error {
+					if untracked > 0 {
+						_, err := fmt.Fprintf(w, "Nothing captured for %s: no tracked-file changes, and %d untracked file(s) which WIP snapshots cannot capture (`git stash create` excludes them). Run `git add` on the ones you want recovered, then re-run.\n", project.Path, untracked)
+						return err
+					}
 					_, err := fmt.Fprintf(w, "Nothing to push for %s (working tree is clean)\n", project.Path)
 					return err
 				}, out)
@@ -133,8 +157,18 @@ func newWipPushCommand(stdout io.Writer, opts *options) *cobra.Command {
 			}); err != nil {
 				return err
 			}
-			out := wipPushResult{Path: project.Path, Ref: ref, SHA: sha, Pushed: true}
+			out := wipPushResult{Path: project.Path, Ref: ref, SHA: sha, Pushed: true, UntrackedNotCaptured: untracked}
+			if untracked > 0 {
+				out.Warnings = append(out.Warnings, fmt.Sprintf("%d untracked file(s) are NOT captured by WIP snapshots", untracked))
+			}
 			return opts.render(stdout, func(w io.Writer) error {
+				// A push that silently omits new files is worse than a refusal:
+				// the user believes their work is recoverable (P9-WIP-02).
+				if untracked > 0 {
+					if _, err := fmt.Fprintf(w, "warning: %d untracked file(s) in %s are NOT part of this snapshot; `git stash create` cannot capture them. `git add` them and re-run to include them.\n", untracked, project.Path); err != nil {
+						return err
+					}
+				}
 				_, err := fmt.Fprintf(w, "Pushed WIP for %s to %s (%s)\n", project.Path, ref, shortSHA(sha))
 				return err
 			}, out)

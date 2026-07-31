@@ -1684,3 +1684,55 @@ func TestSafeRefPath(t *testing.T) {
 		}
 	}
 }
+
+// TestUntrackedCountAndStashCreateBlindSpot pins P9-WIP-02: `git stash create`
+// — the primitive the WIP recovery plane captures with — does NOT include
+// untracked files and has no `-u` form. A tree holding only NEW files therefore
+// produces no stash object at all, and the plane used to report that as
+// "working tree is clean". That is the most misleading thing a recovery feature
+// could say, because a brand-new uncommitted file is exactly what "forgot to
+// push" usually means.
+//
+// This test pins BOTH halves: the blind spot is real (so no future reader
+// assumes stash create covers untracked), and UntrackedCount sees what it
+// misses.
+func TestUntrackedCountAndStashCreateBlindSpot(t *testing.T) {
+	repo, r := initSquashMergeRepo(t)
+	ctx := context.Background()
+
+	if n, err := r.UntrackedCount(ctx, repo); err != nil || n != 0 {
+		t.Fatalf("UntrackedCount on a clean tree = (%d, %v), want (0, nil)", n, err)
+	}
+
+	// ONLY an untracked file — the case the plane got wrong.
+	if err := os.WriteFile(filepath.Join(repo, "URGENT_NEW_WORK.md"), []byte("never committed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sha, ok, err := r.StashCreate(ctx, repo)
+	if err != nil {
+		t.Fatalf("StashCreate err = %v", err)
+	}
+	if ok {
+		t.Fatalf("StashCreate captured an untracked-only tree (%q) — if git gained that ability, the "+
+			"'untracked are not captured' warning this test guards is now wrong and must be revisited", sha)
+	}
+	n, err := r.UntrackedCount(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("UntrackedCount = %d, want 1; without this the plane calls an untracked-only tree clean", n)
+	}
+
+	// Mixed tree: the stash object exists but still omits the new file, so the
+	// count must remain visible alongside a successful capture.
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("modified\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := r.StashCreate(ctx, repo); err != nil || !ok {
+		t.Fatalf("StashCreate on a mixed tree = (ok=%v, err=%v), want a capture", ok, err)
+	}
+	if n, err := r.UntrackedCount(ctx, repo); err != nil || n != 1 {
+		t.Fatalf("UntrackedCount on a mixed tree = (%d, %v), want (1, nil): a successful push still omits the new file", n, err)
+	}
+}

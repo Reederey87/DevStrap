@@ -312,6 +312,33 @@ func (r Runner) PushBranch(ctx context.Context, dir, remote, branch string) erro
 // touching the worktree or index (unlike `git stash push`). Empty stdout
 // means there is nothing to stash (a clean working tree) — this is NOT an
 // error, ok is simply false.
+// UntrackedCount returns how many untracked, non-ignored files the working tree
+// holds. It exists because `git stash create` — the primitive the WIP plane
+// captures with — does NOT include untracked files and has no `-u` equivalent,
+// so an untracked-only tree yields no stash object at all. Without this count
+// the plane reported such a tree as "clean" (P9-WIP-02), which is the single
+// most misleading thing it could say: a brand-new uncommitted file is exactly
+// what "forgot to push" usually means.
+func (r Runner) UntrackedCount(ctx context.Context, dir string) (int, error) {
+	out, err := r.Run(ctx, dir, "status", "--porcelain", "--untracked-files=normal")
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "??") {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// StashCreate captures the working tree's uncommitted state as a commit object
+// without touching the worktree or index. NOTE: `git stash create` does not
+// capture UNTRACKED files, and unlike `git stash push` it has no `-u` form —
+// capturing them would require mutating the worktree, which this plane exists
+// not to do. Callers must therefore consult UntrackedCount before describing a
+// tree as clean or a capture as complete (P9-WIP-02).
 func (r Runner) StashCreate(ctx context.Context, dir string) (sha string, ok bool, err error) {
 	out, err := r.Run(ctx, dir, "stash", "create")
 	if err != nil {
