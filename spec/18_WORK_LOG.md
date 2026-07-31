@@ -31,6 +31,27 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — tombstone GC no longer erases live worktree registrations (P8-SEC-01)
+
+Changed:
+
+- **A routine `hub compact` silently deleted live worktree rows.** `worktrees.namespace_id` is `ON DELETE CASCADE`, and `GCTombstones` hard-`DELETE`s tombstoned `namespace_entries` without ever consulting `worktrees`. `--gc-tombstones` **defaults to true**, so this was the ordinary path, not an exotic one. Reproduced before fixing: an adopted worktree with `dirty_state='dirty'`, its project tombstoned, GC run past the HLC — `worktrees` rows went **1 → 0**. `agent_runs.worktree_id` is `ON DELETE SET NULL`, so runs pointing at it were orphaned in the same instant.
+- The checkout and its uncommitted diff survive on disk; DevStrap's *record* of them does not. The worktree disappears from `worktree list`, `status`, and `doctor`, and the stale-base gate plus `agent pr`'s base-provenance guarantee — the core `AD-5` invariant — can no longer be applied to it. The sync-side delete-vs-dirty guard offers no protection either: it inspects only the MAIN checkout's `device_project_state.dirty_state`, so a dirty **linked** worktree never blocks the tombstone in the first place.
+- **Fix: the GC skips any tombstone whose project still has a `worktrees` row.** Retaining a tombstone is cheap and bounded by devices × projects, and the next GC reclaims it once the worktree is finalized or removed. Losing a registration is not recoverable, so the asymmetry is the whole argument.
+- **Attribution stays honest.** This is structurally pre-existing — the FK dates to migration `00001` and the GC was wired ~2026-07-04 — but `AD5-02` widened the blast radius materially: before adoption only `worktree new` created rows, and those are short-lived, whereas adoption makes long-lived externally-created registrations common for the first time. The wave that shipped this month is what turned a latent schema hazard into a reachable one.
+
+Validated:
+
+- Mutation-checked both directions: removing the `NOT IN (SELECT namespace_id FROM worktrees)` clause makes the new test fail with `worktree rows for the held project = 0, want 1`.
+- The test also asserts the *other* half — a tombstone with no worktree is still reclaimed — so the guard cannot be satisfied by simply never collecting anything.
+- `gofmt` clean; `golangci-lint run` — 0 issues; `go test -race ./...` exit 0.
+
+Follow-ups:
+
+- Pass 8 drops to **3 open of 8**: `P8-ADOPT-03` (record-time `--base-ref` validation), `P8-ADOPT-04` (provision→register gap), `P8-ADOPT-07` (legacy path spellings). All P2/P3.
+- The `decideDelete` half of this finding — consulting `worktrees` for an active dirty row before accepting a delete at all — is deliberately NOT done here. This change makes the data-loss impossible; that one would additionally make the *decision* better-informed, and belongs with the sync-plane work rather than bolted onto a GC guard.
+- Pass 9's WIP dimension remains outstanding across two consecutive passes if it does not report.
+
 ## 2026-07-31 — the watch plane stops failing whole-device, and hints get cheaper (P9-DAEMON-01/02)
 
 Pass 9's first slice. Both findings come from the daemon plane **Pass 8 commissioned and never reached** — its reviewer went idle — which is the concrete payoff of Pass 8 having *declared* that gap instead of reading as complete: Pass 9 knew exactly where to look, and found two real defects in a subsystem that would otherwise have been assumed sound.
