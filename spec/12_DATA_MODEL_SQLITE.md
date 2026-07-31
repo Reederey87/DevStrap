@@ -295,7 +295,7 @@ CREATE TABLE worktrees (
 );
 ```
 
-`created_by` is `"agent"` for a worktree `devstrap worktree new --fresh-upstream` created, or `"adopted"` for one `devstrap worktree adopt` registered after the fact (AD5-02) — an externally-created linked worktree (Codex/Cursor/Devin) that DevStrap did not provision itself. `idx_worktrees_active_path` (migration `00032_worktrees_active_path_unique.sql`), a `UNIQUE` index on `(namespace_id, path) WHERE status = 'active'`, enforces at most one active row per physical worktree regardless of which command registered it; a removed worktree's path remains reusable since the predicate only scopes active rows.
+`branch` is `""` for a worktree adopted while on a detached HEAD (the common shape for a Codex/Devin worktree). That column is **refreshed on re-adoption** and by `agent pr` when it finds a live branch (`P8-ADOPT-02`, 2026-07-31) — before that it was written once at insert and never updated, which made `agent pr`'s own printed remedy ("create a branch, then re-run") impossible to act on. `created_by` is `"agent"` for a worktree `devstrap worktree new --fresh-upstream` created, or `"adopted"` for one `devstrap worktree adopt` registered after the fact (AD5-02) — an externally-created linked worktree (Codex/Cursor/Devin) that DevStrap did not provision itself. `idx_worktrees_active_path` (migration `00032_worktrees_active_path_unique.sql`), a `UNIQUE` index on `(namespace_id, path) WHERE status = 'active'`, enforces at most one active row per physical worktree regardless of which command registered it; a removed worktree's path remains reusable since the predicate only scopes active rows.
 
 ### agent_runs
 

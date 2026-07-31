@@ -445,10 +445,10 @@ func adoptWorktreeAt(ctx context.Context, stderr io.Writer, opts *options, store
 			// keeps whatever base it already recorded. Mutate nothing.
 			return existing, project, adoptOutcome{AlreadyRegistered: true, Warnings: warnings}, nil
 		}
-		if err := store.UpdateWorktreeAdoption(ctx, existing.ID, baseRef, baseSHA, string(dirty)); err != nil {
+		if err := store.UpdateWorktreeAdoption(ctx, existing.ID, identity.Branch, baseRef, baseSHA, string(dirty)); err != nil {
 			return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, err
 		}
-		existing.BaseRef, existing.BaseSHA, existing.DirtyState = baseRef, baseSHA, string(dirty)
+		existing.Branch, existing.BaseRef, existing.BaseSHA, existing.DirtyState = identity.Branch, baseRef, baseSHA, string(dirty)
 		return existing, project, adoptOutcome{AlreadyAdopted: true, Warnings: warnings}, nil
 	}
 

@@ -630,3 +630,71 @@ func TestWorktreeListShowsProvenance(t *testing.T) {
 			"and spec/13 forbids wrapping a store type just to rename what it already says")
 	}
 }
+
+// TestWorktreeAdoptRefreshesBranchAfterSwitch pins P8-ADOPT-02. A worktree
+// adopted while detached records branch="". Before this fix no code path ever
+// updated that column, so `agent pr`'s own printed remedy — "create one first
+// with 'git switch -c <name>', then re-run" — could never take effect: the user
+// followed it and hit the identical refusal forever. A remedy that cannot work
+// is worse than no remedy, because it sends the user in a circle.
+func TestWorktreeAdoptRefreshesBranchAfterSwitch(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	localPath := setupFreshWorktreeRepo(t, home, root, "auto", false)
+
+	head := strings.TrimSpace(runGitOutput(t, localPath, "rev-parse", "HEAD"))
+	extWT := filepath.Join(t.TempDir(), "external-wt")
+	runGit(t, localPath, "worktree", "add", "--detach", extWT, head)
+
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "worktree", "adopt", extWT, "--json")
+	if err != nil {
+		t.Fatalf("adopt stderr=%q err=%v", stderr, err)
+	}
+	var first adoptResultForTest
+	if err := json.Unmarshal([]byte(stdout), &first); err != nil {
+		t.Fatalf("decode: %v\n%s", err, stdout)
+	}
+	if first.Branch != "" {
+		t.Fatalf("fixture is wrong: a detached adopt must record an empty branch, got %q", first.Branch)
+	}
+
+	// The user follows the remedy `agent pr` prints.
+	runGit(t, extWT, "switch", "-c", "feature/fix-login")
+
+	stdout, stderr, err = executeForTest("--home", home, "--root", root, "worktree", "adopt", extWT, "--json")
+	if err != nil {
+		t.Fatalf("re-adopt stderr=%q err=%v", stderr, err)
+	}
+	var second adoptResultForTest
+	if err := json.Unmarshal([]byte(stdout), &second); err != nil {
+		t.Fatalf("decode: %v\n%s", err, stdout)
+	}
+	if !second.AlreadyAdopted {
+		t.Errorf("re-adopting an adopted row should report already_adopted; got %+v", second)
+	}
+	if second.Branch != "feature/fix-login" {
+		t.Fatalf("branch = %q, want feature/fix-login — the remedy the CLI prints must actually take effect", second.Branch)
+	}
+
+	// Read the row BACK. The assertion above only proves the in-memory struct
+	// adopt returned; it passes even if the UPDATE never wrote the column, which
+	// a mutation check caught. What matters is that the next command sees the
+	// branch, so verify through a separate invocation that re-reads the store.
+	listOut, _, err := executeForTest("--home", home, "--root", root, "--json", "worktree", "list")
+	if err != nil {
+		t.Fatalf("worktree list: %v", err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(listOut), &rows); err != nil {
+		t.Fatalf("decode list: %v\n%s", err, listOut)
+	}
+	var persisted string
+	for _, r := range rows {
+		if p, _ := r["path"].(string); p == second.Path {
+			persisted, _ = r["branch"].(string)
+		}
+	}
+	if persisted != "feature/fix-login" {
+		t.Fatalf("PERSISTED branch = %q, want feature/fix-login; the adoption UPDATE must write the column, not just the returned struct", persisted)
+	}
+}

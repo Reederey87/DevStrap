@@ -215,25 +215,25 @@ func newAgentFinishCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return appError{code: exitConflict, err: fmt.Errorf("agent run %s has unexpected status %q", run.ID, run.Status)}
 			}
 
+			// Recompute the diff summary the same way `agent run` does at
+			// completion time. An adopted run never had one set at insert time
+			// and `finish` is deliberately non-idempotent, so this is the ONLY
+			// chance to record it — which is why it must not be conditional on
+			// --test-summary (P8-ADOPT-06). Gating it there left every run
+			// finished without that flag with a permanently empty diff in
+			// `agent show` and in its PR body.
 			testSummary = strings.TrimSpace(testSummary)
-			if testSummary != "" {
-				// Recompute the diff summary the same way `agent run` does at
-				// completion time — an adopted run never had one set at
-				// insert time, so this is the only chance to record it.
-				diffSummary := run.DiffSummary
-				if run.WorktreeID != "" {
-					if wt, wtErr := store.WorktreeByID(cmd.Context(), run.WorktreeID); wtErr == nil {
-						diffSummary = agentDiffSummary(cmd.Context(), wt.Path, wt.BaseSHA)
-					}
+			diffSummary := run.DiffSummary
+			if run.WorktreeID != "" {
+				if wt, wtErr := store.WorktreeByID(cmd.Context(), run.WorktreeID); wtErr == nil {
+					diffSummary = agentDiffSummary(cmd.Context(), wt.Path, wt.BaseSHA)
 				}
-				if err := store.UpdateAgentRunResult(cmd.Context(), run.ID, status, diffSummary, testSummary); err != nil {
-					return err
-				}
-				run.DiffSummary = diffSummary
-				run.TestSummary = testSummary
-			} else if err := store.UpdateAgentRunStatus(cmd.Context(), run.ID, status); err != nil {
+			}
+			if err := store.UpdateAgentRunResult(cmd.Context(), run.ID, status, diffSummary, testSummary); err != nil {
 				return err
 			}
+			run.DiffSummary = diffSummary
+			run.TestSummary = testSummary
 			run.Status = status
 			out := agentFinishResult{AgentRun: run, SchemaVersion: agentFinishSchemaVersion}
 			return opts.render(stdout, func(w io.Writer) error {
