@@ -31,6 +31,29 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — AD-5 wave post-merge reconciliation
+
+Changed:
+
+- **`AD5-03` shipped in PR #254 but its backlog row still read `[ ]`.** A shipped item displayed as pending is the same class of defect this corpus corrects elsewhere — an inventory that disagrees with the code — and it is the exact drift `AGENTS.md`'s post-wave review exists to catch: the drift gate proves a mapped spec was *touched*, never that its contents still match reality. Every other row in the wave was ticked in the PR that shipped it; this one was missed because its PR (`agent adopt`/`agent finish`) predated the tick-at-ship habit the later PRs settled into.
+- **`AD5-05`'s row body still described the problem in the present tense** ("This corpus still advertises the per-harness adapter path") while being marked SHIPPED — a row that reads as both done and outstanding. Rewritten in the past tense, and corrected on a point of fact: the row enumerated **four** sites, but **five** were fixed. The one it had not anticipated was `spec/00`'s *"Not implemented yet"* list, which was the worst of them — leaving a withdrawn path in a *not-yet* list is precisely the implication `AD5-05` exists to remove. Recording that the row under-counted is more useful than quietly matching the number to the outcome.
+
+Post-wave consistency check (the `AGENTS.md` obligation, run against merged trunk rather than a branch):
+
+- `TestEveryCommandIsDocumented` and `TestMigrationsDocumented` pass; `worktree adopt`, `agent adopt`, and `agent finish` each appear in both `spec/13` and `spec/00`.
+- `spec/12`'s migration inventory lists 32 files and 32 exist on disk.
+- The hardcoded schema-version assertions read 32/31/32 consistently across `store_test.go` and `root_test.go`.
+- `last_reviewed` is 2026-07-31 on every spec the wave changed substantively (00, 10, 12, 13, 14, 17) and deliberately unchanged on `spec/02`, whose only edit was a cross-reference.
+- The Pass-7 ledger header still claims 4 open and its table still has 4 rows.
+
+Validated:
+
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`; docs-only change, no Go source touched.
+
+Follow-ups:
+
+- `AD5-07` (the stdio MCP server) is the only open row in the AD-5 backlog and remains deferred by decision. Re-verify the Go SDK version and the 2026-07-28 MCP protocol-rewrite date (recorded in `spec/17`) before implementing it; both came from a dated research pass, not from this repository.
+
 ## 2026-07-31 — the adapter promise is withdrawn, and provenance is visible (AD5-05/AD5-06) — AD-5 WAVE CLOSE
 
 Changed:
