@@ -185,6 +185,14 @@ func newWorktreeProvisionResult(root string, project state.ProjectStatus, wt sta
 		// read by third-party programs. StripURLUserinfo (not redact.URL) keeps
 		// the URL USABLE — it drops the whole userinfo for http/https and keeps
 		// only the SSH login name for ssh/git — which is what a harness needs.
+		//
+		// Note the scp-like form (git@github.com:org/repo.git) is passed through
+		// UNCHANGED: url.Parse rejects it ("first path segment in URL cannot
+		// contain colon"), so StripURLUserinfo returns it verbatim. That is safe,
+		// not an oversight — git's scp-like syntax is [user@]host:path with no
+		// password-embedding mechanism, so the only thing that can ride through
+		// is the SSH login name, which the ssh:// branch preserves deliberately
+		// too. TestWorktreeProvisionResultRemoteURLShapes pins every shape.
 		RemoteURL:     redact.StripURLUserinfo(project.RemoteURL),
 		DefaultBranch: defaultBranch,
 		RepoPath:      repoPath,

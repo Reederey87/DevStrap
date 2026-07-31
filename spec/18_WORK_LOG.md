@@ -41,11 +41,16 @@ Changed:
 - **Two writer parameters were named `stdout` while every caller correctly passes stderr** (`resolveWorktreeDefaultBranch`, `applyWorktreeLFSPolicy`). No live bug — stdout purity on the `--json` path is intact, verified by reading every writer on the success path — but the misleading names are exactly how the *next* caller introduces one, and this file now emits a JSON document that a stray stdout write would corrupt. Renamed to `warn`, matching `removeOrphanWorktree`'s existing convention.
 - **`spec/13`: new § *Machine contract surfaces*.** Names the six `--json` payloads an external program may depend on (`worktree new`, `worktree list`, `worktree status`, `agent list`, `agent show`, `status`) and states what `schema_version` promises — deliberately narrowly, because a version that promises too much is worse than none: every key documented at version N is present with the same meaning at every version >= N; new keys may appear **without** a bump, which is why consumers must ignore unrecognized keys; the version moves only when a consumer written against the prior version would have to change. Prior art cited is Terraform's `format_version` and cargo's `--format-version`. **`gh` and `kubectl` are deliberately NOT cited** — their conventions were not verified against primary sources, and an unverified citation in a spec is worse than none.
 
+Post-review (Codex, no blocking findings; both informational notes taken):
+
+- **A reflect-based shadowing guard.** Go's embedded-struct JSON promotion resolves a duplicate tag by letting the *shallower* field win and silently dropping the deeper one — no error, no warning, no compile failure. Nothing collides today, but if `state.Worktree` ever gained a field tagged `warnings` or `schema_version`, that key would vanish from the machine contract with nothing failing. `TestWorktreeProvisionResultNoTagShadowing` compares the two types' tag sets and turns that into a test failure; mutation-checked by retagging `ProjectPath` as `branch`, which fails with the collision named.
+- **scp-like remotes are documented as a deliberate pass-through, and pinned.** `url.Parse("git@github.com:org/repo.git")` errors ("first path segment in URL cannot contain colon"), so `StripURLUserinfo` returns it verbatim. That is safe rather than tolerated — git's scp-like syntax is `[user@]host:path` with no password-embedding mechanism, so the only thing that can ride through is the SSH login name, which the `ssh://` branch preserves deliberately too. A code comment says so and `TestWorktreeProvisionResultRemoteURLShapes` pins all five shapes, so a future change to `redact` that DID start parsing scp-like remotes has to come past an explicit expectation.
+
 Validated:
 
 - `gofmt -l cmd internal` clean; `go build ./...` ok.
-- `go test ./internal/cli/ -run TestWorktreeProvision -v` — 4 tests, all pass (key set, warnings-omitempty both ways, redaction, derived fields incl. a `release/2.0` slash-bearing branch and an uncuttable base ref).
-- Mutation check on the redaction test, both directions.
+- `go test ./internal/cli/ -run TestWorktreeProvision` — 6 tests, all pass (key set, tag shadowing, warnings-omitempty both ways, redaction, all five remote shapes, derived fields incl. a `release/2.0` slash-bearing branch and an uncuttable base ref).
+- Mutation checks on BOTH the redaction test and the shadowing guard, in both directions.
 - `go run ./cmd/spec-drift --base origin/main --head HEAD`.
 
 Follow-ups:
