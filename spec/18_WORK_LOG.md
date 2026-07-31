@@ -31,6 +31,32 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — Live forge dogfood of the WIP plane, and two docs that overstated reality
+
+Changed:
+
+- **`spec/07`'s forge-notification clause is now MEASURED, not asserted.** The `P7-WIP-08` slice discharged it as documentation, which was the right call for a claim about external behavior — but the claim itself had never been checked against a forge. It has now been, against the private `Reederey87/devstrap-dogfood` repo, and the method is recorded because the obvious version of this check proves nothing: the repo had **no workflows at all**, so observing "no Actions runs after a WIP push" would have been vacuous. A deliberately **unfiltered** `on: push` workflow was added and first confirmed to fire for an ordinary branch push (1 run, `ref=main`); only then was a WIP ref pushed. The run count stayed at 1, and `branches` still listed only `main` with no open PRs. The probe was removed and the WIP refs deleted afterward.
+- `AGENTS.md` step 4 claimed every CodeRabbit thread must be resolved before auto-merge. **CodeRabbit is inactive on this repo** — it last reviewed PR #225 (2026-07-24) and posted on none of the fifteen PRs merged since, including all eight of the 2026-07-30 wave. The requirement was satisfied vacuously while reading as real review coverage; the doc now says so plainly and keeps the rule conditional on reinstatement.
+- `AGENTS.md` step 5's wave-conflict rule prescribed `grep -c '<<<<<<<'`, which is **useless as a gate on this repo**: `spec/18` contains prose describing git's conflict markers, so the count is always nonzero. Corrected to the line-anchored form, plus the two failure modes hit during the wave — a file can carry more than one conflict block, and `git add` will stage a file with markers still in it (that happened once and was caught only by re-running the anchored check).
+- `spec/00`'s "Last validated" was `2026-07-05`, four weeks and roughly twenty merges stale.
+
+**Live dogfood results** (two-device simulation, R2 hub, real GitHub project remote, binary built from `2831133`):
+
+- `wip push` lands a real ref on a real forge remote via the raw refspec; `ls-remote` confirms it.
+- The forge claims above hold, non-vacuously.
+- `wip gc` at the default 30-day TTL **keeps** a fresh ref (`younger than TTL`); `--dry-run` at a 1ms TTL plans the delete and removes nothing; the real run at 1ms deletes it, the ref disappears from origin, and the mirror reports `No pending WIP`.
+- **The corroboration veto was exercised as an attack, and held.** A fresh WIP ref was pushed and its mirror row's `observed_at_hlc` then rewritten directly in SQLite to claim the push was a year old — the forged-age case the whole design exists to stop. `doctor` believed the mirror and warned `pending WIP 8760h old` (correct: warnings are advisory). `wip gc` at the **default** TTL nominated it and then refused: `object is newer than its mirror record; not deleted`. The ref survived. That is the difference between mirror state as a filter and mirror state as authority, demonstrated against a live remote rather than argued.
+- GC left **no** local `refs/devstrap/*` behind, so the fetch-inspect-delete sequence does not accumulate recovery refs.
+
+Validated:
+
+- `gofmt -l cmd internal` (empty); `go build ./...`; `go test -race -count=1 ./...`; pinned golangci-lint v2.12.0; `go run ./cmd/spec-drift --base origin/main --head HEAD`. Docs-and-measurement change only — no production code touched.
+
+Follow-ups:
+
+- The dogfood was a single-device sweep against one forge (GitHub). GitLab/Gitea were not exercised; the `spec/07` note claims parity on the UI-invisibility half from protocol design, not from measurement, and says so.
+- Reinstating CodeRabbit, or deciding not to, is a maintainer call this entry deliberately does not make.
+
 ## 2026-07-30 — P7-WIP-08 automatic WIP GC on convergence
 
 Changed:

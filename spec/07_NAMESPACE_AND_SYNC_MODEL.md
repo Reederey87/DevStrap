@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-30
+last_reviewed: 2026-07-31
 tracks_code: [internal/pathkey/**, internal/scan/**, internal/state/**, internal/sync/**, internal/fold/**, internal/workspacekeys/**, internal/devicekeys/**, internal/id/**, internal/pairing/**]
 ---
 # Namespace and Sync Model
@@ -25,13 +25,23 @@ device remains offline beyond the TTL and its worktree copy is also gone;
 live-but-absent peers and unknown-device orphans are the deliberately
 never-reaped residual.
 
-**Forge-notification clause, checked 2026-07-30 (external behavior).** Refs
-outside `refs/heads/*` and `refs/tags/*` are invisible in the GitHub/GitLab
-branch/tag UI and raise no PR prompts, compare banners, or notifications.
-GitHub Actions `push` events are defined only for heads and tags, so
-`refs/devstrap/wip/*` cannot trigger CI — a protocol-design property, not
-forge courtesy. Unfiltered push webhooks can still fire for any ref; automatic
-GC bounds that residual.
+**Forge-notification clause — MEASURED against a real forge 2026-07-31, not
+asserted.** Refs outside `refs/heads/*` and `refs/tags/*` are invisible in the
+GitHub/GitLab branch/tag UI and raise no PR prompts, compare banners, or
+notifications. GitHub Actions `push` events are defined only for heads and
+tags, so `refs/devstrap/wip/*` cannot trigger CI — a protocol-design property,
+not forge courtesy. Unfiltered push webhooks can still fire for any ref;
+automatic GC bounds that residual.
+
+Method, because the obvious version of this check proves nothing: a private
+GitHub repo (`Reederey87/devstrap-dogfood`) was given a deliberately
+**unfiltered** `on: push` workflow, and that workflow was first confirmed to
+fire for an ordinary branch push (1 run, `ref=main`). Only then was a WIP ref
+pushed via `devstrap wip push`. The run count stayed at 1 — zero runs for the
+WIP ref — and `gh api .../branches` continued to list only `main`, with no open
+PRs. Without the confirmed-live workflow, "no Actions runs" would have been
+vacuous: the repo had no workflows at all beforehand. The probe was removed
+afterward and the WIP refs deleted.
 
 ## Core abstraction
 
