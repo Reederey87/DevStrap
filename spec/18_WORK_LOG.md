@@ -31,6 +31,25 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — `docs/agents.md` was never actually committed (P8-ADOPT-01)
+
+Changed:
+
+- **PR #255 shipped the README link, the testscript, and five spec claims for `docs/agents.md` — but not the document.** `git log --all -- docs/agents.md` was empty. The README's Documentation section linked a 404, and `spec/00` (three places), `spec/10` (two), `spec/14`'s `AD5-04` accept criterion ("the recipe published in `docs/agents.md`"), and `spec/18` all asserted it existed. The audit found it; the file is now written and, this time, verified present in the staged tree rather than on disk.
+- **Root cause is worth recording because it will recur otherwise.** `.gitignore` carries `AGENTS.md` under "# Agents files" to keep local agent-instruction scratch out of the repo. Git's ignore matching is basename-and-any-depth, and `core.ignorecase=true` on macOS and Windows — so **`docs/agents.md` matched the `AGENTS.md` rule** and `git add -A` skipped it *silently*, which is what `add` does with ignored paths. The repo's own root `AGENTS.md` is unaffected only because an ignore rule never untracks an already-tracked file, which is precisely why the rule looked harmless for months. `.gitignore` now carries an explicit `!docs/agents.md` negation and a comment explaining the case-insensitivity trap.
+- **The verification that failed is the more useful lesson.** After the rebase, the check run was `test -f docs/agents.md` — which passes for an **untracked** file sitting in the working tree. It proved the file existed on disk, never that it was in the commit. The correct check is `git cat-file -e <rev>:<path>` or `git diff --cached --name-only`, and this entry is the fifth instance this session of a check that looked green while proving nothing (see the blobless-clone, git-identity, merge-base, and sed-mutation cases above). It is the only one of the five that actually shipped a false claim.
+- The restored guide also folds in three corrections the audit surfaced alongside it: `--base-ref` should be given as a qualified `remote/branch` pair; `--allow-shallow` is accepted only alongside `--adopt-worktree`; and a worktree adopted while detached records an empty branch that a later `git switch -c` does **not** refresh, so `agent pr` keeps refusing it — create the branch before adopting if you intend to open a PR. That last one is tracked as `P8-ADOPT-02` and is a code fix, not a docs fix; the guide states the current limitation rather than describing a remedy that does not work.
+
+Validated:
+
+- `git diff --cached --name-only` confirms `docs/agents.md` is staged (the check whose absence caused this).
+- `git check-ignore -v docs/agents.md` now reports the negation rule rather than the `AGENTS.md` rule.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+
+- The remaining Pass-8 adoption findings (`P8-ADOPT-02` frozen branch column, `P8-ADOPT-03` unvalidated `--base-ref`, `P8-ADOPT-04` provision→register gap, `P8-ADOPT-05` gitdir `commondir` write grant, `P8-ADOPT-06` diff summary, `P8-ADOPT-07` legacy path spellings) plus `P8-SEC-01` are written up in the Pass-8 audit and are not fixed here — this entry restores a shipped-but-missing file and closes the ignore trap that caused it, nothing more.
+
 ## 2026-07-31 — AD-5 wave post-merge reconciliation
 
 Changed:
