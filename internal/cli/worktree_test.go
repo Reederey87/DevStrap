@@ -422,7 +422,16 @@ func setupFreshWorktreeRepo(t *testing.T, home, root, lfsPolicy string, usesLFS 
 	if _, stderr, err := executeForTest("--home", home, "--root", root, "hydrate", "work/acme/repo"); err != nil {
 		t.Fatalf("hydrate stderr = %q err = %v", stderr, err)
 	}
-	return filepath.Join(root, "work", "acme", "repo")
+	local := filepath.Join(root, "work", "acme", "repo")
+	// The hydrated clone carries no committer identity of its own, and CI
+	// machines have no global git config — so any test that commits here (to
+	// advance a base ref, build an orphan history, ...) fails with exit 128
+	// "Author identity unknown" on Linux while passing on a developer laptop
+	// that happens to have a global identity. Configure it on the fixture once
+	// rather than in each test, and never rely on the ambient environment.
+	runGit(t, local, "config", "user.email", "devstrap@example.test")
+	runGit(t, local, "config", "user.name", "DevStrap Test")
+	return local
 }
 
 func installFailingGitLFS(t *testing.T) {

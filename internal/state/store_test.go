@@ -239,8 +239,8 @@ func TestMigrateEnsureSummaryAndVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 31 {
-		t.Fatalf("schema version = %d, want 31", version)
+	if version != 32 {
+		t.Fatalf("schema version = %d, want 32", version)
 	}
 
 	var tableCount int
@@ -462,8 +462,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 30 {
-		t.Fatalf("schema version after down = %d, want 30", version)
+	if version != 31 {
+		t.Fatalf("schema version after down = %d, want 31", version)
 	}
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
@@ -472,8 +472,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 31 {
-		t.Fatalf("schema version after re-migrate = %d, want 31", version)
+	if version != 32 {
+		t.Fatalf("schema version after re-migrate = %d, want 32", version)
 	}
 }
 
@@ -505,6 +505,9 @@ func TestMigration00029RoundTripsDeviceGitstateTable(t *testing.T) {
 		t.Fatalf("upsert device gitstate before down: %v", err)
 	}
 
+	if err := st.Down(); err != nil { // 32 -> 31 (drops the active-path unique index, unrelated here)
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 31 -> 30 (drops WIP tombstone columns)
 		t.Fatal(err)
 	}
@@ -576,6 +579,9 @@ func TestMigration00030RoundTripsDeviceWipTable(t *testing.T) {
 		t.Fatalf("upsert device wip before down: %v", err)
 	}
 
+	if err := st.Down(); err != nil { // 32 -> 31 (drops the active-path unique index, unrelated here)
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 31 -> 30 (drops WIP tombstone columns)
 		t.Fatal(err)
 	}
@@ -648,7 +654,10 @@ func TestMigration00031RoundTripsDroppedAtColumn(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Down(); err != nil {
+	if err := st.Down(); err != nil { // 32 -> 31 (drops the active-path unique index, unrelated here)
+		t.Fatal(err)
+	}
+	if err := st.Down(); err != nil { // 31 -> 30 (drops WIP tombstone columns)
 		t.Fatal(err)
 	}
 	var sha string
@@ -686,6 +695,85 @@ func tableExists(t *testing.T, st *Store, name string) bool {
 	return count > 0
 }
 
+func indexExists(t *testing.T, st *Store, name string) bool {
+	t.Helper()
+	var count int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?;`, name).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count > 0
+}
+
+// TestMigration00032RoundTripsActivePathIndex pins AD5-02's uniqueness
+// invariant: migration 00032 adds idx_worktrees_active_path so the same
+// physical (namespace_id, path) can never be registered twice while ACTIVE —
+// but a REMOVED worktree's path remains legitimately reusable (the checkout
+// is gone) — and the index round-trips cleanly through down/re-migrate.
+func TestMigration00032RoundTripsActivePathIndex(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if !indexExists(t, st, "idx_worktrees_active_path") {
+		t.Fatal("idx_worktrees_active_path missing after migrate")
+	}
+	if err := st.EnsureWorkspace(ctx, "personal", "/tmp/Code"); err != nil {
+		t.Fatal(err)
+	}
+	device, err := st.EnsureDevice(ctx, "test-device")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns, err := st.UpsertProject(ctx, UpsertProjectParams{Path: "work/adopt-index", Type: "plain_folder"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := st.InsertWorktree(ctx, Worktree{
+		NamespaceID: ns.ID, DeviceID: device.ID, Path: "/tmp/wt-dup", Branch: "agent/a",
+		BaseRef: "origin/main", BaseSHA: "abc", CreatedBy: "test",
+	})
+	if err != nil {
+		t.Fatalf("insert first active worktree: %v", err)
+	}
+	if _, err := st.InsertWorktree(ctx, Worktree{
+		NamespaceID: ns.ID, DeviceID: device.ID, Path: "/tmp/wt-dup", Branch: "agent/b",
+		BaseRef: "origin/main", BaseSHA: "abc", CreatedBy: "test",
+	}); err == nil {
+		t.Fatal("want a uniqueness error registering the same active (namespace_id, path) twice")
+	}
+	// A removed worktree's path is legitimately reusable — the WHERE
+	// status='active' predicate must let a later registration through.
+	if err := st.MarkWorktreeRemoved(ctx, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.InsertWorktree(ctx, Worktree{
+		NamespaceID: ns.ID, DeviceID: device.ID, Path: "/tmp/wt-dup", Branch: "agent/c",
+		BaseRef: "origin/main", BaseSHA: "abc", CreatedBy: "test",
+	}); err != nil {
+		t.Fatalf("re-registering a removed worktree's path should succeed: %v", err)
+	}
+
+	if err := st.Down(); err != nil {
+		t.Fatal(err)
+	}
+	if indexExists(t, st, "idx_worktrees_active_path") {
+		t.Fatal("idx_worktrees_active_path remains after migration 00032 down")
+	}
+
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if !indexExists(t, st, "idx_worktrees_active_path") {
+		t.Fatal("idx_worktrees_active_path missing after re-migrate")
+	}
+}
+
 func TestMigration00023DownRefusesPopulatedCoordinates(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
@@ -713,7 +801,10 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
-	// Steps from 31 down to 23 are unrelated and must remain unaffected.
+	// Steps from 32 down to 23 are unrelated and must remain unaffected.
+	if err := st.Down(); err != nil { // 32 -> 31
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 31 -> 30
 		t.Fatal(err)
 	}
@@ -794,6 +885,9 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
+	if err := st.Down(); err != nil { // 32 -> 31
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 31 -> 30
 		t.Fatal(err)
 	}
@@ -2602,5 +2696,35 @@ UPDATE draft_snapshots SET created_at = ? WHERE source_event_id = ?;
 			gotBlob = latest.BlobRef
 		}
 		t.Fatalf("surviving blob after prune = %q, want %q (must match the dry-run preview)", gotBlob, winnerBlob)
+	}
+}
+
+// TestWorktreeByPathSignalsNotFoundDistinguishably pins the sentinel that lets
+// `worktree adopt` tell genuine absence from a failed read. Absence is the ONLY
+// signal that licenses inserting a new row; if a real query failure were
+// indistinguishable, a transient I/O error or a corrupt database would be
+// silently reinterpreted as "not registered yet" and adopt would insert instead
+// of surfacing the fault. Mutation check: drop the %w wrap in WorktreeByPath and
+// this fails.
+func TestWorktreeByPathSignalsNotFoundDistinguishably(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = st.WorktreeByPath(ctx, "ns_does_not_exist", "/nowhere/at/all")
+	if err == nil {
+		t.Fatal("WorktreeByPath returned no error for a path that was never registered")
+	}
+	if !errors.Is(err, ErrWorktreeNotFound) {
+		t.Fatalf("absence must be reported as ErrWorktreeNotFound so callers can branch on it; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "/nowhere/at/all") {
+		t.Errorf("error should name the path it looked for; got %q", err)
 	}
 }

@@ -26,6 +26,7 @@ func newWorktreeCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Short: "Manage isolated worktrees",
 	}
 	cmd.AddCommand(newWorktreeNewCommand(stdout, opts))
+	cmd.AddCommand(newWorktreeAdoptCommand(stdout, opts))
 	cmd.AddCommand(newWorktreeStatusCommand(stdout, opts))
 	cmd.AddCommand(newWorktreeFinalizeCommand(stdout, opts))
 	cmd.AddCommand(newWorktreeListCommand(stdout, opts))
@@ -300,6 +301,260 @@ func resolveWorktreeDefaultBranch(ctx context.Context, warn io.Writer, r dsgit.R
 	return branch, nil
 }
 
+// worktreeAdoptResult is the --json payload for `worktree adopt`: it combines
+// a state.Worktree with fields not on that store type (project_path, the
+// idempotency markers, and any adoption warnings), so it is a named struct at
+// file scope per spec/13's rule (the worktreeStatusOutput pattern). It
+// deliberately has no schema_version field: that is a Pass-6 audit-doc
+// recommendation (docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md) that
+// was never adopted anywhere in the shipped --json contract — no sibling
+// result struct (worktreeStatusOutput, worktreeFinalizeResult, agentPRResult,
+// ...) carries one, so this does not invent a one-off convention here.
+type worktreeAdoptResult struct {
+	state.Worktree
+	ProjectPath       string   `json:"project_path"`
+	AlreadyAdopted    bool     `json:"already_adopted,omitempty"`
+	AlreadyRegistered bool     `json:"already_registered,omitempty"`
+	Warnings          []string `json:"warnings,omitempty"`
+}
+
+func newWorktreeAdoptCommand(stdout io.Writer, opts *options) *cobra.Command {
+	var projectFlag string
+	var baseRefFlag string
+	var allowShallow bool
+	cmd := &cobra.Command{
+		Use:   "adopt <path>",
+		Short: "Register an externally-created linked worktree (Codex/Cursor/Devin, etc.)",
+		Args:  usageArgs(cobra.ExactArgs(1)),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			absPath, err := filepath.Abs(args[0])
+			if err != nil {
+				return appError{code: exitUsage, err: fmt.Errorf("resolve path %q: %w", args[0], err)}
+			}
+			// Resolved identically to `worktree new`'s stored path (P6 path
+			// normalization parity fix below) so the same physical worktree
+			// hits the same idx_worktrees_active_path row regardless of which
+			// command registered it, or which /var vs /private/var spelling
+			// the caller used.
+			resolvedPath, err := filepath.EvalSymlinks(absPath)
+			if err != nil {
+				return appError{code: exitUsage, err: fmt.Errorf("%s does not exist or is not accessible: %w", args[0], err)}
+			}
+			store, err := opts.openState(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer closeStore(store)
+			r := gitRunner(opts)
+
+			identity, err := r.WorktreeIdentity(cmd.Context(), resolvedPath)
+			if err != nil {
+				return appError{code: exitUsage, err: fmt.Errorf("%s is not a git worktree: %w", resolvedPath, err)}
+			}
+			// WorktreeIdentity leaves MainCheckout empty for a layout whose
+			// common dir is not "<checkout>/.git" (a bare repo, or a
+			// `--separate-git-dir` clone). Adoption needs the main checkout to
+			// map the worktree onto an adopted project, so refuse here rather
+			// than guessing — the sandbox path deliberately tolerates the same
+			// case, since it only needs the common dir.
+			if identity.MainCheckout == "" {
+				return appError{code: exitUsage, err: fmt.Errorf("cannot determine the main checkout for %s (its git-common-dir %q is not a <checkout>/.git layout — a bare repo or a --separate-git-dir clone); adopt is not supported for this layout", resolvedPath, identity.CommonDir)}
+			}
+			if !identity.IsLinked {
+				if identity.MainCheckout == resolvedPath {
+					return appError{code: exitUsage, err: fmt.Errorf("%s is the main checkout, not a linked worktree; there is nothing to adopt", resolvedPath)}
+				}
+				return appError{code: exitUsage, err: fmt.Errorf("%s is not a linked git worktree", resolvedPath)}
+			}
+			// Unborn HEAD (a brand new `git init`, no commits yet): there is no
+			// commit to merge-base against. Detached HEAD is NOT refused here —
+			// it is the common, expected shape for agent-harness worktrees and
+			// is adopted with Branch == "".
+			if identity.HeadSHA == "" {
+				return appError{code: exitUsage, err: fmt.Errorf("%s has an unborn HEAD (no commits yet); nothing to record a base against", resolvedPath)}
+			}
+
+			project, err := projectForWorktreeAdopt(cmd.Context(), opts, store, identity.MainCheckout, projectFlag)
+			if err != nil {
+				return err
+			}
+
+			var warnings []string
+			shallow, err := r.IsShallow(cmd.Context(), resolvedPath)
+			if err != nil {
+				return appError{code: exitGit, err: err}
+			}
+			if shallow {
+				if !allowShallow {
+					return appError{code: exitUsage, err: fmt.Errorf("%s is a shallow clone; a grafted history can make the recorded merge-base wrong at the shallow boundary — pass --allow-shallow to adopt anyway", resolvedPath)}
+				}
+				warnings = append(warnings, "repository is a shallow clone; recorded base_sha may be inaccurate at the shallow boundary")
+			}
+
+			baseRef := baseRefFlag
+			if baseRef == "" {
+				defaultBranch, err := resolveWorktreeDefaultBranch(cmd.Context(), cmd.ErrOrStderr(), r, resolvedPath, project.DefaultBranch)
+				if err != nil {
+					return appError{code: exitGit, err: err}
+				}
+				baseRef = "origin/" + defaultBranch
+			}
+
+			baseSHA, err := r.MergeBase(cmd.Context(), resolvedPath, identity.HeadSHA, baseRef)
+			if err != nil {
+				if errors.Is(err, dsgit.ErrNoMergeBase) {
+					label := identity.Branch
+					if label == "" {
+						label = "HEAD"
+					}
+					return appError{code: exitUsage, err: fmt.Errorf("%s and %s share no common history (adopting an orphan branch such as gh-pages is a common, legitimate case); pass an explicit --base-ref origin/<branch that shares history with %s>", label, baseRef, resolvedPath)}
+				}
+				return appError{code: exitGit, err: err}
+			}
+			dirty, err := r.DirtyState(cmd.Context(), resolvedPath)
+			if err != nil {
+				dirty = dsgit.DirtyUnknown
+			}
+
+			// The read-then-write below runs under the project repo lock, the
+			// same P7-GIT-01/02 discipline every other worktree mutation
+			// follows. idx_worktrees_active_path already makes a duplicate row
+			// impossible, but without the lock a concurrent adopt/new on the
+			// same path surfaces as a raw SQLite constraint error instead of a
+			// clear refusal.
+			unlockAdopt, err := acquireRepoLock(opts.paths().Home, project.ID)
+			if err != nil {
+				return err
+			}
+			defer unlockAdopt()
+
+			existing, lookupErr := store.WorktreeByPath(cmd.Context(), project.ID, resolvedPath)
+			// Absence is the ONLY signal that licenses an insert. Any other
+			// lookup failure (I/O error, corruption, timeout) must surface:
+			// reinterpreting it as "not registered yet" would silently insert a
+			// second row for a worktree that may already be registered.
+			if lookupErr != nil && !errors.Is(lookupErr, state.ErrWorktreeNotFound) {
+				return lookupErr
+			}
+			if lookupErr == nil {
+				if existing.CreatedBy != "adopted" {
+					// Adoption is registration, never base-resolution: a row
+					// this device created some other way (e.g. `worktree new`)
+					// keeps whatever base it already recorded. Mutate nothing.
+					out := worktreeAdoptResult{Worktree: existing, ProjectPath: project.Path, AlreadyRegistered: true, Warnings: warnings}
+					return opts.render(stdout, func(w io.Writer) error {
+						_, err := fmt.Fprintf(w, "%s is already registered as worktree %s (created_by=%s); left unchanged\n", resolvedPath, existing.ID, existing.CreatedBy)
+						return err
+					}, out)
+				}
+				if err := store.UpdateWorktreeAdoption(cmd.Context(), existing.ID, baseRef, baseSHA, string(dirty)); err != nil {
+					return err
+				}
+				existing.BaseRef, existing.BaseSHA, existing.DirtyState = baseRef, baseSHA, string(dirty)
+				out := worktreeAdoptResult{Worktree: existing, ProjectPath: project.Path, AlreadyAdopted: true, Warnings: warnings}
+				return opts.render(stdout, func(w io.Writer) error {
+					_, err := fmt.Fprintf(w, "Refreshed adopted worktree %s at %s (base %s %s)\n", existing.ID, existing.Path, existing.BaseRef, existing.BaseSHA)
+					return err
+				}, out)
+			}
+
+			device, err := store.CurrentDevice(cmd.Context())
+			if err != nil {
+				return err
+			}
+			wt, err := store.InsertWorktree(cmd.Context(), state.Worktree{
+				NamespaceID: project.ID,
+				DeviceID:    device.ID,
+				Path:        resolvedPath,
+				Branch:      identity.Branch,
+				BaseRef:     baseRef,
+				BaseSHA:     baseSHA,
+				CreatedBy:   "adopted",
+				DirtyState:  string(dirty),
+			})
+			if err != nil {
+				// The repo lock above serializes adopt against adopt/new for
+				// this project, so reaching the unique index means another
+				// process registered this path outside that lock. Report it as
+				// a conflict rather than leaking raw SQLite text.
+				if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+					return appError{code: exitConflict, err: fmt.Errorf("%s is already registered as an active worktree; run `devstrap worktree list` to see it", resolvedPath)}
+				}
+				return err
+			}
+			out := worktreeAdoptResult{Worktree: wt, ProjectPath: project.Path, Warnings: warnings}
+			return opts.render(stdout, func(w io.Writer) error {
+				_, err := fmt.Fprintf(w, "Adopted worktree %s at %s from %s %s\n", wt.ID, wt.Path, wt.BaseRef, wt.BaseSHA)
+				return err
+			}, out)
+		},
+	}
+	cmd.Flags().StringVar(&projectFlag, "project", "", "namespace path of the adopted project this worktree belongs to (required when it cannot be inferred uniquely)")
+	cmd.Flags().StringVar(&baseRefFlag, "base-ref", "", "explicit base ref (e.g. origin/gh-pages) instead of the resolved default branch")
+	cmd.Flags().BoolVar(&allowShallow, "allow-shallow", false, "adopt even though the repository is a shallow clone (recorded base_sha may be inaccurate)")
+	return cmd
+}
+
+// projectForWorktreeAdopt maps a linked worktree's main checkout to the one
+// adopted project it belongs to. `--project` DISAMBIGUATES; it does not
+// override — the named project's own checkout must still be this worktree's
+// main checkout, or the row would record provenance for a repo the worktree
+// does not belong to (and `remove --prune` would later run `git worktree
+// remove` from the wrong repository). Without an explicit flag, every
+// project's local checkout path is compared against mainCheckout — resolved
+// identically, so a /var vs /private/var spelling difference cannot hide a
+// real match — refusing with a usage error naming every candidate when the
+// match is missing or ambiguous, the same shape `wip show`'s resolveWipTarget
+// uses for its multi-candidate refusal.
+func projectForWorktreeAdopt(ctx context.Context, opts *options, store *state.Store, mainCheckout, projectFlag string) (state.ProjectStatus, error) {
+	resolvedCheckout := func(p state.ProjectStatus) string {
+		repoPath := p.LocalPath
+		if repoPath == "" {
+			repoPath = filepath.Join(opts.paths().Root, filepath.FromSlash(p.Path))
+		}
+		resolved, rerr := filepath.EvalSymlinks(repoPath)
+		if rerr != nil {
+			resolved = filepath.Clean(repoPath)
+		}
+		return resolved
+	}
+	if projectFlag != "" {
+		p, err := store.ProjectByPath(ctx, projectFlag)
+		if err != nil {
+			return state.ProjectStatus{}, err
+		}
+		if got := resolvedCheckout(p); got != mainCheckout {
+			return state.ProjectStatus{}, appError{code: exitUsage, err: fmt.Errorf("--project %s is checked out at %s, but that worktree belongs to %s; --project disambiguates between matching projects, it cannot reassign a worktree to a different repository", projectFlag, got, mainCheckout)}
+		}
+		return p, nil
+	}
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return state.ProjectStatus{}, err
+	}
+	var matches []state.ProjectStatus
+	for _, p := range projects {
+		if p.Type != "git_repo" {
+			continue
+		}
+		if resolvedCheckout(p) == mainCheckout {
+			matches = append(matches, p)
+		}
+	}
+	switch len(matches) {
+	case 1:
+		return matches[0], nil
+	case 0:
+		return state.ProjectStatus{}, appError{code: exitUsage, err: fmt.Errorf("no adopted project's local checkout matches %s; pass --project <namespace-path>", mainCheckout)}
+	default:
+		names := make([]string, 0, len(matches))
+		for _, p := range matches {
+			names = append(names, p.Path)
+		}
+		return state.ProjectStatus{}, appError{code: exitUsage, err: fmt.Errorf("multiple adopted projects match %s (%s); pick one with --project", mainCheckout, strings.Join(names, ", "))}
+	}
+}
+
 func applyWorktreeLFSPolicy(ctx context.Context, warn io.Writer, r dsgit.Runner, project state.ProjectStatus, wtPath string) error {
 	usesLFS, err := dsgit.UsesLFS(ctx, wtPath)
 	if err != nil {
@@ -487,6 +742,7 @@ type worktreeRemoveResult struct {
 
 func newWorktreeRemoveCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var force bool
+	var prune bool
 	cmd := &cobra.Command{
 		Use:   "remove <id>",
 		Short: "Mark a worktree removed",
@@ -500,6 +756,21 @@ func newWorktreeRemoveCommand(stdout io.Writer, opts *options) *cobra.Command {
 			wt, err := store.WorktreeByID(cmd.Context(), args[0])
 			if err != nil {
 				return err
+			}
+			// An adopted worktree is a registration of a checkout DevStrap did
+			// not create. Reaping it the same way as a `worktree new` checkout
+			// would delete something devstrap does not own; deregister only
+			// (mark the row removed, leave the checkout on disk) unless the
+			// caller explicitly opts into also removing the physical checkout.
+			if wt.CreatedBy == "adopted" && !prune {
+				if err := store.MarkWorktreeRemoved(cmd.Context(), args[0]); err != nil {
+					return err
+				}
+				out := worktreeRemoveResult{ID: args[0], Pruned: false}
+				return opts.render(stdout, func(w io.Writer) error {
+					_, err := fmt.Fprintf(w, "Deregistered adopted worktree %s; checkout left in place at %s (pass --prune to also remove it)\n", out.ID, wt.Path)
+					return err
+				}, out)
 			}
 			project, err := store.ProjectByID(cmd.Context(), wt.NamespaceID)
 			if err != nil {
@@ -552,6 +823,7 @@ func newWorktreeRemoveCommand(stdout io.Writer, opts *options) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "remove dirty or missing worktrees and prune stale Git metadata")
+	cmd.Flags().BoolVar(&prune, "prune", false, "for an adopted worktree, also remove the physical checkout (by default only the registration is removed)")
 	return cmd
 }
 
@@ -571,6 +843,7 @@ type worktreeCleanupResult struct {
 func newWorktreeCleanupCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var merged bool
 	var force bool
+	var includeAdopted bool
 	cmd := &cobra.Command{
 		Use:   "cleanup",
 		Short: "Clean up eligible worktrees",
@@ -602,6 +875,13 @@ func newWorktreeCleanupCommand(stdout io.Writer, opts *options) *cobra.Command {
 			refreshed := map[string]bool{}
 			stderr := cmd.ErrOrStderr()
 			for _, wt := range worktrees {
+				// Adopted worktrees are registrations of checkouts DevStrap did
+				// not create; `cleanup --merged` must never `git branch -D`
+				// something it did not create without an explicit opt-in.
+				if wt.CreatedBy == "adopted" && !includeAdopted {
+					skipped++
+					continue
+				}
 				r := gitRunner(opts)
 				project, err := store.ProjectByID(cmd.Context(), wt.NamespaceID)
 				if err != nil {
@@ -645,6 +925,7 @@ func newWorktreeCleanupCommand(stdout io.Writer, opts *options) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&merged, "merged", false, "only remove merged, clean worktrees")
 	cmd.Flags().BoolVar(&force, "force", false, "also remove merged worktrees with a dirty tree")
+	cmd.Flags().BoolVar(&includeAdopted, "include-adopted", false, "also consider adopted worktrees for reaping (by default they are skipped)")
 	return cmd
 }
 
@@ -703,6 +984,17 @@ func cleanupOneWorktree(ctx context.Context, opts *options, stderr io.Writer, st
 		return nil, nil
 	}
 	if dirty != dsgit.DirtyClean && !force {
+		return nil, nil
+	}
+	// A detached-HEAD worktree (Branch == "", the common shape for an adopted
+	// worktree) is NEVER merge-eligible. Without this guard,
+	// strings.Contains(mergedOut, wt.Branch) below is true for ANY mergedOut
+	// when wt.Branch == "" (strings.Contains(x, "") is always true in Go), so
+	// every clean detached worktree would read as "merged" the moment
+	// --include-adopted lets it reach this point — reaping exactly the
+	// checkouts that flag exists to protect, in exactly the detached case
+	// that is the common one (AD5-02 review finding).
+	if wt.Branch == "" {
 		return nil, nil
 	}
 	if refreshKey := project.ID + "\x00" + wt.BaseRef; !refreshed[refreshKey] {
@@ -799,6 +1091,17 @@ func addWorktreeWithFreshBranch(ctx context.Context, runner worktreeAdder, home,
 				continue
 			}
 			return "", "", err
+		}
+		// P6 path-normalization parity (AD5-02): resolve symlinks the same way
+		// `worktree adopt` does, so the SAME physical worktree gets the SAME
+		// stored path (idx_worktrees_active_path, migration 00032) regardless
+		// of which command registered it — otherwise a macOS /var vs
+		// /private/var alias lets the unique index miss a real duplicate.
+		// EvalSymlinks can fail on an unusual filesystem even though the
+		// worktree was just created; fall back to the unresolved path rather
+		// than losing the registration over a cosmetic normalization step.
+		if resolved, rerr := filepath.EvalSymlinks(wtPath); rerr == nil {
+			wtPath = resolved
 		}
 		return branch, wtPath, nil
 	}

@@ -641,7 +641,7 @@ External survey (2026-07-31) confirms the primitive is genuinely unbuilt elsewhe
 **Non-negotiable invariant for every row below.** Adoption is a *registration* plane, never a base-resolution plane. `worktree adopt` records what a worktree was **actually** based on and never rewrites, repairs, or blesses that base; an adopted worktree that is stale must report stale. This is the same separation `10_AGENT_WORKSPACES_AND_POLICIES.md` § *Independence from the cross-machine sync plane* already enforces for the WIP plane, and it is proven the same way — by a check that fails when the behavior is reverted, per the `worktree_never_bases_off_wip_ref.txtar` precedent.
 
 ```text
-[ ] AD5-01  `worktree new --fresh-upstream --json` becomes a documented, versioned
+[x] AD5-01  SHIPPED 2026-07-31 (PR #252). `worktree new --fresh-upstream --json` is a documented, versioned
             MACHINE contract rather than an incidental byproduct of the P5-CLI-01
             render rollout (which wired the flag without ever designing the payload
             for an external consumer). Adds a schema version plus the fields a harness
@@ -657,7 +657,7 @@ External survey (2026-07-31) confirms the primitive is genuinely unbuilt elsewhe
             Accept: a harness goes from `worktree new --json` to a usable checkout with
             no second devstrap call, and dropping any documented key fails the test.
 
-[ ] AD5-02  `devstrap worktree adopt <path>` registers an externally-created linked git
+[x] AD5-02  SHIPPED 2026-07-31 (PR #253). `devstrap worktree adopt <path>` registers an externally-created linked git
             worktree. Proves the path IS a linked worktree through ONE canonical helper
             extracted from `WorktreeSandboxWriteDirs` (which already carries the
             git-dir/common-dir comparison privately) so there is one definition rather

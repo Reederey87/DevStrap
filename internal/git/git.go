@@ -60,6 +60,12 @@ var (
 	// retryable outcome of the git-carrier hub's optimistic write loop:
 	// refetch, re-apply, push again — never a terminal failure.
 	ErrNonFastForward = errors.New("git non-fast-forward push")
+	// ErrNoMergeBase classifies `git merge-base`'s documented exit-1/empty-output
+	// outcome: the two refs share no common ancestor (an orphan branch such as
+	// gh-pages is the common case). This is an EXPECTED result, never an
+	// operational failure — callers such as `worktree adopt` must surface it as
+	// a usage refusal naming an explicit --base-ref, not as a bare error.
+	ErrNoMergeBase = errors.New("git no common ancestor")
 )
 
 type CommandError struct {
@@ -737,6 +743,124 @@ func (r Runner) RevParse(ctx context.Context, dir, ref string) (string, error) {
 	return r.Run(ctx, dir, "rev-parse", ref)
 }
 
+// MergeBase resolves the merge base of a and b (`git merge-base a b`). git's
+// own exit-1/empty-output convention for "no common ancestor" (two refs with
+// unrelated histories, e.g. an orphan gh-pages branch) is NOT an operational
+// failure — it is classified as the distinct sentinel ErrNoMergeBase so
+// callers can offer an explicit remedy (an alternate --base-ref) instead of
+// failing bare. Any other non-zero exit (invalid ref, git too old) is
+// returned as an ordinary error.
+func (r Runner) MergeBase(ctx context.Context, dir, a, b string) (string, error) {
+	out, err := r.Run(ctx, dir, "merge-base", a, b)
+	if err != nil {
+		var cmdErr CommandError
+		if errors.As(err, &cmdErr) && cmdErr.ExitCode() == 1 {
+			return "", fmt.Errorf("%w: %s and %s", ErrNoMergeBase, a, b)
+		}
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// IsShallow reports whether dir is a shallow clone (`git rev-parse
+// --is-shallow-repository`). A shallow history can make MergeBase return a
+// plausible-but-wrong answer at the shallow boundary rather than the true
+// common ancestor, so callers that record a merge-base as provenance (e.g.
+// `worktree adopt`) must gate on this before trusting the result.
+func (r Runner) IsShallow(ctx context.Context, dir string) (bool, error) {
+	out, err := r.Run(ctx, dir, "rev-parse", "--is-shallow-repository")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(out) == "true", nil
+}
+
+// WorktreeIdentity resolves what dir actually is: the main checkout, a
+// genuine linked worktree, or neither (not a git worktree at all). It is the
+// single definition behind both WorktreeSandboxWriteDirs' sandbox-grant
+// resolution and `worktree adopt`'s registration of an externally-created
+// worktree — extracted so there is exactly one place that decides "linked
+// worktree or not" (previously duplicated logic living only inside
+// WorktreeSandboxWriteDirs).
+type WorktreeIdentity struct {
+	CommonDir    string // resolved git-common-dir
+	GitDir       string // resolved git-dir (per-worktree admin dir for a linked worktree)
+	IsLinked     bool   // true only for a genuine linked worktree
+	MainCheckout string // working tree of the main checkout
+	Branch       string // "" when HEAD is detached
+	HeadSHA      string // "" when HEAD is unborn
+}
+
+func (r Runner) WorktreeIdentity(ctx context.Context, dir string) (WorktreeIdentity, error) {
+	common, err := r.Run(ctx, dir, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return WorktreeIdentity{}, err
+	}
+	gitDir, err := r.Run(ctx, dir, "rev-parse", "--git-dir")
+	if err != nil {
+		return WorktreeIdentity{}, err
+	}
+	abs := func(p string) string {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return ""
+		}
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(dir, p)
+		}
+		if resolved, rerr := filepath.EvalSymlinks(p); rerr == nil {
+			return resolved
+		}
+		return filepath.Clean(p)
+	}
+	commonAbs := abs(common)
+	gitDirAbs := abs(gitDir)
+	if commonAbs == "" || gitDirAbs == "" {
+		return WorktreeIdentity{}, fmt.Errorf("could not resolve git dir for %q", dir)
+	}
+	// A genuine linked worktree's --git-dir sits under <common>/worktrees/; the
+	// main checkout has gitDirAbs == commonAbs. A --git-dir that resolves
+	// elsewhere under the common dir (a malformed gitfile/commondir could point
+	// at <common>/hooks or a sibling) is refused rather than treated as linked.
+	isLinked := false
+	if gitDirAbs != commonAbs {
+		worktreesRoot := filepath.Join(commonAbs, "worktrees")
+		if rel, rerr := filepath.Rel(worktreesRoot, gitDirAbs); rerr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			isLinked = true
+		}
+	}
+	// commonAbs normally ends in "/.git", so its main checkout is its parent
+	// directory. A bare repo, or a checkout made with `git clone/init
+	// --separate-git-dir`, does not — and guessing there would fabricate a wrong
+	// path. Such a case yields MainCheckout == "" rather than an ERROR, which
+	// matters: WorktreeSandboxWriteDirs must keep granting git-storage writes for
+	// these layouts (it only needs CommonDir and IsLinked), and turning this into
+	// an error would silently deny every git write for a --separate-git-dir
+	// project, breaking the agent's own `git commit` under the sandbox. Callers
+	// that genuinely need the main checkout — `worktree adopt` — check for "" and
+	// refuse themselves.
+	mainCheckout := ""
+	if filepath.Base(commonAbs) == ".git" {
+		mainCheckout = filepath.Dir(commonAbs)
+	}
+	branch := ""
+	if out, berr := r.Run(ctx, dir, "symbolic-ref", "--quiet", "--short", "HEAD"); berr == nil {
+		branch = strings.TrimSpace(out)
+	}
+	headSHA := ""
+	if out, herr := r.Run(ctx, dir, "rev-parse", "--verify", "HEAD"); herr == nil {
+		headSHA = strings.TrimSpace(out)
+	}
+	return WorktreeIdentity{
+		CommonDir:    commonAbs,
+		GitDir:       gitDirAbs,
+		IsLinked:     isLinked,
+		MainCheckout: mainCheckout,
+		Branch:       branch,
+		HeadSHA:      headSHA,
+	}, nil
+}
+
 // IsSquashMerged reports whether branch's content is already contained in the
 // CURRENT baseRef tree — the content-equivalence test behind `worktree cleanup
 // --merged`'s squash/rebase detection (P4-GIT-04). It simulates the merge
@@ -789,30 +913,12 @@ func (r Runner) IsSquashMerged(ctx context.Context, dir, branch, baseRef string)
 // symlink-resolved. A nil slice with no error is returned when dir is not inside
 // a git worktree, so callers can grant nothing without special-casing.
 func (r Runner) WorktreeSandboxWriteDirs(ctx context.Context, dir string) ([]string, error) {
-	common, err := r.Run(ctx, dir, "rev-parse", "--git-common-dir")
+	identity, err := r.WorktreeIdentity(ctx, dir)
 	if err != nil {
-		return nil, nil // not a git worktree — nothing to grant
-	}
-	gitDir, err := r.Run(ctx, dir, "rev-parse", "--git-dir")
-	if err != nil {
-		return nil, nil
-	}
-	abs := func(p string) string {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			return ""
-		}
-		if !filepath.IsAbs(p) {
-			p = filepath.Join(dir, p)
-		}
-		if resolved, rerr := filepath.EvalSymlinks(p); rerr == nil {
-			return resolved
-		}
-		return filepath.Clean(p)
-	}
-	commonAbs := abs(common)
-	gitDirAbs := abs(gitDir)
-	if commonAbs == "" || gitDirAbs == "" {
+		// Translate any resolution failure (not a git worktree, bare repo,
+		// relocated $GIT_COMMON_DIR, ...) into WorktreeSandboxWriteDirs' own
+		// long-standing nil,nil contract: callers grant nothing rather than
+		// special-casing an error they cannot act on.
 		return nil, nil
 	}
 	// Resolve each storage subpath too: <common>/objects can itself be a
@@ -821,7 +927,7 @@ func (r Runner) WorktreeSandboxWriteDirs(ctx context.Context, dir string) ([]str
 	// EvalSymlinks fails on a not-yet-created path (e.g. no reflog); fall back
 	// to the clean join, which git creates under the already-resolved commonAbs.
 	evalJoin := func(elem string) string {
-		p := filepath.Join(commonAbs, elem)
+		p := filepath.Join(identity.CommonDir, elem)
 		if resolved, rerr := filepath.EvalSymlinks(p); rerr == nil {
 			return resolved
 		}
@@ -832,18 +938,11 @@ func (r Runner) WorktreeSandboxWriteDirs(ctx context.Context, dir string) ([]str
 		evalJoin("refs"),
 		evalJoin("logs"),
 	}
-	// Add the per-worktree admin dir only for a genuine LINKED worktree, and
-	// only when it is actually under <common>/worktrees/. gitDir == common is
-	// the main checkout (objects/refs/logs already cover its writes; never add
-	// the whole common dir — hooks/ and config live there). A --git-dir that
-	// resolves ELSEWHERE under the common dir (a malformed gitfile/commondir
-	// could point at <common>/hooks or a sibling) is refused rather than
-	// granted, keeping the hooks/config exclusion robust against hostile setups.
-	if gitDirAbs != commonAbs {
-		worktreesRoot := filepath.Join(commonAbs, "worktrees")
-		if rel, rerr := filepath.Rel(worktreesRoot, gitDirAbs); rerr == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			dirs = append(dirs, gitDirAbs)
-		}
+	// Add the per-worktree admin dir only for a genuine LINKED worktree. The
+	// main checkout (objects/refs/logs already cover its writes) never gets
+	// the whole common dir — hooks/ and config live there.
+	if identity.IsLinked {
+		dirs = append(dirs, identity.GitDir)
 	}
 	return dirs, nil
 }
