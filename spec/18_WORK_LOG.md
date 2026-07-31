@@ -31,6 +31,24 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-30 — Export recursively watched directory health
+
+Changed:
+
+- Added the optional `WatchedDirCounter` seam and made `NativeWatcher` a pointer-owned, concurrency-safe live registry that sums fsnotify `WatchList` directory counts across every active root.
+- Plumbed known-versus-unknown directory counts through the watch plane, `/v1/health`, JSON `daemon status`, and human status output; poll, idle, and degraded states never report a false zero.
+- Added native directory-semantics/lifetime coverage, daemon multi-root/poll/stale/wire-shape coverage, and a real-binary idle JSON assertion.
+- Updated the FSEvents threshold documentation and backlog: the 20,000-directory threshold is now observable through optional `watch.watched_dirs`, while `watch.roots` remains a project count and the 5,639-directory measurement remains explicitly a `~/Developer` proxy.
+
+- **Post-review (Codex, one should-fix, accepted — and it was against the design instruction I wrote):** `snapshot()` captured the counter under `p.mu`, released the lock, then called `WatchedDirs()` and published `DirsKnown=true` unconditionally. Releasing the lock is correct — the call reaches into the platform adapter, which takes its own lock, and holding both would couple the two lock orders — but it opens a window in which a concurrent `degrade()`/`idle()`/poll fallback clears the counter mid-call, so a **degraded plane could report a directory count from the native arm that preceded it**, which is the precise confusion this field exists to avoid. The result is now RE-VALIDATED under the lock and published only if the plane is still armed on the very same counter. Pinned by `TestSnapshotDoesNotPublishACountThePlaneNoLongerSupports`, which parks a blocking counter inside `WatchedDirs()` and forces a `degrade()` through that window; mutation-verified against the pre-fix code, which reports `WatchedDirs:5639, DirsKnown:true` beside `Degraded:false`→degraded state.
+
+Validated:
+
+- Requested build, cross-build, race, lint, spec-drift, and mutation checks recorded in the task handoff.
+
+Follow-ups:
+
+- None.
 ## 2026-07-30 — doctor never puts a raw error string in Detail
 
 Changed:

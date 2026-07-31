@@ -51,10 +51,15 @@ type watchState struct {
 	// Reason explains the degradation in one line.
 	Reason string
 	// Roots is how many paths are being watched — the measurement the FSEvents
-	// decision in spec/05 is gated on.
+	// plane arms, not the recursive directory total.
 	Roots int
+	// WatchedDirs is the live recursive directory total when the active adapter
+	// can report it. DirsKnown distinguishes a genuine zero from unknown.
+	WatchedDirs int
+	DirsKnown   bool
 	// Hints counts coalesced triggers observed since start.
-	Hints uint64
+	Hints   uint64
+	counter platform.WatchedDirCounter
 }
 
 // minTriggerInterval floors the gap between watcher-driven convergences. The
@@ -132,10 +137,35 @@ func newWatchPlane(w, fallback platform.Watcher, src WatchSource, s *scheduler, 
 	}
 }
 
+// snapshot reads the plane's state plus, when the armed backend can report it,
+// the live watched-directory count.
+//
+// The counter call happens OUTSIDE p.mu — it reaches into the platform adapter,
+// which takes its own lock, and holding both would couple this plane's lock to
+// an adapter's. That leaves a window in which a concurrent degrade(), idle(), or
+// poll fallback clears the counter while the call is in flight, so the result is
+// RE-VALIDATED under the lock before publication: a count is reported only if
+// the plane is still armed on the very same counter it was read from. Otherwise
+// the field stays unknown, which is the honest answer — a degraded or polling
+// plane must never carry a count from the native arm that preceded it.
 func (p *watchPlane) snapshot() watchState {
 	p.mu.Lock()
+	state := p.state
+	counter := state.counter
+	p.mu.Unlock()
+	if counter == nil {
+		return state
+	}
+	dirs := counter.WatchedDirs()
+	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.state
+	state = p.state
+	if state.counter != counter {
+		return state
+	}
+	state.WatchedDirs = dirs
+	state.DirsKnown = true
+	return state
 }
 
 // beginProbation marks gen as the arm serving a recovery probation.
@@ -321,7 +351,7 @@ func (p *watchPlane) arm(ctx context.Context, gen uint64, roots []string, events
 		if p.watcher != nil {
 			name = p.watcher.Name()
 		}
-		p.watching(name, len(roots))
+		p.watching(p.watcher, len(roots))
 		p.logger.Info("daemon: watching workspace", "backend", name, "roots", len(roots))
 		err := <-nativeResult
 		if ctx.Err() != nil {
@@ -343,6 +373,9 @@ func (p *watchPlane) arm(ctx context.Context, gen uint64, roots []string, events
 	p.setState(func(s *watchState) {
 		s.Backend = p.fallback.Name()
 		s.Roots = len(roots)
+		s.counter = nil
+		s.WatchedDirs = 0
+		s.DirsKnown = false
 	})
 	if err := p.watchAll(ctx, p.fallback, roots, events); err != nil && ctx.Err() == nil {
 		p.degrade("polling watcher failed: " + err.Error())
@@ -463,6 +496,9 @@ func (p *watchPlane) consume(ctx context.Context, events <-chan platform.FSEvent
 func (p *watchPlane) degrade(reason string) {
 	p.transition(watchPhaseDegraded, func(s *watchState) {
 		s.Reason = reason
+		s.counter = nil
+		s.WatchedDirs = 0
+		s.DirsKnown = false
 	}, redact.Scrub(reason))
 	p.logger.Warn("daemon: watch plane degraded", "reason", reason)
 }
@@ -472,14 +508,20 @@ func (p *watchPlane) idle() {
 		s.Backend = ""
 		s.Reason = "no materialized projects yet"
 		s.Roots = 0
+		s.counter = nil
+		s.WatchedDirs = 0
+		s.DirsKnown = false
 	}, "watch plane recovered: idle")
 }
 
-func (p *watchPlane) watching(backend string, roots int) {
+func (p *watchPlane) watching(watcher platform.Watcher, roots int) {
 	p.transition(watchPhaseWatching, func(s *watchState) {
-		s.Backend = backend
+		s.Backend = watcher.Name()
 		s.Reason = ""
 		s.Roots = roots
+		s.counter, _ = watcher.(platform.WatchedDirCounter)
+		s.WatchedDirs = 0
+		s.DirsKnown = false
 	}, "watch plane recovered: native watcher armed")
 }
 

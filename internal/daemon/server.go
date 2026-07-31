@@ -162,13 +162,14 @@ type Health struct {
 
 // WatchHealth is the watch plane's contribution to /v1/health.
 type WatchHealth struct {
-	Enabled  bool   `json:"enabled"`
-	State    string `json:"state"`
-	Backend  string `json:"backend,omitempty"`
-	Degraded bool   `json:"degraded"`
-	Reason   string `json:"reason,omitempty"`
-	Roots    int    `json:"roots"`
-	Hints    uint64 `json:"hints,omitempty"`
+	Enabled     bool   `json:"enabled"`
+	State       string `json:"state"`
+	Backend     string `json:"backend,omitempty"`
+	Degraded    bool   `json:"degraded"`
+	Reason      string `json:"reason,omitempty"`
+	Roots       int    `json:"roots"`
+	Hints       uint64 `json:"hints,omitempty"`
+	WatchedDirs *int   `json:"watched_dirs,omitempty"`
 }
 
 // Version is the /v1/version payload.
@@ -235,6 +236,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 			Reason:   redact.Scrub(ws.Reason),
 			Roots:    ws.Roots,
 			Hints:    ws.Hints,
+		}
+		if ws.DirsKnown {
+			health.Watch.WatchedDirs = &ws.WatchedDirs
 		}
 	}
 	writeJSON(w, http.StatusOK, health)

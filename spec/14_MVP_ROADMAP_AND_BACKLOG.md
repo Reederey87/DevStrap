@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-29
+last_reviewed: 2026-07-30
 tracks_code: [cmd/**, internal/**, .github/**, docs/audits/AUDIT_RECOMMENDATIONS.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # MVP Roadmap and Backlog
@@ -321,11 +321,13 @@ Tasks:
     37,799-directory tree watches 5,639 directories for 38,095 fds — 15.5% of the 245,760 that
     machine's `kern.maxfilesperproc` allows. Reconsider at ~20,000 watched directories. The reading is
     a PROXY (`~/Code` was empty, so the tree was the maintainer's working tree; one machine, one macOS
-    version) and the threshold quantity is NOT reported by `/v1/health` — `watch.roots` counts
-    projects, not directories. Method, caveats, and threshold: `05_MAC_FIRST_IMPLEMENTATION.md`.
-[ ] Export the recursively-watched directory count through `WatchHealth` so the FSEvents reconsider
-    threshold above is checkable without re-running a harness (`len(watcher.WatchList())` already
-    exists inside the adapter; it needs plumbing through the `platform.Watcher` seam).
+    version). `/v1/health` now reports the threshold quantity conditionally as `watch.watched_dirs`;
+    `watch.roots` still counts projects, not directories. Method, caveats, and threshold:
+    `05_MAC_FIRST_IMPLEMENTATION.md`.
+[x] Export the recursively-watched directory count through `WatchHealth` so the FSEvents reconsider
+    threshold above is checkable without re-running a harness (2026-07-30). The optional
+    `WatchedDirCounter` seam preserves unknown for poll/non-directory backends; the native adapter
+    sums `len(watcher.WatchList())` across every concurrent root on one instance.
 [x] Implement reconcile job — the `Converger` seam over the existing `runLoopTick` (the `ARCH2-01`
     narrowing, PR #231). Periodic ticks, watcher hints, and `POST /v1/sync` all drive that one
     function, so no second convergence path exists to drift from `run-loop`.

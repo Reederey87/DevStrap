@@ -40,6 +40,13 @@ type Watcher interface {
 	Watch(ctx context.Context, root string, events chan<- FSEvent) error
 }
 
+// WatchedDirCounter is the optional half of the Watcher seam. An adapter that
+// registers per-directory descriptors reports the live total across every
+// concurrent Watch call on the instance. An adapter with no notion of
+// directories does NOT implement it — which is different from reporting 0, and
+// the difference is the whole point: a false 0 reads as "no descriptors".
+type WatchedDirCounter interface{ WatchedDirs() int }
+
 // PeerIdentity is the OS-reported identity of the process on the other end of a
 // connected Unix domain socket. UID is the authorization-relevant field; PID is
 // diagnostic only — it is unavailable on darwin, and a pid can be recycled
