@@ -29,6 +29,26 @@ Follow-ups:
 - <remaining work, or "None">
 ```
 
+## 2026-08-01 — the AD5-07 deferral asked for evidence; here it is (W13-01 PR A)
+
+Changed:
+- `spec/14`: the `AD5-07` row gains a **decision record** — the measured dependency delta, four durable supply-chain costs, a proposed change to the tool names, and an honest statement of what PR B costs beyond the server itself. **The row stays unchecked.** This PR decides nothing; it makes the decision possible.
+
+**Why this is a separate PR, and the process point.** The first draft of this wave put the measurement and the implementation in one PR, "so the measurement lands first". Review pointed out that gate is **structurally fictional**: if the finished server arrives in the same change, nobody actually gets to decline. A decision PR that could be closed with nothing else lost is the only shape that makes the go/no-go real.
+
+**The deferral said two things and they are worth very different amounts today.** The protocol half is weak on inspection: the 2026-07-28 rewrite is a *stateless-HTTP* rewrite — sessions, header routing, cache hints, MRTR, auth hardening — and `AD5-07` is stdio-only, i.e. precisely the surface it does not reach. The Go SDK has also carried a formal no-breaking-**API**-changes guarantee since v1.0.0, so the churn is in the wire protocol, not in the dependency's Go surface.
+
+The supply-chain half stands, and it was right to hold for it — so it was **measured rather than argued**. A scratch module importing the SDK and built for stdio links 9 modules, **7 net-new** against a 144-module graph. The costs a reviewer would otherwise find late are written into the row: `golang.org/x/oauth2` is linked *even for stdio*, which has no auth story; `segmentio/asm`/`encoding` put **hand-written assembly** on a JSON fast path parsing client-controlled input inside a signed binary; module-level scanners and the SBOM flag all seven regardless of reachability, so **CVE cadence transfers permanently** and a pinned SDK makes fix-lag the maintainer's job; and v1.7.0 was three days old when proposed.
+
+**Two things the measurement changed about the plan.** The row's tool names gain a `devstrap_` prefix — a server is loaded beside three to five others and bare `worktree_new` is a name another tool will also want. And PR B's cost is stated honestly: `worktree status`, `worktree list` and `agent adopt` all hold their logic inside the cobra `RunE`, so the "no second execution path" criterion needs three behaviour-preserving extractions **before** any MCP code, provable by no existing test changing.
+
+Validated: no code changed; `spec-drift`; the dependency figures were produced by building the probe module, not read off documentation.
+
+Follow-ups:
+- PR B is gated on the maintainer's answer. A "no" is a successful outcome of this row and should be recorded as one.
+- Two post-cutoff claims (the stdio-unaffected release note, the GitHub-500k datapoint) must cite primary sources in PR B rather than being restated.
+
+
 ## 2026-08-01 — the guard against vacuous tests could not itself fail (W13-06)
 
 Changed:

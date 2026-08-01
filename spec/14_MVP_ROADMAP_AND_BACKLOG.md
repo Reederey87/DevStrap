@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-31
+last_reviewed: 2026-08-01
 tracks_code: [cmd/**, internal/**, .github/**, docs/audits/AUDIT_RECOMMENDATIONS.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # MVP Roadmap and Backlog
@@ -765,19 +765,87 @@ External survey (2026-07-31) confirms the primitive is genuinely unbuilt elsewhe
             DevStrap provisioned.
 
 [ ] AD5-07  `devstrap mcp serve` — stdio MCP server, <=5 hand-authored tools
-            (`worktree_new`/`worktree_adopt`/`worktree_status`/`worktree_list`/
-            `agent_adopt`), no auth code (the local subprocess boundary IS the trust
-            boundary), SDK version pinned rather than floating. DEFERRED out of the
-            first wave ON PURPOSE: the MCP protocol had a breaking rewrite on
-            2026-07-28, and adding an external dependency to a signed-release binary is
-            a supply-chain decision to take deliberately, not as a wave side-effect.
+            (`devstrap_worktree_new`/`_adopt`/`_status`/`_list`/`devstrap_agent_adopt`
+            — service-prefixed, see below), no auth code (the local subprocess
+            boundary IS the trust boundary), SDK version pinned rather than floating.
             Precedent for shipping it as a subcommand rather than a second binary:
             `docker agent serve mcp`, `container-use stdio`.                              [M]
+            DEFERRED 2026-07-31 for two stated reasons. **The evidence the deferral
+            asked for is now gathered (2026-08-01, `W13-01` PR A); the go/no-go is
+            the maintainer's and the row stays UNCHECKED until it is given.**
             Accept: `claude mcp add devstrap -- devstrap mcp serve` yields a working
             provisioning surface with NO second execution path — each tool calls the
             same internal function its cobra command calls, exactly as the daemon's
             `Converger` seam calls the same `runLoopTick` the CLI calls.
 ```
+
+#### `AD5-07` decision record (2026-08-01) — measurement, not argument
+
+The deferral's two halves, answered separately. **This section is the evidence; it
+does not itself decide.**
+
+**Half 1 — "the MCP protocol had a breaking rewrite on 2026-07-28."** True, and the
+largest revision since launch. It is nonetheless not a reason to keep waiting:
+
+- The official Go SDK is at **v1.7.0** with full `2026-07-28` support, and has carried
+  a formal **no-breaking-API-changes guarantee since v1.0.0** (2025-09-30). The *wire
+  protocol* churned; the *Go API this would depend on* is under a stability commitment.
+- The rewrite's substance — removing `initialize`/`Mcp-Session-Id`, `Mcp-Method`
+  header routing, `ttlMs`/`cacheScope`, MRTR replacing server-initiated calls,
+  OAuth/DCR→CIMD hardening — is about running behind a load balancer. **`AD5-07` is
+  stdio-only by design**, i.e. precisely the surface the churn does not reach.
+- The SDK negotiates down to legacy clients automatically.
+
+*Two claims here are post-cutoff and the implementing PR must cite primary sources
+rather than restating them: the "local stdio integrations are largely unaffected"
+release note, and the GitHub-MCP-at-500k-users datapoint.*
+
+**Half 2 — the supply-chain decision.** This half stands and was right to hold for.
+Measured, not argued: a scratch module importing `github.com/modelcontextprotocol/go-sdk/mcp`
+at v1.7.0, built for **stdio only**, links these nine modules —
+
+```
+github.com/google/jsonschema-go        github.com/segmentio/asm
+github.com/modelcontextprotocol/go-sdk github.com/segmentio/encoding
+github.com/yosida95/uritemplate/v3     golang.org/x/oauth2
+golang.org/x/sync   (already ours)     golang.org/x/sys   (already ours)
+golang.org/x/time
+```
+
+**Net-new: 7 modules** against a current graph of 144 (`go list -m all`), about +5%.
+The durable costs, each of which a reviewer would otherwise discover late:
+
+- **`golang.org/x/oauth2` is linked even for stdio**, which needs no auth. An OAuth
+  client compiled into a signed release binary with no network auth story.
+  (`golang-jwt/jwt/v5` is an SDK requirement but is *not* linked.)
+- **`segmentio/asm` + `segmentio/encoding` bring hand-written assembly** into that
+  binary, on a JSON fast path parsing client-controlled input. This is the
+  hardest-to-audit item in the delta — arguably more than `x/oauth2`.
+- **CVE cadence transfers permanently.** Module-level scanners and the release SBOM
+  flag all seven regardless of symbol reachability, and a *pinned* SDK makes CVE-fix
+  lag the maintainer's job. A one-time `govulncheck` pass proves today, not that.
+- All seven land in the binary's embedded buildinfo (`go version -m`), enlarging the
+  cosign-verified artifact's audit surface.
+- **v1.7.0 was published 2026-07-28**, three days before this row was written.
+  Pinning a three-day-old release into a signed binary is itself a choice; since
+  stdio needs nothing from the new revision, pinning the last pre-rewrite release is
+  a live alternative.
+
+**One design change this record proposes to the row above.** The tool names gain a
+`devstrap_` prefix. A server is loaded alongside three to five others and bare
+`worktree_new` is a name another tool will also want; service-prefixed, snake_case,
+verb-oriented names are the standing convention. Tools additionally carry `title`,
+`readOnlyHint` and `destructiveHint` annotations (`_status`/`_list` are read-only),
+tight schemas with described parameters, and error text written as a **recovery path
+for the calling agent** rather than a status code — an agent, not a human, reads it.
+
+**What PR B costs beyond the server itself**, so the estimate is honest: the "no
+second execution path" acceptance criterion needs three extractions first —
+`worktree status` (`internal/cli/worktree.go:710`), `worktree list` (`:820`) and
+`agent adopt` (`internal/cli/agent_adopt.go:41`) all hold their logic inside the
+cobra `RunE`. `createFreshWorktree` (`:203`) and `adoptWorktreeAt` (`:338`) are
+already extracted. That refactor is behaviour-preserving and lands as its own commit,
+provable by the fact that no existing test changes.
 
 **Two reap-safety interactions `AD5-02` must close, recorded here because both destroy user work if they slip.** `worktree cleanup --merged` iterates every row from `ListWorktrees` with no `created_by` filter and runs `git branch -D` on what it reaps, and `worktree remove` deletes the checkout — neither is acceptable by default against a worktree DevStrap did not create, so adopted rows must be opt-in for both. Worse, and found only by adversarial review of this decomposition: the merged test is `strings.Contains(mergedOut, wt.Branch)`, and **`strings.Contains(x, "")` is vacuously true in Go**. A detached-HEAD adopted row carries `branch=""` (the representation `AD5-02` requires, since `worktrees.branch` is `NOT NULL`), so such a row would be judged "merged" and reaped the moment the opt-in flag is passed — deleting precisely the externally-created checkouts the opt-in exists to protect, in precisely the detached-HEAD case that is the common one. **Branchless rows are never merge-eligible**, and that must be pinned by a test rather than left to the reader.
 
