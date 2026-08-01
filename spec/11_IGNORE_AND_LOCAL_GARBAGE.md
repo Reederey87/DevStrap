@@ -29,6 +29,10 @@ DevStrap needs one canonical ignore policy that can compile to multiple systems.
 .devstrapignore → .gitignore, .dockerignore, draft-sync ignore, watcher exclusion set, agent denylist
 ```
 
+**Why DevStrap's own staging directories are in the default set (`W12-01`, 2026-07-31).** `hydrate` clones into a sibling `.<target>.devstrap-tmp-<random>` and promotes it by rename on success. A process killed before that rename — a daemon crash, a power loss, a `kill -9` — leaves a **partial clone inside the managed namespace, carrying the real remote in its `.git/config`**. Until this pattern was added the scanner walked straight into it: `scan --adopt` adopted the orphan as a *second* project sharing the real project's remote (reproduced: `Adopted 2 projects`), which then replicates to every device as a namespace event — and the duplicate-remote resolver **recommended the orphan**, because `.` sorts before a letter.
+
+Note the marker sits in the **middle** of the name, not at its start, so a prefix match does not find it. The pattern and the directory name both derive from `ignore.StagingDirMarker` for that reason: two spellings of one fact will drift, and the drift is silent. `TestCloneTempDirIsPrunedByTheScanner` calls the real `cloneTempDir` and asserts the scanner prunes what it actually produced, so a naming change that outruns the pattern fails the build rather than quietly reopening the hole.
+
 As of the 2026-06-28 cloud-sync design, this single `.devstrapignore` compiler is **designed and required** (no longer an optional convenience). It is the prerequisite for safe non-git content sync: the draft-bundling layer that ships env vars and non-git/draft folders as age-encrypted, content-addressed `age_blob:<sha256>` blobs must derive its exclusion set from exactly the same compiler that drives scan, the watcher, and the agent deny-list. Any divergence between those consumers can leak a secret or a `node_modules` tree into a draft bundle, so they MUST all read one compiled output rather than maintain separate hardcoded lists (workstream `DRAFT-*` in `docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`).
 
 ## Shipped default table (`internal/ignore` `defaultPatterns`)
@@ -46,6 +50,9 @@ ehthumbs.db
 .AppleDouble
 .LSOverride
 desktop.ini
+
+# DevStrap clone-staging directories (W12-01)
+*.devstrap-tmp-*/
 
 # Build artifacts
 node_modules/

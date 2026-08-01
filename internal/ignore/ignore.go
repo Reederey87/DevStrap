@@ -470,11 +470,36 @@ func IsSecretPath(relSlash string) bool {
 	return false
 }
 
+// StagingDirMarker is the infix DevStrap puts in a clone-staging directory
+// name. Staging dirs are created as ".<target-basename>" + StagingDirMarker +
+// "<random>", so the marker sits in the MIDDLE of the name — a prefix match
+// does not find it.
+//
+// It lives here, rather than beside the code that creates the directory, so
+// the creator and the ignore policy derive from ONE string. That is the whole
+// point: a staging directory that the scanner does not prune is adoptable, and
+// an orphan left by a killed clone then gets adopted as a second project
+// sharing the real project's remote — which replicates fleet-wide as a
+// namespace event, with the duplicate-remote resolver preferring the orphan
+// because "." sorts before a letter. Letting the two spellings drift silently
+// reopens exactly that.
+const StagingDirMarker = ".devstrap-tmp-"
+
+// StagingDirPattern is the gitignore-syntax form of StagingDirMarker, matching
+// any directory whose name carries the marker.
+const StagingDirPattern = "*" + StagingDirMarker + "*/"
+
 var defaultPatterns = func() []Pattern {
 	// OS junk comes from osJunkNames so the table and IsOSJunkName cannot drift.
 	lines := append([]string{
 		// VCS metadata — never synced or bundled.
 		".git/",
+		// DevStrap's own clone-staging directories. A clone stages into a
+		// sibling temp dir and is promoted by rename on success; a process
+		// killed before that promotion leaves a partial clone behind, inside
+		// the managed namespace, carrying the real remote in its .git/config.
+		// Without this it is walked, adopted, and synced as a second project.
+		StagingDirPattern,
 	}, osJunkNames...)
 	lines = append(lines, []string{
 		// Language/runtime build artifacts — rebuilt on hydrate, never synced (DRAFT-05).
