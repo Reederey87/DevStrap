@@ -267,6 +267,7 @@ func runSyncCycle(ctx context.Context, stdout, stderr io.Writer, opts *options, 
 	}
 	// sync always materializes with a blobless/partial clone (EAGER-01).
 	results := materializePass(ctx, store, opts, projects, true)
+	_, _ = maybeSweepStagingOrphansAfterSync(ctx, stderr, opts, store, time.Now())
 	// HUB-05: reclaim locally-cached blobs no longer referenced.
 	if removed, gcErr := gcUnreferencedBlobs(ctx, store, opts.paths()); gcErr == nil && removed > 0 {
 		result.BlobsGCd = removed

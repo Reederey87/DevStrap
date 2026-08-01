@@ -4,6 +4,14 @@ tracks_code: [internal/ignore/**, internal/draftbundle/**, internal/scan/**, .gi
 ---
 # Ignore Rules and Local Garbage
 
+### W13-05 staging-orphan sweep (2026-08-01)
+
+The convergence path now sweeps clone-staging orphans immediately after materialization, on the WIP-GC interval cadence. A mapped candidate first acquires the real project's repo lock; an unmapped candidate instead requires a one-hour age. Every candidate is checked with `Lstat`, symlinks and non-directories are refused, registered project paths are never deleted — neither an exact match nor a staging-shaped **ancestor** of one, the latter being a legacy-row case review caught, and each removal or skip reports its reason. Staging-pattern namespace components are reserved at scan and event-apply validation; `doctor` warns about any legacy registered row without deleting it. Accepted residual: manually stored work in an unlocked, unregistered hidden `.X.devstrap-tmp-*` directory can be deleted after the age window.
+
+**The sweep walks the managed tree with the scanner's own prune set**, and the order is load-bearing: the staging check runs *first*, because `W12-01` added `StagingDirPattern` to `defaultPatterns`, so `ShouldPruneDir` returns true for exactly the directories this sweep exists to find. Pruning is not only a cost question — unpruned, the walk descends into every `node_modules`/`.git`/`.venv` in the tree (the measured namespace is ~7x larger unpruned, `spec/05`) and can match a directory that merely *looks* like staging inside a dependency and delete it. Pinned by `TestStagingSweepDoesNotDescendIntoGeneratedDirs`, mutation-checked: with the prune disabled the sweep reports `Removed:true` for a path under `node_modules`.
+
+**`ignore.IsStagingDirName` is deliberately NARROWER than `StagingDirPattern`.** The gitignore pattern matches any name containing the marker, including a bare `.devstrap-tmp-1`; the predicate additionally requires a non-empty target basename before the marker (`.<base>` + marker + suffix). The asymmetry is intentional and in the safe direction: the predicate gates a *deletion* primitive and a namespace *refusal*, so it errs toward doing neither, while the pattern only gates pruning. A bare `.devstrap-tmp-1` is therefore hidden from scan but never swept.
+
 ## Problem
 
 A developer Dropbox cannot sync everything.

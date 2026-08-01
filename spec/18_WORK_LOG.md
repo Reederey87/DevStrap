@@ -29,6 +29,38 @@ Follow-ups:
 - <remaining work, or "None">
 ```
 
+## 2026-08-01 — the staging orphan is now swept, and the sweeper is a deletion primitive (W13-05)
+
+Changed:
+- `internal/cli/staging_sweeper.go`: an interval-gated sweep on the convergence path, immediately after materialization, mirroring `maybeGCWipRefsAfterSync` (shared `maintenanceDue` helper, same failure isolation — a sweep error warns and never fails the tick).
+- `internal/ignore.IsStagingDirName`; namespace validation rejects the reserved basename; `doctor` surfaces legacy registered rows **without deleting them**.
+
+**This closes `W12-01`'s recorded follow-up.** That change stopped the scanner *adopting* an orphan left by a killed clone; nothing removed it, so disk grew forever. Every constraint below comes from the adversarial review of `W12-01`, reproduced here because the framing is the point: **a naive sweeper is a remote-triggered deletion primitive.**
+
+- **A peer cannot aim it.** Project paths arrive as signed namespace events, so a peer registering `.x.devstrap-tmp-1` would have sync materialize it and every device delete it forever. Two independent guards: the basename is refused at validation, and the sweeper skips any path matching a registered project row.
+- **Lock first, mtime second.** A mapped candidate acquires the real project's repo lock before any filesystem inspection; only an *unmapped* name falls back to the one-hour age window. The order matters because a staging directory's top-level mtime goes stale during a long pack fetch — git writes deep inside `.git/objects/pack/` — so an mtime-first sweeper deletes live clones.
+- **`Lstat`, and require a real directory**, so a symlink swapped in after matching is never followed. The suffix is not pinned to digits: `MkdirTemp`'s digit-only suffix is a stdlib internal, not a contract.
+- **The removal itself is root-scoped (`os.Root`), because `Lstat` alone does not close the race.** `Lstat` and the removal are two separate syscalls, so a directory can be swapped for a symlink in between — on a path that deletes, that TOCTOU is the whole ballgame, and `gosec` G122 flagged exactly it. `os.OpenRoot(managed root)` + `Root.RemoveAll(rel)` refuses to traverse a symlink out of the managed tree, so the worst a winning racer achieves is an error instead of a deletion outside `~/Code`. The linter finding was fixed rather than suppressed.
+
+**Coordinator review found one defect the delegated pass did not, and it was a data-loss path.** The walk had no prune, so it descended into every `node_modules`/`.git`/`.venv` in the managed tree on each interval — and, worse than slow, it could match a directory that merely *looks* like staging inside a dependency and delete it. It now prunes with the scanner's own matcher, with the staging check ordered **first**, because `W12-01` added `StagingDirPattern` to `defaultPatterns` and `ShouldPruneDir` therefore returns true for exactly the directories this sweep exists to find. Mutation-checked: with the prune disabled the sweep reports `Removed:true` for a path under `node_modules`. A real staging directory is always a *sibling* of a project target, so nothing reachable only through a pruned directory was ever a legitimate candidate.
+
+**A deliberate asymmetry, recorded so it is not read as drift.** `IsStagingDirName` is narrower than `StagingDirPattern`: the gitignore pattern matches a bare `.devstrap-tmp-1`, the predicate additionally requires a non-empty target basename. That is the safe direction — the predicate gates a *deletion* and a namespace *refusal*, the pattern only gates pruning — so a bare `.devstrap-tmp-1` is hidden from scan but never swept.
+
+**Independent review then found a wrong-deletion path in the guard itself, plus three smaller gaps.** The registered-row protection was **exact-match on the candidate**, so a legacy project registered *underneath* a staging-shaped ancestor — `work/.x.devstrap-tmp-a/app` — was not protected: the walk hit the ancestor, failed to map it, and after the age window deleted the directory **including the registered project inside it**. `doctor`'s mitigation checked only `filepath.Base`, so that row produced no warning either, and `spec/11`'s "registered project paths are never deleted" was not fully true. Fixed with a strict-descendant check over the already-loaded registered set, and `doctor` now checks **every** path component. The population is legacy-only — `pathkey.Clean` now rejects the component at the store layer — and that is why the new test exercises the predicate directly and says so: the row shape can no longer be constructed through any API, which is good news and also means an end-to-end fixture cannot reach it.
+
+Three more from the same pass: registered keys and walk paths are now **NFC-normalized on both sides**, because a registered row is NFC while an on-disk APFS/HFS+ parent can be NFD, and an exact-string miss silently downgraded a *mapped* candidate to the unmapped branch whose only protection is the age window; **the age window itself had no test in either direction** (the txtar's removed candidate is mapped, so it never reached that branch — setting `stagingOrphanMinAge = 0` passed the whole suite); and **one unreadable directory aborted the entire sweep forever**, because the abort also skipped the success marker, so the sweep re-ran every interval and never reached candidates past the error. Permission/not-exist errors now skip and continue.
+
+Validated:
+- `TestStagingSweepDoesNotDescendIntoGeneratedDirs` mutation-checked as above (first attempt was invalid: removing the prune block failed the *build* on unused variables, which proves nothing — redone by disabling the condition with the variables still in use).
+- `TestRegisteredUnderSparesAncestorOfRegisteredProject` mutation-checked (forcing the predicate to return false fails it) and it also pins the other direction: a sibling sharing a textual prefix must NOT be spared, or the guard would refuse to sweep real orphans.
+- `TestStagingSweepAgeGuardBothDirections` mutation-checked: with `stagingOrphanMinAge = 0` a five-minute-old candidate is deleted.
+- Parser, live-lock, symlink, peer-path and convergence coverage; `staging_orphan_sweep.txtar` drives the real binary.
+- `gofmt` (checked by output), `go vet`, `go test -race` on `internal/cli`/`internal/ignore`/`internal/pathkey`, `spec-drift`.
+
+Follow-ups:
+- The accepted residual, stated rather than discovered later: a user manually squatting work inside an unlocked, unregistered hidden `.X.devstrap-tmp-*` directory loses it after the age window.
+
+
 ## 2026-08-01 — the AD5-07 deferral asked for evidence; here it is (W13-01 PR A)
 
 Changed:
@@ -47,6 +79,7 @@ Validated: no code changed; `spec-drift`; the dependency figures were produced b
 Follow-ups:
 - PR B is gated on the maintainer's answer. A "no" is a successful outcome of this row and should be recorded as one.
 - Two post-cutoff claims (the stdio-unaffected release note, the GitHub-500k datapoint) must cite primary sources in PR B rather than being restated.
+
 
 
 ## 2026-08-01 — the guard against vacuous tests could not itself fail (W13-06)
@@ -78,6 +111,7 @@ Follow-ups:
 - Stronger vacuous-test form: assert a non-zero *passing* test count per package via `go test -json`.
 - Security PR: non-PEM multi-line registered secrets through `redact.Writer`.
 - Four CI jobs (`MinIO hub conformance`, `Linux Secret Service keychain`, both `Service E2E` legs) run and gate nothing. Promoting them is a branch-protection settings change only the maintainer can make, so it is named here rather than attempted.
+
 
 
 ## 2026-08-01 — the case-fold fix over-corrected, and cases.Fold is the wrong function (W13-08)

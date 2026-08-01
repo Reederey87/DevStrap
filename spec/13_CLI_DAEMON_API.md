@@ -1,8 +1,12 @@
 ---
-last_reviewed: 2026-07-31
+last_reviewed: 2026-08-01
 tracks_code: [cmd/**, internal/cli/**, internal/daemon/**, internal/platform/**]
 ---
 # CLI and Daemon API
+
+### W13-05 staging-orphan sweep (2026-08-01)
+
+After convergence materialization, an interval-gated sweep reports every clone-staging removal or skip and isolates failures from the tick. Mapped names acquire the per-project repo lock before filesystem inspection; only unmapped names use the one-hour mtime guard. `Lstat` rejects symlinks and non-directories, registered rows are never deleted, and `doctor` surfaces legacy staging-pattern registrations. Namespace validation rejects new peer or scan paths carrying the reserved basename. Accepted residual: unlocked, unregistered manual work under `.X.devstrap-tmp-*` may be removed after the age window.
 
 Linux watch-budget observability is explicit at both API layers: `/v1/health`
 optionally reports `watch.watch_limit` without a percentage, while `doctor`

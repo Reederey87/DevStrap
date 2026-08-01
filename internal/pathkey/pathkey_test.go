@@ -215,3 +215,9 @@ func TestKnownResidualDottedCapitalI(t *testing.T) {
 			"hazard recorded in spec/07.", a.Key)
 	}
 }
+
+func TestCleanRejectsStagingPatternComponent(t *testing.T) {
+	if _, err := Clean("work/acme/.api.devstrap-tmp-alpha"); err == nil {
+		t.Fatal("Clean accepted a peer-aimable clone-staging path")
+	}
+}
