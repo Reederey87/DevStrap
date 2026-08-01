@@ -685,22 +685,22 @@ The MVP transport above is built (`internal/daemon`), as the first slice of the 
 - **Endpoints.** `GET /v1/health` (`{"ok", "uptime_seconds"}`) and `GET /v1/version` (`{"version","api_version"}`). JSON tags are `snake_case` per this file's `--json` conventions, and a wrong method on a real route returns `405`, not `404`.
 - **Client.** `daemon.NewClient(socketPath)` dials the socket and exports `ErrUnavailable` for "no daemon is there", distinguished from a real transport failure by inspecting the dial. Callers map it to the already-reserved `exitDaemonUnavailable = 3`.
 
-Still design intent, in the sections below: `/v1/status`, `/v1/sync`, `/v1/hydrate`, `/v1/open`, `/v1/worktrees`, `/v1/agent-runs`, `/v1/events`, `/v1/projects`, `/v1/jobs`, and the whole job model. The package is transport only — it holds no convergence logic and imports no command code, so the dependency arrow points `daemon → core` and never `daemon → cobra` (see the `ARCH2-01` narrowing in `03_SYSTEM_ARCHITECTURE.md`).
+`/v1/status`, `/v1/sync` and `/v1/events` are **shipped** (see their own sections). The remaining designed endpoints and the whole job model are **withdrawn** — see *Withdrawn: the wider socket API and the job model* below, which replaces the inventories that used to stand here. The package is transport only — it holds no convergence logic and imports no command code, so the dependency arrow points `daemon → core` and never `daemon → cobra` (see the `ARCH2-01` narrowing in `03_SYSTEM_ARCHITECTURE.md`).
 
 ## API endpoints
 
 ```text
-GET  /v1/status
-POST /v1/sync
-POST /v1/hydrate
-POST /v1/open
-POST /v1/worktrees
-POST /v1/agent-runs
-GET  /v1/events
-GET  /v1/projects
-POST /v1/projects
-GET  /v1/jobs
+GET  /v1/health      shipped
+GET  /v1/version     shipped
+GET  /v1/status      shipped
+POST /v1/sync        shipped
+GET  /v1/events      shipped
 ```
+
+That is the whole surface. The endpoints this section used to list alongside
+them — `POST /v1/hydrate`, `POST /v1/open`, `POST /v1/worktrees`,
+`POST /v1/agent-runs`, `GET|POST /v1/projects`, `GET /v1/jobs` — are
+**withdrawn**, not pending. See below.
 
 Example hydrate request:
 
@@ -757,23 +757,61 @@ Two corrections to what the watcher shipped as, both found by the Pass-9 audit o
 
 **A hint-triggered convergence is now genuinely cheaper than the periodic tick.** `runLoopTick` ran its full-workspace `scan.Walk` unconditionally, including for watcher-driven cycles. That scan shells out to git twice per discovered repo, and the "cheap enough to run every tick" judgement behind it was made against run-loop's 5-minute interval — while the watcher's trigger floor is 5 seconds. Hint-driven cycles (`TickNamespaceOnly`, which is the only mode the watcher requests) now skip scan+adopt. Adoption of a newly-created local project is picked up by the next periodic tick, which is correct: the watcher is a latency optimization and makes no completeness claim. A daemon configured namespace-only for other reasons keeps scanning, as does `run-loop --namespace-only`, where the scan is exactly what feeds the namespace.
 
-## Daemon job types
+## Withdrawn: the wider socket API and the job model (2026-08-01, `W13-09`)
 
-```text
-reconcile_root
-scan_project
-create_skeleton
-hydrate_git_repo
-fetch_git_repo
-check_dirty_state
-capture_env
-hydrate_env
-sync_push
-sync_pull
-create_worktree
-run_agent
-cleanup_worktree
-```
+This file documented six further endpoints and a thirteen-type job model
+(`reconcile_root`, `scan_project`, `create_skeleton`, `hydrate_git_repo`,
+`fetch_git_repo`, `check_dirty_state`, `capture_env`, `hydrate_env`,
+`sync_push`, `sync_pull`, `create_worktree`, `run_agent`, `cleanup_worktree`).
+None was ever built. **They are withdrawn rather than left pending**, following
+the `AD5-05` precedent: a path the project has decided not to take, described as
+"planned", is a promise it has decided not to keep, and a reader cannot tell the
+difference from the outside.
+
+**The reason is not that a socket endpoint is inherently a second execution
+path.** That argument is refuted by this project's own precedent — `POST /v1/sync`
+calls the same `runLoopTick` the CLI calls, and after `W13-01`'s extractions a
+`POST /v1/worktrees` would be a thin handler over the same `createFreshWorktree`.
+Discipline already solves that problem. Three other things decide it:
+
+- **A second machine contract for one operation is permanent dual maintenance.**
+  `AD5-01` made `worktree new --json` a versioned, documented machine contract
+  with an additive-only evolution rule, and `AD-5`'s settled answer is that
+  harnesses shell out. `POST /v1/worktrees` would be a second contract for the
+  same operation, evolving separately, with the same additive obligations.
+- **No consumer exists or is designed.** There is no TUI, no editor adapter, no
+  shell integration that wants these. The latency argument does not rescue them
+  either: worktree creation, hydrate and agent runs are seconds of git and
+  network work, so the ~30ms of process spawn plus SQLite open that a daemon
+  saves is noise. The one endpoint class where daemon residency genuinely pays —
+  fast repeated reads, i.e. `GET /v1/projects` — is precisely the database proxy
+  this file **already refused** when it scoped `/v1/status` to a narrow `Reader`
+  seam, on the stated grounds that it would give the daemon a second, drifting
+  view of state it does not own.
+- **A persisted job queue with leases and requeue-on-crash makes the daemon
+  stateful**, against the explicit and load-bearing invariant that the daemon is
+  never a correctness dependency. Every command works with no daemon, and
+  `devstrap run-loop` remains the portable daemonless convergence path.
+
+**What is kept as design intent, because it is qualitatively different.** A
+**read-only** surface reporting what the daemon *already does* — watch-triggered
+convergence outcomes it has observed — observes existing work rather than
+creating a second way to start work. `/v1/events` is that surface and it shipped.
+Any future extension of it stays in that shape: it may report, it may not act.
+
+**Re-open trigger, stated so it can be observed rather than argued.** Reinstate
+this direction when a **real consumer exists in-tree** — a TUI, an editor
+adapter, or a shell integration that is committed, not proposed — **and** that
+consumer needs either repeated reads at a rate where per-call process spawn is
+measurably the bottleneck, or observability of daemon-initiated work that
+`/v1/events` cannot express. Absent a committed consumer, the correct number of
+endpoints is the number that has one. This mirrors the FSEvents deferral in
+`05_MAC_FIRST_IMPLEMENTATION.md`, which named a threshold (~20,000 watched
+directories) instead of "if it becomes a problem".
+
+`W13-01`'s `devstrap mcp serve`, if it ships, further narrows any future case:
+MCP over stdio becomes the machine protocol a harness speaks, and it needs no
+socket at all.
 
 ## Logging
 
@@ -830,7 +868,7 @@ Referenced by the new workstreams; intentionally absent from the live command tr
 
 ```text
 devstrap promote <path> --draft|--git-remote <url>     # plain -> draft -> git (NOVCS-03 / DRAFT-*)
-devstrap gitstate capture [--fetch]                    # working-state validation plane (Section 5)
+devstrap gitstate capture [--fetch]  # WITHDRAWN 2026-08-01 (W13-09): superseded by the sync-wired Layer A capture                    # working-state validation plane (Section 5)
 devstrap sync   # hub: git@host:path.git (zero-infra git carrier, AD-1) or hub: r2://<bucket> (R2/S3, HUB-*); the --hub-s3 flag was superseded by the hub: config value
 ```
 
