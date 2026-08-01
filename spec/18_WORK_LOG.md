@@ -51,6 +51,30 @@ Validated:
 - Verified by inspection that `doctor` grew **no filesystem walk** to compute the count (it comes from the daemon socket) and that no assumed limit constant appears anywhere in the new code.
 - `gofmt` (checked by output), `go vet`, `golangci-lint`, race tests, `spec-drift`.
 
+## 2026-07-31 — P9-WIP-03: the fault reproduced, three fixes refuted, and deliberately not patched
+
+Changed:
+- New `internal/cli/wip_gc_backdated_capture_test.go` — `TestWipGCReapsAMinutesOldRefCapturedUnderASlowClock`, which **pins the open finding** rather than a fix: a WIP commit captured under a >TTL-slow clock is reaped seconds later by the device's own GC. Its comments say plainly that its assertions describe the fault, and must be rewritten to assert the fix if this is ever closed.
+- `docs/audits/README.md`: the `P9-WIP-03` open-note now records what was attacked and why each candidate failed.
+
+**The deliverable is a refutation, and that is the result — not an absence of one.** Pass 10 established that recording a chased-and-refuted hypothesis with reasoning is worth writing down; this is the same discipline applied to a fix rather than a bug.
+
+Reproduction, and why it is not a harness artifact: the test backdates capture with `GIT_COMMITTER_DATE` and plants the mirror row at the matching HLC, then runs the real `sweepWipRefs` at the real default 720h TTL against real `time.Now()`. **Negative control executed:** substituting a fresh committer date makes it fail at exactly the veto — `"object is newer than its mirror record; not deleted"` — so the pass genuinely demonstrates the backdated date defeating the veto.
+
+What the investigation added beyond the Pass-9 text:
+- **HLC monotonicity narrows the scenario.** `nextLocalEventStamp` stamps `advanceHLC(persisted last_hlc, wall)` and receive advances `last_hlc` too, so a mid-life backwards jump cannot backdate the mirror below the device's last emitted-or-received event. The realizable case is a machine restored from a >30-day-old snapshot — clock, HLC and disk equally stale — not "a clock wrong for a month while in use".
+- **The reap is automatic and correlated with the correction.** `maybeGCWipRefsAfterSync` sweeps after a routine `sync`, and NTP correction plus reconnection fire together. The user never types `wip gc`. That makes the fault more live than the Pass-9 text implied, without changing its severity given the conjunction required.
+- **The existing skew gates cannot help.** The receive-skew check is future-only (5 min) and the past floor is the absolute 2024-01-01 epoch; both guard *received peer* events, while this is the self-reap path.
+
+Three refutations, each stronger than "disfavored": cross-checking commit date against the mirror is blind to a **common-mode** error (same clock, same instant — and where they would diverge, monotonicity makes the row read young and it is never nominated); a recorded clock offset is self-reported by the wrong clock; and bounding by `devices.created_at` — **the coordinator's own proposal, refuted** — fails in both realizable scenarios, since `created_at` is `timestampNow()` at init and a restored image backdates it identically, while monotonicity forces init >TTL into the past in the mid-life case. That one is worth naming: it satisfied the stated independence criterion and still does not work, and shipping it would have closed the row while the fault survived.
+
+A fourth option **does** work and is recorded for a future pass: extend the orphan branch's locally-stamped first-seen quarantine to mirror-nominated candidates, so deletion also requires the reaping device to have observed the (ref, sha) on its own clock. Not taken — it makes a destroying path stateful, defers every legitimate reap, and buys down a P3 needing a five-way conjunction whose loss window closes at the next `wip push`, where the reap destroys the backup while the tree that produced it is still on that device's disk.
+
+Not verified, stated rather than glossed: no actual VM-snapshot restore was performed. The `GIT_COMMITTER_DATE` + planted-HLC simulation is *argued* — and negative-controlled — to be value-equivalent to a slow clock, not demonstrated on a real restored machine.
+
+Validated: the new test passes; the negative control was executed and independently re-run by the coordinator; `devices.created_at`'s local-clock origin was spot-checked directly rather than accepted from the report; `gofmt`, `go vet`, the full `wip` GC test set, `spec-drift`.
+
+
 ## 2026-07-31 — ten shipped findings had no row anywhere, and the check that should have caught it passed throughout
 
 Changed:
