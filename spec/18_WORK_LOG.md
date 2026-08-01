@@ -31,6 +31,26 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — the Gatekeeper deadline is now enforced, not merely documented (P4-SEC-05)
+
+Changed:
+- New `internal/releasegate` + `cmd/release-gate`, wired into `.github/workflows/release.yml` immediately after the existing 0-or-5 `MACOS_*` secret validation and before GoReleaser. Past the Homebrew Gatekeeper cutoff (2026-09-01) a **stable** tag with notarization still dormant is refused; a prerelease warns that promotion will be refused; before the cutoff every release warns with the remaining runway in days; with notarization active the gate passes silently.
+- `RELEASING.md` § "Enabling notarization" now states the enforced contract as a table instead of a prose deadline, and `spec/03_SYSTEM_ARCHITECTURE.md` Distribution §2 records why the pre-existing check was not sufficient.
+
+Why this and not the enrollment itself: the `.goreleaser.yaml` `notarize:` block has been correct and complete since PR #119. **The gap was never the configuration — it was that nothing failed if the date passed with the config still dormant.** A stable tag cut on 2026-09-02 would have published a cask Homebrew refuses while `verify`, `goreleaser`, and `provenance` all reported success. The 0-or-5 step immediately upstream looks like it covers this and does not: it proves the five secrets are *consistent*, and zero secrets is a consistent state.
+
+The gate cannot complete Apple Developer enrollment, which remains the real blocker and a maintainer action (`RELEASING.md` one-time checklist, 31 days of runway at the time of writing). What it guarantees is that missing the deadline surfaces as a refused release naming the five secrets and the runbook, rather than as an uninstallable cask discovered by users.
+
+Post-review (fable-5 plan review + Codex diff review, four findings, all applied):
+- **Two call sites, not one.** The gate was initially only in the `goreleaser` job. `stable-publish` is concurrency-grouped and pushes the cask to the tap, so it can run arbitrarily later than the build that produced the artifact — a build that passed the gate *before* the cutoff could still publish *after* it. It now re-checks there, which required adding `checkout`+`setup-go` to a job that previously ran in an empty workspace (verified no collision: `staged/` and `tap/` do not exist at repo root pre-checkout).
+- **Wiring vacuity.** `release.yml` runs only on a tag push, so no ordinary CI run executes the gate — deleting the `run:` line leaves every other test passing. `TestReleaseWorkflowInvokesTheGate` now pins both invocations, and its env assertions are **scoped per invocation**: the first version checked the whole file, which would have passed with `MACOS_SIGN_P12` dropped from one step, since the name also appears in GoReleaser's own env block.
+- **Secret-spelling linkage.** The gate reads `MACOS_SIGN_P12`; `.goreleaser.yaml` activates notarization on `isEnvSet "MACOS_SIGN_P12"`. Two independent spellings of one fact, and renaming either alone fails *silently and inverted* — goreleaser stops notarizing while the gate still sees a value and passes. Pinned by `TestGateWatchesTheSecretGoreleaserActivatesOn`.
+- **Fail closed on a bad input.** `DEVSTRAP_RELEASE_STABLE` was parsed as `== "true"`, so an unset or misspelled value silently selected the *lenient* prerelease branch — the one that never refuses. It now exits 1 on anything but exactly `true`/`false`. Not reachable through the current workflow, but the wrong default direction for a gate whose only job is to refuse.
+
+Validated:
+- `go test ./internal/releasegate/` green, and **mutation-checked**: inverting the cutoff comparison, dropping the `Stable` discriminator, and removing the `NotarizeActive` short-circuit each fail the truth-table test. The date arithmetic is parameterized (`Input.Now`/`Input.Cutoff`) precisely so the refusal path is proven now rather than in September — a gate whose only proof is "wait and see" is one nobody has verified.
+- The binary was exercised across all four states end-to-end; the refusal exits 1 and the three permitted states exit 0.
+- `gofmt -l cmd internal` clean (checked by output, not exit code — it exits 0 while listing files), `go build ./...`, `go test -race ./...`, `golangci-lint run`, `spec-drift`.
 ## 2026-07-31 — the commercial cluster is decomposed, and deliberately not scheduled
 
 Changed:
