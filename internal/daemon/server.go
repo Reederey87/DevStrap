@@ -90,6 +90,7 @@ type Server struct {
 	watch      *watchPlane
 	reader     Reader
 	events     *eventBus
+	procRoot   string
 }
 
 // New validates cfg and builds a Server. It does not touch the filesystem;
@@ -122,6 +123,7 @@ func New(cfg Config) (*Server, error) {
 		jitter:   cfg.Jitter,
 		reader:   cfg.Reader,
 		events:   newEventBus(),
+		procRoot: platform.DefaultProcRoot,
 	}
 	if cfg.Converger != nil {
 		s.scheduler = newScheduler(cfg.Converger, s.events)
@@ -170,6 +172,7 @@ type WatchHealth struct {
 	Roots       int    `json:"roots"`
 	Hints       uint64 `json:"hints,omitempty"`
 	WatchedDirs *int   `json:"watched_dirs,omitempty"`
+	WatchLimit  *int   `json:"watch_limit,omitempty"`
 }
 
 // Version is the /v1/version payload.
@@ -240,6 +243,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 		if ws.DirsKnown {
 			health.Watch.WatchedDirs = &ws.WatchedDirs
 		}
+	}
+	limits := platform.ReadInotifyLimits(s.procRoot)
+	if limits.MaxUserWatchesKnown {
+		health.Watch.WatchLimit = &limits.MaxUserWatches
 	}
 	writeJSON(w, http.StatusOK, health)
 }

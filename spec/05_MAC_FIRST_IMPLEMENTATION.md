@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-30
+last_reviewed: 2026-07-31
 tracks_code: [internal/platform/**, internal/cli/open.go, internal/cli/hydrate.go, .github/**]
 ---
 # Mac-First Implementation Guide
@@ -159,6 +159,16 @@ Watcher events are filtered, debounced, and batched before enqueueing reconcilia
 Three things in that table matter more than the headline.
 
 **It confirms the per-entry cost this section asserted from documentation.** 38,095 descriptors across 5,639 directories is ~6.8 each — 5.8 entries per directory plus the directory itself — so the bill really does track the *file* count inside watched directories, not the directory count. Any future extrapolation multiplies watched directories by ~7, not by 1.
+
+**Linux has a separate, differently shaped ceiling.** Linux derives
+`fs.inotify.max_user_watches` at boot as
+`clamp(1% of addressable memory / INOTIFY_WATCH_COST, 8192, 1048576)`, so the
+limit must be read on each machine rather than copied from this macOS
+measurement or replaced with a fixed default. It is per UID, not per process:
+DevStrap pools with the user's editors and language servers. The sysctls are
+not namespace-aware, so containers share the host user's budget rather than
+receiving an independent container ceiling. There is no single Linux analogue
+of the macOS ~20,000-directory reconsider threshold below.
 
 **`M5D-06` was worth more than the FSEvents question.** The same tree under the old four-entry prune watches 20,584 directories. Extrapolating is deliberately given as a **range**: at the measured source-set ratio (6.8) that is ~139,000 descriptors, but the ~15,000 extra directories the old rule kept are exactly the build-output, cache, and virtualenv trees `M5D-06` added to the prune — the file-densest part of a code tree — so the source-set ratio biases *low*, and at whole-tree density (~7.6) it is ~157,000. Either way the old configuration sat at **57–64% of the limit** where the new one sits at 15.5%: compiler-driven pruning cut the descriptor bill ~3.6× for no distribution cost whatsoever. The cheap fix mattered more than the expensive one — and taken before that slice, this measurement would have read far closer to adopting cgo.
 
