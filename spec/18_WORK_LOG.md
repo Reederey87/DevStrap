@@ -29,6 +29,31 @@ Follow-ups:
 - <remaining work, or "None">
 ```
 
+## 2026-07-31 — the Linux Secret Service backend runs for the first time (W12-02)
+
+Changed:
+- New `Linux Secret Service keychain` CI job: gnome-keyring under `dbus-run-session`, a bounded poll for `org.freedesktop.secrets` on the session bus, then `TestSecretService*` with `DEVSTRAP_NO_KEYCHAIN` **deliberately unset**.
+- New `internal/platform/keychain_secretservice_linux_test.go` (`//go:build linux`): a real store→load→delete round trip through `SystemKeychain`, plus a test that an **absent** secret is not classified as an **unreachable** backend.
+- `spec/14`: Milestone 6's last box is now checked. **Milestone 6 is complete.**
+
+**Why this was the box `W11-05` refused to tick.** Every CI job sets `DEVSTRAP_NO_KEYCHAIN=1` — correct for them, since headless runners have no session bus — which routes `newSet` to `UnsupportedKeychain`. The consequence is that the Linux Secret Service backend had **never executed**, on any machine, in any run. That is not a cosmetic gap: `devicekeys` fails closed to file custody when the keychain is unreachable and records that decision **once, at init** (`P6-XP-04`), so a Linux user's device-private-key custody was decided by code nobody had observed running.
+
+**The recipe is not incidental**, and each element is a way the job fails if changed:
+- `dbus-run-session` exports `DBUS_SESSION_BUS_ADDRESS` into its child. The older `dbus-launch --sh-syntax` + background-daemon pattern broke on gnome-keyring 46+, which Ubuntu 24.04 ships.
+- Feeding a throwaway passphrase to `gnome-keyring-daemon --unlock` on **stdin** creates and unlocks a collection without the `gcr-prompter` GUI dialog. On gnome-keyring 42+, `--start` and `--unlock` are mutually exclusive, and a bare `--unlock` on a fresh session raises the prompter and dies headless with "cannot open display".
+- The bus poll converts a race into a named diagnostic instead of a downstream, opaque `NoStorageAccess`.
+
+**The vacuity guard is the point of the job, not decoration.** A job whose tests all SKIP exits 0 and reads as coverage — which is precisely the state this replaces. So a separate step greps for `--- PASS:` **by test name** and fails on any `--- SKIP`, rather than trusting the exit code. The test file additionally **refuses** (rather than skips) if `DEVSTRAP_NO_KEYCHAIN=1` and the opt-in are both set, since that combination would exercise the stub while claiming to test the real backend.
+
+Validated:
+- `GOOS=linux go vet ./internal/platform/` clean. **Stated plainly: the new tests cannot run on the maintainer's macOS host — they are `//go:build linux` — so their first real execution is the CI job itself.** That is inherent to the gap being closed, and it is exactly why the by-name PASS assertion exists rather than a bare exit-code check.
+- Workflow YAML parses (`yaml.safe_load`).
+
+Post-review (fable-5, three passes; both diffs SHIP with no blockers):
+- **The guard's soundness was confirmed at the mechanism, not the surface.** `SystemKeychain.Store/Load/Delete` call `keyring.Set/Get/Delete` directly (`platform.go:243-259`), and on Linux zalando/go-keyring is D-Bus Secret Service with **no internal file fallback** and no mock unless `MockInit()` is called — which nothing here does. So a green PASS on the two named tests **cannot** occur without a live bus round trip. Compile failure, rename, skip, or crash each turn the job red via `pipefail` + the by-name PASS grep + `! grep -- "--- SKIP"`.
+- **A comment of mine was wrong and is corrected here rather than deferred.** It claimed `DEVSTRAP_NO_KEYCHAIN=1` "forces `UnsupportedKeychain` everywhere (`newSet`)" — but these tests construct `SystemKeychain` **directly**, bypassing `newSet`, so that variable would not change what they exercise. The refusal is conservative, not load-bearing, and the comment now says so. A comment that overstates its own mechanism is the same defect class this wave exists to remove.
+- **Documented residual:** `newSet`'s *selection* path under a live bus is still untested. These tests cover the backend operations and the error classification the custody decision turns on, not the wiring that chooses the backend.
+
 ## 2026-07-31 — the Linux watch ceiling is knowable only at runtime, and doctor was promised it (W11-02)
 
 Changed:

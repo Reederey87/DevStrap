@@ -411,17 +411,21 @@ Tasks:
 [x] Test same namespace DB import/export — `db backup --full`/`db restore` round-trip txtars
     (db_full_backup_restore, db_restore_verify, db_restore_journal_recovery); pure Go/SQLite, no
     build tags, so the ubuntu leg proves it
-[ ] Exercise the Linux Secret Service (D-Bus) keychain against a live session bus — the ONE
-    genuine gap. `SystemKeychain` is a real Secret-Service implementation, but CI sets
-    `DEVSTRAP_NO_KEYCHAIN=1` (headless runners have no session bus), which routes to
-    `UnsupportedKeychain`. Only the unsupported-classification path is covered; the backend
-    itself has never run in CI. Needs a gated job with `dbus-run-session` + gnome-keyring.
+[x] Exercise the Linux Secret Service (D-Bus) keychain against a live session bus — SHIPPED
+    2026-07-31 (W12-02). The `Linux Secret Service keychain` CI job brings up gnome-keyring
+    under `dbus-run-session`, polls `org.freedesktop.secrets` onto the bus, and runs
+    `TestSecretService*` with `DEVSTRAP_NO_KEYCHAIN` deliberately unset. A separate step
+    asserts both tests PASSED **by name** and that nothing skipped — a job whose tests all
+    skip exits 0 and reads as coverage, which is the one outcome this must not have.
 ```
 
-> **Reconciled 2026-07-31.** Every box above except the last was checked on evidence, not on the
-> existence of a related job — **five** of them had been left unchecked long after the work shipped.
-> The last stays open deliberately: a keychain backend that CI structurally cannot reach is
-> untested, and ticking it because the code exists is how a milestone comes to lie.
+> **Reconciled 2026-07-31 (W11-05), then closed the same day (W12-02).** Five boxes had been left
+> unchecked long after the work shipped, and were ticked on evidence rather than on the existence
+> of a related job. The sixth — the Linux Secret Service keychain — was **deliberately left open**
+> at that point, because CI set `DEVSTRAP_NO_KEYCHAIN=1` in every job and the backend had
+> therefore never run; ticking it because the code existed is how a milestone comes to lie.
+> `W12-02` then built the job that actually exercises it, so the box is now checked for the
+> reason the others are. **Milestone 6 is complete.**
 
 Acceptance (corrected 2026-07-31 — the commands below were never the shipped spelling; there is
 no `devstrap daemon install` and the default unit label is `devstrap-run-loop`):

@@ -84,6 +84,7 @@ Linux adapter:
 Watcher: fsnotify/inotify now
 Service: unsupported placeholder now; systemd --user target
 Secrets: Secret Service/keyring-backed age and Ed25519 identities with file fallback
+        (exercised live in CI since 2026-07-31, `W12-02` — see below)
 Paths: ~/.devstrap, ~/Code, XDG optional
 ```
 
@@ -129,6 +130,10 @@ loginctl enable-linger "$USER"   # may require sudo; needed for headless/boot pe
 ```
 
 The probe never fails the install — it only advises.
+
+**The Secret Service backend is exercised in CI (`W12-02`, 2026-07-31).** Until then it had **never run** — every CI job sets `DEVSTRAP_NO_KEYCHAIN=1`, which is correct for them (headless runners have no session bus) but routes `newSet` to `UnsupportedKeychain`, so the code deciding where a Linux user's device private keys live was never executed anywhere. The `Linux Secret Service keychain` job brings up gnome-keyring under `dbus-run-session`, polls `org.freedesktop.secrets` onto the session bus, and runs a real store→load→delete round trip with `DEVSTRAP_NO_KEYCHAIN` deliberately unset. It also pins the distinction the custody decision turns on: an **absent** secret must not be classified as an **unreachable** backend, or a healthy keychain device silently migrates to file custody.
+
+The job asserts its tests **PASSED by name** and that none skipped, rather than trusting the exit code: a job whose tests all skip exits 0 and reads as coverage, which is the precise state it replaces. The recipe is load-bearing — `dbus-run-session` (the older `dbus-launch` pattern broke on gnome-keyring 46+, which Ubuntu 24.04 ships), a stdin passphrase to `--unlock` (a bare `--unlock` raises the `gcr-prompter` GUI and dies headless), and a bounded bus poll (otherwise the race surfaces as an opaque `NoStorageAccess`).
 
 **Keychain custody (fail-closed, `P6-XP-04`; install-time gate, `P7-XP-02`).** The service runs in exactly the D-Bus-less context where the Secret Service is unreachable, and a keychain-custody store under the unit fails closed every tick until the run-loop exits into a restart loop. `service install` therefore checks custody UP FRONT: a `file`-custody store proceeds silently; recorded `keychain` custody is **refused** on systemd with a migrate-to-file remedy unless `--allow-keychain-custody` is passed (for the rare desktop-Linux-with-linger box that really has a session D-Bus at service runtime); unrecorded (pre-`P6-XP-04`) custody warns. The no-silent-downgrade rule stands: the installer never *invents* file custody — but when the operator runs the install with `DEVSTRAP_NO_KEYCHAIN=1` already set (an explicit, non-secret override that makes custody effectively file-backed), that override is baked into the unit's `Environment=` so the service behaves like the session that installed it instead of stranding. `doctor` repeats the custody warning while a service is installed. See the headless custody model at `P6-XP-04` below.
 

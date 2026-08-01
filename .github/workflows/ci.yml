@@ -462,6 +462,77 @@ jobs:
       - name: Vulnerability check
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 
+  secret-service:
+    name: Linux Secret Service keychain
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install gnome-keyring and libsecret
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends gnome-keyring libsecret-tools dbus-x11
+      - name: Exercise SystemKeychain against a live Secret Service
+        # This job exists because every other job sets DEVSTRAP_NO_KEYCHAIN=1 --
+        # correct for them, since headless runners have no session bus -- which
+        # meant the Linux Secret Service backend had NEVER run. That backend
+        # decides where a Linux user's device private keys live.
+        #
+        # Recipe notes, each of which is a way this job fails if changed:
+        #   * dbus-run-session exports DBUS_SESSION_BUS_ADDRESS into its child.
+        #     The older `dbus-launch --sh-syntax` + background-daemon pattern
+        #     broke on gnome-keyring 46+, which Ubuntu 24.04 ships.
+        #   * `--unlock` reading a passphrase from stdin creates AND unlocks a
+        #     collection without the gcr-prompter GUI dialog. On gnome-keyring
+        #     42+, `--start` and `--unlock` are mutually exclusive, and a bare
+        #     `--unlock` on a fresh session raises the prompter, which fails
+        #     headless with "cannot open display".
+        #   * The bus poll turns a race into a clear diagnostic instead of a
+        #     downstream, opaque NoStorageAccess.
+        run: |
+          set -Eeuo pipefail
+          dbus-run-session -- bash -eo pipefail -c '
+            printf "devstrap-ci-throwaway\n" | gnome-keyring-daemon --unlock >/dev/null 2>&1 || true
+            for i in $(seq 1 15); do
+              if dbus-send --session --dest=org.freedesktop.DBus --type=method_call \
+                   --print-reply /org/freedesktop/DBus org.freedesktop.DBus.ListNames 2>/dev/null \
+                   | grep -q org.freedesktop.secrets; then
+                echo "org.freedesktop.secrets registered after ${i}s"
+                break
+              fi
+              sleep 1
+            done
+            dbus-send --session --dest=org.freedesktop.DBus --type=method_call \
+              --print-reply /org/freedesktop/DBus org.freedesktop.DBus.ListNames \
+              | grep -q org.freedesktop.secrets \
+              || { echo "::error::org.freedesktop.secrets never appeared on the session bus" >&2; exit 1; }
+
+            # DEVSTRAP_NO_KEYCHAIN is deliberately NOT set here. That is the
+            # whole point of the job.
+            DEVSTRAP_TEST_SECRET_SERVICE=1 go test ./internal/platform/ \
+              -run TestSecretService -count=1 -v 2>&1 | tee /tmp/secret-service.log
+          '
+      - name: Assert the backend actually ran
+        # A job whose tests all SKIPPED exits 0 and reads as coverage. That is
+        # the specific vacuous outcome this job must not have, so assert on the
+        # PASS lines by name rather than on the exit code.
+        run: |
+          set -Eeuo pipefail
+          for t in TestSecretServiceRoundTrip TestSecretServiceMissingSecretIsNotUnreachable; do
+            grep -q -- "--- PASS: $t" /tmp/secret-service.log \
+              || { echo "::error::$t did not PASS (skipped, or never ran) -- this job proves nothing"; \
+                   grep -E -- "--- (SKIP|FAIL)" /tmp/secret-service.log || true; exit 1; }
+          done
+          ! grep -q -- "--- SKIP" /tmp/secret-service.log \
+            || { echo "::error::a Secret Service test skipped; the backend was not exercised"; exit 1; }
+          echo "Secret Service backend exercised: both tests PASSED."
+
   minio-conformance:
     name: MinIO hub conformance
     runs-on: ubuntu-latest
