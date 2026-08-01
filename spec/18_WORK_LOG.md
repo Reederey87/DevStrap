@@ -29,6 +29,33 @@ Follow-ups:
 - <remaining work, or "None">
 ```
 
+## 2026-08-01 — the case-fold fix over-corrected, and cases.Fold is the wrong function (W13-08)
+
+Changed:
+- `internal/pathkey.foldKey`: `norm.NFC.String(cases.Fold().String(clean))` → `norm.NFC.String(strings.ToLower(clean))`. The `golang.org/x/text/cases` import is dropped again.
+- `TestCrossFilesystemCaseFoldNFCInvariant` loses its dotted-capital-I case; new `TestKnownResidualDottedCapitalI` pins that split as a recorded limitation.
+- `FuzzClean`'s ASCII-case-variant property is scoped to inputs with no combining mark **on either side of the flip**; its tautological "Key equals the production expression" assertion is replaced with an independent fixed-point property.
+- `spec/07` § *Path identity*, `spec/11`, `spec/16` corrected.
+
+**What #277 got wrong.** It fixed a real defect — `path_key` normalized only before case mapping, so `"Y"+U+030A` and `U+1E99` produced two keys for one directory — and then went further than the evidence supported, switching from `strings.ToLower` to full Unicode case folding on the reasoning that the corpus has called `path_key` "case-folded" since it was introduced while the code only ever *lowered*.
+
+**Why that is worse than the bug.** Enumerated across all of Unicode: 188 runes fold differently from how they lower, and the difference is not exotica. Folding **merges `ß`/`ss`, `ς`/`σ`, `µ`/`μ`, `ﬁ`/`fi`** — pairs a filesystem keeps **distinct**. A German user with both `straße/` and `strasse/` would have had them collapse to one `path_key`: two real projects silently unified across the fleet, and `DetectCaseConflicts` refusing a legitimate tree. **A false MERGE is strictly worse than the split being fixed** — the split duplicated one project, the merge conflates two.
+
+**How it was caught, and how it got in.** The Codex review pass questioned the unsupported "no key changes in practice" migration claim. Answering it properly meant *enumerating* the affected rune set instead of asserting it — and that enumeration is what surfaced the false merges. The measurement demanded to defend one claim refuted a different one. Two other findings from the same pass are also fixed here: the stated reason for building the `Caser` per call ("a Caser is stateful") was factually wrong — `cases.Fold`'s Caser is documented "stateless and safe to use concurrently" — and the central fuzz assertion restated the production expression, so it would have validated the implementation against itself.
+
+**Why it reached trunk anyway, which is the process lesson.** Auto-merge was armed on #277 before its reviews returned. CI went green and it merged while the correction was mid-flight. Arming auto-merge is only safe when review is *already* complete; on a change to the namespace identity function it was not. The narrow fix is therefore a forward fix rather than an amend.
+
+The ordering fix itself is unchanged and still mutation-checked: removing the re-normalization fails `TestCrossFilesystemCaseFoldNFCInvariant/combining_ring,_case-only`, its `DetectCaseConflicts` assertion, and `FuzzClean`'s committed seed.
+
+**Independent review then found something worse, which settles the primitive question.** In `golang.org/x/text` v0.40.0, `cases.Fold` maps Cherokee in BOTH directions — `U+13A0 → U+AB70` *and* `U+AB70 → U+13A0`. That is an involution, not a fold. So the folding key was **non-idempotent for 172 runes**, and the two case-variants of one caseless Cherokee directory got *different* keys — a case `strings.ToLower` handled correctly. The "use real Unicode case folding" thesis was wrong on its own terms: the function chosen does not implement it. `FuzzClean` now carries both Cherokee runes as **seeds** plus an explicit idempotence property (`foldKey(Key) == Key`), so this cannot regress silently; mutation-checked by restoring `cases.Fold`, which fails both seeds deterministically rather than waiting for a fuzzer to rediscover Cherokee.
+
+**The right answer is now known and measured, and is deliberately not in this PR.** A simple per-rune fold applied to NFD and recomposed — `NFC(map(r → ToLower(ToUpper(r)), NFD(x)))` — fixes `Y̊`/`ẙ`, fixes `U+0130` vs `i`+`U+0307` (that character's canonical decomposition *is* `I`+`U+0307`, so decomposing first makes the spellings identical before any case mapping), fixes Cherokee, is idempotent for 0 runes out of a sweep to `U+2FFFF`, and does **not** merge `straße`/`strasse` or `ﬁle`/`file`. It changes 86 runes' keys, which is exactly why it is not bundled here: `upsertNamespaceTx` matches rows only by `path_key`, so a changed key mints a fresh `prj_` id and leaves a **permanent duplicate project** with the old row never tombstoned; a mixed-version fleet diverges because receivers re-derive keys from `Display`; and a WIP ref pushed under an old key becomes undiscoverable. It needs a re-key migration where a UNIQUE collision *is* a detected case conflict. `spec/07` carries the table and the requirement.
+
+Validated:
+- `FuzzClean` **21,669,324 executions / 100s** against the narrow fix, clean.
+- Unicode-wide enumeration of both deltas, run rather than reasoned: ordering-only changes **0** single runes; folding changes **188** and introduces **4** named false merges.
+- Mutation check re-run after the revert; `go test -race` on `internal/pathkey` and `internal/scan`; `gofmt`, `go vet`, `spec-drift`.
+
 ## 2026-08-01 — path_key never actually case-folded, and the test named for that invariant passed anyway (W13-07)
 
 Changed:

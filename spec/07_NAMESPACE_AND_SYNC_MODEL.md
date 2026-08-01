@@ -57,29 +57,79 @@ personal/scripts     → plain managed folder
 
 The path is the product.
 
-### Path identity: `path_key` (`W13-07`, 2026-08-01)
+### Path identity: `path_key` (`W13-07`/`W13-08`, 2026-08-01)
 
 Every entry carries two spellings of its path. `Display` is the NFC-normalized
 path as the user wrote it; **`path_key` is the case-folded identity** — the value
 two devices compare, the key `pathkey.DetectCaseConflicts` dedupes on, and the
-column `namespace_entries`/`device_wip`/`device_gitstate` key their rows by.
+column `namespace_entries` / `device_wip` / `device_gitstate` key their rows by.
 
-`path_key` is derived as `NFC(fold(Display))` — Unicode case **folding**
-(`golang.org/x/text/cases.Fold`), re-normalized **after** the fold. Both halves
-of that sentence are load-bearing and both were wrong until `W13-07`, which
-derived it as `ToLower(NFC(...))`:
+`path_key` is `NFC(ToLower(Display))` — normalized **after** the case mapping.
 
-- Case mapping does not preserve normalization. `"Y"+U+030A` has no precomposed
-  uppercase form so NFC leaves two runes, while its lowercase composes to
-  `U+1E99` — one path, two keys, unless the fold is re-normalized.
-- `strings.ToLower` is simple case *mapping*, not case *folding*, despite this
-  corpus having called `path_key` "case-folded" from the start. Go maps `U+0130`
-  to a bare `"i"`; `"i"+U+0307` stays two runes. Only folding reconciles them.
+**Why the order matters.** Case mapping does not preserve normalization.
+`"Y"+U+030A` (COMBINING RING ABOVE) has no precomposed uppercase form, so NFC
+leaves two runes; lowering yields `"y"+U+030A`, which NFC *does* compose to
+`U+1E99`. One path, two keys — and on a case-insensitive filesystem those are one
+directory, so the conflict check did not fire and both spellings were adopted and
+replicated as separate projects. The defect is a **base+combining interaction,
+not a per-rune one**: enumerated across all of Unicode, there is no single rune
+whose `ToLower` output is non-NFC. That is why a table of single-character cases
+never caught it and a fuzzer did on its first run.
 
-The consequence of getting either wrong is not cosmetic: on a case-insensitive
-filesystem those pairs are **one directory**, so the case-conflict check does not
-fire and both spellings are adopted and replicated as separate projects. Folding
-and lowering agree on all ASCII, so the fix changed no key in practice.
+**Why NOT full Unicode case folding, despite "case-folded" being this corpus's
+own word for `path_key`.** `cases.Fold` is the semantically correct caseless
+match and additionally closes a second split (`U+0130` vs `"i"+U+0307`). It
+shipped briefly in PR #277 and was **reverted in #278-series follow-up**, on
+enumeration: 188 runes fold differently from how they lower, and the difference
+is not exotica — folding merges **`ß`/`ss`, `ς`/`σ`, `µ`/`μ`, `ﬁ`/`fi`**, pairs a
+filesystem keeps **distinct**. Giving two genuinely different directories one
+`path_key` silently unifies two real projects across the fleet and makes
+`DetectCaseConflicts` refuse a legitimate tree containing both. **A false MERGE
+is strictly worse than the split being fixed**, so the narrow ordering fix is
+what ships.
+
+**`cases.Fold` is additionally the wrong function, not merely too strong.** In
+`golang.org/x/text` v0.40.0 it maps Cherokee in BOTH directions —
+`U+13A0 → U+AB70` *and* `U+AB70 → U+13A0` — an involution rather than a fold. So
+a fold-derived key is **non-idempotent** (172 runes), and the two case-variants
+of one caseless Cherokee directory get *different* keys, which is a case
+`strings.ToLower` handled correctly. `FuzzClean` now carries both Cherokee runes
+as seeds and an explicit idempotence property, so this cannot regress silently.
+
+**The designed follow-up, measured rather than speculated.** A **simple
+per-rune fold applied to NFD and recomposed** —
+`NFC(map(r → unicode.ToLower(unicode.ToUpper(r)), NFD(x)))` — is strictly better
+than everything above and is what `path_key` should eventually use:
+
+| | `Y̊`/`ẙ` | `U+0130`/`i`+`U+0307` | Cherokee | `straße`/`strasse` | non-idempotent | churn vs shipped |
+|---|---|---|---|---|---|---|
+| `NFC(Fold(x))` | fixed | fixed | **breaks** | **merges** | 172 | 188 |
+| `NFC(ToLower(x))` **(shipped)** | fixed | residual | ok | ok | 0 | 0 |
+| `NFC(simpleFold(NFD(x)))` | fixed | **fixed** | ok | ok | **0** | 86 |
+
+It closes the `U+0130` residual for free, because that character's canonical
+decomposition *is* `I`+`U+0307`, so decomposing first makes the two spellings
+identical before any case mapping runs.
+
+It is **not** shipped here for one reason: it changes 86 runes' keys, and
+`upsertNamespaceTx` matches rows only by `path_key`, so a changed key finds no
+row, mints a fresh `prj_` id, and leaves a **permanent duplicate project** — the
+old row is never tombstoned. Events carry `Display` and every receiver re-derives
+the key, so a mixed-version fleet diverges; and a WIP ref pushed under an old key
+becomes undiscoverable, since `refs/devstrap/wip/<device>/<path_key>` is derived
+canonically. Adopting it therefore requires a **re-key migration** at
+`db migrate` across `namespace_entries` / `device_wip` / `device_gitstate`, where
+a UNIQUE collision during re-key *is* a detected case conflict and must be
+surfaced rather than swallowed. That is its own change, with its own review.
+
+**Recorded residual:** `U+0130` vs `"i"+U+0307` still yields two keys. Pinned
+deliberately by `TestKnownResidualDottedCapitalI`, whose assertions describe the
+limitation and must be rewritten if it is ever closed.
+
+**No migration.** `ToLower` and its re-normalized form differ for **zero** single
+runes, and ASCII is untouched, so no stored key changes except for a path
+containing a base+combining sequence whose lowering composes — the `Y̊` shape.
+A mixed-version fleet diverges only on such a path.
 
 Case-folding here is namespace *identity* and is deliberately unlike the
 `.devstrapignore` compiler's case-*sensitive* content matching (`P7-XP-06`); see

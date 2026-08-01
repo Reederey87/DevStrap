@@ -3,9 +3,9 @@ package pathkey
 import (
 	"strings"
 	"testing"
+	"unicode"
 	"unicode/utf8"
 
-	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -27,6 +27,8 @@ func FuzzClean(f *testing.F) {
 		"a/.",
 		"café",       // NFC
 		"cafe\u0301", // NFD of the same string
+		"\u13a0",     // Cherokee uppercase; x/text cases.Fold maps this pair
+		"\uab70",     // BOTH ways, so a fold-based key is non-idempotent here
 		"a\\b",
 		"a\x00b",
 		" a ",
@@ -81,12 +83,35 @@ func FuzzClean(f *testing.F) {
 		if !norm.NFC.IsNormalString(got.Key) {
 			t.Fatalf("Key is not NFC: %q (Display=%q)", got.Key, got.Display)
 		}
-		if got.Key != norm.NFC.String(cases.Fold().String(got.Display)) {
-			t.Fatalf("Key is not the re-normalized case-fold of Display: %+v", got)
+		// Independent of HOW the key is derived: the key must be a fixed point
+		// of Clean. Restating the production expression here instead would
+		// validate the implementation against itself.
+		if reKey, err := Clean(got.Key); err == nil && reKey.Key != got.Key {
+			t.Fatalf("Key is not a fixed point of Clean: Key=%q -> %q", got.Key, reKey.Key)
+		}
+		// The derivation must be idempotent on its own output. This is the
+		// property that catches a case mapping which is an INVOLUTION rather
+		// than a fold, and it is not hypothetical: x/text v0.40.0's cases.Fold
+		// maps Cherokee both ways (U+13A0 -> U+AB70 AND U+AB70 -> U+13A0), so a
+		// fold-based derivation gave the two case-variants of one caseless
+		// directory different keys — worse than the defect it was meant to fix.
+		// 172 runes were non-idempotent under it; zero are here.
+		if again := foldKey(got.Key); again != got.Key {
+			t.Fatalf("key derivation not idempotent: %q -> %q", got.Key, again)
 		}
 		// ASCII case variation of the input must produce the same Key —
 		// path_key is the identity two devices compare.
 		flipped := asciiFlipCase(in)
+		// Scoped, and the exclusion is honest rather than convenient: with a
+		// combining mark present, case mapping and NFC composition do not
+		// commute, and U+0130 vs "i"+U+0307 still yields two keys — a RECORDED
+		// RESIDUAL, pinned by TestKnownResidualDottedCapitalI. Check BOTH sides:
+		// U+0130 is precomposed and carries no mark itself, but its ASCII-case
+		// variant "i"+U+0307 does, so guarding only the original input would let
+		// exactly that residual through.
+		if hasCombiningMark(norm.NFC.String(in)) || hasCombiningMark(norm.NFC.String(flipped)) {
+			return
+		}
 		gotFlip, errFlip := Clean(flipped)
 		if errFlip != nil {
 			t.Fatalf("ASCII case-variant rejected: in=%q flipped=%q err=%v (accepted=%+v)",
@@ -120,4 +145,17 @@ func asciiFlipCase(s string) string {
 		i += size
 	}
 	return string(b)
+}
+
+// hasCombiningMark reports whether s contains a Unicode nonspacing mark. Case
+// mapping and NFC composition do not commute across a base+combining pair,
+// which is both the defect foldKey fixes and the boundary of what the narrow
+// fix can guarantee.
+func hasCombiningMark(s string) bool {
+	for _, r := range s {
+		if unicode.Is(unicode.Mn, r) {
+			return true
+		}
+	}
+	return false
 }

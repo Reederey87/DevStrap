@@ -157,9 +157,6 @@ func TestCrossFilesystemCaseFoldNFCInvariant(t *testing.T) {
 		// "Y"+U+030A has no precomposed uppercase, so NFC leaves two runes; its
 		// lowercase composes to U+1E99. Normalizing before mapping split the key.
 		{"combining ring, case-only", "work/Y\u030a", "work/\u1e99", true},
-		// Go maps U+0130 to a bare "i", dropping the dot; "i"+U+0307 stays two
-		// runes. Only folding reconciles them -- normalization cannot.
-		{"dotted capital I, case-only", "work/\u0130", "work/i\u0307", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -185,5 +182,36 @@ func TestCrossFilesystemCaseFoldNFCInvariant(t *testing.T) {
 				t.Errorf("DetectCaseConflicts unexpectedly flagged %q vs %q: %v", tt.a, tt.b, err)
 			}
 		})
+	}
+}
+
+// TestKnownResidualDottedCapitalI pins a LIMITATION, not a guarantee. Its
+// assertions describe what DevStrap currently does; if the residual is ever
+// closed, this test must be rewritten to assert the fix.
+//
+// U+0130 and "i"+U+0307 are ASCII-case variants of one another, and a
+// case-insensitive filesystem is likely to treat them as one directory. They
+// still produce two path_keys, because strings.ToLower maps U+0130 to a bare
+// "i" (dropping the dot) while "i"+U+0307 stays two runes — no amount of
+// re-normalizing reconciles those.
+//
+// Closing it requires full Unicode case folding, which shipped briefly in #277
+// and was reverted: folding additionally merges pairs the filesystem keeps
+// DISTINCT — enumerated across all of Unicode as ß/ss, ς/σ, µ/μ, ﬁ/fi and 184
+// others. A false merge unifies two real projects fleet-wide and is strictly
+// worse than the split it fixes. Recorded in spec/07 rather than decided here.
+func TestKnownResidualDottedCapitalI(t *testing.T) {
+	a, err := Clean("work/\u0130")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Clean("work/i\u0307")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Key == b.Key {
+		t.Fatalf("residual appears CLOSED (keys now collide: %q). If intentional, "+
+			"rewrite this test to assert the fix and re-check the false-merge "+
+			"hazard recorded in spec/07.", a.Key)
 	}
 }

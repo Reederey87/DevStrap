@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -54,35 +53,34 @@ func Clean(input string) (Path, error) {
 }
 
 // foldKey derives the case-folded comparison key from an already-NFC display
-// path. Two things matter and both were wrong before: it uses real Unicode case
-// FOLDING rather than strings.ToLower, and it re-normalizes AFTER folding.
+// path. It re-normalizes AFTER lowering, and that order is the whole fix.
 //
-// The old spelling normalized once, then applied strings.ToLower. Each half was
-// independently broken, and FuzzClean found both:
+// Case mapping does not preserve normalization. "Y" + U+030A (COMBINING RING
+// ABOVE) has no precomposed uppercase form, so NFC leaves two runes; lowering
+// yields "y" + U+030A, which NFC *does* compose to U+1E99. Normalizing only
+// before the mapping therefore produced a 2-rune key for one spelling of a path
+// and a 1-rune key for the other. path_key is the identity two devices compare
+// and the key DetectCaseConflicts dedupes on, so on a case-insensitive
+// filesystem — where those are ONE directory — the conflict check did not fire
+// and both spellings were adopted and replicated as separate projects.
 //
-//   - Normalization is not preserved by case mapping. "Y" + U+030A (COMBINING
-//     RING ABOVE) has no precomposed uppercase form, so NFC leaves it as two
-//     runes; lowering yields "y" + U+030A, which NFC *does* compose to U+1E99.
-//     So the key for the uppercase spelling was 2 runes and the lowercase one 1.
-//     Re-normalizing after the fold fixes this half.
+// The defect is a base+combining interaction, not a per-rune one: enumerating
+// all of Unicode, there is NO single rune whose ToLower output is non-NFC. That
+// is why a table of single-character cases never caught it and a fuzzer did.
 //
-//   - strings.ToLower is simple case MAPPING, not case FOLDING -- despite
-//     path_key being described throughout the corpus as "case-folded". Go maps
-//     U+0130 to a bare "i", dropping the dot, while "i" + U+0307 stays two
-//     runes. No amount of re-normalizing reconciles those; only folding does.
-//     cases.Fold maps both to "i" + U+0307.
-//
-// path_key is the identity two devices compare and the key DetectCaseConflicts
-// dedupes on, so either split defeats what it exists to prevent: on a
-// case-insensitive filesystem those pairs are one directory, and DevStrap would
-// treat them as two projects and replicate both.
-//
-// ASCII is unaffected -- folding and lowering agree on every ASCII path, which
-// is why no existing key changes in practice (see this change's spec/18 entry).
+// WHY strings.ToLower AND NOT cases.Fold, despite this corpus calling path_key
+// "case-folded". Full Unicode case folding is the semantically correct caseless
+// match, and it additionally fixes U+0130 vs "i"+U+0307 (see the recorded
+// residual in TestKnownResidualDottedCapitalI). It shipped briefly in #277 and
+// was REVERTED here, because folding also merges pairs the filesystem keeps
+// DISTINCT — enumerated across all of Unicode as ß/ss, ς/σ, µ/μ, ﬁ/fi and 184
+// others. Giving two genuinely different directories one path_key silently
+// unifies two real projects across the fleet, and makes DetectCaseConflicts
+// refuse a legitimate tree containing both. A false MERGE is strictly worse than
+// the split being fixed, so the narrow fix ships and the folding question is
+// recorded in 07_NAMESPACE_AND_SYNC_MODEL.md rather than decided in passing.
 func foldKey(clean string) string {
-	// A Caser is stateful and must not be shared across goroutines, so it is
-	// constructed per call rather than hoisted to a package-level var.
-	return norm.NFC.String(cases.Fold().String(clean))
+	return norm.NFC.String(strings.ToLower(clean))
 }
 
 func FromRoot(root, path string) (Path, error) {
