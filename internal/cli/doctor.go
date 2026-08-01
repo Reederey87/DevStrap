@@ -19,6 +19,7 @@ import (
 	"github.com/Reederey87/DevStrap/internal/daemon"
 	"github.com/Reederey87/DevStrap/internal/devicekeys"
 	"github.com/Reederey87/DevStrap/internal/hub"
+	"github.com/Reederey87/DevStrap/internal/ignore"
 	"github.com/Reederey87/DevStrap/internal/platform"
 	"github.com/Reederey87/DevStrap/internal/redact"
 	"github.com/Reederey87/DevStrap/internal/state"
@@ -319,6 +320,7 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 			results = append(results, checkGitstateFreshness(ctx, store)...)
 			results = append(results, checkPendingWip(ctx, store)...)
 			results = append(results, checkBloblessCaveat(ctx, store)...)
+			results = append(results, checkStagingPatternProjects(ctx, store)...)
 		}
 	} else if os.IsNotExist(err) {
 		results = append(results, checkResult{Name: "state database", Status: checkWarn, Detail: "missing", Remedy: "run `devstrap init` (or doctor --fix)"})
@@ -1354,4 +1356,32 @@ func deviceKeyStatus(ctx context.Context, keyStore devicekeys.HybridStore, devic
 		return "public/private mismatch"
 	}
 	return "ok"
+}
+
+func checkStagingPatternProjects(ctx context.Context, store *state.Store) []checkResult {
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return []checkResult{{Name: "projects at staging-pattern paths", Status: checkWarn, Detail: scrubbed(err)}}
+	}
+	var out []checkResult
+	for _, project := range projects {
+		// Every component, not just the basename: a legacy row registered
+		// UNDERNEATH a staging-shaped ancestor is exactly the case the sweeper
+		// has to spare, so it is exactly the case doctor must surface.
+		if hasStagingComponent(project.Path) {
+			out = append(out, checkResult{Name: "project registered at a staging-pattern path", Status: checkWarn, Detail: project.Path, Remedy: "move or re-register this project at a non-reserved path; doctor will not delete it"})
+		}
+	}
+	return out
+}
+
+// hasStagingComponent reports whether any path component carries the reserved
+// clone-staging shape.
+func hasStagingComponent(slashPath string) bool {
+	for _, part := range strings.Split(slashPath, "/") {
+		if ignore.IsStagingDirName(part) {
+			return true
+		}
+	}
+	return false
 }

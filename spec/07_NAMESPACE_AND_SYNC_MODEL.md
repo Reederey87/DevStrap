@@ -4,6 +4,10 @@ tracks_code: [internal/pathkey/**, internal/scan/**, internal/state/**, internal
 ---
 # Namespace and Sync Model
 
+## Reserved clone-staging paths (`W13-05`)
+
+Every namespace path component matching DevStrap's hidden clone-staging shape is invalid at local creation, scan, and peer event apply. This prevents a peer from registering a path that the convergence sweeper could otherwise be induced to delete. Legacy registered rows are retained and surfaced by `doctor`; the sweeper independently skips their exact on-disk paths.
+
 ## Layer B WIP expiry (`P7-WIP-07`/`P7-WIP-08`)
 
 `devstrap wip gc` bounds `refs/devstrap/wip/*` with a 720h default TTL. The

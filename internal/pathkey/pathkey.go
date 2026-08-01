@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Reederey87/DevStrap/internal/ignore"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -38,6 +39,9 @@ func Clean(input string) (Path, error) {
 	}
 	parts := strings.Split(raw, "/")
 	for _, part := range parts {
+		if ignore.IsStagingDirName(part) {
+			return Path{}, fmt.Errorf("namespace path contains reserved clone-staging directory %q", part)
+		}
 		switch part {
 		case "", ".":
 			return Path{}, ErrEmptyPart

@@ -485,6 +485,16 @@ func IsSecretPath(relSlash string) bool {
 // reopens exactly that.
 const StagingDirMarker = ".devstrap-tmp-"
 
+// IsStagingDirName reports whether base has the complete clone-staging shape.
+// The marker is an infix, and the opaque suffix is only required to be non-empty.
+func IsStagingDirName(base string) bool {
+	if !strings.HasPrefix(base, ".") {
+		return false
+	}
+	i := strings.LastIndex(base, StagingDirMarker)
+	return i > 1 && i+len(StagingDirMarker) < len(base)
+}
+
 // StagingDirPattern is the gitignore-syntax form of StagingDirMarker, matching
 // any directory whose name carries the marker.
 const StagingDirPattern = "*" + StagingDirMarker + "*/"

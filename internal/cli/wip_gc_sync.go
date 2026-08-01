@@ -44,7 +44,11 @@ func parseWipDuration(opts *options, key string, defaultValue time.Duration) (ti
 }
 
 func wipGCDue(ctx context.Context, store *state.Store, interval time.Duration, now time.Time) (bool, error) {
-	raw, ok, err := store.GetLocalMeta(ctx, wipGCLastSuccessKey)
+	return maintenanceDue(ctx, store, wipGCLastSuccessKey, interval, now)
+}
+
+func maintenanceDue(ctx context.Context, store *state.Store, key string, interval time.Duration, now time.Time) (bool, error) {
+	raw, ok, err := store.GetLocalMeta(ctx, key)
 	if err != nil {
 		return false, err
 	}
