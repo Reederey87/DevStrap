@@ -336,6 +336,47 @@ This is the most important test.
 5. assert ignored files missing
 ```
 
+### Promotion (`NOVCS-03`, shipped 2026-08-01)
+
+`internal/cli/promote_test.go` tables the **whole four-type lattice** — every
+(source type, flag) pair including all four refusals — asserting both the
+resulting stored type and that a refusal emitted no `project.updated` event at
+all, because "the type did not change" alone would not catch a refusal that
+still announced something to the fleet.
+
+Three tests carry the findings the command turns on, each mutation-checked:
+
+- `TestPromoteLocalGitPushesExistingHistory` — a 3-commit no-remote fixture is
+  promoted and the remote must carry the SAME tip sha and the SAME commit count.
+  This is the one that fails if the implementation ever `git init`s over a
+  `local_git`; the mutation reports `remote commit count = 1, want 3`.
+- `TestPromoteFailedPushLeavesProjectUnchanged` — the ordering pin
+  (validate → push → record). The remote is a **non-bare** repo with `main`
+  checked out, so `ls-remote` succeeds and reports it empty (the preflight
+  passes) and the receiving end then refuses the push: a deterministic failure
+  at exactly the step under test, unlike an unreachable URL which never gets
+  past the preflight. Asserts the type is still `local_git`, no event was
+  emitted, and the rollback removed the `origin` the attempt added.
+  `TestPromoteFailedPushRemovesTheRepositoryItCreated` is the same contract for
+  the non-git sources, where the rollback deletes the `.git` the command made
+  while leaving the user's own files untouched.
+- `TestPromoteRefusesNonEmptyRemote` — a remote seeded with an unrelated commit
+  is refused naming `devstrap add`.
+
+`TestPromoteRefusalsThatProtectContent` covers the empty-folder refusal, the
+secret-looking-staged-file refusal, the never-rewrite-an-existing-`origin`
+refusal, the mutually-exclusive-flags usage error, and an `ext::` URL bouncing
+off the shared `git.CanonicalRemoteKey` validator.
+
+`cmd/devstrap/testdata/script/promote_converges.txtar` is the two-device
+end-to-end: A adopts a no-remote repo as `local_git`, both devices converge, A
+promotes, B pulls — and B's type is `git_repo` with the repo really cloned on
+disk **and `conflicts list` reports none on either device**. That last assertion
+is the only thing in the tree pinning the event-design argument (promotion
+reuses `project.updated` safely because `decideUpsert`'s conflict branch
+requires a non-empty EXISTING remote key); without it, a future edit to that
+guard would silently start raising a conflict on every promotion in the fleet.
+
 ### Add/adopt namespace event emission
 
 ```text

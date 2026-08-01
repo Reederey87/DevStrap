@@ -29,6 +29,40 @@ Follow-ups:
 - <remaining work, or "None">
 ```
 
+## 2026-08-01 — a remote-less folder had no way to graduate, and the obvious implementation destroys the history it exists to rescue (W13-03)
+
+Changed:
+- `internal/cli/promote.go`: new `devstrap promote <path> --draft|--git-remote <url>` (`NOVCS-03`), registered in `root.go`.
+- `internal/git/promote.go`: the primitives it needs — `RemoteIsEmpty`, `InitRepo`, `StageAll`, `StagedFiles`, `CommitStaged`, `AddRemote`, `RemoveRemote`, `CurrentBranch`, `HasCommits`.
+- `internal/cli/promote_test.go` + `cmd/devstrap/testdata/script/promote_converges.txtar`.
+- `spec/07` gains a *Promotion* section and its `local_git`/`plain_folder` status claims are corrected; `spec/08` gains a *Promotion git operations* section; `spec/13` gains a `promote` section and drops it from three "planned" inventories; `spec/00` and `spec/14` status claims corrected; `spec/16` gains the coverage entry.
+
+**The type lattice is four-valued, and the primary case is the one that reads like an afterthought.** `git_repo`, `local_git`, `draft_project`, `plain_folder` — and it is tempting to describe the git direction as "plain/draft → git", with `local_git` as a footnote. It is the opposite. A `local_git` is a **real git repository the user never pushed** (`NOVCS-01` classifies both a repo with no origin and one whose origin failed validation), which is precisely the "forgot to push" population this product exists for. Promoting it means `git remote add origin` + `git push -u origin <current branch>`. **`git init` over it destroys exactly the history the promotion is rescuing** — and the destruction is quiet, because `git init` on an existing repo prints "Reinitialized existing Git repository" and exits 0. It only becomes data loss when the reinitialization lands on a different branch name than the one already checked out, at which point HEAD moves to an unborn branch, `git add -A` stages the working tree, and the push delivers a single root commit. So `internal/git/promote.go` deliberately exposes no primitive that could initialize over an existing repository, and the type switch in `promoteToGitRepo` is the only place the distinction lives.
+
+**Ordering is the correctness property: validate → push → record.** Recording the `git_repo` row first and pushing after would publish, on a failure, a `git_repo` pointing at a remote holding no commits — which every other device in the fleet would then try to clone. So the row and its event are written only after a successful push, and a failure rolls the working tree back to its exact pre-command state (the added `origin` removed, or the `.git` the command created deleted, leaving the user's own files untouched). Without that rollback the ordering guarantee is only half true: the type would be right but a retry after fixing the remote would refuse on the leftover `origin`, or refuse to init over the `.git` the failed attempt left. The one thing deliberately *not* rolled back is a successful push whose database write then fails — deleting a remote branch to tidy up local bookkeeping could destroy the only copy of the history, so the error names the `devstrap add` remedy instead.
+
+**`promote` reuses `project.updated`; a new event kind was considered and rejected, and the reasoning is pinned by a test rather than a comment.** Announcing a remote where the namespace map had none looks like it should collide with the shipped same-path/different-remote reconciliation and raise spurious conflicts fleet-wide. It does not: `decideUpsert`'s conflict branch is guarded by `existing.RemoteKey != ""`, and every legitimate promotion source has an empty remote key, so the event falls through to plain HLC last-writer-wins — no apply-handler, `snapshot.v2` projection, compaction, or verification change follows. **That makes one refusal load-bearing rather than tidy:** a project that already has a remote is the case that *would* reach the conflict branch, so it is refused naming `add`. The two-device testscript asserts B's type changed **and** that `conflicts list` reports none on either device; mutation-checking it by deleting `existing.RemoteKey != ""` from `decide.go` fails with `1 open conflict(s)`, which is the only thing in the tree that would catch a future edit to that guard.
+
+`promoteToGitRepo` holds the project's **repo operation lock** for its whole git-mutating stretch, the same lock `hydrate`/`materialize`/`worktree` take: promotion runs `init`/`remote add`/`push` against a managed working tree, so an unlocked promotion could interleave with a convergence tick materializing the same project.
+
+**Two refusals protect content rather than invariants, and one of them is not obvious.** An empty folder is refused rather than given an invented empty initial commit (stated in the spec, not left to inference). And a non-git source whose commit would carry secret-looking files is refused: a promotion push is the first time that content ever leaves the machine, and `scan` already treats those filenames as a warning class. The screen runs against the **staged index**, not the directory, so `.gitignore` is honored for free — a folder that already ignores its `.env` promotes fine, which a filesystem walk would have wrongly blocked.
+
+Scope note: only the CURRENT branch is pushed (tags and other local branches stay local, documented in `spec/13`), and **demotion is out of scope** — a `git_repo` whose content lives in a remote has no bundle to fall back to.
+
+**Review found a remedy that could not work in the state it was offered — the same defect class as `P8-ADOPT-02`.** The push-succeeded/record-failed path said "re-run `devstrap add`". But `add` calls `ensureHydratableTarget` (`add.go:73`), which refuses a non-empty, non-skeleton directory — and in exactly that state the directory **is** the just-promoted repository, full of the user's files. The one recovery command the message named fails in precisely the state the message exists for. Reproduced against the built binary (`refusing to hydrate into non-empty directory`), and now `scan --adopt`, which adopts an existing checkout whose origin validates. Pinned by `TestPromoteRemediesNameCommandsThatWorkInTheStateTheyAreOffered`, which asserts on the message text because forcing a store write to fail after a successful push needs a fault-injection seam this package does not have — naming the wrong command is the defect, and the message is where it lives. Mutation-checked by restoring the `add` wording.
+
+Two more from the same pass: a **silent rollback failure** is now a stderr warning (telling the user the tree is back at its pre-command state when it is not sends their retry into the "already has an 'origin'" refusal, which wrongly implies they configured it); and two caveats the property statements did not carry are written into `spec/07` — the secret screen covers the **non-git source only**, so a `local_git` promotion pushes existing history unscreened by design, and the empty-remote check is **best effort** because `RemoteIsEmpty` and the push are not atomic.
+
+Recorded, not fixed, because it is pre-existing semantics rather than new: a `--draft` promotion event (empty `RemoteKey`) arriving at a peer whose row became `git_repo` via a concurrent `add` skips the conflict branch — which needs BOTH keys non-empty — so LWW may flip `git_repo` → `draft_project` with no conflict row. That is how every empty-`RemoteKey` event already behaves.
+
+Validated:
+- **Mutation-checked, four times.** (1) Routing `local_git` through the init path fails `TestPromoteLocalGitPushesExistingHistory` at the commit step (`nothing to commit, working tree clean`); the destructive form (removing `.git` first) fails it on the assertion that matters — `remote tip = 5c5c5196…, want the local tip 1baa87c2… (history was not pushed)`. (2) Moving `recordPromotion` above the push fails both rollback tests: `stored type = "git_repo", want local_git (a failed push must not promote)`. (3) Deleting the non-empty-remote refusal fails `TestPromoteRefusesNonEmptyRemote` — the command gets as far as git's own `! [rejected] main -> main (fetch first)`. (4) Deleting `existing.RemoteKey != ""` from `decideUpsert` fails the testscript: `no match for 'No open conflicts' found in stdout`.
+- `go test -race ./internal/cli/ ./internal/sync/ ./cmd/devstrap/`; `gofmt -l cmd internal` (empty); `go vet ./...`; `spec-drift`.
+
+Follow-ups:
+- Scan-side `plain_folder` emission (`NOVCS-02`) is still open, so today the only way to reach that type is through sync from a device that has one. `promote --draft` graduates it out again, but nothing yet creates it locally.
+
+
 ## 2026-08-01 — the daemon job model is withdrawn, not pending (W13-09)
 
 Changed:
@@ -49,6 +83,7 @@ Validated: no code changed; `spec-drift`. The five registered routes were verifi
 
 Follow-ups:
 - Work-log rotation (ledger convention 4 / `P6-DOC-02`, this file is now 1,200+ lines) was considered for this change and left out: it is mechanical churn across the file every other PR in the wave is also editing, and it deserves a quiet moment rather than a five-way rebase.
+
 
 
 ## 2026-08-01 — the staging orphan is now swept, and the sweeper is a deletion primitive (W13-05)
@@ -81,6 +116,7 @@ Validated:
 
 Follow-ups:
 - The accepted residual, stated rather than discovered later: a user manually squatting work inside an unlocked, unregistered hidden `.X.devstrap-tmp-*` directory loses it after the age window.
+
 
 
 ## 2026-08-01 — the AD5-07 deferral asked for evidence; here it is (W13-01 PR A)
@@ -162,6 +198,7 @@ Validated:
 - `FuzzClean` **21,669,324 executions / 100s** against the narrow fix, clean.
 - Unicode-wide enumeration of both deltas, run rather than reasoned: ordering-only changes **0** single runes; folding changes **188** and introduces **4** named false merges.
 - Mutation check re-run after the revert; `go test -race` on `internal/pathkey` and `internal/scan`; `gofmt`, `go vet`, `spec-drift`.
+
 
 ## 2026-08-01 — path_key never actually case-folded, and the test named for that invariant passed anyway (W13-07)
 

@@ -111,6 +111,7 @@ devstrap db
 devstrap sync
 devstrap open
 devstrap hydrate
+devstrap promote
 devstrap add
 devstrap clone
 devstrap env
@@ -132,7 +133,6 @@ devstrap completion
 Planned:
 devstrap ignore
 devstrap export
-devstrap promote
 devstrap gitstate
 ```
 
@@ -141,8 +141,8 @@ devstrap gitstate
 Current repository status as of `2026-07-01`:
 
 ```text
-Implemented: devstrap init, up, join, pair, version, scan, add, clone, hydrate, open, sync --hub-file, sync (hub: git+ssh://…/git@host:path.git zero-infrastructure git carrier — the documented default — and hub: r2://<bucket> production R2/S3 SDK wiring), hub init, hub compact, hub gc, hub login, hub logout, hub migrate-events, keys rotate, materialize, draft snapshot create, run-loop, daemon start, daemon stop, daemon status, daemon sync, daemon events, service install, service uninstall, service status, status, doctor, conflicts list, conflicts show, conflicts resolve, db migrate, db status, db backup, db backup --full, db restore, db down, env capture, env hydrate, env bind, env rotate, run, worktree new, worktree status, worktree finalize, worktree list, worktree remove, worktree cleanup, worktree unlock, wip push, wip fetch, wip status, wip show, wip apply, wip drop, agent run, agent list, agent show, agent pr, devices enroll, devices list, devices approve, devices revoke, devices lost, devices rename, devices recipient, devices pairing-code
-Planned: env check, automatic remote device enrollment/fingerprint confirmation, the daemon job model and the endpoints beyond health/version, export, promote, gitstate
+Implemented: devstrap init, up, join, pair, version, scan, add, clone, hydrate, promote, open, sync --hub-file, sync (hub: git+ssh://…/git@host:path.git zero-infrastructure git carrier — the documented default — and hub: r2://<bucket> production R2/S3 SDK wiring), hub init, hub compact, hub gc, hub login, hub logout, hub migrate-events, keys rotate, materialize, draft snapshot create, run-loop, daemon start, daemon stop, daemon status, daemon sync, daemon events, service install, service uninstall, service status, status, doctor, conflicts list, conflicts show, conflicts resolve, db migrate, db status, db backup, db backup --full, db restore, db down, env capture, env hydrate, env bind, env rotate, run, worktree new, worktree status, worktree finalize, worktree list, worktree remove, worktree cleanup, worktree unlock, wip push, wip fetch, wip status, wip show, wip apply, wip drop, agent run, agent list, agent show, agent pr, devices enroll, devices list, devices approve, devices revoke, devices lost, devices rename, devices recipient, devices pairing-code
+Planned: env check, automatic remote device enrollment/fingerprint confirmation, the daemon job model and the endpoints beyond health/version, export, gitstate
 ```
 
 `TestEveryCommandIsDocumented` path-anchors this inventory against the live Cobra tree: every visible command path must appear as a contiguous substring here and in `spec/00_START_HERE.md`.
@@ -384,6 +384,43 @@ Options:
 ```
 
 Current implementation uses partial clone by default, supports `--full` and `--lfs`, refuses to clone into non-empty non-skeleton directories, stages clones in hidden sibling temp directories, promotes only after clone success plus a second target validation, preserves the original skeleton on clone failure, **names those staging directories from `ignore.StagingDirMarker` so the scanner's default prune set and the directory name cannot drift** (`W12-01`: a process killed before the promoting rename leaves a partial clone inside the managed namespace carrying the real remote, and until the pattern was added `scan --adopt` adopted it as a second project which then replicated fleet-wide — the marker sits mid-name, so a prefix match does not catch it), and updates local materialization/dirty state. The eager `materialize`/`sync` path additionally honors the stored `git_repos.lfs_policy` (`P6-GIT-04`): after clone, an `always`/`agent` repo runs `git lfs install --local` + `git lfs pull` (recorded **failed** on error, never available/clean with pointers), and `auto`/`never` warns — applied in `materializeGitRepo` so a `SkeletonProjects` retry of a failed repo cannot silently flip it to available (see `08_GIT_MATERIALIZATION_AND_WORKTREES.md`). The manual `--lfs` flag stays an explicit one-off pull. Planned (`DRAFT-*`): `hydrate` extends beyond `git_repo` projects to materialize `local_git`/`plain_folder`/draft content from decrypted `age_blob:<sha256>` bundles, while `node_modules`/build artifacts are rebuilt (npm/pnpm/uv install) rather than synced.
+
+### promote
+
+```bash
+devstrap promote work/acme/notes --draft
+devstrap promote work/acme/tool  --git-remote git@github.com:me/tool.git
+```
+
+Graduates a remote-less namespace entry (`NOVCS-03`, shipped 2026-08-01). Exactly
+one of `--draft` / `--git-remote <url>` is required; both together is a usage
+error (exit 10). The full type lattice, the refusals, and the ordering rationale
+are canonical in `07_NAMESPACE_AND_SYNC_MODEL.md` § *Promotion*; the CLI-facing
+contract is:
+
+- `--draft` moves a `plain_folder` to `draft_project` and does nothing else —
+  content is then the shipped `draft snapshot create` bundle plane's job, not a
+  second bundling path. Re-running it on an already-`draft_project` entry is an
+  idempotent no-op that emits no event.
+- `--git-remote <url>` produces a `git_repo`. A `local_git`'s **existing history
+  is pushed** (`git remote add origin` + `git push -u origin <current branch>`);
+  a `plain_folder`/`draft_project` is `git init`-ed and given one initial commit
+  first. `git init` is never run over an existing repository.
+- The remote must be reachable and **empty**. A remote already holding refs
+  exits `exitInvalidConfig` (2) naming `devstrap add`; an unreadable remote exits
+  `exitGit` (7) and says to create the empty repository first.
+- The row and its `project.updated` event are written only **after** a
+  successful push, and a failed push rolls the working tree back to its exact
+  pre-command state, so retrying after fixing the remote is unobstructed.
+- Refusals: a project that already has a remote (naming `add`; demotion is out
+  of scope), `--draft` on a `local_git`, an empty folder, a folder whose staged
+  index would carry secret-looking files, a `local_git` that already has an
+  `origin` or a detached HEAD or no commits, and any remote URL the shared
+  `git.CanonicalRemoteKey` validator rejects.
+- `--json` renders `{path, from_type, to_type, remote, branch, pushed, changed}`.
+
+Only the CURRENT branch is pushed; other local branches stay local and are the
+user's own `git push` away. Tags are not pushed either.
 
 ### run-loop
 
@@ -867,8 +904,7 @@ Rules:
 Referenced by the new workstreams; intentionally absent from the live command tree the drift test checks until implemented (`devstrap conflicts` has since shipped — see the 2026-06-28 implementation notes — and is documented under `status`):
 
 ```text
-devstrap promote <path> --draft|--git-remote <url>     # plain -> draft -> git (NOVCS-03 / DRAFT-*)
-devstrap gitstate capture [--fetch]  # WITHDRAWN 2026-08-01 (W13-09): superseded by the sync-wired Layer A capture                    # working-state validation plane (Section 5)
+devstrap gitstate capture [--fetch]  # WITHDRAWN 2026-08-01 (W13-09): superseded by the sync-wired Layer A capture
 devstrap sync   # hub: git@host:path.git (zero-infra git carrier, AD-1) or hub: r2://<bucket> (R2/S3, HUB-*); the --hub-s3 flag was superseded by the hub: config value
 ```
 
@@ -889,7 +925,7 @@ The cloud-sync architecture (`docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md`) 
 
 - **Eager materialization (`EAGER-*`)**: `devstrap sync` (shipped) clones the whole `~/Code` tree up front via blobless/partial clone as the default behavior (`--namespace-only` opts out) — no FUSE, placeholder, or lazy-VFS layer (StrapFS stays deferred). After a **successful** sync the full tree is present on disk; per-project materialization failures are isolated and leave those entries as `failed`, and the command finishes non-zero (see the `sync`/`materialize` exit codes above), so the "whole tree present" guarantee is scoped to a clean exit.
 - **Two-plane zero-knowledge hub (`HUB-*`)**: the hub carries only (a) the signed, HLC-ordered namespace map (event log) and (b) content-addressed `age_blob:<sha256>` ciphertext for env and non-git/draft content. Repo content never traverses the hub — it rides git transport from the existing remote. `hub: r2://<bucket>` (or `s3://`) selects the shipped Cloudflare R2 / S3 backend (`aws-sdk-go-v2` adapter behind `hubFromOptions`) and `hub: git+ssh://…` selects the shipped zero-infrastructure private-git-repo carrier (`AD-1`), both behind one pluggable Hub interface; `--hub-file` stays for tests only. Credentials resolve via env/config (values may be `op://` refs), then `AWS_*` literals, then the `hub login` keychain slot / 0600 file fallback — never the URI (`P6-HUB-02`).
-- **Content-type split (`DRAFT-*`)**: env plus non-git/draft folders sync as age-encrypted blobs; `node_modules`/build artifacts are never synced and are rebuilt on hydrate. `hydrate`/`open` extend to `local_git`/`plain_folder`/draft project types; `devstrap promote` walks a folder from plain -> draft -> git (`NOVCS-03`).
+- **Content-type split (`DRAFT-*`)**: env plus non-git/draft folders sync as age-encrypted blobs; `node_modules`/build artifacts are never synced and are rebuilt on hydrate. `hydrate`/`open` extend to `local_git`/`plain_folder`/draft project types. `devstrap promote` (`NOVCS-03`) is **shipped** — see its section above.
 - **Conflicts stay detect-don't-merge**: HLC ordering plus tombstones; `devstrap conflicts` (shipped) surfaces them. Files are never byte-merged.
 - **Device trust**: revocation re-encrypts affected blobs to the reduced recipient set and flags secrets for rotation; once device enrollment exists, event verification must fail closed (`SECU-03`).
 
