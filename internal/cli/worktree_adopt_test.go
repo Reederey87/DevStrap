@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -745,5 +746,357 @@ func TestWorktreeAdoptValidatesBaseRefShape(t *testing.T) {
 	if _, stderr, err := executeForTest("--home", home, "--root", root,
 		"worktree", "adopt", extWT, "--base-ref", "origin/main"); err != nil {
 		t.Fatalf("origin/main must be accepted: stderr=%q err=%v", stderr, err)
+	}
+}
+
+// TestWorktreeAdoptFindsLegacyUnresolvedRow pins P8-ADOPT-07: a row written
+// before migration 00032 stores the path as the caller spelled it, because
+// EvalSymlinks arrived WITH adopt (AD5-02). Under a symlinked prefix the
+// resolved lookup misses that row, and the string-keyed unique index then
+// admits a SECOND active row for one physical worktree.
+//
+// The trap this test must dodge: on macOS /tmp is itself a symlink to
+// /private/tmp, so a fixture built there can make the resolved lookup succeed
+// by accident and pass with the fix reverted. The two spellings are asserted
+// to actually differ before anything else runs — without that guard the whole
+// test is vacuous.
+func TestWorktreeAdoptFindsLegacyUnresolvedRow(t *testing.T) {
+	ctx := t.Context()
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	localPath := setupFreshWorktreeRepo(t, home, root, "auto", false)
+
+	head := strings.TrimSpace(runGitOutput(t, localPath, "rev-parse", "HEAD"))
+	realDir := t.TempDir()
+	extWT := filepath.Join(realDir, "external-wt")
+	runGit(t, localPath, "worktree", "add", "--detach", extWT, head)
+
+	linkDir := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	viaLink := filepath.Join(linkDir, "external-wt")
+
+	resolved, err := filepath.EvalSymlinks(viaLink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved == viaLink {
+		t.Fatalf("fixture is vacuous: %q resolves to itself, so the resolved lookup can "+
+			"never miss and this test would pass with the fix reverted", viaLink)
+	}
+
+	store, err := state.Open(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.ProjectByPath(ctx, "work/acme/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, err := store.CurrentDevice(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The legacy shape: created by `worktree new`, holding the UNRESOLVED
+	// spelling, with a base only that command could have recorded.
+	if _, err := store.InsertWorktree(ctx, state.Worktree{
+		NamespaceID: project.ID,
+		DeviceID:    device.ID,
+		Path:        viaLink,
+		Branch:      "legacy-branch",
+		BaseRef:     "origin/main",
+		BaseSHA:     "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+		CreatedBy:   "new",
+		DirtyState:  "clean",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-fix proof: the resolved spelling does NOT find that row. If this ever
+	// starts succeeding, the fixture stopped reproducing the defect.
+	if _, err := store.WorktreeByPath(ctx, project.ID, resolved); !errors.Is(err, state.ErrWorktreeNotFound) {
+		t.Fatalf("resolved lookup found the legacy row (err=%v); the fixture no longer reproduces P8-ADOPT-07", err)
+	}
+	_ = store.Close()
+
+	if _, stderr, aerr := executeForTest("--home", home, "--root", root,
+		"worktree", "adopt", viaLink); aerr != nil {
+		t.Fatalf("adopt: stderr=%q err=%v", stderr, aerr)
+	}
+
+	store, err = state.Open(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	all, err := store.ListWorktrees(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var active []state.Worktree
+	for _, wt := range all {
+		if wt.Status == "active" {
+			active = append(active, wt)
+		}
+	}
+	if len(active) != 1 {
+		t.Fatalf("active worktree rows = %d, want 1; a second row for one physical worktree is the defect", len(active))
+	}
+	got := active[0]
+	if got.Path != resolved {
+		t.Errorf("path = %q, want the canonicalized %q so the unique index can see it", got.Path, resolved)
+	}
+	// The AD5-02 invariant: adoption is registration, never base-resolution.
+	// Rewriting a base_sha adopt did not record is exactly what is forbidden.
+	if got.BaseSHA != "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" {
+		t.Errorf("base_sha = %q, want it untouched; adopt must not rewrite a base it did not record", got.BaseSHA)
+	}
+	if got.Branch != "legacy-branch" {
+		t.Errorf("branch = %q, want it untouched at \"legacy-branch\"", got.Branch)
+	}
+	if got.CreatedBy != "new" {
+		t.Errorf("created_by = %q, want it left as \"new\"", got.CreatedBy)
+	}
+}
+
+// TestWorktreeAdoptRefusesWhenLegacyAndResolvedRowsCollide pins item 3 of the
+// P8-ADOPT-07 fix: if canonicalizing a legacy row's path would collide with
+// another already-active row at that exact resolved path — the duplicate
+// this finding describes, already materialized — the raw SQLite UNIQUE
+// constraint error must become an actionable refusal naming both path
+// spellings, never leak as "UNIQUE constraint failed: ...", and neither row
+// may be deleted or mutated.
+//
+// This cannot be driven through the full `worktree adopt` CLI path in one
+// deterministic call: WorktreeByPath and idx_worktrees_active_path share the
+// same (namespace_id, path)/status='active' scope, so if a row already holds
+// the resolved path, adoptWorktreeAt's OWN lookup — which runs before the
+// legacy retry — finds it first and the retry branch is never reached at
+// all. The collision this fix defends against can only come from a writer
+// outside the repo lock (a race adoptWorktreeAt cannot be driven into from a
+// single-threaded test), so this test exercises the extracted translation
+// function directly, against a genuine SQLite constraint violation produced
+// by CanonicalizeWorktreePath.
+func TestWorktreeAdoptRefusesWhenLegacyAndResolvedRowsCollide(t *testing.T) {
+	ctx := t.Context()
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	_ = setupFreshWorktreeRepo(t, home, root, "auto", false)
+
+	store, err := state.Open(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	project, err := store.ProjectByPath(ctx, "work/acme/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, err := store.CurrentDevice(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	legacyPath := filepath.Join(t.TempDir(), "alias-wt")
+	resolvedPath := filepath.Join(t.TempDir(), "resolved-wt")
+
+	// The "resolved" row: already registered, occupying the exact canonical
+	// path a legacy canonicalization would target — as if a pre-fix adopt
+	// call had already blind-inserted after missing the legacy row below.
+	resolvedRow, err := store.InsertWorktree(ctx, state.Worktree{
+		NamespaceID: project.ID,
+		DeviceID:    device.ID,
+		Path:        resolvedPath,
+		Branch:      "main",
+		BaseRef:     "origin/main",
+		BaseSHA:     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		CreatedBy:   "adopted",
+		DirtyState:  "clean",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The legacy `worktree new` row, still at its unresolved spelling.
+	legacyRow, err := store.InsertWorktree(ctx, state.Worktree{
+		NamespaceID: project.ID,
+		DeviceID:    device.ID,
+		Path:        legacyPath,
+		Branch:      "",
+		BaseRef:     "origin/main",
+		BaseSHA:     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		CreatedBy:   "new",
+		DirtyState:  "clean",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updateErr := store.CanonicalizeWorktreePath(ctx, legacyRow.ID, resolvedPath)
+	if updateErr == nil {
+		t.Fatal("want the canonicalizing UPDATE to hit idx_worktrees_active_path; the fixture's two rows must collide on resolvedPath")
+	}
+	refused := worktreeCanonicalizePathConflict(updateErr, legacyPath, resolvedPath)
+	if refused == nil {
+		t.Fatal("want a refusal, got nil")
+	}
+	if strings.Contains(refused.Error(), "UNIQUE constraint failed") {
+		t.Fatalf("raw SQLite text leaked to the user: %v", refused)
+	}
+	if !strings.Contains(refused.Error(), legacyPath) || !strings.Contains(refused.Error(), resolvedPath) {
+		t.Fatalf("refusal must name both conflicting path spellings (%q, %q): %v", legacyPath, resolvedPath, refused)
+	}
+	var appErr appError
+	if !errors.As(refused, &appErr) || appErr.code != exitConflict {
+		t.Fatalf("refusal = %v (%T), want an appError{code: exitConflict}", refused, refused)
+	}
+
+	// Neither row may have been deleted or mutated by the failed UPDATE.
+	gotLegacy, err := store.WorktreeByID(ctx, legacyRow.ID)
+	if err != nil {
+		t.Fatalf("legacy row was deleted: %v", err)
+	}
+	if gotLegacy.Path != legacyPath {
+		t.Fatalf("legacy row Path = %q, want unchanged %q — a failed UPDATE must not leave a partial write", gotLegacy.Path, legacyPath)
+	}
+	gotResolved, err := store.WorktreeByID(ctx, resolvedRow.ID)
+	if err != nil {
+		t.Fatalf("resolved row was deleted: %v", err)
+	}
+	if gotResolved.Path != resolvedPath {
+		t.Fatalf("resolved row Path = %q, want unchanged %q", gotResolved.Path, resolvedPath)
+	}
+	if got := worktreeRowCountForTest(t, filepath.Join(home, "state.db")); got != 2 {
+		t.Fatalf("active worktree row count = %d, want 2 (no row deleted, no new row inserted)", got)
+	}
+}
+
+// TestWorktreeAdoptLeavesWorktreeNewRowUnrefreshed pins the AD5-02 invariant
+// that P8-ADOPT-07 must not violate: every pre-migration-00032 row was
+// written by `worktree new`, never by adopt (EvalSymlinks arrived WITH
+// adopt), so a legacy hit must take the reported-and-left-untouched path,
+// never the idempotent-refresh branch — which is the branch that LOOKS
+// correct here, since it is the sibling logic for re-adopting an already-
+// adopted row. The remote is advanced PAST the worktree before adopting, so a
+// wrongly-taken refresh — which would recompute merge-base and rewrite
+// base_sha — is caught by a base_sha mismatch instead of passing by accident
+// because nothing moved.
+func TestWorktreeAdoptLeavesWorktreeNewRowUnrefreshed(t *testing.T) {
+	ctx := t.Context()
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	localPath := setupFreshWorktreeRepo(t, home, root, "auto", false)
+
+	ancestor := strings.TrimSpace(runGitOutput(t, localPath, "rev-parse", "HEAD"))
+	realDir := t.TempDir()
+	extWT := filepath.Join(realDir, "external-wt")
+	runGit(t, localPath, "worktree", "add", "--detach", extWT, ancestor)
+
+	linkDir := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	viaLink := filepath.Join(linkDir, "external-wt")
+
+	resolved, err := filepath.EvalSymlinks(viaLink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved == viaLink {
+		t.Fatalf("fixture is vacuous: %q resolves to itself, so the resolved lookup can "+
+			"never miss and this test would pass with the fix reverted", viaLink)
+	}
+
+	store, err := state.Open(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.ProjectByPath(ctx, "work/acme/repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, err := store.CurrentDevice(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The legacy shape: created by `worktree new`, holding the UNRESOLVED
+	// spelling, with a base only that command could have recorded.
+	if _, err := store.InsertWorktree(ctx, state.Worktree{
+		NamespaceID: project.ID,
+		DeviceID:    device.ID,
+		Path:        viaLink,
+		Branch:      "",
+		BaseRef:     "origin/main",
+		BaseSHA:     ancestor,
+		CreatedBy:   "new",
+		DirtyState:  "clean",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Advance the base PAST the worktree. A wrongly-taken refresh recomputes
+	// merge-base against the new tip and would rewrite base_sha to something
+	// other than `ancestor` — the exact "looks correct but is wrong" branch
+	// this test exists to catch.
+	if err := os.WriteFile(filepath.Join(localPath, "AFTER.md"), []byte("later\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, localPath, "add", "AFTER.md")
+	runGit(t, localPath, "commit", "-m", "advance the base past the worktree")
+	runGit(t, localPath, "push", "origin", "main")
+	runGit(t, localPath, "fetch", "origin")
+	tip := strings.TrimSpace(runGitOutput(t, localPath, "rev-parse", "origin/main"))
+	if tip == ancestor {
+		t.Fatalf("fixture failed to advance the base: tip == ancestor == %s", tip)
+	}
+
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "worktree", "adopt", viaLink, "--json")
+	if err != nil {
+		t.Fatalf("adopt stdout=%q stderr=%q err=%v", stdout, stderr, err)
+	}
+	var out adoptResultForTest
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("decode: %v\n%s", err, stdout)
+	}
+	if out.AlreadyAdopted {
+		t.Fatalf("adopt reported already_adopted for a `worktree new` row; want already_registered — " +
+			"already_adopted means the wrong (refresh) branch was taken")
+	}
+	if !out.AlreadyRegistered {
+		t.Fatalf("adopt = %+v, want already_registered", out)
+	}
+	if out.BaseSHA != ancestor {
+		t.Fatalf("BaseSHA = %q, want the ORIGINAL %q; adopt must not recompute/write a new base_sha into a legacy `worktree new` row", out.BaseSHA, ancestor)
+	}
+
+	// Read back through a SEPARATE store open, not the in-memory struct adopt
+	// returned — P8-ADOPT-02's own regression test was vacuous on its first
+	// attempt for exactly this reason (it asserted the struct, not the DB).
+	store2, err := state.Open(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store2.Close() }()
+	all, err := store2.ListWorktrees(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted state.Worktree
+	found := false
+	for _, wt := range all {
+		if wt.Status == "active" && wt.Path == resolved {
+			persisted, found = wt, true
+		}
+	}
+	if !found {
+		t.Fatalf("no active row at the canonicalized path %q", resolved)
+	}
+	if persisted.BaseSHA != ancestor {
+		t.Fatalf("PERSISTED BaseSHA = %q, want unchanged %q", persisted.BaseSHA, ancestor)
+	}
+	if persisted.Branch != "" {
+		t.Fatalf("PERSISTED Branch = %q, want unchanged empty", persisted.Branch)
 	}
 }

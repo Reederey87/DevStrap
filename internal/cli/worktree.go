@@ -459,6 +459,44 @@ func adoptWorktreeAt(ctx context.Context, stderr io.Writer, opts *options, store
 	if lookupErr != nil && !errors.Is(lookupErr, state.ErrWorktreeNotFound) {
 		return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, lookupErr
 	}
+	// P8-ADOPT-07: rows written before migration 00032 stored the path as the
+	// caller spelled it, because EvalSymlinks arrived with AD5-02 — i.e. with
+	// adopt itself. On a symlinked prefix (/tmp -> /private/tmp is the everyday
+	// case) the resolved lookup above misses such a row, and the string-keyed
+	// index then admits a SECOND active row for one physical worktree.
+	//
+	// Retry with the unresolved spelling before concluding "not registered".
+	//
+	// Coverage is partial by construction: this finds the row only when the
+	// caller's spelling matches the one `worktree new` happened to store. The
+	// complete form would be an os.SameFile sweep over the project's active
+	// rows, which catches every aliasing rather than the string-equal ones;
+	// that is deliberately out of scope for a P3 that also self-heals via
+	// cleanup's path-missing prune.
+	if errors.Is(lookupErr, state.ErrWorktreeNotFound) && absPath != resolvedPath {
+		legacy, legacyErr := store.WorktreeByPath(ctx, project.ID, absPath)
+		if legacyErr != nil && !errors.Is(legacyErr, state.ErrWorktreeNotFound) {
+			return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, legacyErr
+		}
+		if legacyErr == nil {
+			// Canonicalize the path ONLY. This row is a `worktree new` row, so
+			// the branch below reports it and leaves its base untouched; the
+			// path rewrite exists purely so the unique index can see it from
+			// here on.
+			//
+			// This cannot collide: WorktreeByPath and idx_worktrees_active_path
+			// share the same scope — (namespace_id, path) over status='active'
+			// — so an active row already holding resolvedPath in this project
+			// would have been found by the lookup above and we would never be
+			// here. The UNIQUE translation is kept anyway for a racing writer
+			// outside the repo lock, so SQLite text never reaches the user.
+			if err := store.CanonicalizeWorktreePath(ctx, legacy.ID, resolvedPath); err != nil {
+				return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, worktreeCanonicalizePathConflict(err, absPath, resolvedPath)
+			}
+			legacy.Path = resolvedPath
+			existing, lookupErr = legacy, nil
+		}
+	}
 	if lookupErr == nil {
 		if existing.CreatedBy != "adopted" {
 			// Adoption is registration, never base-resolution: a row
@@ -498,6 +536,29 @@ func adoptWorktreeAt(ctx context.Context, stderr io.Writer, opts *options, store
 		return state.Worktree{}, state.ProjectStatus{}, adoptOutcome{}, err
 	}
 	return wt, project, adoptOutcome{Warnings: warnings}, nil
+}
+
+// worktreeCanonicalizePathConflict translates the raw SQLite UNIQUE
+// constraint error from a P8-ADOPT-07 path canonicalization into a typed,
+// actionable refusal naming both path spellings, instead of letting "UNIQUE
+// constraint failed: ..." reach the user. An err that is not a constraint
+// violation passes through unchanged.
+//
+// Extracted to its own function because it is not reachable through
+// adoptWorktreeAt's own control flow in a single synchronous call:
+// WorktreeByPath and idx_worktrees_active_path share the same scope —
+// (namespace_id, path) over status='active' — so an active row already
+// holding resolvedPath would have been found by the lookup that runs before
+// this one, and adoptWorktreeAt would never reach the retry branch at all. A
+// genuine collision can only come from a writer outside the repo lock; this
+// function exists so that (rare, hard-to-race-in-a-test) case still gets a
+// clear refusal instead of raw SQLite text, and so the translation itself is
+// directly testable without needing to reproduce the race.
+func worktreeCanonicalizePathConflict(err error, absPath, resolvedPath string) error {
+	if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		return appError{code: exitConflict, err: fmt.Errorf("%s is registered twice — once as %q and once as %q — for one physical worktree; run `devstrap worktree list` and `devstrap worktree remove` the stale registration", resolvedPath, absPath, resolvedPath)}
+	}
+	return err
 }
 
 func newWorktreeAdoptCommand(stdout io.Writer, opts *options) *cobra.Command {

@@ -4504,6 +4504,35 @@ WHERE namespace_id = ? AND path = ? AND status = 'active';
 	return wt, nil
 }
 
+// CanonicalizeWorktreePath rewrites a worktree row's stored path and NOTHING
+// else (P8-ADOPT-07).
+//
+// Rows written before migration 00032 hold the path as the caller spelled it,
+// because EvalSymlinks arrived WITH adopt (AD5-02). idx_worktrees_active_path
+// is keyed on the path string, so under a symlinked prefix such a row is
+// invisible to a lookup by the resolved spelling and the index will admit a
+// second active row for one physical worktree. This makes the row visible
+// again from then on.
+//
+// Deliberately narrower than UpdateWorktreeAdoption: every pre-00032 row was
+// written by `worktree new`, never by adopt, so these are exactly the rows the
+// AD5-02 invariant requires be reported and left untouched. Rewriting a
+// base_sha adopt never recorded is the one thing that invariant forbids —
+// hence a method that cannot express it.
+//
+// A collision with an existing active row surfaces as the raw SQLite
+// constraint error rather than being translated here: only the caller knows
+// both rows' identities well enough to name them in a useful refusal.
+func (s *Store) CanonicalizeWorktreePath(ctx context.Context, id, newPath string) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE worktrees SET path = ?, updated_at = ? WHERE id = ?;
+`, newPath, timestampNow(), id)
+	if err != nil {
+		return fmt.Errorf("canonicalize worktree path: %w", err)
+	}
+	return nil
+}
+
 // UpdateWorktreeAdoption refreshes an already-adopted worktree row's
 // base_ref/base_sha/dirty_state in place. It is the mutation `worktree adopt`
 // is allowed to perform on re-adopting the SAME row (created_by == "adopted")
