@@ -1,8 +1,21 @@
 ---
-last_reviewed: 2026-07-31
+last_reviewed: 2026-08-01
 tracks_code: [internal/state/**, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # SQLite Data Model
+
+## `ErrProjectNotFound` — absence and failure are different answers (`W13-02`, 2026-08-01)
+
+`Store.ProjectByPath` signalled "no such namespace path" with a bare
+`fmt.Errorf`, so a caller could only ask *did this fail?*, never *is it absent?*
+Any read error therefore read as "absent". That is harmless for a caller that
+then reports an error, and dangerous for one that then **writes**: the manifest
+import's clobber refusal fell through to `UpsertProject`, whose
+`ON CONFLICT ... DO UPDATE` overwrites `remote_url`/`remote_key` — bypassing the
+exact refusal it exists to enforce, on a transient failure.
+
+`state.ErrProjectNotFound` now wraps the not-found case. Callers that only check
+`err != nil` are unaffected; callers that write on absence must distinguish.
 
 ## WIP GC reads and local advisory state (`P7-WIP-07`/`P7-WIP-08`)
 

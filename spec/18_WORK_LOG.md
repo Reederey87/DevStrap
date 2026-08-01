@@ -22,12 +22,58 @@ Changed:
 
 - Post-review (Codex P1 + P3): the pre-delete read-back confirm is now a BYTE-FOR-BYTE comparison against the manifest bytes this device just CAS-wrote — a hostile hub that acks the CAS and serves back a forged manifest naming the same snapshot sha can no longer widen the deletion floors (deletion is gated on the confirmed bytes); the roundtrip txtar additionally asserts no event carrier remains in the log after compaction (cold objects actually GONE, not merely unreadable).
 
-Validated:
+**Review found a `--pinned` that pins SHAs the remote may not have — in exactly the case the flag is documented for.** `resolveExportHead` was `git rev-parse HEAD` with no reachability check, so an unpushed commit (or a HEAD sitting on a topic branch) produced a pin that, after total local loss, exists nowhere: `vcs import` fails its checkout during the actual recovery. `docs/recovery.md` says outright *"use `--pinned` when the manifest is a recovery artifact"*, and the code's own comment already claimed "the file never claims a pin it does not have" — so this violated its own stated ethos rather than merely missing a check. The pin now requires reachability from a remote-tracking ref (`git.Runner.RemoteTrackingContains`, no network — a stale remote-tracking ref answers "no", which is the safe direction) and otherwise degrades to the existing omit-the-version path. Mutation-checked: disabling the gate pins an unpushed sha and fails `TestExportPinnedOmitsUnpushedHead`.
+
+Three more from the same pass. **`devstrap import` silently ignored pins** — the two documented recovery paths for one file produced different trees (`vcs import` checks out the pin; devstrap import + sync clones default-branch tips) with no warning; it now says so once, because registration is a namespace plane and carries no per-project revision. **The clobber refusal fell through on any DB error**: `ProjectByPath`'s not-found was a bare `fmt.Errorf`, so a transient read failure reached `UpsertProject`, whose `ON CONFLICT DO UPDATE` overwrites `remote_url`/`remote_key` — the exact refusal being bypassed. A `state.ErrProjectNotFound` sentinel now separates the two, and non-not-found errors abort the entry. **`materialization_policy` was exported and silently dropped on import**; today "lazy" is the only value so nothing is lost, but the round trip would have started losing the field the day a second value shipped.
+
+**And the interop test never ran in CI.** `TestVCSToolImportsEmittedManifest` skips when `vcs-import` is absent, and the workflow never installed vcstool — so the claim this whole item rests on was verified only on the author's machine, while an always-skipping test reads exactly like a passing one. CI now `pipx install vcstool`s on the ubuntu leg — **and applies `W13-06`'s own remedy to itself**, because installing the tool is not the same as proving the test ran. The install step asserts `vcs-import --help` succeeds, and the ubuntu Test step sets `DEVSTRAP_REQUIRE_VCSTOOL=1`, under which the test **fails** rather than skips when `vcs-import` is absent. Without that, a `pipx` install landing off `PATH` would silently restore the exact vacuum the step was added to end. Verified by negative control: with `go` on `PATH` and `vcs-import` hidden, the test fails with *"DEVSTRAP_REQUIRE_VCSTOOL=1 but vcs-import is not on PATH"*.
+
+This is the `W13-06` lesson (a job whose tests all skip exits 0 and reads as coverage) recurring one wave later, in a PR written after that very fix shipped — and then nearly recurring a second time inside the fix for it. Knowing a failure mode plainly does not confer immunity to it.
+
+**A CI failure caught what my local gates did not, and the reason is worth recording.** `TestEveryInternalPackageHasASpecificSpecOwner` failed on the macOS leg: `internal/manifest` is a NEW package and no spec claimed it in `tracks_code`. `spec/13` now owns it, which is where the commands and the machine-contract rules already live.
+
+I missed it because I ran **targeted** packages (`./internal/manifest/ ./internal/cli/ ./internal/state/ ./cmd/devstrap/`) rather than `./...`, and the guard lives in `internal/specdrift` — a package this change never touches, which is exactly why a targeted run cannot see it. The `spec-drift` CLI gate passed throughout: it checks that changed code touched a mapped spec, not that every package HAS an owner. Two different invariants, one of which only the full suite proves. `AGENTS.md`'s gate list says `go test -race ./...` for this reason.
+
+Validated:Validated:Validated:
 - <commands or checks run>
 
 Follow-ups:
 - <remaining work, or "None">
 ```
+
+## 2026-08-01 — a backup only DevStrap can read is not an escape hatch (W13-02)
+
+Changed:
+- `internal/manifest` (new): the workspace manifest format — `Encode`/`Decode`, `SchemaVersion = 1`, a golden file, and the real-`vcstool` interop test.
+- `internal/cli/export.go`, `internal/cli/import.go`, registered in `root.go`.
+- `docs/recovery.md` (new), linked from `README.md`; `spec/13` § *Workspace manifest commands (AD-7)*; `spec/16`'s `AD-7` DIRECTION; `spec/00` command list + document map.
+- `cmd/devstrap/testdata/script/manifest_roundtrip.txtar`: the drill through the real binary.
+- `go.mod`: `go.yaml.in/yaml/v3` moved from the indirect block to direct. **Zero net-new modules** — viper already links it, so `go mod tidy` changed one line and added nothing to the graph. Given `W13-01 PR A` spent a whole PR measuring a 7-module delta, picking the yaml library already in the build was the point, not a coincidence: `gopkg.in/yaml.v3` was the obvious reach and would have been a new module.
+
+**Why the format is vcstool's and not ours.** `spec/16` has carried this DIRECTION for a long time next to a shipped `db backup --full`. The temptation is to read the row as "we already have backup, this is a nice-to-have serialization" — but `db backup --full` is a DevStrap-format artifact only DevStrap restores. That is a backup. The question the row actually asks is what happens **if DevStrap goes away**, and the only honest answer is an artifact an unrelated binary consumes. So the emitted document *is* a `vcstool` `.repos` file rather than a DevStrap file that resembles one, and the claim is checked by running `vcs import`, not by asserting it: `TestVCSToolImportsEmittedManifest` clones local bare repos through the real tool (network-free, skipped when vcstool is absent).
+
+**The one structural decision that will matter in two years.** DevStrap's fields live under a single top-level `devstrap` key, never inside the entries vcstool parses. Reading `vcstool/commands/import_.py` rather than its docs makes the reason concrete: `get_repos_in_vcstool_format` reads `root["repositories"]` and then only `type`/`url`/`version` per entry. A sibling top-level key is therefore ignored **by construction**, while an added attribute inside an entry would tie our schema evolution to their parser forever. Mutation-checked: adding `devstrap_lfs_policy` to each entry fails `TestGoldenStaysVCSToolCompatible` with `repositories["work/acme/api"] carries non-vcstool key "devstrap_lfs_policy"`. Notably `vcs import` itself still **passed** under that mutation — the tool tolerates the extra key today — which is exactly why the structural test, not the tool, is the gate for this invariant.
+
+**The interop claim is scoped in the artifact, not only in the corpus.** It holds for `git_repo` rows only; `local_git`/`plain_folder`/`draft_project` have no `{url, version}` and are structurally invisible to `vcs import`, and env/draft content is age-encrypted and DevStrap-only by design. Putting that in `spec/16` alone would repeat the overclaim pattern this log keeps correcting, so the emitted file's header says it where a user reads it mid-disaster, the txtar greps for those lines, and the vcstool test asserts a `plain_folder` is **not** reconstructed — the honest half is executable too.
+
+**Two decisions where the obvious behaviour is the wrong one.**
+
+- *`--pinned` omits rather than degrades.* When HEAD cannot be resolved (a project this device never materialized), the natural fallback is the branch name. That writes a branch into a file whose `pinned: true` says it holds commits — a lie the consumer cannot detect. The entry carries **no** `version` instead; vcstool then clones the remote default, and the project is named on stderr and in `--json warnings`. Mutation-checked: restoring the fallback fails with `version = "main", want empty for an unmaterialized project under --pinned`.
+- *`import` registers and stops.* It writes rows plus `project.added` events and lets `sync`/`materialize` clone. Cloning here would be a second materialization path — the thing `spec/13` already refused for `/v1/status` and `AD5-07`'s criterion forbids. It also does **not** reuse `adoptFindings`, which claims `materialization_state: available` because a scan just observed the checkout; import observed nothing, and after a total local loss the tree is gone. `TestImportedProjectMaterializesThroughTheExistingPass` proves the hand-off from the other side.
+
+**One correction made during implementation.** The first version of `registerManifestEntry`'s comment claimed it "records skeleton". `Tx.UpsertProject` does not persist `device_project_state` at all (neither does `add`'s or `scan --adopt`'s call), so the state stays empty and `SkeletonProjects` treats empty and `"skeleton"` identically. The comment now says that plainly rather than describing a write that does not happen — a comment asserting behaviour the code does not have is the same defect class as a test that cannot fail.
+
+**Scope held deliberately.** `spec/16` names three drills; only the manifest round trip is this item. Total-hub-loss is unbuilt and total-local-loss is automation of shipped `db restore` machinery — folding the latter in would have re-scoped a `db restore` drill as manifest work. Import also carries no `--dry-run`: useful, but not asked for, and every flag on a recovery surface is a flag to keep honest.
+
+Validated:
+- `gofmt -l cmd internal` (empty); `go vet ./...`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `go test -race ./internal/manifest/ ./internal/cli/ ./cmd/devstrap/`.
+- `vcstool 0.3.0` installed locally (`uv tool install vcstool`) so the interop test ran for real rather than skipping.
+- Five mutation checks, each failing with the quoted output: the interleaved key, the renamed root key (`vcs import` itself: `Input data is not valid format: 'repositories'`), dropping non-git projects on import, the `--pinned` branch fallback, and exporting an un-stripped credentialed URL.
+
+Follow-ups:
+- The other two `AD-7` drills (total hub loss, total local loss) remain future scope and belong to their own item.
+- `vcs validate` reaches the network, so it is deliberately not wired into any test.
+
 
 ## 2026-08-01 — a remote-less folder had no way to graduate, and the obvious implementation destroys the history it exists to rescue (W13-03)
 
@@ -61,6 +107,7 @@ Validated:
 
 Follow-ups:
 - Scan-side `plain_folder` emission (`NOVCS-02`) is still open, so today the only way to reach that type is through sync from a device that has one. `promote --draft` graduates it out again, but nothing yet creates it locally.
+
 
 
 ## 2026-08-01 — the daemon job model is withdrawn, not pending (W13-09)

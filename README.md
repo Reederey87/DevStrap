@@ -171,7 +171,8 @@ Load your SSH key first (`ssh-add ~/.ssh/<key>`) — git runs non-interactively.
 shared-folder or S3/R2 hub, the pairing ceremony in full (including the high-assurance fingerprint compare), and the agent loop, see
 **[docs/quickstart.md](docs/quickstart.md)**; for choosing and operating a hub, see
 **[docs/self-hosting.md](docs/self-hosting.md)**; for driving DevStrap from Claude Code, Cursor,
-or Codex, see **[docs/agents.md](docs/agents.md)**.
+or Codex, see **[docs/agents.md](docs/agents.md)**; for rebuilding a workspace after losing a
+machine — including without DevStrap installed — see **[docs/recovery.md](docs/recovery.md)**.
 
 Prefer not to install? Every command also works via `go run ./cmd/devstrap <cmd> …`.
 
@@ -237,7 +238,9 @@ corpus lives under [`spec/`](spec/), beginning with [`spec/00_START_HERE.md`](sp
 - **[docs/](docs/)** — user guides: [install.md](docs/install.md), [quickstart.md](docs/quickstart.md),
   [self-hosting.md](docs/self-hosting.md) (choosing and operating a hub), and
   [agents.md](docs/agents.md) (running coding agents on DevStrap — provisioning a fresh-based
-  worktree, or adopting the one your harness already made).
+  worktree, or adopting the one your harness already made), and
+  [recovery.md](docs/recovery.md) (rebuilding your workspace — with DevStrap, or with `vcstool`
+  and no DevStrap at all).
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — the big picture, bridging this README and the spec.
 - **[`spec/`](spec/)** — the design corpus (one file per subsystem); depth pointers throughout ARCHITECTURE.md.
 - **[docs/audits/](docs/audits/)** — the standing design/implementation audit archive and open backlog.

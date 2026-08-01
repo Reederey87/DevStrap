@@ -370,6 +370,21 @@ Cons:
 
 MVP should use normal clones first.
 
+### `RemoteTrackingContains` — a pin must be reachable, not merely resolvable (`W13-02`, 2026-08-01)
+
+`git.Runner.RemoteTrackingContains` reports whether a SHA is reachable from any
+remote-tracking ref (`git branch -r --contains`). It exists for `export
+--pinned`, where the distinction is the whole point: `git rev-parse HEAD`
+resolves an **unpushed** commit perfectly well, and a manifest that pins it is
+worthless in the disaster the pin is written for, because after total local loss
+that commit exists nowhere and `vcs import` fails its checkout.
+
+It reads refs already fetched into `refs/remotes` and makes **no network call**.
+A stale remote-tracking ref can therefore answer "not reachable" for a commit
+that *is* on the remote — deliberately the safe direction, since the caller
+degrades to omitting the version rather than recording one it cannot vouch for.
+
+
 ## Promotion git operations (`W13-03` / `NOVCS-03`, 2026-08-01)
 
 `devstrap promote` graduates a remote-less project into a real `git_repo`, and
@@ -396,6 +411,7 @@ repository with no commits is refused rather than given an invented one.
 
 `RemoteIsEmpty` gates `--git-remote` on the target being empty; a non-empty
 remote means the user wants `add`, and the error says so.
+
 
 ## Git operation locks
 

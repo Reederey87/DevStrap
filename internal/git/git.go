@@ -789,6 +789,33 @@ func (r Runner) MergeBase(ctx context.Context, dir, a, b string) (string, error)
 	return strings.TrimSpace(out), nil
 }
 
+// RemoteTrackingContains reports whether sha is reachable from ANY
+// remote-tracking ref in dir (`git branch -r --contains <sha>`).
+//
+// It exists for the `--pinned` manifest export, where the distinction is the
+// whole point: a SHA that lives only in the local checkout is worthless in the
+// disaster the pin is written for, because after total local loss it exists
+// nowhere. An unpushed commit and a topic-branch HEAD both produce a pin that
+// `vcs import` cannot check out.
+//
+// No network: this reads refs already fetched into refs/remotes. A stale
+// remote-tracking ref can therefore answer "no" for a commit that IS on the
+// remote — the safe direction, since the caller degrades to omitting the
+// version rather than recording one it cannot vouch for.
+func (r Runner) RemoteTrackingContains(ctx context.Context, dir, sha string) (bool, error) {
+	out, err := r.Run(ctx, dir, "branch", "-r", "--contains", sha, "--format=%(refname)")
+	if err != nil {
+		var cmdErr CommandError
+		// git exits non-zero when the object is unknown to this repository,
+		// which is itself a definitive "not reachable" rather than a failure.
+		if errors.As(err, &cmdErr) && cmdErr.ExitCode() != 0 {
+			return false, nil
+		}
+		return false, err
+	}
+	return strings.TrimSpace(out) != "", nil
+}
+
 // IsShallow reports whether dir is a shallow clone (`git rev-parse
 // --is-shallow-repository`). A shallow history can make MergeBase return a
 // plausible-but-wrong answer at the shallow boundary rather than the true
