@@ -29,6 +29,37 @@ Follow-ups:
 - <remaining work, or "None">
 ```
 
+## 2026-08-01 — the guard against vacuous tests could not itself fail (W13-06)
+
+Changed:
+- `.github/workflows/ci.yml`: the vacuous-test guard no longer hard-codes three packages, and no longer checks only that a `*_test.go` **file exists** for those three. It walks every `go list ./internal/... ./cmd/...` package and fails if any lacks a test file.
+- `internal/redact/fuzz_test.go`: `FuzzRedactorNeverLeaks` (a registered value never survives a contiguous `Scrub`) and `FuzzWriterSplitBoundaries` (the line-buffering writer's native failure mode — a secret straddling split `Write`s).
+- `spec/16`: `TEST-01` and `TEST-03` reconciled; `spec/15`: the scrubber residual below recorded in the threat model.
+
+**Why the old guard was the same defect class as ledger convention 3a.** A check written to catch vacuous tests that cannot itself fail is not a gate. Enumerating three packages by hand — and asserting only that a file exists — means a package containing just `func TestNothing(t *testing.T) {}` passes, and every package added since is silently out of scope. The generalized loop ships with **no allowlist**, and that is a checked fact rather than a hope: every package under `internal/` and `cmd/` already has at least one `*_test.go` on trunk, so a reported miss is a loop bug or a real finding, never a known exception.
+
+**`TEST-03`'s first clause was stale and is corrected rather than carried forward.** The row read "Coverage profile is computed then discarded **and** the vacuous-test guard checks only 3 packages". The coverage half shipped as `P5-QUAL-04` — `ci.yml` consumes the profile, enforces a 50% total floor, and adds per-package floors via `go-test-coverage` — and the row was never updated. An item that "closes" a partial by rebuilding the half that already shipped is how a wave manufactures work; this one nearly did.
+
+**The guard half is closed; the stronger form is a stated deferral, not an omission.** File-existence is still weaker than the row's own rationale implies — it cannot detect an assertion-free test. Asserting a non-zero *passing* count per package needs `go test -json` plumbing and gets its own change.
+
+**Both fuzz targets found real behaviour on their first run, and neither was quiet-fixed.**
+
+- *A documented contract, not a bug:* `AddValue` ignores values under 4 bytes ("very short values are ignored to avoid mangling unrelated text"). Registering `"a"` would rewrite every `a` in the stream — worse than the leak it prevents. Both targets skip below that floor, because asserting against it would assert the opposite of the intended contract.
+- *A real limitation, recorded and NOT patched:* `redact.Writer` scrubs one **complete line** at a time, so a registered secret spanning a line boundary matches neither half and is forwarded verbatim. `FuzzWriterSplitBoundaries` found it immediately (`secret="multi\nline"` produced `out="ymulti\nliney"`). The motivating multi-line case is already covered — `SECU-04`'s `inPEM` suppression handles PEM key blocks — so the surviving exposure is a **non-PEM multi-line registered value**, e.g. a JSON service-account key echoed by a tool. Changing the scrubber is a security change needing its own PR and its own review, so the target skips that class with the reason written at the skip, and `spec/15` records it. **The suite is green; nothing here ships red.**
+
+Scope note: `FuzzClean` (the pathkey half of `TEST-01`) began in this change and was **carved out into `W13-07`** when it turned up a production defect in `path_key` derivation. A correctness fix to the namespace identity function does not belong inside a CI-hygiene change. This entry claims only the scrubber and the guard.
+
+Validated:
+- `FuzzRedactorNeverLeaks` **1,081,655 executions / 61s**; `FuzzWriterSplitBoundaries` **1,296,652 executions / 91s**; both clean after the contract corrections above.
+- The new guard loop executed locally against trunk's package set: **zero** missing packages, confirming no allowlist is needed.
+- `gofmt -l cmd internal` empty; `go vet ./...`; `go test -race ./internal/redact/`; `spec-drift`; workflow YAML parses under `yaml.safe_load`.
+
+Follow-ups:
+- Stronger vacuous-test form: assert a non-zero *passing* test count per package via `go test -json`.
+- Security PR: non-PEM multi-line registered secrets through `redact.Writer`.
+- Four CI jobs (`MinIO hub conformance`, `Linux Secret Service keychain`, both `Service E2E` legs) run and gate nothing. Promoting them is a branch-protection settings change only the maintainer can make, so it is named here rather than attempted.
+
+
 ## 2026-08-01 — the case-fold fix over-corrected, and cases.Fold is the wrong function (W13-08)
 
 Changed:
@@ -86,6 +117,7 @@ Validated:
 
 Follow-ups:
 - The secret-scrubber half of `TEST-01` ships in `W13-06`. That work also surfaced, and did NOT patch, a separate limitation: `redact.Writer` scrubs one complete line at a time, so a registered secret spanning a line boundary is forwarded verbatim. PEM blocks are already handled by `SECU-04`'s suppression, so the surviving exposure is a non-PEM multi-line registered value. Recorded there.
+
 
 ## 2026-07-31 — a killed clone left an orphan the scanner adopted as a second project (W12-01)
 

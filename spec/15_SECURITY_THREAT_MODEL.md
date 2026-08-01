@@ -1,8 +1,26 @@
 ---
-last_reviewed: 2026-07-31
+last_reviewed: 2026-08-01
 tracks_code: [internal/agentsecrets/**, internal/childenv/**, internal/cli/**, internal/devicekeys/**, internal/envbundle/**, internal/git/**, internal/hub/**, internal/redact/**, internal/state/**, internal/sync/**, internal/logging/**, internal/workspacekeys/**]
 ---
 # Security Threat Model
+
+## Scrubber fuzz targets and a recorded residual (`W13-06`)
+
+`internal/redact` carries two coverage-guided targets (`spec/16` `TEST-01`):
+`FuzzRedactorNeverLeaks` (a registered value never survives a contiguous
+`Scrub`) and `FuzzWriterSplitBoundaries` (a secret straddling split `Write`s
+must not reach the destination after `Close`). `AddValue` ignores values under
+4 bytes **by design** — registering `"a"` would rewrite every `a` in the stream.
+
+**Recorded residual, not patched.** `redact.Writer` scrubs one COMPLETE LINE at
+a time, so a registered secret spanning a line boundary matches neither half and
+is forwarded verbatim. The motivating multi-line case is already covered —
+`SECU-04`'s `inPEM` suppression removes PEM key blocks — so the surviving
+exposure is a **non-PEM multi-line registered value**, e.g. a JSON
+service-account key echoed by a tool into a captured agent log. The fuzz target
+skips that class with the reason written at the skip rather than asserting a
+property the writer does not have; fixing it is a security change owed its own
+PR and review.
 
 ## WIP GC deletion authority (`P7-WIP-07`)
 
