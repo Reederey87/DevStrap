@@ -1,0 +1,44 @@
+# W12-01: a clone staging directory orphaned by a killed process must never be
+# adopted as a project.
+#
+# `hydrate` stages a clone into a sibling ".<name>.devstrap-tmp-<random>" and
+# promotes it by rename on success. A process killed before that rename leaves
+# a PARTIAL CLONE inside the managed namespace, carrying the real remote in its
+# .git/config. Before this fix the scanner walked into it and adopted it as a
+# SECOND project sharing the real project's remote — which then replicates to
+# every device as a namespace event, and the duplicate-remote resolver
+# recommended the orphan, because "." sorts before a letter.
+#
+# This exercises the real defect end to end. A unit test on ShouldPruneDir
+# alone would pass while `scan --adopt` still reached the orphan by some other
+# path, which is exactly the class of proof this repo has been burned by.
+
+env DEVSTRAP_NO_KEYCHAIN=1
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+exec devstrap --home=$WORK/home --root=$WORK/Code init
+
+# The real project.
+exec git init -b main $WORK/Code/work/acme/api-server
+exec sh -c 'cd $WORK/Code/work/acme/api-server && echo hi > README.md && git add README.md && git commit -m init'
+exec git -C $WORK/Code/work/acme/api-server remote add origin https://example.com/acme/api.git
+
+# The orphan a killed clone leaves: same remote, staging-directory name.
+exec git init -b main $WORK/Code/work/acme/.api-server.devstrap-tmp-424242
+exec sh -c 'cd $WORK/Code/work/acme/.api-server.devstrap-tmp-424242 && echo hi > README.md && git add README.md && git commit -m init'
+exec git -C $WORK/Code/work/acme/.api-server.devstrap-tmp-424242 remote add origin https://example.com/acme/api.git
+
+exec devstrap --home=$WORK/home --root=$WORK/Code scan --adopt
+stdout 'Adopted 1 project'
+! stdout 'Adopted 2 projects'
+# The duplicate-remote warning must not appear either: there is no duplicate,
+# because the orphan was never a candidate.
+! stdout 'duplicate remote'
+
+# Only the real project is registered, and the orphan is absent by name.
+exec devstrap --home=$WORK/home --root=$WORK/Code status
+stdout 'work/acme/api-server'
+! stdout 'devstrap-tmp'

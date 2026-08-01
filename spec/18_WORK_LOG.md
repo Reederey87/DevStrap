@@ -29,6 +29,56 @@ Follow-ups:
 - <remaining work, or "None">
 ```
 
+## 2026-07-31 — a killed clone left an orphan the scanner adopted as a second project (W12-01)
+
+Changed:
+- `internal/ignore`: new `StagingDirMarker` / `StagingDirPattern`, and the pattern joins the default prune set beside `.git`/`node_modules`.
+- `internal/cli/hydrate.go`: `cloneTempDir` now builds its name **from that same marker**, so the directory DevStrap creates and the pattern the scanner prunes derive from one string.
+- `spec/11`, `spec/13` updated with the rationale.
+
+**Found while planning Wave 12, and it disproved the plan that found it.** The item began as documentation cleanup: `spec/14`'s risk-traceability row claims *"daemon crash mid-job → startup requeues leased jobs and prunes partial clones/worktrees"*, backed by a `jobs` table no Go code reads or writes. The draft plan argued the row should simply be **withdrawn**, since convergence is idempotent. Attacking that judgement before acting on it split it in two:
+
+- the **lock** half really is self-healing — `repo_lock.go` detects staleness by dead holder (`ProcessAlive` + a start-time PID-reuse guard) *and* a 30-minute age window;
+- the **"prunes partial clones"** half named a mitigation that did not exist, and its absence was not disk waste.
+
+**Reproduced with the real binary**, which is how this stopped being a doc fix:
+
+```
+Code/work/acme/api-server                        (remote: example.com/acme/api)
+Code/work/acme/.api-server.devstrap-tmp-999888   # exactly what a killed clone leaves
+devstrap scan --adopt
+→ duplicate remote example.com/acme/api: [.api-server.devstrap-tmp-999888  api-server]
+   recommended .api-server.devstrap-tmp-999888
+→ Adopted 2 projects
+```
+
+The chain: `cloneTempDir` stages into `<parent>/.<name>.devstrap-tmp-*` and promotes by rename; a kill before that rename orphans a **partial clone inside the managed namespace** carrying the real remote in its `.git/config`; **nothing swept it** (repo-wide grep: one hit, the creation site); and `ShouldPruneDir` returned **false** for that shape while returning true for `.git`, `node_modules` and `build`. So the scanner walked in, found a `.git`, and adopted a **second project** — replicated to every device as a namespace event. The duplicate-remote resolver then *recommended the orphan*, because `.` sorts before a letter.
+
+**Why the marker is shared rather than written twice.** The name is `.<target>.devstrap-tmp-<random>`: the marker sits **mid-name**, so a prefix match does not find it — an easy way to write a pattern that looks right and matches nothing. Two spellings of one fact drift, and this drift is silent, so both sides derive from `ignore.StagingDirMarker`.
+
+Validated:
+- `scan_skips_orphan_staging_dir.txtar` reproduces the defect end to end and asserts **one** project, no `duplicate remote` warning, and no `devstrap-tmp` in `status`. A unit test on `ShouldPruneDir` alone would pass while `scan` still reached the orphan by another path.
+- **Mutation-checked three ways**, each verified to have actually applied before drawing a conclusion: removing the pattern from the defaults reproduces `Adopted 2 projects` **and the orphan-recommendation line** verbatim in the test output; drifting `StagingDirPattern` away from `StagingDirMarker` fails all three layers (unit, cli drift guard, e2e); and `TestCloneTempDirIsPrunedByTheScanner` calls the **real** `cloneTempDir` so a naming change that outruns the pattern fails the build.
+- `TestStagingPruneDoesNotSwallowOrdinaryDirectories` pins the other direction: `.config`, `.github`, `.vscode`, `tmp`, `temp`, `.hidden-project` must **not** be pruned. Over-pruning would hide real user content, which is a worse and quieter failure than the one being fixed.
+
+Two risks checked before shipping, because the ignore compiler has three consumers, not one (`spec/11`):
+- **Draft bundles** (`draft.go:79`) and the **watcher** (`fsnotify_watcher.go:46`) compile the same defaults. Review found this is **more than neutral for bundles**: previously a staging directory's `.git/` was already excluded but **its working files would bundle**, so the old behavior could ship a partial clone's file contents into an encrypted draft blob as if it were draft data. Excluding DevStrap's own transient staging is therefore a correction, not merely a tidy-up — and the only content it newly excludes is content this same change makes unadoptable anyway. Pruning it from the watch set is a smaller bonus: a clone in progress no longer churns the watch plane, while promotion still surfaces because the rename lands the event on the *target* name, which is not pruned.
+- **A leftover orphan does not block a later hydrate of the same target**, verified by calling `cloneTempDir` twice with the first left in place: `MkdirTemp` mints a distinct random suffix each time (`.api-server.devstrap-tmp-2406353791` vs `…-1914468680`), and promotion renames onto the target rather than the sibling. So "prune but never delete" is a functionally stable end state; only disk accumulates.
+
+Follow-ups:
+- A tick-time sweep that removes aged orphans from disk is **not** in this change, and the check above is why it is safe to defer rather than merely convenient: nothing breaks, disk grows.
+
+  **Design constraints for whoever builds it, from this change's review — a naive sweeper is a remote-triggered deletion primitive, so none of these are optional:**
+  - **Reserve the pattern in path validation.** Project paths arrive from peers as namespace events. If a peer can register `.x.devstrap-tmp-1` as a project, sync materializes it and the sweeper deletes it — forever, on every device. Reject staging-pattern basenames at event-apply and scan time, and have the sweeper **skip any path matching a registered project row**. That guard also protects an orphan some tree may have *already* adopted before this fix, possibly with user edits inside by now; `doctor` should surface "project registered at a staging-pattern path" as a remediation surface rather than deleting it.
+  - **Gate on the per-project repo lock, not the maintenance lock.** An interactive `devstrap hydrate` holds only the former, so it runs concurrently with a tick. Derive the project name by **right-anchored** strip of the temp name (so a dotted project like `.my.app` parses correctly), acquire that project's lock before deleting, release after. Stale-lock reclaim means a crashed holder does not block the sweep. Add an mtime window (~1h, comfortably past `repoLockStaleAfter` = 30m and the long-transfer retry budget) as belt-and-braces for names that fail to map.
+  - **`Lstat` and require a real directory** before removing, so a symlink swapped in after matching is never followed.
+  - Do **not** pin the random suffix to digits — `MkdirTemp`'s digit-only suffix is a stdlib internal, not a contract. Anchor both ends of the name instead.
+  - Documented residual to state on the row: a user manually squatting work inside a hidden `.X.devstrap-tmp-*` directory that is neither locked nor registered loses it after the age window.
+
+- **`ShouldPruneDir` was the more urgent half, and this change is it.** The prune also prevents adopting a **live** staging directory mid-clone — git creates `.git` early, so a scan racing an in-flight hydrate could adopt it, and **no age window fixes that**. The sweeper only ever handles disk garbage.
+- The `spec/14` risk row and the dead `jobs` schema are corrected separately, now that the answer is known: cite `repo_lock.go` for the lock half and this prune for the other, rather than a queue nobody built.
+
+
 ## 2026-07-31 — the Linux Secret Service backend runs for the first time (W12-02)
 
 Changed:

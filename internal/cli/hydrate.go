@@ -12,6 +12,7 @@ import (
 	"time"
 
 	dsgit "github.com/Reederey87/DevStrap/internal/git"
+	"github.com/Reederey87/DevStrap/internal/ignore"
 	"github.com/Reederey87/DevStrap/internal/logging"
 	"github.com/Reederey87/DevStrap/internal/pathkey"
 	"github.com/Reederey87/DevStrap/internal/redact"
@@ -302,7 +303,11 @@ func cloneTempDir(targetPath string) (string, error) {
 	if err := os.MkdirAll(parent, 0o750); err != nil {
 		return "", fmt.Errorf("create clone parent: %w", err)
 	}
-	tmpPath, err := os.MkdirTemp(parent, "."+filepath.Base(targetPath)+".devstrap-tmp-*")
+	// The marker comes from internal/ignore so the name this creates and the
+	// pattern the scanner prunes derive from one string. If they drift, an
+	// orphan left by a killed clone becomes adoptable again — see
+	// ignore.StagingDirMarker for why that is worse than a stray directory.
+	tmpPath, err := os.MkdirTemp(parent, "."+filepath.Base(targetPath)+ignore.StagingDirMarker+"*")
 	if err != nil {
 		return "", fmt.Errorf("create clone temp dir: %w", err)
 	}
