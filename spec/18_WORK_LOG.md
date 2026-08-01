@@ -51,6 +51,25 @@ Validated:
 - Verified by inspection that `doctor` grew **no filesystem walk** to compute the count (it comes from the daemon socket) and that no assumed limit constant appears anywhere in the new code.
 - `gofmt` (checked by output), `go vet`, `golangci-lint`, race tests, `spec-drift`.
 
+## 2026-07-31 — a legacy path spelling the unique index could not see (P8-ADOPT-07)
+
+Changed:
+- `worktree adopt` retries its row lookup with the **unresolved** spelling when the resolved one misses (`internal/cli/worktree.go`), then canonicalizes that row's **path and nothing else** via the new `state.Store.CanonicalizeWorktreePath`.
+- `worktreeCanonicalizePathConflict` translates a UNIQUE-constraint collision into a refusal naming both spellings, so raw SQLite text never reaches the user.
+
+Why the obvious branch is the wrong one, and the whole substance of this fix: `EvalSymlinks` arrived **with** `AD5-02`, i.e. with `adopt` itself, so no adopt-created row can hold an unresolved path — **every** pre-`00032` legacy row was written by `worktree new`. Those are precisely the rows the `AD5-02` invariant requires be *reported and left untouched*. Routing a legacy hit into the existing idempotent-refresh branch (which is what the first draft of the plan said to do) would rewrite a `base_sha` adopt never recorded — the single thing that invariant forbids. It goes to the reported-and-left-untouched branch instead, and the path rewrite is the only mutation permitted.
+
+**The collision case is unreachable in normal flow, and the code says so rather than implying a guard is load-bearing.** `WorktreeByPath` and `idx_worktrees_active_path` share the same scope — `(namespace_id, path)` over `status='active'` — so an active row already holding the resolved path would have been found by the lookup that runs *before* the retry. Only a writer outside the repo lock can collide. The translation is kept for that case and extracted to its own function so it is directly testable without reproducing a race.
+
+Coverage is **partial by construction** and the comment says so: the retry matches only when the caller's spelling equals the one `worktree new` stored. The complete form is an `os.SameFile` sweep over the project's active rows; deliberately out of scope for a P3 that also self-heals via cleanup's path-missing prune.
+
+Validated — three tests, each mutation-checked by reverting the specific piece of production code it pins, confirming the test fails, then restoring:
+- `TestWorktreeAdoptFindsLegacyUnresolvedRow` — removing the whole retry block yields *"active worktree rows = 2, want 1"* (the defect itself, a second row for one physical worktree). **The macOS fixture trap is guarded explicitly:** `/tmp` is itself a symlink to `/private/tmp`, so a fixture built there can make the resolved lookup succeed by accident and pass with the fix reverted. The test fails up front if its two spellings do not actually differ, and separately asserts the resolved lookup *misses* the legacy row before adoption runs at all.
+- `TestWorktreeAdoptRefusesWhenLegacyAndResolvedRowsCollide` — pins item 3: a canonicalizing UPDATE that collides with another already-active row must become a typed refusal naming both spellings, never leak `UNIQUE constraint failed: ...`, and delete/mutate neither row. This branch is **not reachable through the full `worktree adopt` CLI path in one deterministic call** — `WorktreeByPath` and `idx_worktrees_active_path` share the same scope, so a row already at the resolved path would be found by the lookup that runs *before* the retry, and the retry branch is never reached; a genuine collision can only come from a writer outside the repo lock, which a single-threaded test cannot reproduce as a race. The test instead drives a real SQLite constraint violation via `CanonicalizeWorktreePath` directly and exercises `worktreeCanonicalizePathConflict` — the same function `adoptWorktreeAt` calls — against it. Mutation-checked: disabling the translation (returning the raw error unchanged) fails the test with *"raw SQLite text leaked to the user: ... UNIQUE constraint failed ..."*.
+- `TestWorktreeAdoptLeavesWorktreeNewRowUnrefreshed` — pins the `AD5-02` invariant directly: the remote is advanced *past* the worktree before adopting, so a wrongly-taken refresh (which recomputes merge-base and rewrites `base_sha`) is caught by a base mismatch rather than passing by accident because nothing moved. Mutation-checked by forcing the legacy hit into the refresh branch: fails with *"adopt reported already_adopted for a `worktree new` row; want already_registered"*. The same mutation also fails `TestWorktreeAdoptFindsLegacyUnresolvedRow` (its fixture's `base_sha`/`branch` are untouched-assertions too), confirming both tests independently guard the one branch this fix is not allowed to take — "the branch in the existing code that looks correct to take and is wrong."
+- `gofmt` (checked by output, not exit code), `go vet`, `go test -race`, `spec-drift`.
+
+Pass 8 is now **fully closed** (8/8).
 ## 2026-07-31 — P9-WIP-03: the fault reproduced, three fixes refuted, and deliberately not patched
 
 Changed:
