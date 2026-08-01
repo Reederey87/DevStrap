@@ -1,0 +1,95 @@
+# AD-7 manifest round-trip drill (spec/16 § Durability / disaster-recovery
+# drill): export workspace.yaml, wipe the state dir, import, and assert the
+# namespace map came back — then prove the recovered rows materialize through
+# the ONE existing materialize pass rather than any import-specific clone.
+#
+# This is the drill through the real binary, so it also pins the machine
+# contract: exactly one JSON document on stdout and the exit code alone
+# signalling a partial import.
+
+env DEVSTRAP_HOME=$WORK/home
+env DEVSTRAP_ROOT=$WORK/Code
+env DEVSTRAP_NO_KEYCHAIN=1
+
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+# A real bare remote so the recovered project can actually be cloned back.
+exec git init --bare -b main $WORK/remote.git
+exec git clone $WORK/remote.git $WORK/src
+exec sh -c 'echo hello > $WORK/src/README.md'
+exec sh -c 'cd $WORK/src && git add README.md && git commit -m init && git branch -M main && git push origin main'
+
+exec devstrap init $WORK/Code
+exec devstrap add --path work/proj $WORK/remote.git
+exec devstrap hydrate work/proj
+
+# A non-git draft project: recorded in the manifest, but structurally invisible
+# to `vcs import`. Its presence is what keeps the scoping claim honest.
+mkdir $WORK/Code/notes/scratch
+exec sh -c 'echo draft > $WORK/Code/notes/scratch/README.md'
+exec devstrap scan $WORK/Code --adopt
+stdout 'notes/scratch'
+
+# Export. The file is the vcstool .repos schema plus one namespaced devstrap key.
+exec devstrap export --manifest $WORK/workspace.yaml
+stdout 'git repositories'
+exists $WORK/workspace.yaml
+grep '^repositories:' $WORK/workspace.yaml
+grep '^devstrap:' $WORK/workspace.yaml
+grep '    type: git$' $WORK/workspace.yaml
+
+# The scoping and the no-secrets disclaimer live in the artifact itself, not
+# only in the spec: a user reading it mid-disaster must not have to guess.
+grep 'and ONLY those' $WORK/workspace.yaml
+grep 'NO SECRETS' $WORK/workspace.yaml
+grep 'never carries one' $WORK/workspace.yaml
+
+# The non-git project is under devstrap.projects and NOWHERE under repositories.
+grep 'type: draft_project' $WORK/workspace.yaml
+
+# TOTAL LOCAL LOSS: the state dir is gone and the tree with it. The plain-text
+# manifest is the only surviving artifact.
+rm $WORK/home
+rm $WORK/Code
+! exists $WORK/home
+! exists $WORK/Code/work/proj
+
+exec devstrap init $WORK/Code
+exec devstrap status
+! stdout 'work/proj'
+
+# Import registers the namespace and stops. Nothing is cloned here.
+exec devstrap import --manifest $WORK/workspace.yaml
+stdout 'Registered 2 project'
+stdout 'devstrap sync'
+! exists $WORK/Code/work/proj/.git
+
+exec devstrap status
+stdout 'work/proj'
+stdout 'notes/scratch'
+
+# The recovered rows flow through the existing materialize pass.
+exec devstrap materialize
+exists $WORK/Code/work/proj/.git
+exec sh -c 'grep hello $WORK/Code/work/proj/README.md'
+
+# Re-importing the same manifest is idempotent and exits 0.
+exec devstrap import --manifest $WORK/workspace.yaml --json
+stdout '"registered": 0'
+stdout '"already_present": 2'
+stdout '"skipped": 0'
+
+# A partial import exits non-zero and says why on stderr, while stdout still
+# carries exactly one JSON document.
+exec sh -c 'printf "repositories:\n  legacy/hg:\n    type: hg\n    url: https://example.com/hg\n" > $WORK/partial.yaml'
+exitstatus 1 devstrap import --manifest $WORK/partial.yaml --json
+stdout '"skipped": 1'
+stderr 'is not supported'
+
+# A file that is not a manifest is refused as a config error, not a partial run.
+exec sh -c 'printf "some_other_tool:\n  key: value\n" > $WORK/bogus.yaml'
+exitstatus 2 devstrap import --manifest $WORK/bogus.yaml
+stderr 'not a workspace manifest'

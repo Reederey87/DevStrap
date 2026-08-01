@@ -146,6 +146,19 @@ jobs:
         run: go vet ./...
       - name: Build
         run: go build ./...
+      - name: Install vcstool (manifest interop test)
+        if: matrix.os == 'ubuntu-latest'
+        # W13-02's headline claim is that `vcs import` can rebuild the git
+        # projects from an exported workspace.yaml WITHOUT DevStrap.
+        # TestVCSToolImportsEmittedManifest skips when vcs-import is absent, so
+        # without this the load-bearing claim is never verified anywhere — an
+        # always-skipping test reads exactly like a passing one.
+        run: |
+          pipx install vcstool
+          # Fail here rather than let the test skip: a silently-skipping test
+          # reads exactly like a passing one, which is the state this step
+          # exists to end.
+          vcs-import --help >/dev/null
       - name: Install bubblewrap (Linux sandbox E2E)
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -175,6 +188,10 @@ jobs:
           fi
           test ! -e "$HOME/landlock-denied-probe"
       - name: Test
+        env:
+          # Set only where the install step above ran. The test turns a missing
+          # vcs-import into a FAILURE under this flag instead of a skip.
+          DEVSTRAP_REQUIRE_VCSTOOL: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}
         run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
       - name: Fuzz smoke (Decide convergence property)
         # P4-QUAL-02: run the rapid convergence property under the coverage-guided

@@ -106,6 +106,8 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newDoctorCommand(stdout, opts))
 	cmd.AddCommand(newDBCommand(stdout, opts))
 	cmd.AddCommand(newScanCommand(stdout, opts))
+	cmd.AddCommand(newExportCommand(stdout, opts))
+	cmd.AddCommand(newImportCommand(stdout, opts))
 	cmd.AddCommand(newAddCommand(stdout, opts))
 	cmd.AddCommand(newCloneCommand(stdout, opts))
 	cmd.AddCommand(newHydrateCommand(stdout, opts))

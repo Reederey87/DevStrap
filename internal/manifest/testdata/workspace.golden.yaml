@@ -1,0 +1,60 @@
+# DevStrap workspace manifest — vcstool ".repos" schema.
+
+# Recover WITHOUT DevStrap:  vcs import <target-dir> < workspace.yaml
+#                            (https://github.com/dirk-thomas/vcstool)
+# Recover WITH DevStrap:     devstrap import --manifest workspace.yaml && devstrap sync
+
+# SCOPE — what a third-party tool can rebuild from this file:
+#   "vcs import" reconstructs the git projects listed under "repositories"
+#   below, and ONLY those. Projects of type local_git, plain_folder and
+#   draft_project have no clonable remote, so they appear under
+#   "devstrap.projects" for "devstrap import" and are structurally invisible
+#   to vcstool. This is not whole-tree third-party recovery, and does not
+#   claim to be.
+
+# NO SECRETS — this file is plain text and carries NO encrypted content.
+#   Captured env profiles and draft-folder bundles are age-encrypted to
+#   device recipients; they are recoverable only through DevStrap, from
+#   "db backup --full" plus "devstrap sync". The "env_profile: true" marker
+#   below names which projects HAVE a profile. It never carries one.
+repositories:
+  oss/tool:
+    type: git
+    url: https://github.com/example/tool.git
+    version: trunk
+  work/acme/api:
+    type: git
+    url: git@github.com:acme/api.git
+    version: main
+# DevStrap-specific metadata. vcstool reads only the "repositories" key
+# above and ignores this one entirely.
+devstrap:
+  schema_version: 1
+  workspace_id: ws_01jz0000000000000000000000
+  workspace_name: Code
+  exported_at: "2026-08-01T00:00:00Z"
+  exported_by_device: dev_01jz0000000000000000000000
+  pinned: false
+  projects:
+    drafts/idea:
+      type: draft_project
+      materialization_policy: lazy
+    notes/scratch:
+      type: plain_folder
+      materialization_policy: lazy
+    oss/tool:
+      type: git_repo
+      default_branch: trunk
+      lfs_policy: never
+      materialization_policy: lazy
+    vendor/patched:
+      type: local_git
+      default_branch: main
+      materialization_policy: lazy
+    work/acme/api:
+      type: git_repo
+      default_branch: main
+      lfs_policy: auto
+      forge_kind: github
+      materialization_policy: lazy
+      env_profile: true

@@ -38,6 +38,12 @@ type Store struct {
 }
 
 var ErrNotInitialized = errors.New("workspace is not initialized; run devstrap init")
+
+// ErrProjectNotFound distinguishes "no such namespace path" from a real read
+// failure. A caller that treats ANY error as absent will create a duplicate or
+// clobber an existing row on a transient failure; the manifest import's
+// clobber refusal is exactly such a caller (W13-02 review).
+var ErrProjectNotFound = errors.New("project not found")
 var ErrDivergentEvent = errors.New("event id already exists with different immutable content")
 var ErrEventHashChain = errors.New("event prev_event_hash chain break")
 var ErrEventVerification = errors.New("event verification failed")
@@ -1720,7 +1726,7 @@ WHERE n.workspace_id = ? AND n.path_key = ? AND n.status = 'active';
 		&p.RemoteURL, &p.RemoteKey, &p.DefaultBranch, &p.LFSPolicy, &p.ForgeKind, &p.LocalPath, &p.MaterializationState, &p.DirtyState, &p.LastError)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return ProjectStatus{}, fmt.Errorf("unknown namespace path %q", pk.Display)
+			return ProjectStatus{}, fmt.Errorf("unknown namespace path %q: %w", pk.Display, ErrProjectNotFound)
 		}
 		return ProjectStatus{}, fmt.Errorf("read project: %w", err)
 	}
