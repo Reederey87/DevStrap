@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-31
+last_reviewed: 2026-08-01
 tracks_code: [internal/pathkey/**, internal/scan/**, internal/state/**, internal/sync/**, internal/fold/**, internal/workspacekeys/**, internal/devicekeys/**, internal/id/**, internal/pairing/**]
 ---
 # Namespace and Sync Model
@@ -56,6 +56,34 @@ personal/scripts     → plain managed folder
 ```
 
 The path is the product.
+
+### Path identity: `path_key` (`W13-07`, 2026-08-01)
+
+Every entry carries two spellings of its path. `Display` is the NFC-normalized
+path as the user wrote it; **`path_key` is the case-folded identity** — the value
+two devices compare, the key `pathkey.DetectCaseConflicts` dedupes on, and the
+column `namespace_entries`/`device_wip`/`device_gitstate` key their rows by.
+
+`path_key` is derived as `NFC(fold(Display))` — Unicode case **folding**
+(`golang.org/x/text/cases.Fold`), re-normalized **after** the fold. Both halves
+of that sentence are load-bearing and both were wrong until `W13-07`, which
+derived it as `ToLower(NFC(...))`:
+
+- Case mapping does not preserve normalization. `"Y"+U+030A` has no precomposed
+  uppercase form so NFC leaves two runes, while its lowercase composes to
+  `U+1E99` — one path, two keys, unless the fold is re-normalized.
+- `strings.ToLower` is simple case *mapping*, not case *folding*, despite this
+  corpus having called `path_key` "case-folded" from the start. Go maps `U+0130`
+  to a bare `"i"`; `"i"+U+0307` stays two runes. Only folding reconciles them.
+
+The consequence of getting either wrong is not cosmetic: on a case-insensitive
+filesystem those pairs are **one directory**, so the case-conflict check does not
+fire and both spellings are adopted and replicated as separate projects. Folding
+and lowering agree on all ASCII, so the fix changed no key in practice.
+
+Case-folding here is namespace *identity* and is deliberately unlike the
+`.devstrapignore` compiler's case-*sensitive* content matching (`P7-XP-06`); see
+`11_IGNORE_AND_LOCAL_GARBAGE.md` for why those two answers differ.
 
 ## Namespace entry example
 
