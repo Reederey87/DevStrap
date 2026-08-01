@@ -31,6 +31,28 @@ Follow-ups:
 
 Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
 
+## 2026-07-31 — ten shipped findings had no row anywhere, and the check that should have caught it passed throughout
+
+Changed:
+- **`docs/audits/README.md`: ten missing *Recently shipped* rows added** — all seven shipped Pass-9 findings (`P9-DAEMON-01/-02`, `P9-WIP-01/-02/-04/-05/-06`) plus `P8-SEC-01`, `P8-ADOPT-04` and the record-time half of `P8-ADOPT-03`. Before this, a grep for `P9-` across *Recently shipped* returned **zero** rows.
+- **Three false claims corrected.** The Pass-9 section asserted the seven "are listed in *Recently shipped*" — they were not. The Pass-8 header note said "all are listed" while enumerating only #258/#260/#261. The `P8-ADOPT-02` entry still read "the record-time validation half of `P8-ADOPT-03` remains open" — it had shipped.
+- **New convention 3a:** removing an open row and adding its *Recently shipped* row happen in the SAME PR.
+- `spec/14` Milestone 6 reconciled; the `cd` hydration hook **withdrawn** with its reason; `spec/00`'s "remaining core-engine candidates" line corrected — both slices it named had shipped.
+
+**The finding underneath the finding: the invariant that passed is not the one that failed.** `AGENTS.md` requires each pass header to equal its open-row count. That held at every step — Pass 8 "1 open of 8" with one row, Pass 9 "1 open of 8" with one row. But a header count is satisfied by *deleting* an open row, which is precisely the failing operation. Four consecutive fix PRs (#262/#265/#266/#267) removed rows without adding shipped ones; audit PR #268 then asserted they were listed without checking. The counts were right the whole time and the provenance underneath them was gone. Convention 3a closes the specific hole; the general lesson is that a check nobody can fail is not a check.
+
+**Review caught the same defect class inside this very change — twice.** A `spec/14` clause claimed the Gatekeeper deadline was "now **ENFORCED** by `cmd/release-gate`". That package **did not exist on trunk**; it lives in a separate PR that had not merged. A present-tense shipped-claim for unmerged code is precisely what this entry is about, written into the change that exists to purge it. Resolved by *sequencing* rather than weakening the sentence — this work merges after the gate does, so the claim is true when a reader meets it. The second was a miscount: the reconciliation note said "six" boxes had been left unchecked while the diff ticks **five**, in a change whose thesis is that counts must be honest.
+
+That both slipped past the author is the point worth recording: **knowing the failure mode does not confer immunity to it.** The check that caught them was a reviewer re-deriving every claim from `origin/main` instead of reading the description — the same discipline convention 3a now requires of the next author.
+
+**A provenance error made while fixing the provenance.** The first draft cited the three P8 fixes as landing in `1e4b014`/`12e1fc1`. **Neither commit is in `origin/main`** — `git merge-base --is-ancestor` refutes both; they are branch commits of PRs #263/#264, both closed unmerged. All three reached trunk inside PR #265's squash `9369405`, whose title names only `P9-WIP-01`. Verified by reading the markers at `9369405` (present) and at `9369405^` (absent). Recorded rather than quietly fixed, because it is exactly the failure this entry is about: a local SHA reads identically to a trunk SHA, and closed-PR branches stay fetchable forever.
+
+Validated:
+- Every row re-derived from `origin/main`, never from the plan text: `git merge-base --is-ancestor` per commit, `gh pr view` for merge SHAs and closed/merged state, and marker greps at each squash and its parent.
+- Milestone 6 boxes checked against code and CI rather than against the existence of a related job. **One box left deliberately unchecked**: the Linux Secret Service backend is real but CI sets `DEVSTRAP_NO_KEYCHAIN=1`, so it has never run — ticking it because the code exists is how a milestone comes to lie.
+- `spec-drift`; anchored `grep -c '^<<<<<<<'` on every resolved file.
+
+
 ## 2026-07-31 — the Gatekeeper deadline is now enforced, not merely documented (P4-SEC-05)
 
 Changed:
