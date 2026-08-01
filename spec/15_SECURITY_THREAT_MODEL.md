@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-30
+last_reviewed: 2026-07-31
 tracks_code: [internal/agentsecrets/**, internal/childenv/**, internal/cli/**, internal/devicekeys/**, internal/envbundle/**, internal/git/**, internal/hub/**, internal/redact/**, internal/state/**, internal/sync/**, internal/logging/**, internal/workspacekeys/**]
 ---
 # Security Threat Model
@@ -25,6 +25,23 @@ signer's WIP events are in fact rejected outright once the revocation applies â€
 compromised approved signer can tombstone then revoke another owner
 (amplification inside the already-accepted fleet revoke threat), but neither
 can bypass the object-date and leased-SHA corroboration.
+
+**Accepted residual â€” the owner's own clock (`P9-WIP-03`, open).** That last
+sentence holds against a *peer*; it does not hold against the ref owner. The
+object-date signal is the commit's own `%ct`, so a device whose clock is more
+than one TTL slow at capture pushes a backdated commit, and after its clock
+corrects its **own** post-sync GC reaps a minutes-old recovery ref as past-TTL.
+This is a self-harm class, not a peer attack, and the existing skew gates do not
+reach it: the receive-skew check is future-only (5 minutes), the past floor is
+the absolute 2024-01-01 epoch, and both guard *received peer* events while this
+is the self-reap path. HLC monotonicity confines it to a machine restored from a
+>TTL-old snapshot. Reproduced by
+`TestWipGCReapsAMinutesOldRefCapturedUnderASlowClock`; three candidate fixes are
+refuted in the ledger's `P9-WIP-03` note, including bounding by
+`devices.created_at`, which a restored image backdates identically. Accepted for
+now because the reap destroys the *backup* while the tree that produced it
+remains on that device's disk, and the loss window closes at the next
+`wip push`.
 
 ## Security posture
 
