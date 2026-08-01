@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-31
+last_reviewed: 2026-08-01
 tracks_code: [internal/ignore/**, internal/draftbundle/**, internal/scan/**, .gitignore]
 ---
 # Ignore Rules and Local Garbage
@@ -326,6 +326,9 @@ Ignore matching is **NFC-normalized and case-sensitive**, deliberately:
   divergence the NFC fix removes. Note the contrast with `path_key`, which case-folds — that is
   namespace *identity* (two projects may not differ only by case), not content *matching*.
   Write patterns in the on-disk case; add both spellings if a tree genuinely mixes them.
+  **`path_key` genuinely case-*folds* only since `W13-07`** (2026-08-01): it previously applied
+  `strings.ToLower` after NFC, which is simple case *mapping* and is not normalization-preserving,
+  so two spellings of one path could yield two keys. See `internal/pathkey.foldKey`.
 
 ## Policy levels
 

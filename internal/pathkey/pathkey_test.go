@@ -149,6 +149,17 @@ func TestCrossFilesystemCaseFoldNFCInvariant(t *testing.T) {
 		{"case-only nested", "work/Org/Repo", "work/org/repo", true},
 		{"NFC vs NFD", "work/café", "work/cafe\u0301", false}, // same path after NFC normalization
 		{"case + NFC combined", "Work/Café", "work/café", true},
+		// The two cases below fail under `strings.ToLower` and pass only under
+		// real Unicode case folding + re-normalization. Both were found by
+		// FuzzClean; this table is where they belong, because this test is named
+		// for the invariant they violated and passed anyway while it was false.
+		//
+		// "Y"+U+030A has no precomposed uppercase, so NFC leaves two runes; its
+		// lowercase composes to U+1E99. Normalizing before mapping split the key.
+		{"combining ring, case-only", "work/Y\u030a", "work/\u1e99", true},
+		// Go maps U+0130 to a bare "i", dropping the dot; "i"+U+0307 stays two
+		// runes. Only folding reconciles them -- normalization cannot.
+		{"dotted capital I, case-only", "work/\u0130", "work/i\u0307", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

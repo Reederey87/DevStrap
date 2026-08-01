@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -49,7 +50,39 @@ func Clean(input string) (Path, error) {
 	if clean == "." || strings.HasPrefix(clean, "../") || clean == ".." {
 		return Path{}, ErrEscape
 	}
-	return Path{Display: clean, Key: strings.ToLower(clean)}, nil
+	return Path{Display: clean, Key: foldKey(clean)}, nil
+}
+
+// foldKey derives the case-folded comparison key from an already-NFC display
+// path. Two things matter and both were wrong before: it uses real Unicode case
+// FOLDING rather than strings.ToLower, and it re-normalizes AFTER folding.
+//
+// The old spelling normalized once, then applied strings.ToLower. Each half was
+// independently broken, and FuzzClean found both:
+//
+//   - Normalization is not preserved by case mapping. "Y" + U+030A (COMBINING
+//     RING ABOVE) has no precomposed uppercase form, so NFC leaves it as two
+//     runes; lowering yields "y" + U+030A, which NFC *does* compose to U+1E99.
+//     So the key for the uppercase spelling was 2 runes and the lowercase one 1.
+//     Re-normalizing after the fold fixes this half.
+//
+//   - strings.ToLower is simple case MAPPING, not case FOLDING -- despite
+//     path_key being described throughout the corpus as "case-folded". Go maps
+//     U+0130 to a bare "i", dropping the dot, while "i" + U+0307 stays two
+//     runes. No amount of re-normalizing reconciles those; only folding does.
+//     cases.Fold maps both to "i" + U+0307.
+//
+// path_key is the identity two devices compare and the key DetectCaseConflicts
+// dedupes on, so either split defeats what it exists to prevent: on a
+// case-insensitive filesystem those pairs are one directory, and DevStrap would
+// treat them as two projects and replicate both.
+//
+// ASCII is unaffected -- folding and lowering agree on every ASCII path, which
+// is why no existing key changes in practice (see this change's spec/18 entry).
+func foldKey(clean string) string {
+	// A Caser is stateful and must not be shared across goroutines, so it is
+	// constructed per call rather than hoisted to a package-level var.
+	return norm.NFC.String(cases.Fold().String(clean))
 }
 
 func FromRoot(root, path string) (Path, error) {

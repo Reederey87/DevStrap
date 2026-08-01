@@ -29,6 +29,37 @@ Follow-ups:
 - <remaining work, or "None">
 ```
 
+## 2026-08-01 — path_key never actually case-folded, and the test named for that invariant passed anyway (W13-07)
+
+Changed:
+- `internal/pathkey`: `Clean` now derives `Key` through a new `foldKey` — `norm.NFC.String(cases.Fold().String(clean))` — replacing `strings.ToLower(clean)`.
+- `internal/pathkey/fuzz_test.go`: new `FuzzClean` (`TEST-01`, the long-open pathkey half), with its two crashers committed as seed corpus.
+- `internal/pathkey/pathkey_test.go`: two cases added to `TestCrossFilesystemCaseFoldNFCInvariant`.
+- `spec/11` and `spec/16` corrected; `spec/16`'s `TEST-01` row also gains `internal/sync`'s `FuzzDecideConvergence`, which it had never listed.
+
+**Two independent defects in one expression, both found by the new fuzz target within 16 seconds of its first run.**
+
+*Normalization is not preserved by case mapping.* `"Y"+U+030A` (COMBINING RING ABOVE) has no precomposed uppercase form, so NFC leaves it two runes; lowering yields `"y"+U+030A`, which NFC **does** compose to `U+1E99`. Normalizing once *before* mapping therefore produced a 2-rune key for one spelling and a 1-rune key for the other.
+
+*`strings.ToLower` is case MAPPING, not case FOLDING.* The corpus has described `path_key` as "case-folded" since it was introduced — `spec/00`, `spec/12` (twice, in the schema comments), `spec/11`. It was never true. Go maps `U+0130` to a bare `"i"`, dropping the dot, while `"i"+U+0307` stays two runes; no amount of re-normalizing reconciles those. Only `cases.Fold` does. So the first defect was an ordering bug and the second was the wrong primitive, and fixing only the ordering — which is what the first patch here did — leaves the second live. The fuzzer found the second one 90 seconds after the first fix landed.
+
+**Why this matters rather than being a Unicode curiosity.** `path_key` is the identity two devices compare and the key `DetectCaseConflicts` dedupes on. On a case-insensitive filesystem the pairs above are ONE directory. The mutation check reports the user-visible consequence directly: with the fix reverted, `DetectCaseConflicts did not flag collision for "work/Y̊" vs "work/ẙ"`. Both would be adopted as separate projects and replicated fleet-wide.
+
+**The finding under the finding: `TestCrossFilesystemCaseFoldNFCInvariant` already existed, is named for exactly this invariant, and passed throughout.** Its four cases were `MyRepo`/`myrepo`, a nested variant, `café` NFC-vs-NFD, and a combination — every one of which `strings.ToLower` handles correctly. The invariant was false for four years of Unicode the table never sampled. That is this repo's recurring failure mode (ledger convention 3a, "a check nobody can fail is not a check") in a new place, and it is the argument for property-based tests over tables: the fuzzer picked the inputs the author would not.
+
+**No migration, stated rather than assumed.** Folding and lowering agree on every ASCII path, so no key in any existing store changes unless a namespace path contains one of the affected non-ASCII characters. `foldKey` builds its `Caser` per call rather than hoisting it, because a `cases.Caser` is stateful and must not be shared across goroutines.
+
+Scope note: this was carved out of `W13-06` (the test-integrity slice) once `FuzzClean` turned up a production defect. A correctness fix to the namespace identity function does not belong inside a CI-hygiene change, and the fuzz target that found it is its regression test, so they ship together.
+
+Validated:
+- `FuzzClean` fuzzed **181s / 1,968,814 executions** against the fix with no new failures, after failing at 16s and again at 45s against the two intermediate states.
+- **Mutation-checked**: reverting `foldKey` to `strings.ToLower` fails both new invariant cases *and* both `DetectCaseConflicts` assertions; restoring passes.
+- `go test -race` on `internal/pathkey`, `internal/scan`, `internal/state` (every consumer of `path_key`).
+- `gofmt` (checked by output), `go vet`, `spec-drift`.
+
+Follow-ups:
+- The secret-scrubber half of `TEST-01` ships in `W13-06`. That work also surfaced, and did NOT patch, a separate limitation: `redact.Writer` scrubs one complete line at a time, so a registered secret spanning a line boundary is forwarded verbatim. PEM blocks are already handled by `SECU-04`'s suppression, so the surviving exposure is a non-PEM multi-line registered value. Recorded there.
+
 ## 2026-07-31 — a killed clone left an orphan the scanner adopted as a second project (W12-01)
 
 Changed:
