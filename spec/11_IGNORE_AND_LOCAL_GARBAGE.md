@@ -326,9 +326,11 @@ Ignore matching is **NFC-normalized and case-sensitive**, deliberately:
   divergence the NFC fix removes. Note the contrast with `path_key`, which case-folds — that is
   namespace *identity* (two projects may not differ only by case), not content *matching*.
   Write patterns in the on-disk case; add both spellings if a tree genuinely mixes them.
-  **`path_key` genuinely case-*folds* only since `W13-07`** (2026-08-01): it previously applied
-  `strings.ToLower` after NFC, which is simple case *mapping* and is not normalization-preserving,
-  so two spellings of one path could yield two keys. See `internal/pathkey.foldKey`.
+  **`path_key` re-normalizes after lowering only since `W13-07`** (2026-08-01): case mapping is
+  not normalization-preserving, so two spellings of one path could yield two keys. It uses
+  `strings.ToLower`, **not** full `cases.Fold` — folding was measured and reverted because it
+  merges pairs the filesystem keeps distinct (`ß`/`ss`, `ς`/`σ`). See `internal/pathkey.foldKey`
+  and `07_NAMESPACE_AND_SYNC_MODEL.md` § *Path identity*.
 
 ## Policy levels
 
