@@ -29,7 +29,27 @@ Follow-ups:
 - <remaining work, or "None">
 ```
 
-Entries are newest-first: each code-modifying cycle prepends ONE dated entry at the top.
+## 2026-07-31 — the Linux watch ceiling is knowable only at runtime, and doctor was promised it (W11-02)
+
+Changed:
+- New GOOS-gated inotify-limit reader (`internal/platform/inotify*.go`) with an **injectable procfs root** and strict unknown semantics: absent, unreadable, empty, non-numeric, negative and zero all yield *unknown*, never a substituted default.
+- `/v1/health` gains `watch_limit`, reported **independently of watcher state** — the ceiling is a property of the machine and is true regardless of which backend is armed. The consumed count keeps its existing unknown-under-degraded discipline (`watch.go:149`), so the daemon never synthesizes a percentage.
+- `doctor` gains an always-present `watch budget` row, combining the locally-read ceiling with the daemon-owned consumed count via the `checkDaemonVersion` socket pattern.
+
+**Not a new idea — a standing obligation finally met.** `spec/06` already required *doctor* to "report the limit condition with remediation guidance", and a Pass-2 recommendation (`AUDIT_RECOMMENDATIONS_2026-06-27.md`) asked for this check near-verbatim. Spec-promised-and-never-delivered is the justification; nothing here is speculative.
+
+**Why read the value instead of assuming one.** The widely-repeated "Linux defaults to 8192" is stale: since kernel 5.11 the ceiling is `clamp(1% of addressable memory / INOTIFY_WATCH_COST, 8192, 1048576)`, so a workstation sits in six figures while a small VM sits near the floor. That makes the ceiling **per-machine and knowable only at runtime**, which is precisely why a guessed default would manufacture a false percentage. Two further properties are recorded in `spec/06`: the budget is **per-UID, not per-process** (unlike macOS's `kern.maxfilesperproc`), so DevStrap shares it with editors and language servers; and the sysctls are **not namespace-aware**, so a container pools into the host user's budget rather than getting its own.
+
+This is why the `spec/05` FSEvents-deferral measurement (5,639 watched dirs = 15.5% of `kern.maxfilesperproc`) does not transfer: that verdict is unchanged and stays, but it stops reading as a cross-platform conclusion. **No fixed Linux threshold is written into the spec** — inventing one would repeat the error this change corrects.
+
+The plane already degraded to polling correctly and visibly on ENOSPC; what was missing was any warning *before* that, and `doctor` — the command that exists to say what is wrong — said nothing about the watch plane at all.
+
+Validated:
+- Parser tests over a fake procfs root (valid, trailing newline, missing, empty, non-numeric, negative, zero); doctor state/threshold/remedy tests; health-wire test.
+- **Mutation-checked**: inverting the `>= 60` threshold fails `TestDoctorWatchWarnsAboveThreshold` at both boundary cases (59 and 60); removing the unknown-limit guard fails `TestDoctorWatchRowRendersInEveryState/budget_unknown`.
+- **One `//go:build linux` test against the REAL `/proc` reader**, not a fake root. Without it every fake-root test can pass while the production read path is never wired — the build-tag seam makes that easy to miss, and it is the single most likely way this ships broken. It runs on the ubuntu CI leg.
+- Verified by inspection that `doctor` grew **no filesystem walk** to compute the count (it comes from the daemon socket) and that no assumed limit constant appears anywhere in the new code.
+- `gofmt` (checked by output), `go vet`, `golangci-lint`, race tests, `spec-drift`.
 
 ## 2026-07-31 — ten shipped findings had no row anywhere, and the check that should have caught it passed throughout
 

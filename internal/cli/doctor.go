@@ -290,6 +290,7 @@ func runDoctorChecks(ctx context.Context, opts *options) []checkResult {
 	results = append(results, checkStateHome(paths)...)
 	results = append(results, checkDaemonSocketPath(paths)...)
 	results = append(results, checkDaemonVersion(ctx, paths)...)
+	results = append(results, checkWatchBudget(ctx, paths)...)
 	results = append(results, checkRestoreJournal(paths.Home)...)
 	if _, err := os.Stat(paths.StateDB()); err == nil {
 		store, err := opts.openState(ctx)
@@ -812,6 +813,55 @@ func checkDaemonSocketPath(paths config.Paths) []checkResult {
 		}}
 	}
 	return []checkResult{{Name: "daemon socket path", Status: checkOK, Detail: paths.SocketPath()}}
+}
+
+func checkWatchBudget(ctx context.Context, paths config.Paths) []checkResult {
+	return checkWatchBudgetWithLimits(ctx, paths, platform.ReadInotifyLimits(platform.DefaultProcRoot), platform.Runtime().OS)
+}
+
+func checkWatchBudgetWithLimits(ctx context.Context, paths config.Paths, limits platform.InotifyLimits, goos string) []checkResult {
+	return checkWatchBudgetWithHealth(ctx, paths, limits, goos, func(ctx context.Context, socketPath string) (daemon.Health, error) {
+		return daemon.NewClient(socketPath).Health(ctx)
+	})
+}
+
+func checkWatchBudgetWithHealth(ctx context.Context, paths config.Paths, limits platform.InotifyLimits, goos string,
+	healthFn func(context.Context, string) (daemon.Health, error)) []checkResult {
+	const name = "watch budget"
+	if goos != "linux" {
+		return []checkResult{{Name: name, Status: checkOK, Detail: "not applicable on this platform"}}
+	}
+	if !limits.MaxUserWatchesKnown {
+		return []checkResult{{Name: name, Status: checkOK, Detail: "inotify limit unreadable; skipped"}}
+	}
+	limit := limits.MaxUserWatches
+	unavailable := func() []checkResult {
+		return []checkResult{{Name: name, Status: checkOK, Detail: fmt.Sprintf("%d inotify watches available; consumption unknown (daemon not running)", limit)}}
+	}
+	if err := paths.ValidateSocketPath(); err != nil {
+		return unavailable()
+	}
+	health, err := healthFn(ctx, paths.SocketPath())
+	if err != nil {
+		if errors.Is(err, daemon.ErrUnavailable) {
+			return unavailable()
+		}
+		return []checkResult{{Name: name, Status: checkWarn, Detail: scrubbed(err)}}
+	}
+	if health.Watch.WatchedDirs == nil {
+		return []checkResult{{Name: name, Status: checkOK, Detail: fmt.Sprintf("%d inotify watches available; consumption unknown (watcher degraded — see the watch plane check)", limit)}}
+	}
+	consumed := *health.Watch.WatchedDirs
+	pct := consumed * 100 / limit
+	detail := fmt.Sprintf("%d of %d inotify watches (%d%%)", consumed, limit, pct)
+	// The budget is per-UID and shared, so headroom must survive one more
+	// ordinary watcher (an editor) arriving; 60% leaves that margin.
+	if pct >= 60 {
+		raised := limit * 4
+		detail = fmt.Sprintf("%d of %d inotify watches (%d%%); DevStrap alone — the limit is per-user and shared with editors and language servers, so real usage is higher. Raise it with: sudo sysctl fs.inotify.max_user_watches=%d  (persist: echo 'fs.inotify.max_user_watches=%d' | sudo tee /etc/sysctl.d/99-devstrap-inotify.conf)", consumed, limit, pct, raised, raised)
+		return []checkResult{{Name: name, Status: checkWarn, Detail: detail}}
+	}
+	return []checkResult{{Name: name, Status: checkOK, Detail: detail}}
 }
 
 func checkDaemonVersion(ctx context.Context, paths config.Paths) []checkResult {

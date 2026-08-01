@@ -4,6 +4,10 @@ tracks_code: [cmd/**, internal/cli/**, internal/daemon/**, internal/platform/**]
 ---
 # CLI and Daemon API
 
+Linux watch-budget observability is explicit at both API layers: `/v1/health`
+optionally reports `watch.watch_limit` without a percentage, while `doctor`
+always renders a `watch budget` row and warns at 60% of the runtime-read limit.
+
 ## `wip gc`
 
 ```text

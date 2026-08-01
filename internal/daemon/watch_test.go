@@ -6,6 +6,8 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -634,6 +636,35 @@ func TestWatchHealthIdleIsVisibleOnTheWire(t *testing.T) {
 	}
 	if got, ok := fields["watched_dirs"]; !ok || got != float64(0) {
 		t.Fatalf("watched_dirs = %#v, present = %v; want present 0 in %s", got, ok, payload)
+	}
+}
+
+func TestHealthWatchBudgetOmittedWhenUnknown(t *testing.T) {
+	server, err := New(Config{SocketPath: filepath.Join(t.TempDir(), "daemon.sock")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.procRoot = filepath.Join(t.TempDir(), "missing-proc")
+	recorder := httptest.NewRecorder()
+	server.handleHealth(recorder, httptest.NewRequest(http.MethodGet, "/v1/health", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("health status = %d, want 200", recorder.Code)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	watch, ok := payload["watch"].(map[string]any)
+	if !ok {
+		t.Fatalf("watch payload = %#v, want object", payload["watch"])
+	}
+	if _, ok := watch["watch_limit"]; ok {
+		t.Fatalf("unknown watch_limit was emitted: %s", recorder.Body.String())
+	}
+	for key := range watch {
+		if strings.Contains(strings.ToLower(key), "percent") || strings.Contains(strings.ToLower(key), "pct") {
+			t.Fatalf("daemon emitted percentage field %q: %s", key, recorder.Body.String())
+		}
 	}
 }
 
