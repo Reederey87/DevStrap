@@ -29,6 +29,28 @@ Follow-ups:
 - <remaining work, or "None">
 ```
 
+## 2026-08-01 — the daemon job model is withdrawn, not pending (W13-09)
+
+Changed:
+- `spec/13`: the six unbuilt socket endpoints (`/v1/hydrate`, `/v1/open`, `/v1/worktrees`, `/v1/agent-runs`, `/v1/projects`, `/v1/jobs`) and the thirteen-type job model are **withdrawn**, replaced by a section that states the decision, what is kept, and an observable re-open trigger. The endpoint inventory now lists the five routes that exist and says the rest are withdrawn rather than pending.
+- `spec/14`'s job-queue row and `spec/00`'s "Not implemented yet" bullet reconciled; `gitstate capture` withdrawn from the planned-commands line as superseded by the sync-wired Layer A capture.
+
+**Why withdraw rather than leave it planned.** `AD5-05` established the precedent: a path the project has decided not to take, described as "planned", is a promise it has decided not to keep, and a reader cannot tell the difference from outside. `spec/00`'s own list carries a stronger version of the rule now — a withdrawn path in a *not-yet* list is exactly the implication being removed — which is the correction `AD5-05` had to make there too.
+
+**The argument I started with was wrong, and dropping it is the substance of this entry.** The draft plan led with "a socket endpoint is a second execution path". Review refuted it from this project's own precedent: `POST /v1/sync` calls the same `runLoopTick` the CLI calls, and after `W13-01`'s extractions a `POST /v1/worktrees` would be a thin handler over the same `createFreshWorktree`. Discipline already solves that. Leaning on it would have been rationalising a conclusion rather than reaching one.
+
+The three reasons that do decide it: a second **machine contract** for one operation is permanent dual maintenance against `AD5-01`'s versioned `worktree new --json`; **no consumer exists or is designed**, and latency does not rescue these particular endpoints because worktree creation, hydrate and agent runs are seconds of git and network work, so ~30ms of process spawn is noise — while the one endpoint class where residency *would* pay (`GET /v1/projects`, fast repeated reads) is precisely the database proxy this file already refused when it scoped `/v1/status` to a narrow `Reader` seam; and a persisted queue with leases and requeue-on-crash makes the daemon **stateful**, against the load-bearing "never a correctness dependency" invariant.
+
+**What is kept, and why it is a different kind of thing.** A read-only surface reporting what the daemon *already does* observes existing work rather than creating a second way to start it. `/v1/events` is that surface and it shipped; any future extension stays in that shape — it may report, it may not act.
+
+**The re-open trigger is observable, following the FSEvents precedent rather than `AD5-05`'s flat removal.** Reinstate when a real consumer exists **in-tree** — committed, not proposed — **and** it needs either repeated reads at a rate where per-call process spawn is measurably the bottleneck, or observability of daemon-initiated work `/v1/events` cannot express. `spec/05` deferred FSEvents against ~20,000 watched directories rather than "if it becomes a problem"; this is the same discipline applied to a product surface.
+
+Validated: no code changed; `spec-drift`. The five registered routes were verified directly against `internal/daemon/server.go` (`:204-208`) rather than taken from the spec that was wrong about them.
+
+Follow-ups:
+- Work-log rotation (ledger convention 4 / `P6-DOC-02`, this file is now 1,200+ lines) was considered for this change and left out: it is mechanical churn across the file every other PR in the wave is also editing, and it deserves a quiet moment rather than a five-way rebase.
+
+
 ## 2026-08-01 — the staging orphan is now swept, and the sweeper is a deletion primitive (W13-05)
 
 Changed:
