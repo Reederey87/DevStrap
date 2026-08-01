@@ -186,7 +186,7 @@ working tree bytes, .git internals, dependencies
 
 ### `local_git`
 
-A git repository with **no usable remote** (just ran `git init`, or the remote is not added yet). Tracked so the path appears everywhere, but its content syncs via an encrypted bundle (like `draft_project`), never via clone. Promote to `git_repo` once a remote is added (planned command: `devstrap promote <path> --git-remote <url>`; not yet implemented — today re-adopt via `devstrap add` after adding the remote).
+A git repository with **no usable remote** (just ran `git init`, the remote is not added yet, or the configured origin failed validation). Tracked so the path appears everywhere, but its content syncs via an encrypted bundle (like `draft_project`), never via clone. Once a remote exists, `devstrap promote <path> --git-remote <url>` graduates it to `git_repo` by **pushing its existing history** (shipped, `NOVCS-03` — see *Promotion* below).
 
 ### `draft_project`
 
@@ -223,7 +223,7 @@ Use for:
 - documentation buckets;
 - local-only areas.
 
-**Status:** `plain_folder` is a documented type but `scan` does not yet emit it; local-only folders without a recognized manifest are currently descended into and dropped (`NOVCS-03`).
+**Status:** `scan` still does not EMIT `plain_folder` — local-only folders without a recognized manifest are descended into and dropped. The type is reachable in a fleet through sync, and `devstrap promote --draft`/`--git-remote` graduates it out again (`NOVCS-03`, see *Promotion*); scan-side emission remains open.
 
 ### Content-sync status (type ↔ content)
 
@@ -235,6 +235,79 @@ Use for:
 | `plain_folder` | no | none (structure only) | n/a |
 
 *The encrypted draft-bundle path (`draft.snapshot.created`, see Draft sync model) is **shipped** (`P5-DOC-01`): `internal/draftbundle` packs/extracts age-encrypted, content-addressed bundles, `devstrap draft snapshot create` emits the event, and `materialize`/`sync` extract it on receive. `materialize` on a `local_git`/`draft_project` with no synced bundle yet returns an honest "content sync not yet materialized" interim, classified *skipped* (not failed — `P5-QUAL-01`), never a misleading clone error (`NOVCS-02`). What remains deferred is cross-device recipient enrollment (the live R2/S3 client is shipped, `P5-HUB-01`).
+
+## Promotion (`NOVCS-03`, shipped 2026-08-01)
+
+**Two caveats the implementation carries and the property statements above do
+not, recorded rather than left to inference (`W13-03` review):**
+
+- The secret screen covers a **non-git source only** — the commit `promote`
+  itself creates. A `local_git` promotion pushes the user's **existing history
+  unscreened**, and deliberately so: screening it would mean rewriting history
+  the user owns. The push is still the first time that content leaves the
+  machine, so the asymmetry is worth knowing before promoting a repo whose
+  history contains credentials.
+- The empty-remote check is **best effort**. `RemoteIsEmpty` and the push are
+  not atomic, so a remote that gains refs in the window can end with two
+  unrelated histories under different branch names (a `push -u` of a distinct
+  branch name succeeds). Push failure is the common outcome; the "never two
+  unrelated histories" property should be read as holding against a remote
+  nobody else is writing to.
+
+`devstrap promote <path>` is the only path by which an entry changes type. It is
+one-directional: **demotion is out of scope**, because a `git_repo` whose
+content already lives in a remote has no bundle to fall back to.
+
+| source | `--draft` | `--git-remote <url>` |
+|---|---|---|
+| `plain_folder` | -> `draft_project` | `git init` + one initial commit, then push -> `git_repo` |
+| `draft_project` | no-op (already that type) | `git init` + one initial commit, then push -> `git_repo` |
+| `local_git` | refused (it is a git repo; bundling it would sync a `.git`) | **push existing history** -> `git_repo` |
+| `git_repo` | refused, naming `add` | refused, naming `add` |
+
+**`local_git` is the primary case, and the one an implementation gets wrong.**
+It is a real git repository the user simply never pushed — the "forgot to push"
+population this product exists for. Promoting it means `git remote add origin`
+plus `git push -u origin <current branch>`; running `git init` over it would
+destroy exactly the history the promotion is rescuing. Only the two non-git
+sources are initialized, and `internal/git/promote.go` deliberately exposes no
+primitive that could initialize over an existing repository.
+
+**Ordering is a correctness property, not a style choice: validate -> push ->
+record.** The remote URL goes through the same `git.CanonicalRemoteKey` helper
+`scan` and `add` use (one protocol allowlist, one userinfo-stripping rule, not
+two), the remote must advertise **no refs at all** (a remote that already holds
+refs means the user wants `devstrap add`, and pushing an unrelated history into
+it is the mirror of the "never adopted as broken clonable git repos" promise),
+and the `git_repo` row plus its event are written only after the push succeeds.
+Recording first would publish a `git_repo` pointing at a remote with no commits,
+which every other device would then try to clone. A failed push rolls the
+working tree back to its exact pre-command state — the added `origin` is
+removed, or the `.git` the command created is deleted — so a retry after fixing
+the remote is not blocked by the previous attempt's leftovers.
+
+**Promotion reuses `project.updated`; it is deliberately not a new event kind.**
+Announcing a remote where the namespace map had none looks like it should
+collide with the same-path/different-remote reconciliation, and it does not:
+`decideUpsert`'s conflict branch is guarded by `existing.RemoteKey != ""`, and
+every promotion source has an empty remote key, so the event falls through to
+plain HLC last-writer-wins. No apply-handler, snapshot-projection, compaction,
+or verification change follows. **That makes one refusal load-bearing rather
+than tidy:** a project that already has a remote is precisely the case that
+would reach the conflict branch, so it is refused rather than announced.
+`cmd/devstrap/testdata/script/promote_converges.txtar` asserts device B's type
+changed *and* that no conflict row exists on either device, which is what pins
+this reasoning against a future edit to `decideUpsert`.
+
+**Two refusals protect content rather than invariants.** An empty folder is
+refused rather than given an invented empty initial commit, and a non-git source
+whose index would carry secret-looking files (`ignore.IsSecretPath`, screened
+against the staged index so `.gitignore` is already honored) is refused before
+the commit — a promotion push is the first time that content leaves the machine.
+The initial commit is authored as `devstrap <devstrap@localhost>`, matching the
+git-carrier hub, because `Runner` runs git with `GIT_CONFIG_GLOBAL=/dev/null`
+and there is no user identity to inherit.
+
 
 ## Device state
 

@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-07-31
+last_reviewed: 2026-08-01
 tracks_code: [internal/git/**, internal/cli/add.go, internal/cli/clone.go, internal/cli/forge.go, internal/cli/hydrate.go, internal/cli/materialize.go, internal/cli/open.go, internal/cli/repo_lock.go, internal/cli/worktree.go, internal/cli/status.go, internal/cli/doctor.go]
 ---
 # Git Materialization and Worktree Design
@@ -369,6 +369,33 @@ Cons:
 - avoid in MVP unless needed.
 
 MVP should use normal clones first.
+
+## Promotion git operations (`W13-03` / `NOVCS-03`, 2026-08-01)
+
+`devstrap promote` graduates a remote-less project into a real `git_repo`, and
+the git primitives it needs live in `internal/git/promote.go`: `RemoteIsEmpty`,
+`InitRepo`, `StageAll`, `StagedFiles`, `CommitStaged`, `AddRemote`,
+`RemoveRemote`, `CurrentBranch`, `HasCommits`. They run under the project's
+repo operation lock like every other mutating path.
+
+**The ordering is the safety property, not a preference: validate → push →
+record.** A `git_repo` row whose remote has no commits is precisely the "broken
+clonable repo" `00_START_HERE.md` promises never to create — the next device
+would blobless-clone it and get nothing. So the type is recorded and the
+namespace event emitted **only after the push succeeds**; a failed push leaves
+the project at its original type, and `promoteInitRepo`'s rollback removes an
+`init`/`remote add` the promotion itself created.
+
+**`local_git` never goes through `InitRepo`.** It is a real repository whose
+remote is absent *or failed validation* (`NOVCS-01`), so the promotion pushes its
+existing history. Running `init` over it would destroy that history, which is the
+single most likely way this path ships broken. Two refusals follow from the same
+fact: a `local_git` that already has an `origin` is refused rather than rewritten
+(the classification may be due to a *rejected* remote, not a missing one), and a
+repository with no commits is refused rather than given an invented one.
+
+`RemoteIsEmpty` gates `--git-remote` on the target being empty; a non-empty
+remote means the user wants `add`, and the error says so.
 
 ## Git operation locks
 
