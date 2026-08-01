@@ -399,21 +399,43 @@ Tasks:
 
 ```text
 [x] Implement initial Linux platform detection with polling/unsupported fallbacks
-[ ] Implement native Linux platform adapter
+[x] Implement native Linux platform adapter — `detect_linux.go` wires NativeWatcher (fsnotify,
+    shared untagged file — the SAME code as darwin, not a separate port), SystemdUserManager,
+    SystemKeychain{secret-service}, LinuxSandbox; plus peercred_linux.go (SO_PEERCRED) and
+    procstart_linux.go (/proc/<pid>/stat). Compare detect_other.go for what a real stub looks like.
 [x] Implement systemd service install — shipped as `devstrap service`, wrapping run-loop (`P4-PROD-04`)
-[ ] Test watcher on Ubuntu
-[ ] Test Git hydration
-[ ] Test env hydration
-[ ] Test same namespace DB import/export
+[x] Test watcher on Ubuntu — `internal/platform` runs in the ubuntu-latest `test` matrix leg
+[x] Test Git hydration — `internal/git` + the cmd/devstrap testscripts run under `go test -race
+    ./...` on ubuntu-latest
+[x] Test env hydration — same leg (`internal/envfile`, env capture/hydrate testscripts)
+[x] Test same namespace DB import/export — `db backup --full`/`db restore` round-trip txtars
+    (db_full_backup_restore, db_restore_verify, db_restore_journal_recovery); pure Go/SQLite, no
+    build tags, so the ubuntu leg proves it
+[ ] Exercise the Linux Secret Service (D-Bus) keychain against a live session bus — the ONE
+    genuine gap. `SystemKeychain` is a real Secret-Service implementation, but CI sets
+    `DEVSTRAP_NO_KEYCHAIN=1` (headless runners have no session bus), which routes to
+    `UnsupportedKeychain`. Only the unsupported-classification path is covered; the backend
+    itself has never run in CI. Needs a gated job with `dbus-run-session` + gnome-keyring.
 ```
 
-Acceptance:
+> **Reconciled 2026-07-31.** Every box above except the last was checked on evidence, not on the
+> existence of a related job — **five** of them had been left unchecked long after the work shipped.
+> The last stays open deliberately: a keychain backend that CI structurally cannot reach is
+> untested, and ticking it because the code exists is how a milestone comes to lie.
+
+Acceptance (corrected 2026-07-31 — the commands below were never the shipped spelling; there is
+no `devstrap daemon install` and the default unit label is `devstrap-run-loop`):
 
 ```bash
-devstrap daemon install --user
-systemctl --user status devstrapd
+devstrap service install            # or: devstrap service install --daemon
+systemctl --user status devstrap-run-loop   # --daemon installs devstrap-daemon
 devstrap status
 ```
+
+This acceptance is executed live in CI, not just written down: the `Service E2E (ubuntu-latest)`
+job installs, polls until running, asserts the tick log shows no error, runs `doctor`, uninstalls,
+re-installs, and exercises the headless-uninstall degrade path with `DBUS_SESSION_BUS_ADDRESS`
+and `XDG_RUNTIME_DIR` unset.
 
 ## Milestone 7 — Multi-device hub
 
@@ -468,11 +490,22 @@ Status shows both devices.
 [ ] sparse checkout profiles
 [x] draft project encrypted sync (DRAFT-*, shipped 2026-06-29)
 [ ] conflict resolution UI
-[ ] shell cd hydration hook
-[ ] zsh/fish/bash integrations
+[~] shell cd hydration hook — WITHDRAWN 2026-07-31, not pending (see note below)
+[ ] zsh/fish/bash integrations (completions shipped v0.1.0; the `cd` hook is withdrawn, so what
+    remains here is prompt/status integration only)
 [x] Homebrew tap + curl|sh installer + completions (v0.1.0 SHIPPED 2026-07-05 — `brew install Reederey87/devstrap/devstrap` live)
-[~] code signing/notarization (cosign keyless signing + SBOMs + SLSA provenance SHIPPED and LIVE-VERIFIED on v0.1.1, 2026-07-05 — `P4-QUAL-05` closed; remaining: Apple Developer ID + notarization, dormant config ready per `RELEASING.md`, Homebrew Gatekeeper deadline 2026-09-01)
+[~] code signing/notarization (cosign keyless signing + SBOMs + SLSA provenance SHIPPED and LIVE-VERIFIED on v0.1.1, 2026-07-05 — `P4-QUAL-05` closed; remaining: Apple Developer ID + notarization, dormant config ready per `RELEASING.md`, Homebrew Gatekeeper deadline 2026-09-01 — now ENFORCED by `cmd/release-gate`, which refuses a post-cutoff stable release while notarization is dormant)
 ```
+
+**Withdrawn: the `cd` hydration hook** (2026-07-31). The row predates the 2026-06-28 eager-clone
+re-baseline and the re-baseline removed its job. `spec/00` now states the promise plainly: *"The
+same folder paths are really present on disk — no skeleton to 'open' first."* A hook whose purpose
+was triggering hydration when the user `cd`s into a skeleton has nothing left to trigger — and the
+failed-materialization case it might otherwise cover is already handled, since the retry rides
+every sync tick rather than waiting for a visit.
+
+Withdrawn explicitly rather than deleted, in the manner of `AD5-05`/`AD5-06`: a silently-removed
+row reads later as an oversight, and someone re-proposes it. This is a **decision**, not a gap.
 
 ## Backlog: V2
 
