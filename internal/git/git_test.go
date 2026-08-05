@@ -1736,3 +1736,77 @@ func TestUntrackedCountAndStashCreateBlindSpot(t *testing.T) {
 		t.Fatalf("UntrackedCount on a mixed tree = (%d, %v), want (1, nil): a successful push still omits the new file", n, err)
 	}
 }
+
+// TestRemotesReadsEveryConfiguredRemote covers the lookup `--pinned` uses to
+// decide WHICH remote's refs answer for the url a manifest entry records
+// (P11-MANIFEST-01). A repository with no remotes at all is an empty map, not
+// an error: `git config --get-regexp` exits 1 when nothing matches.
+func TestRemotesReadsEveryConfiguredRemote(t *testing.T) {
+	dir := t.TempDir()
+	r := Runner{}
+	ctx := context.Background()
+	mustGit(t, dir, "init")
+
+	got, err := r.Remotes(ctx, dir)
+	if err != nil {
+		t.Fatalf("Remotes on a remote-less repo: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Remotes = %v, want empty for a repo with no remotes", got)
+	}
+
+	mustGit(t, dir, "remote", "add", "origin", "https://example.test/org/fork.git")
+	mustGit(t, dir, "remote", "add", "up.stream", "git@example.test:org/canonical.git")
+	// A remote can carry several `url` values. git fetches from the FIRST and
+	// treats the rest as push-only, so the first is the one whose refs are in
+	// refs/remotes; reporting the last would let this remote claim to serve a
+	// url it never fetched from, and that is a FALSE pin, not a missed one.
+	mustGit(t, dir, "remote", "set-url", "--add", "origin", "https://example.test/org/push-mirror.git")
+	got, err = r.Remotes(ctx, dir)
+	if err != nil {
+		t.Fatalf("Remotes: %v", err)
+	}
+	want := map[string]string{
+		"origin":    "https://example.test/org/fork.git",
+		"up.stream": "git@example.test:org/canonical.git",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Remotes = %v, want %v", got, want)
+	}
+	for name, url := range want {
+		if got[name] != url {
+			t.Errorf("Remotes[%q] = %q, want %q", name, got[name], url)
+		}
+	}
+}
+
+// TestRemoteTrackingContainsRefusesAnUnscopedQuery pins the two guards that
+// keep the `<name>/*` patterns safe and the question honest. An empty list
+// must never reach git: with no patterns the command degrades back to "any
+// remote", which is exactly the P11-MANIFEST-01 bug. An unsafe name must never
+// reach git either, since that is what keeps the pattern free of option
+// injection and fnmatch metacharacters. Neither may spawn a subprocess.
+func TestRemoteTrackingContainsRefusesAnUnscopedQuery(t *testing.T) {
+	countPath := filepath.Join(t.TempDir(), "count")
+	script := writeFakeGit(t, fmt.Sprintf(`#!/bin/sh
+echo attempt >> %[1]q
+`, countPath))
+	r := Runner{Bin: script}
+	for _, remotes := range [][]string{nil, {}, {"--upload-pack=touch /tmp/pwned"}, {"origin", "up stream"}, {"origin", "*"}} {
+		if _, err := r.RemoteTrackingContains(context.Background(), t.TempDir(), remotes, "deadbeef"); err == nil {
+			t.Errorf("RemoteTrackingContains(%q) = nil error, want a refusal", remotes)
+		}
+	}
+	if got := attemptCount(t, countPath); got != 0 {
+		t.Fatalf("git ran %d time(s); a refused remote list must never reach the subprocess", got)
+	}
+}
+
+func mustGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}

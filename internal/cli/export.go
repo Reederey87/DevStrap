@@ -6,8 +6,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
+	dsgit "github.com/Reederey87/DevStrap/internal/git"
 	"github.com/Reederey87/DevStrap/internal/manifest"
 	"github.com/Reederey87/DevStrap/internal/redact"
 	"github.com/Reederey87/DevStrap/internal/state"
@@ -192,17 +195,68 @@ func resolveExportHead(ctx context.Context, opts *options, project state.Project
 	// a topic branch — pins a SHA that exists nowhere after total local loss.
 	// `vcs import` would then fail its checkout during the actual recovery.
 	//
-	// So the pin must be reachable from a remote-tracking ref. Anything else
-	// degrades to the same omit-the-version path an unresolvable HEAD takes:
-	// the file never claims a pin it does not have.
-	reachable, err := r.RemoteTrackingContains(ctx, localPath, sha)
+	// So the pin must be reachable from a remote-tracking ref of the remote
+	// this entry's url names — not of any remote at all. Anything else degrades
+	// to the same omit-the-version path an unresolvable HEAD takes: the file
+	// never claims a pin it does not have.
+	remotes, err := remoteNamesForURL(ctx, r, localPath, project.RemoteURL)
+	if err != nil {
+		return "", err
+	}
+	reachable, err := r.RemoteTrackingContains(ctx, localPath, remotes, sha)
 	if err != nil {
 		return "", fmt.Errorf("check %s is on a remote: %w", sha, err)
 	}
 	if !reachable {
-		return "", fmt.Errorf("HEAD (%s) is not reachable from any remote-tracking ref — it is unpushed, or HEAD is on a local-only branch", sha)
+		return "", fmt.Errorf("HEAD (%s) is not reachable from a remote-tracking ref of %s (remote %s) — it is unpushed, or HEAD is on a local-only branch",
+			sha, redact.StripURLUserinfo(project.RemoteURL), strings.Join(remotes, ", "))
 	}
 	return sha, nil
+}
+
+// remoteNamesForURL resolves which of the checkout's configured remotes serve
+// remoteURL, so `--pinned` asks its reachability question about the url the
+// manifest entry actually records. The fork workflow is why: with an empty
+// fork as `origin` and the canonical repo as `upstream`, a HEAD on
+// `upstream/main` is on *a* remote but not on the fork the entry pins it
+// against, and `vcs import` would fail its checkout during recovery.
+//
+// EVERY matching name is returned rather than one: two names for the same url
+// address the same upstream refs, but their local caches were fetched at
+// different times, so narrowing to one could answer "no" on the stale one.
+func remoteNamesForURL(ctx context.Context, r dsgit.Runner, dir, remoteURL string) ([]string, error) {
+	want, err := dsgit.CanonicalRemoteKey(remoteURL)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize %s: %w", redact.StripURLUserinfo(remoteURL), err)
+	}
+	configured, err := r.Remotes(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for name, url := range configured {
+		if key, err := dsgit.CanonicalRemoteKey(url); err == nil && key == want {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no configured remote of the checkout serves %s", redact.StripURLUserinfo(remoteURL))
+	}
+	sort.Strings(names)
+	// git accepts a remote NAME containing a slash, and `origin/vendor`'s refs
+	// land under refs/remotes/origin/vendor/* — whose shortened names match the
+	// `origin/*` pattern the reachability check uses, since git's wildmatch runs
+	// without WM_PATHNAME and `*` spans slashes. A commit present only on the
+	// nested remote would then vouch for this url. The two namespaces cannot be
+	// told apart by pattern, so refuse and let the caller omit the pin.
+	for name := range configured {
+		for _, selected := range names {
+			if strings.HasPrefix(name, selected+"/") {
+				return nil, fmt.Errorf("remote %q is nested inside %q, whose remote-tracking refs cannot be told apart", name, selected)
+			}
+		}
+	}
+	return names, nil
 }
 
 // writeManifestFile writes the manifest atomically at 0600. The document holds
