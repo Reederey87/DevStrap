@@ -17,7 +17,7 @@ This directory holds DevStrap's chronological design & implementation audits. **
 | 7 | 2026-07-10 | [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md`](AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md) | Seventh pass: adversarial audit of the post-Pass-6 waves (git/folder hub carriers, OS sandbox, device-trust + env-sync propagation, distribution/service install) + commercial readiness | 47 (P1=1, P2=25, P3=21) | Open — see below |
 | 8 | 2026-07-31 | [`AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md`](AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md) | Eighth pass: the post-Pass-7 waves — AD-5 agent substrate, Milestone 5 daemon, working-state plane, plus security/data across all of it | 8 (P1=1, P2=5, P3=2) | Open — 7 of 8 open (`P8-ADOPT-01` shipped PR #258); **coverage is partial by declaration**, see below |
 | 9–10 | 2026-07-31 | [`AUDIT_RECOMMENDATIONS_2026-07-31_PASS9-10.md`](AUDIT_RECOMMENDATIONS_2026-07-31_PASS9-10.md) | Ninth: the working-state and daemon planes Pass 8 commissioned and never reported on. Tenth: hub carriers, blob plane, snapshot exchange — the largest surface no pass had reached | 8 (P1=0, P2=6, P3=2) + 0 | 1 open (`P9-WIP-03`, P3); Pass 10 clean, nothing above P3 |
-| 11 | 2026-08-05 | [`AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md`](AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md) | Eleventh: the three `W13` surfaces that shipped 2026-08-01 with zero adversarial review — `devstrap promote`, `workspace.yaml` export/import, and the clone-staging sweeper | 7 (P1=0, P2=2, P3=5) | Open — 7 of 7 open |
+| 11 | 2026-08-05 | [`AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md`](AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md) | Eleventh: the three `W13` surfaces that shipped 2026-08-01 with zero adversarial review — `devstrap promote`, `workspace.yaml` export/import, and the clone-staging sweeper | 7 (P1=0, P2=2, P3=5) | Open — 5 of 7 open (`P11-MANIFEST-02`/`-03` shipped) |
 
 ## Conventions (going forward)
 
@@ -156,6 +156,7 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 
 | ID | Sev | Shipped | Note |
 |---|---|---|---|
+| P11-MANIFEST-02 / -03 | P3/P3 | PR #293 (`fix/p11-manifest-02-03-import-hardening`, 2026-08-05) | `import`'s clobber refusal read via `store.ProjectByPath` — the separate reader pool — before opening the `WithTx` whose `UpsertProject` then overwrote `remote_url`/`remote_key`; the lookup now runs on the `Tx`, so the `_txlock=immediate` write lock covers check and upsert as one step. `W13-02`'s own review had closed the *error* leg of this same refusal; the concurrency leg is the identical bug with the read simply somewhere the write could not see it. Same PR: `import` validated nothing it persisted, so `lfs_policy: alwyas` imported "successfully" and failed later at materialize time on whichever project first triggered an LFS operation — both fields now reuse the existing validators and a bad value skips the entry through `ErrPartialImport`. **The concurrency test passed against the broken code five runs in a row** before being rewritten to hold the writer connection open as a real barrier; it now fails 8-winners-to-1 pre-fix, deterministically. |
 | P8-ADOPT-07 | P3 | `fix/p8-adopt-07-legacy-paths` (2026-07-31) | Rows written before migration `00032` store the path as the caller spelled it, because `EvalSymlinks` arrived WITH adopt (`AD5-02`). Under a symlinked prefix the resolved lookup missed such a row and the string-keyed `idx_worktrees_active_path` then admitted a **second active row for one physical worktree**. `adopt` now retries the lookup with the unresolved spelling and canonicalizes the row's **path only** — routed to the reported-and-left-untouched branch, never the idempotent-refresh one, because every pre-`00032` row was written by `worktree new` and rewriting a `base_sha` adopt did not record is exactly what the `AD5-02` invariant forbids. Coverage is partial by construction (string-equal spellings only) and says so; the `os.SameFile` sweep that would be complete is out of scope for a P3 that also self-heals via cleanup's path-missing prune. |
 | P9-WIP-04 / -05 / -06 | P3/P2/P2 | PR #267 (`7366942`, 2026-07-31) | A `wip.gc_interval` config typo silently stopped off-site replication; the GC deleted refs that a sha-agnostic tombstone had merely *hidden*; and four present-tense spec claims contradicted the shipped plane, two of them inside their own files. |
 | P9-WIP-02 | P2 | PR #266 (`8e2fd21`, 2026-07-31) | `git stash create` — the primitive the recovery plane captures with — does not include untracked files and has no `-u` form, so a tree holding only new files produced no stash object and `wip push` reported *"working tree is clean"*. **The "forgot to push" feature failing at exactly the case it exists for**, since a brand-new uncommitted file is the most common thing anyone forgets. |
@@ -299,16 +300,14 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 
 <!-- MD028 separator between adjacent dated blockquotes -->
 
-### Pass 11 (2026-08-05) — 7 open of 7
+### Pass 11 (2026-08-05) — 5 open of 7
 
-Full detail, `file:line` evidence, and the five hypothesis verdicts in [`AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md`](AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md). The header count equals the rows below (P1=0, P2=2, P3=5 = 7); nothing has shipped yet, so *Recently shipped* holds no `P11-` row.
+Full detail, `file:line` evidence, and the five hypothesis verdicts in [`AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md`](AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md). The header count equals the rows below (P1=0, P2=2, P3=3 = 5). `P11-MANIFEST-02` and `P11-MANIFEST-03` shipped 2026-08-05 in one PR and are listed in *Recently shipped*; the pass's own total stays 7.
 
 | ID | Sev | Finding | Effort |
 |---|---|---|---|
 | P11-PROMOTE-01 | P2 | Two `promote` refusals name `devstrap add`, which refuses the non-empty directory they always leave behind — the corrected sibling message's own defect, twice over | S |
 | P11-MANIFEST-01 | P2 | `--pinned` gates on `git branch -r --contains`, which counts **any** remote; a fork-workflow HEAD pins a SHA the exported `url` does not have | S |
-| P11-MANIFEST-02 | P3 | The clobber refusal reads via `store.ProjectByPath` outside the transaction whose `UpsertProject` then overwrites `remote_url`/`remote_key` | S |
-| P11-MANIFEST-03 | P3 | `import` persists `lfs_policy`/`default_branch` unvalidated; `add` and the git layer both validate them, so the failure defers to materialize time | S |
 | P11-SWEEP-01 | P3 | The staging-orphan sweep rides `wip.gc_interval` (documented as the WIP sweep's key) and its caller discards the error entirely | S |
 | P11-PROMOTE-02 | P3 | `promoteInitRepo` arms its rollback only after `InitRepo` returns; a partial `.git` then blocks every retry path with no message naming the fix | S |
 | P11-PROMOTE-03 | P3 | `git add -A` records a nested repo as an unscreened gitlink; the pushed commit points at an object the remote never gets, so the recovered clone is empty there | S |

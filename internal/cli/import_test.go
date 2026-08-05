@@ -2,11 +2,18 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	dsgit "github.com/Reederey87/DevStrap/internal/git"
 	"github.com/Reederey87/DevStrap/internal/state"
 )
 
@@ -429,5 +436,227 @@ func TestImportDiagnosticsNeverReachStdout(t *testing.T) {
 	}
 	if dec.More() {
 		t.Fatalf("stdout carries more than one document:\n%s", stdout)
+	}
+}
+
+// TestImportRejectsAnUnsupportedLFSPolicy: a manifest is hand-editable plain
+// text, so a typo used to import "successfully" and surface only much later at
+// materialize time — and only on a project that happened to trigger an LFS
+// operation. The bad entry is skipped, the rest of the batch still recovers,
+// and the exit code says the import was partial.
+func TestImportRejectsAnUnsupportedLFSPolicy(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	initForTest(t, home, root)
+	path := writeManifestForTest(t, `
+repositories:
+  work/acme/api:
+    type: git
+    url: https://example.com/acme/api.git
+  work/acme/web:
+    type: git
+    url: https://example.com/acme/web.git
+devstrap:
+  schema_version: 1
+  workspace_id: ws_01
+  exported_at: "2026-08-01T00:00:00Z"
+  pinned: false
+  projects:
+    work/acme/api:
+      type: git_repo
+      lfs_policy: alwyas
+    work/acme/web:
+      type: git_repo
+      lfs_policy: auto
+`)
+	result, stderr, err := importForTest(t, home, root, path)
+	if !errors.Is(err, ErrPartialImport) {
+		t.Fatalf("err = %v, want ErrPartialImport (stderr = %q)", err, stderr)
+	}
+	if result.Registered != 1 || result.Skipped != 1 {
+		t.Fatalf("import result = %+v, want 1 registered / 1 skipped", result)
+	}
+	if !strings.Contains(stderr, `unsupported lfs_policy "alwyas"`) {
+		t.Errorf("stderr must name the rejected value; got %q", stderr)
+	}
+	projects := projectsForTest(t, home, root)
+	if _, ok := projects["work/acme/api"]; ok {
+		t.Error("an entry whose lfs_policy can never be honoured must not be registered")
+	}
+	if _, ok := projects["work/acme/web"]; !ok {
+		t.Error("one bad entry must not abort the batch; recovering most of a namespace beats recovering none")
+	}
+}
+
+// TestImportRejectsAnUnusableDefaultBranch is the same boundary for the other
+// unvalidated field. It is not an injection hole — ResolveDefaultBranch gates
+// the value through the same check before any git invocation — but registering
+// it defers a certain failure to the worst possible moment.
+func TestImportRejectsAnUnusableDefaultBranch(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	initForTest(t, home, root)
+	path := writeManifestForTest(t, `
+repositories:
+  work/acme/api:
+    type: git
+    url: https://example.com/acme/api.git
+  work/acme/web:
+    type: git
+    url: https://example.com/acme/web.git
+devstrap:
+  schema_version: 1
+  workspace_id: ws_01
+  exported_at: "2026-08-01T00:00:00Z"
+  pinned: false
+  projects:
+    work/acme/api:
+      type: git_repo
+      default_branch: --upload-pack=touch /tmp/pwned
+    work/acme/web:
+      type: git_repo
+      default_branch: main
+`)
+	result, stderr, err := importForTest(t, home, root, path)
+	if !errors.Is(err, ErrPartialImport) {
+		t.Fatalf("err = %v, want ErrPartialImport (stderr = %q)", err, stderr)
+	}
+	if result.Registered != 1 || result.Skipped != 1 {
+		t.Fatalf("import result = %+v, want 1 registered / 1 skipped", result)
+	}
+	if !strings.Contains(stderr, "unusable default_branch") {
+		t.Errorf("stderr must explain the refusal; got %q", stderr)
+	}
+	if _, ok := projectsForTest(t, home, root)["work/acme/api"]; ok {
+		t.Error("an entry whose default_branch can never be fetched must not be registered")
+	}
+}
+
+// TestImportDeclinesAnUnusableVersionWithoutSkippingTheEntry: a third-party
+// .repos file carries the branch only in `version`, which is a heuristic that
+// already declines a pinned manifest and a resolved SHA. An unusable value
+// declines the same way rather than costing the whole repo, because the row
+// still registers and materialize resolves its default branch from the remote.
+func TestImportDeclinesAnUnusableVersionWithoutSkippingTheEntry(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	initForTest(t, home, root)
+	path := writeManifestForTest(t, "repositories:\n  oss/tool:\n    type: git\n    url: https://example.com/x/tool.git\n    version: \"--upload-pack=evil\"\n")
+	result, stderr, err := importForTest(t, home, root, path)
+	if err != nil {
+		t.Fatalf("import stderr = %q err = %v", stderr, err)
+	}
+	if result.Registered != 1 || result.Skipped != 0 {
+		t.Fatalf("import result = %+v, want 1 registered / 0 skipped", result)
+	}
+	if got := projectsForTest(t, home, root)["oss/tool"].DefaultBranch; got != "main" {
+		t.Errorf("default_branch = %q, want the \"main\" fallback rather than an unusable `version`", got)
+	}
+}
+
+// TestImportRegistrationRefusesAConcurrentlyCreatedRow: the clobber refusal is
+// only a refusal if it reads inside the transaction it writes in. The lookup
+// used to run on the reader pool BEFORE WithTx, so any writer that created the
+// row in that window — a daemon converging a peer's `project.added` while the
+// user imports — was silently overwritten by UpsertProject's ON CONFLICT DO
+// UPDATE. Racing N registrations of one path must leave exactly one winner and
+// that winner's remote on disk.
+func TestImportRegistrationRefusesAConcurrentlyCreatedRow(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	initForTest(t, home, root)
+	store, err := state.Open(t.Context(), filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	// Hold the single writer connection open so the window is opened
+	// deliberately rather than left to the scheduler: every racer reaches its
+	// lookup while no row exists and no racer can write. A lookup on the reader
+	// pool (the pre-fix shape) therefore ALWAYS returns "absent" for all of them;
+	// a lookup inside WithTx blocks at BEGIN instead and sees whoever won.
+	held, release := make(chan struct{}), make(chan struct{})
+	var holder sync.WaitGroup
+	holder.Add(1)
+	go func() {
+		defer holder.Done()
+		if txErr := store.WithTx(t.Context(), func(*state.Tx) error {
+			close(held)
+			<-release
+			return nil
+		}); txErr != nil {
+			t.Errorf("hold the writer: %v", txErr)
+		}
+	}()
+	<-held
+
+	const racers = 8
+	type outcome struct {
+		status manifestEntryStatus
+		remote string
+		done   bool
+	}
+	results := make([]outcome, racers)
+	var arrived atomic.Int32
+	var wg sync.WaitGroup
+	for i := range racers {
+		remote := fmt.Sprintf("https://example.com/racer-%d/api.git", i)
+		remoteKey, keyErr := dsgit.CanonicalRemoteKey(remote)
+		if keyErr != nil {
+			t.Fatalf("canonical remote key: %v", keyErr)
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			arrived.Add(1)
+			status, _, regErr := registerManifestEntry(t.Context(), store, root, "work/acme/api", manifestEntry{
+				Type:                  "git_repo",
+				RemoteURL:             remote,
+				RemoteKey:             remoteKey,
+				MaterializationPolicy: "lazy",
+			})
+			if regErr != nil {
+				t.Errorf("racer %d: %v", i, regErr)
+				return
+			}
+			results[i] = outcome{status: status, remote: remote, done: true}
+		}()
+	}
+	for arrived.Load() < racers {
+		runtime.Gosched()
+	}
+	// Every racer is now inside registerManifestEntry, and each is either
+	// blocked at BEGIN or already past a reader-pool lookup that takes
+	// microseconds. Releasing the writer lets them contend for the one
+	// connection in some order.
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	holder.Wait()
+	wg.Wait()
+
+	winners, winner := 0, ""
+	for _, r := range results {
+		if !r.done {
+			continue
+		}
+		switch r.status {
+		case manifestEntryRegistered:
+			winners++
+			winner = r.remote
+		case manifestEntryConflict:
+		case manifestEntryPresent:
+			t.Error("a racer carrying a different remote is a conflict, never an already-present no-op")
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("%d racers registered the same path; only the one that created the row may win", winners)
+	}
+	got, err := store.ProjectByPath(t.Context(), "work/acme/api")
+	if err != nil {
+		t.Fatalf("read the registered row back: %v", err)
+	}
+	if got.RemoteURL != winner {
+		t.Errorf("remote_url = %q, want the winner's %q — a later racer clobbered the row", got.RemoteURL, winner)
 	}
 }
