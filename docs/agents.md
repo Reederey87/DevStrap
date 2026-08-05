@@ -160,6 +160,41 @@ silently rot. What those tests cannot prove is that Claude Code actually fires t
 run the harness. The integration is verified up to the harness boundary, and the hook itself is
 Claude Code's documented behavior, not DevStrap's guarantee.
 
+## Provisioning via MCP
+
+`devstrap mcp serve` exposes the same provisioning primitives as an MCP stdio server, for harnesses
+that speak MCP instead of shelling out to the CLI. Add it once:
+
+```bash
+claude mcp add devstrap -- devstrap mcp serve
+```
+
+It ships five tools, one per primitive documented above, each service-prefixed so it does not collide
+with another server's `worktree_new`:
+
+- `devstrap_worktree_new` — Direction 1: create a fresh worktree for an already-registered project.
+- `devstrap_worktree_adopt` — Direction 2: register a linked worktree the harness created itself.
+- `devstrap_worktree_status` — is a worktree fresh or stale against its recorded base?
+- `devstrap_worktree_list` — every worktree DevStrap has registered.
+- `devstrap_agent_adopt` — register the run, optionally adopting the worktree in the same call.
+
+**There is no second execution path.** Every tool handler calls the exact same internal Go function
+its cobra command calls — `devstrap_worktree_new` calls `createFreshWorktree`, `devstrap_agent_adopt`
+calls `adoptAgentRun`, and so on. A fresh worktree from either surface has the identical
+fetched-`origin/<default_branch>`-plus-recorded-base-SHA provenance; adoption from either surface
+records the same honest base and never rewrites it.
+
+**The local stdio subprocess boundary is the trust boundary.** There is no authentication, matching
+the precedent of `docker agent serve mcp` and `container-use stdio` — the client that spawns the
+process already controls what it can do on this machine, so a second credential layer would protect
+against nothing an MCP client's own process boundary does not already stop.
+
+This is the same primitive as the shell-out shown above, not a replacement for it: use whichever your
+harness's integration surface makes easier. `cmd/devstrap/TestMCPServeRealSubprocess` builds the real
+binary, spawns `mcp serve` as a real subprocess, and speaks the actual MCP wire protocol to it over its
+real stdin/stdout — pinning the five tool names above and one real `tools/call` round trip — so this
+list cannot drift from what the server actually advertises.
+
 ## What DevStrap does not promise
 
 **The wrapper's command and file policy is guardrails, not a sandbox.** `devstrap agent run`'s
