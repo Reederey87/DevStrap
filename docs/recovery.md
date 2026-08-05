@@ -26,6 +26,14 @@ the equivalent of `vcs export --exact`. A branch name says "whatever is on `main
 says what you actually had. Use `--pinned` when the manifest is a recovery artifact and the
 plain form when it is a description of the workspace.
 
+A pin is only written when the SHA is actually reachable from the remote the entry records —
+the url in that same entry, not merely *some* remote you have fetched. A commit that is
+unpushed, on a local-only branch, or only on a second remote (a fork setup where `origin` is
+your empty fork and the real code is on `upstream`) gets **no** `version` at all, plus a warning
+naming the project. `vcs import` then clones that remote's default branch. This is deliberate:
+a pin your remote cannot serve fails the checkout during the recovery, which is worse than no
+pin. If you want a real pin, push the commit to the remote the manifest records and re-export.
+
 Keep the file somewhere that survives losing the machine: a password manager attachment,
 another host, a private gist. It contains no secrets (see [What it does not carry](#what-it-does-not-carry)),
 but it does list every project path and remote URL you work on, so treat it as you would a

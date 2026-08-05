@@ -263,3 +263,109 @@ func TestExportPinnedOmitsUnpushedHead(t *testing.T) {
 		t.Errorf("stderr must name the unpinnable project; got %q", stderr)
 	}
 }
+
+// TestExportPinnedScopesReachabilityToTheExportedRemote pins P11-MANIFEST-01.
+//
+// A manifest entry pairs its SHA with exactly ONE url — the registered remote,
+// exported as this entry's `url`. So "is this SHA on some remote I have
+// fetched" is the wrong question to gate the pin on. The fork workflow makes
+// the gap load-bearing: `origin` is an empty fork and the canonical repo is a
+// second remote holding the commit. The unscoped question answers yes, the
+// manifest pins the SHA against the FORK's url, and `vcs import` clones the
+// fork and fails its checkout during the actual disaster recovery — precisely
+// what the reachability gate was added to prevent.
+func TestExportPinnedScopesReachabilityToTheExportedRemote(t *testing.T) {
+	home, root := setupManifestWorkspace(t)
+	repo := filepath.Join(root, "work", "acme", "repo")
+
+	// Non-regression half: the ordinary single-remote case still pins.
+	if _, path, _ := exportForTest(t, home, root, "--pinned"); readManifest(t, path).Repositories["work/acme/repo"].Version == "" {
+		t.Fatal("precondition failed: a fully pushed HEAD on the registered remote should pin")
+	}
+
+	// `origin` stays the registered remote — it is the url the manifest
+	// exports, and it is the one that will NOT hold the commit.
+	upstream := filepath.Join(t.TempDir(), "upstream.git")
+	runGitOutput(t, filepath.Dir(upstream), "init", "--bare", upstream)
+	runGitOutput(t, repo, "remote", "add", "upstream", "file://"+upstream)
+
+	if err := os.WriteFile(filepath.Join(repo, "upstream-only.txt"), []byte("canonical\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitOutput(t, repo, "add", "-A")
+	runGitOutput(t, repo, "commit", "-m", "lands on upstream, never on the registered origin")
+	runGitOutput(t, repo, "push", "upstream", "HEAD:refs/heads/main")
+	runGitOutput(t, repo, "fetch", "upstream")
+
+	result, path, stderr := exportForTest(t, home, root, "--pinned")
+	if got := readManifest(t, path).Repositories["work/acme/repo"].Version; got != "" {
+		t.Fatalf("manifest pinned %q against the exported remote's url, which does not contain it — "+
+			"the commit is only on `upstream`, so `vcs import` would fail its checkout during recovery", got)
+	}
+	if len(result.Warnings) == 0 {
+		t.Error("an unpinnable project must be reported in the --json warnings array")
+	}
+	if !strings.Contains(stderr, "cannot pin") {
+		t.Errorf("stderr must name the unpinnable project; got %q", stderr)
+	}
+
+	// Once the exported remote genuinely serves the commit the pin returns: the
+	// gate is scoped to the right remote, not merely made stricter.
+	runGitOutput(t, repo, "push", "origin", "HEAD:refs/heads/main")
+	runGitOutput(t, repo, "fetch", "origin")
+	head := strings.TrimSpace(runGitOutput(t, repo, "rev-parse", "HEAD"))
+	if _, path, _ := exportForTest(t, home, root, "--pinned"); readManifest(t, path).Repositories["work/acme/repo"].Version != head {
+		t.Error("a SHA the exported remote genuinely serves must pin")
+	}
+}
+
+// TestExportPinnedRefusesWhenARemoteIsNestedInsideTheExportedOne closes the
+// escape hatch under the scoping itself (Codex review of P11-MANIFEST-01). A
+// remote NAME may contain a slash, and `origin/vendor` writes its refs to
+// refs/remotes/origin/vendor/* — whose shortened names match the `origin/*`
+// pattern, because git's wildmatch runs without WM_PATHNAME and `*` spans
+// slashes. A commit present only on the nested remote would therefore vouch for
+// origin's url, reopening the exact hole the scoping closes. The namespaces are
+// indistinguishable by pattern, so the pin is refused rather than guessed.
+//
+// The remote is written with `git config` rather than `git remote add` because
+// git's porcelain guard against nested names is VERSION-DEPENDENT: 2.50.1
+// creates this happily, while the CI runners' newer git refuses with "remote
+// name 'origin/vendor' is a subset of existing remote 'origin'". The state is
+// reachable on every version through config (and through `remote add` on older
+// git, or in a repo created by one), so the guard is real — but the test must
+// not depend on which git built the fixture.
+func TestExportPinnedRefusesWhenARemoteIsNestedInsideTheExportedOne(t *testing.T) {
+	home, root := setupManifestWorkspace(t)
+	repo := filepath.Join(root, "work", "acme", "repo")
+
+	nested := filepath.Join(t.TempDir(), "vendor.git")
+	runGitOutput(t, filepath.Dir(nested), "init", "--bare", nested)
+	runGitOutput(t, repo, "config", "remote.origin/vendor.url", "file://"+nested)
+	runGitOutput(t, repo, "config", "remote.origin/vendor.fetch", "+refs/heads/*:refs/remotes/origin/vendor/*")
+
+	if err := os.WriteFile(filepath.Join(repo, "vendor-only.txt"), []byte("vendored\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitOutput(t, repo, "add", "-A")
+	runGitOutput(t, repo, "commit", "-m", "lands only on the nested remote")
+	runGitOutput(t, repo, "push", "origin/vendor", "HEAD:refs/heads/main")
+	runGitOutput(t, repo, "fetch", "origin/vendor")
+
+	// Precondition: the nested remote's ref really is what `origin/*` would
+	// match, so this test would be vacuous without the refusal.
+	if got := runGitOutput(t, repo, "branch", "-r", "--list", "origin/*", "--format=%(refname)"); !strings.Contains(got, "origin/vendor/main") {
+		t.Fatalf("precondition failed: `origin/*` no longer matches the nested remote's refs; got %q", got)
+	}
+
+	result, path, stderr := exportForTest(t, home, root, "--pinned")
+	if got := readManifest(t, path).Repositories["work/acme/repo"].Version; got != "" {
+		t.Fatalf("manifest pinned %q vouched for by a NESTED remote's refs; origin itself does not serve it", got)
+	}
+	if len(result.Warnings) == 0 {
+		t.Error("an unpinnable project must be reported in the --json warnings array")
+	}
+	if !strings.Contains(stderr, "nested inside") {
+		t.Errorf("stderr must explain the nested-remote refusal; got %q", stderr)
+	}
+}

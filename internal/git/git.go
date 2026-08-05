@@ -789,21 +789,76 @@ func (r Runner) MergeBase(ctx context.Context, dir, a, b string) (string, error)
 	return strings.TrimSpace(out), nil
 }
 
-// RemoteTrackingContains reports whether sha is reachable from ANY
-// remote-tracking ref in dir (`git branch -r --contains <sha>`).
+// Remotes lists dir's configured remotes as name -> fetch URL. The runner's
+// sanitized environment neutralizes global and system config, so the answer is
+// this repository's own remotes and nothing else.
+func (r Runner) Remotes(ctx context.Context, dir string) (map[string]string, error) {
+	out, err := r.Run(ctx, dir, "config", "--get-regexp", `^remote\..*\.url$`)
+	if err != nil {
+		var cmdErr CommandError
+		// git config exits 1 when no key matches, which is a repository with
+		// no remotes rather than a failure.
+		if errors.As(err, &cmdErr) && cmdErr.ExitCode() == 1 {
+			return map[string]string{}, nil
+		}
+		return nil, err
+	}
+	remotes := make(map[string]string)
+	for _, line := range strings.Split(out, "\n") {
+		key, url, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if !ok {
+			continue
+		}
+		name := strings.TrimSuffix(strings.TrimPrefix(key, "remote."), ".url")
+		if name == "" || url == "" {
+			continue
+		}
+		// A remote may carry several `url` values; git fetches from the FIRST
+		// and treats the rest as push-only. The fetch url is the one whose refs
+		// landed in refs/remotes, so last-wins would let a multi-url remote
+		// claim to serve a url it never fetched from.
+		if _, seen := remotes[name]; seen {
+			continue
+		}
+		remotes[name] = url
+	}
+	return remotes, nil
+}
+
+// RemoteTrackingContains reports whether sha is reachable from a
+// remote-tracking ref of one of the NAMED remotes in dir.
 //
-// It exists for the `--pinned` manifest export, where the distinction is the
-// whole point: a SHA that lives only in the local checkout is worthless in the
-// disaster the pin is written for, because after total local loss it exists
-// nowhere. An unpushed commit and a topic-branch HEAD both produce a pin that
-// `vcs import` cannot check out.
+// It exists for the `--pinned` manifest export, where a SHA that lives only in
+// the local checkout is worthless: after total local loss it exists nowhere,
+// and `vcs import` fails its checkout during the actual recovery.
 //
-// No network: this reads refs already fetched into refs/remotes. A stale
-// remote-tracking ref can therefore answer "no" for a commit that IS on the
-// remote — the safe direction, since the caller degrades to omitting the
-// version rather than recording one it cannot vouch for.
-func (r Runner) RemoteTrackingContains(ctx context.Context, dir, sha string) (bool, error) {
-	out, err := r.Run(ctx, dir, "branch", "-r", "--contains", sha, "--format=%(refname)")
+// The scoping to named remotes is the point. A manifest entry pairs its SHA
+// with ONE url, so "is this SHA on some remote I have fetched" is the wrong
+// question: with an empty fork as `origin` and the canonical repo as
+// `upstream`, it answers yes about a url that does not serve the commit.
+//
+// No network: this reads refs already fetched into refs/remotes, a local cache
+// that can be stale in BOTH directions. It answers "no" for a commit that IS
+// on the remote but has not been fetched, and — after an upstream force-push
+// or branch deletion with no intervening fetch — "yes" for an object the
+// remote no longer serves. Only the first direction is safe, so callers must
+// treat a "yes" as the best available evidence, not a guarantee.
+func (r Runner) RemoteTrackingContains(ctx context.Context, dir string, remotes []string, sha string) (bool, error) {
+	// An empty list would drop the pattern arguments entirely and silently
+	// restore the unscoped "any remote" question this signature exists to end.
+	if len(remotes) == 0 {
+		return false, errors.New("no remote to check reachability against")
+	}
+	args := []string{"branch", "-r", "--contains", sha, "--format=%(refname)"}
+	for _, remote := range remotes {
+		// Keeps the pattern free of both option injection and fnmatch
+		// metacharacters, so `<name>/*` matches exactly that remote's refs.
+		if !safeRemoteName(remote) {
+			return false, fmt.Errorf("unsafe remote name %q", remote)
+		}
+		args = append(args, remote+"/*")
+	}
+	out, err := r.Run(ctx, dir, args...)
 	if err != nil {
 		var cmdErr CommandError
 		// git exits non-zero when the object is unknown to this repository,

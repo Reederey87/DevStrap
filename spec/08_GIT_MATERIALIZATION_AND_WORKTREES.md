@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-05
 tracks_code: [internal/git/**, internal/cli/add.go, internal/cli/clone.go, internal/cli/forge.go, internal/cli/hydrate.go, internal/cli/materialize.go, internal/cli/open.go, internal/cli/repo_lock.go, internal/cli/worktree.go, internal/cli/status.go, internal/cli/doctor.go]
 ---
 # Git Materialization and Worktree Design
@@ -370,19 +370,89 @@ Cons:
 
 MVP should use normal clones first.
 
-### `RemoteTrackingContains` — a pin must be reachable, not merely resolvable (`W13-02`, 2026-08-01)
+### `RemoteTrackingContains` — a pin must be reachable *from the exported remote* (`W13-02`, 2026-08-01; scoped by `P11-MANIFEST-01`, 2026-08-05)
 
-`git.Runner.RemoteTrackingContains` reports whether a SHA is reachable from any
-remote-tracking ref (`git branch -r --contains`). It exists for `export
---pinned`, where the distinction is the whole point: `git rev-parse HEAD`
-resolves an **unpushed** commit perfectly well, and a manifest that pins it is
-worthless in the disaster the pin is written for, because after total local loss
-that commit exists nowhere and `vcs import` fails its checkout.
+`git.Runner.RemoteTrackingContains` reports whether a SHA is reachable from a
+remote-tracking ref of one of the **named** remotes it is given (`git branch -r
+--contains <sha> <name>/*` …). It exists for `export --pinned`, where the
+distinction is the whole point: `git rev-parse HEAD` resolves an **unpushed**
+commit perfectly well, and a manifest that pins it is worthless in the disaster
+the pin is written for, because after total local loss that commit exists
+nowhere and `vcs import` fails its checkout.
 
-It reads refs already fetched into `refs/remotes` and makes **no network call**.
-A stale remote-tracking ref can therefore answer "not reachable" for a commit
-that *is* on the remote — deliberately the safe direction, since the caller
-degrades to omitting the version rather than recording one it cannot vouch for.
+**The remote scoping is the second half of the same claim, and it is not
+optional.** A manifest entry pairs its SHA with exactly ONE url — the registered
+remote. `git branch -r` with no pattern lists remote-tracking branches for
+*every* configured remote, which answers "this SHA is on some remote I have
+fetched", not "this SHA is on the url this entry records". In a fork workflow —
+`origin` an empty fork, `upstream` the canonical repo, HEAD on `upstream/main` —
+the unscoped question answers yes and the manifest pins the SHA against the
+fork's url, which cannot serve it. `vcs import` then clones the fork and fails
+its checkout during the actual recovery: exactly the failure the reachability
+gate exists to prevent (`P11-MANIFEST-01`). `internal/cli`'s
+`remoteNamesForURL` therefore resolves which configured remotes serve
+`project.RemoteURL` — comparing `CanonicalRemoteKey`s, so URL-shape differences
+between the registered url and the checkout's config do not cause a spurious
+miss — and passes only those names. All matching names are passed, not one:
+two names for the same url address the same upstream refs but their local
+caches were fetched at different times. No matching remote is an error that
+takes the same omit-the-version path, and an empty name list is refused rather
+than degraded back into the unscoped query. Each name is validated with
+`safeRemoteName` before it becomes a `<name>/*` pattern, keeping the invocation
+free of option injection and fnmatch metacharacters.
+
+**Two ways the scoping could still be evaded, both closed (Codex review).**
+
+- **A nested remote name.** A remote *named* `origin/vendor` writes its refs
+  under `refs/remotes/origin/vendor/*`. git's `branch --list` wildmatch runs
+  without `WM_PATHNAME`, so `*` spans slashes — which is what makes `origin/*`
+  match the nested branch `origin/feat/x` as intended, and also makes it match
+  `origin/vendor/main`. A commit present only on the nested remote would vouch
+  for `origin`'s url. The namespaces are not separable by pattern, so
+  `remoteNamesForURL` refuses when any configured remote name is nested inside a
+  selected one, and the pin is omitted rather than guessed.
+
+  **How reachable this is depends on the git that wrote the config**, which is
+  worth stating precisely rather than implying it is an everyday shape. Newer
+  git refuses `git remote add origin/vendor` while `origin` exists (*"remote
+  name 'origin/vendor' is a subset of existing remote 'origin'"*); git 2.50.1
+  creates it without complaint, in either order. Writing
+  `remote.origin/vendor.url` with `git config` bypasses the porcelain guard on
+  every version. So the state arrives from an older git, a repo created by one,
+  a tool that writes config directly, or a hand edit — not from current
+  porcelain. The guard stays because DevStrap reads whatever config it is
+  handed and the failure mode is a false pin; it is cheap and fails safe. The
+  regression test builds the state with `git config` for exactly this reason:
+  constructing it with `git remote add` passes on the maintainer's machine and
+  fails on CI, which is how this version dependency was found.
+- **A multi-url remote.** `git config --get-regexp` prints every `remote.<n>.url`
+  value; git fetches from the **first** and treats the rest as push-only, so the
+  first is the one whose refs are in `refs/remotes`. `Runner.Remotes` therefore
+  keeps the first occurrence. Last-wins would let a remote whose push mirror
+  happens to be the registered url claim to serve refs it fetched from
+  somewhere else — a false pin, not a missed one.
+
+**Two known limits, accepted and stated rather than guarded.** A hand-written
+`remote.<other>.fetch` refspec whose destination is `refs/remotes/origin/*`
+aliases another remote into origin's namespace, and a repo-local
+`url.<base>.insteadOf` rewrites a configured url before git fetches it. Both
+would let refs from one endpoint answer for another. Detecting them means
+parsing every remote's refspecs and resolving git's url expansion, and both
+require deliberately hand-edited config that already breaks git's own
+remote-tracking bookkeeping. A pin is best-effort local evidence (see the
+staleness note below), so this is a documented ceiling on the guarantee, not an
+oversight.
+
+It reads refs already fetched into `refs/remotes` and makes **no network call**,
+so the answer is only as good as the last fetch — and that cache is stale in
+**both** directions. It answers "not reachable" for a commit that *is* on the
+remote but has not been fetched (the safe direction: the caller degrades to
+omitting the version). It can also answer "reachable" for an object the remote
+**no longer serves**, after an upstream force-push or branch deletion with no
+intervening fetch. A "yes" is therefore the best available local evidence, not
+a guarantee about the remote's current state — the fork case above does not even
+need staleness to break, which is why the scoping, not a freshness heuristic, is
+the fix.
 
 
 ## Promotion git operations (`W13-03` / `NOVCS-03`, 2026-08-01)
