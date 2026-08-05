@@ -541,3 +541,14 @@ advertised to other users:
 A full backup takes DB-derived inventory from the immutable read-only SQLite snapshot and fails if referenced ciphertext cannot be captured. Restore verifies the versioned manifest, every entry's SHA-256/size, the absence of unlisted files, SQLite integrity, and all DB-referenced blobs/device keys/held WCK files before touching the live home. Journaled all-target promotion keeps every old target under one shared aside suffix until every new target is durably marked done; recovery rolls forward only from that committed state and otherwise restores the exact prior generation in reverse. Pending-journal state opens fail closed until `db restore --recover` (or a plain restore's initial auto-recovery) completes. The state-home maintenance lock serializes promotion with full backup, `db down`, and run-loop ticks.
 
 Residuals: the manifest supplies integrity, not provenance—a local operator who can replace the whole tar can forge the manifest too, and authenticated backup signing is out of scope. One-shot `devstrap sync` deliberately does not take the maintenance lock, so operators must not run it concurrently with full backup/restore.
+
+### Tooling note: staticcheck SA5011 platform nondeterminism
+
+`agentsecrets_test.go` and several `internal/cli` test files carry an explicit `return`
+immediately after a `t.Fatal`/`t.Fatalf` nil-guard, even though the `Fatal` call already halts
+the goroutine. This is not a behavior or security change — CI's Linux/amd64 `golangci-lint` run
+flagged SA5011 ("possible nil pointer dereference") on the guarded dereference immediately
+following the nil check, while the identical code reproduced 0 issues locally on macOS/arm64
+across two golangci-lint versions with a cleared cache. The explicit `return` makes the
+control-flow edge unambiguous to the analyzer without relying on its interprocedural
+noreturn-inference for `t.Fatal`, which is the documented false-positive class for this check.

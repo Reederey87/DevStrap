@@ -769,19 +769,30 @@ External survey (2026-07-31) confirms the primitive is genuinely unbuilt elsewhe
             Accept: a harness can list what it adopted and tell it apart from what
             DevStrap provisioned.
 
-[ ] AD5-07  `devstrap mcp serve` — stdio MCP server, <=5 hand-authored tools
-            (`devstrap_worktree_new`/`_adopt`/`_status`/`_list`/`devstrap_agent_adopt`
-            — service-prefixed, see below), no auth code (the local subprocess
-            boundary IS the trust boundary), SDK version pinned rather than floating.
-            Precedent for shipping it as a subcommand rather than a second binary:
-            `docker agent serve mcp`, `container-use stdio`.                              [M]
-            DEFERRED 2026-07-31 for two stated reasons. **The evidence the deferral
-            asked for is now gathered (2026-08-01, `W13-01` PR A); the go/no-go is
-            the maintainer's and the row stays UNCHECKED until it is given.**
+[x] AD5-07  SHIPPED 2026-08-05, in two PRs. PR A did ONLY the prerequisite extraction — three
+            RunE closures (`worktree status`/`list`, `agent adopt`) had no callable
+            form outside cobra, which would have made "no second execution path"
+            asserted rather than verifiable; it also added `worktree status`'s missing
+            `schema_version` and closed a pre-existing gap where `agentAdoptResult`'s
+            schema stamp had no golden test. PR B added `devstrap mcp serve`: exactly
+            the 5 tools named below (`devstrap_worktree_new`/`_adopt`/`_status`/`_list`,
+            `devstrap_agent_adopt`), each calling the extracted function directly, no
+            auth code, `github.com/modelcontextprotocol/go-sdk` pinned at `v1.7.0`.     [M]
+            The measured +7-linked-module cost (`W13-01` below) held exactly at
+            merge — confirmed via `go version -m` on the built binary, since the
+            module GRAPH (`go list -m all`) includes several unlinked modules the
+            SDK's go.mod requires for its own test/auth code that this binary never
+            imports and are not part of the compiled artifact.
             Accept: `claude mcp add devstrap -- devstrap mcp serve` yields a working
             provisioning surface with NO second execution path — each tool calls the
             same internal function its cobra command calls, exactly as the daemon's
-            `Converger` seam calls the same `runLoopTick` the CLI calls.
+            `Converger` seam calls the same `runLoopTick` the CLI calls. Proven by
+            `cmd/devstrap`'s `TestMCPServeRealSubprocess`, which drives the real
+            binary as a real MCP client would (spawn, connect over its actual
+            stdin/stdout, `tools/list`, one real `tools/call`) rather than asserting
+            the wiring — mutation-checked: a single stray `fmt.Println` anywhere on
+            the startup path fails it with a JSON-RPC framing error, which is the
+            concrete stdio-hygiene risk this design carries.
 ```
 
 #### `AD5-07` decision record (2026-08-01) — measurement, not argument
