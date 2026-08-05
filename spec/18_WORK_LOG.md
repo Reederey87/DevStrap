@@ -41,6 +41,38 @@ Follow-ups:
 - <remaining work, or "None">
 ```
 
+## 2026-08-05 — the eleventh pass: two guarantees that were fixed once, at the one call site a review looked at (Pass 11)
+
+Changed:
+- `docs/audits/AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md` (new): the eleventh design & implementation pass, against trunk `0e66277`.
+- `docs/audits/README.md`: Pass 11 index row, the dated landing note, and the seven-row open table (header count = row count).
+
+Docs only. No code changed, and by the ledger's "one PR per audit finding" convention no fix is attempted here.
+
+**Scope: the three `W13` surfaces that shipped on 2026-08-01 with zero adversarial review** — `devstrap promote` (`W13-03`), `workspace.yaml` export/import (`W13-02`), and the clone-staging sweeper (`W13-05`), the last of which its own entry above calls "a remote-triggered deletion primitive". **7 findings (P1=0, P2=2, P3=5).**
+
+**Method copied from Pass 10 deliberately: five concrete hypotheses stated before reading, each chased to a verdict** — two confirmed, two partial, one refuted — rather than open-ended browsing. All five are reported with their reasoning, including the refutations, so a later pass does not re-walk the ground. Two companion reviewers (Codex on the logic, Grok adversarially) were run against the same excerpts and told which findings were already held, so they hunted only novel ones.
+
+**The two P2s share one shape, and it is the transferable part.** Each is a guarantee that `W13`'s own review found, fixed, and pinned with a test — at the single call site the review was looking at.
+
+- `P11-PROMOTE-01`: the review corrected the push-succeeded/record-failed remedy from `devstrap add` to `scan --adopt`, because `add` refuses a non-empty directory. Two *other* messages in the same file still name `devstrap add`, and both are reachable only in states where the directory is populated by definition. **Executed both**: the refusal prints the command, the command prints `refusing to hydrate into non-empty directory`. The non-empty-remote leg is the one that matters, because it is where a push whose ack was lost lands the user — with the remote possibly holding the only pushed copy of their history. The test written to prevent exactly this, `TestPromoteRemediesNameCommandsThatWorkInTheStateTheyAreOffered`, greps a literal and inspects **400 bytes** from that offset; both defects live a hundred lines away in the same file and it passes.
+- `P11-MANIFEST-01`: the review added `RemoteTrackingContains` so `--pinned` never claims a pin the remote does not have. It asks whether the SHA is on **a** remote (`git branch -r --contains` lists every remote), while the manifest pairs that SHA with **one** URL. **Reproduced end to end through the real binary** in a fork workflow: `origin` = an empty fork, `upstream` = canonical, HEAD on `upstream/main` — the export writes a `version` the exported `url` does not contain, with no warning. The work log's own safety argument ("a stale remote-tracking ref answers *no*, the safe direction") is one-directional; a cache is stale in both directions, and the fork case needs no staleness at all.
+
+**Verifying the companions' claims rather than accepting them changed the result.** The strongest reported finding — `git init` reusing a pre-existing `.git`'s hooks to execute an attacker-planted `pre-commit`, with the rollback then deleting content the command did not create — is **refuted in the document**: `dsgit.IsRepo` is `dirExists(.git) || fileExists(.git)`, it does not parse the repository, so a folder holding `.git/hooks/pre-commit` is already refused by the guard that feeds it. Reported as a P1-class escape; it is not one. What survives is the ordering nit underneath it (`P11-PROMOTE-02`).
+
+**`P11-SWEEP-01` is the third appearance of one shape.** `P9-WIP-05` was recorded here as "two unrelated subsystems shared a failure mode because one ran first", and `sync.go` still carries the comment explaining why the durability export was decoupled from it. `W13-05` then attached a third subsystem to the same key: the staging sweep rides `wip.gc_interval`, so `0` — documented in `spec/13` as disabling the *WIP* sweep — silently disables the disk-growth sweeper too, and an invalid value disables it with no output at all because `sync.go:270` discards both return values.
+
+**The refuted hypothesis is the sweeper's, and it is refuted three times over,** which is the useful form: a second process starting a legitimate staging clone cannot collide with a removal in flight, because `MkdirTemp` names are unique by construction, because `hydrate` takes the repo lock *before* it makes the directory, and because same-host PID liveness is authoritative over the age window so a long clone's lock cannot be aged out. One residual is recorded rather than filed: the cross-host staleness fallback is a flat 30 minutes — exactly `LongTimeout` for a clone — and `W13-05` is the first caller to make a **destructive** action depend on that lock.
+
+Validated:
+- Two findings reproduced by **executing the defect** against a binary built from this trunk, not by re-reading the code: the two `promote` remedies (both legs), and the `--pinned` fork-workflow export (checked with `git cat-file -e` against the exported remote).
+- Every companion claim re-derived against the source before counting; one refuted outright, two merged, two confirmed independently.
+- `go run ./cmd/spec-drift --base origin/main --head HEAD`.
+
+Follow-ups:
+- Seven open rows, each its own future PR per the one-PR-per-finding convention. Sequencing is in the pass file: the two P2s first and separately, because in both cases the real cost is a test that would have to fail across **every** instance of its property rather than the one instance a review looked at.
+
+
 ## 2026-08-01 — a backup only DevStrap can read is not an escape hatch (W13-02)
 
 Changed:

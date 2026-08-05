@@ -17,6 +17,7 @@ This directory holds DevStrap's chronological design & implementation audits. **
 | 7 | 2026-07-10 | [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md`](AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md) | Seventh pass: adversarial audit of the post-Pass-6 waves (git/folder hub carriers, OS sandbox, device-trust + env-sync propagation, distribution/service install) + commercial readiness | 47 (P1=1, P2=25, P3=21) | Open — see below |
 | 8 | 2026-07-31 | [`AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md`](AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md) | Eighth pass: the post-Pass-7 waves — AD-5 agent substrate, Milestone 5 daemon, working-state plane, plus security/data across all of it | 8 (P1=1, P2=5, P3=2) | Open — 7 of 8 open (`P8-ADOPT-01` shipped PR #258); **coverage is partial by declaration**, see below |
 | 9–10 | 2026-07-31 | [`AUDIT_RECOMMENDATIONS_2026-07-31_PASS9-10.md`](AUDIT_RECOMMENDATIONS_2026-07-31_PASS9-10.md) | Ninth: the working-state and daemon planes Pass 8 commissioned and never reported on. Tenth: hub carriers, blob plane, snapshot exchange — the largest surface no pass had reached | 8 (P1=0, P2=6, P3=2) + 0 | 1 open (`P9-WIP-03`, P3); Pass 10 clean, nothing above P3 |
+| 11 | 2026-08-05 | [`AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md`](AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md) | Eleventh: the three `W13` surfaces that shipped 2026-08-01 with zero adversarial review — `devstrap promote`, `workspace.yaml` export/import, and the clone-staging sweeper | 7 (P1=0, P2=2, P3=5) | Open — 7 of 7 open |
 
 ## Conventions (going forward)
 
@@ -29,7 +30,38 @@ This directory holds DevStrap's chronological design & implementation audits. **
 
 ## Open backlog — single source of truth for "what's left"
 
-Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely implemented or superseded (see `spec/18_WORK_LOG.md` for the shipped history); Passes 5 and 6 are fully closed; the open backlog is concentrated in passes 4 and 7.
+Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely implemented or superseded (see `spec/18_WORK_LOG.md` for the shipped history); Passes 5, 6 and 8 are fully closed; the open backlog is concentrated in passes 4, 7 and 11.
+
+> **2026-08-05 — Pass 11 landed.** The eleventh pass
+> ([`AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md`](AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md))
+> audited trunk `0e66277` — the three `W13` surfaces that shipped on 2026-08-01
+> and had received **no adversarial review at all**: `devstrap promote`
+> (`W13-03`), `workspace.yaml` export/import (`W13-02`), and the clone-staging
+> sweeper (`W13-05`). **7 findings (P1=0, P2=2, P3=5).** It followed Pass 10's
+> shape: **five concrete hypotheses stated up front and chased to a verdict**
+> rather than open-ended browsing — two confirmed, two partial, one refuted, all
+> five reported with their reasoning.
+>
+> The two P2s are the same shape: **a guarantee fixed once, at the one call site
+> a review looked at.** `P11-PROMOTE-01` — two of `promote`'s three refusals name
+> `devstrap add`, which refuses the non-empty directory those refusals always
+> leave behind; the third message was corrected during `W13-03`'s own review,
+> along with a test whose name states the general property while its assertion
+> inspects a 400-byte window. `P11-MANIFEST-01` — `--pinned`'s reachability gate,
+> added by that same wave's review, asks whether a SHA is on *a* remote when the
+> manifest pairs it with *one* URL; in a fork workflow it pins a commit the
+> exported remote does not have. **Both were reproduced by executing the defect
+> through the real binary.**
+>
+> `P11-SWEEP-01` records the third appearance of one shape: the staging sweep
+> rides `wip.gc_interval`, so disabling WIP-ref GC silently disables the
+> disk-growth sweeper — the `P9-WIP-05` coupling, in code written after that fix
+> shipped.
+>
+> **The strongest companion-reviewer finding is refuted in the document** (a
+> `git init` reusing a pre-existing `.git`'s hooks): `dsgit.IsRepo` is a bare
+> `.git`-exists check, so the guard it feeds already covers it. Every claim was
+> verified by the coordinator against the code before it counted.
 
 > **2026-07-31 — Pass 8 landed.** The eighth pass
 > ([`AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md`](AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md))
@@ -266,6 +298,22 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 > `CT-01`, not a failed one.
 
 <!-- MD028 separator between adjacent dated blockquotes -->
+
+### Pass 11 (2026-08-05) — 7 open of 7
+
+Full detail, `file:line` evidence, and the five hypothesis verdicts in [`AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md`](AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md). The header count equals the rows below (P1=0, P2=2, P3=5 = 7); nothing has shipped yet, so *Recently shipped* holds no `P11-` row.
+
+| ID | Sev | Finding | Effort |
+|---|---|---|---|
+| P11-PROMOTE-01 | P2 | Two `promote` refusals name `devstrap add`, which refuses the non-empty directory they always leave behind — the corrected sibling message's own defect, twice over | S |
+| P11-MANIFEST-01 | P2 | `--pinned` gates on `git branch -r --contains`, which counts **any** remote; a fork-workflow HEAD pins a SHA the exported `url` does not have | S |
+| P11-MANIFEST-02 | P3 | The clobber refusal reads via `store.ProjectByPath` outside the transaction whose `UpsertProject` then overwrites `remote_url`/`remote_key` | S |
+| P11-MANIFEST-03 | P3 | `import` persists `lfs_policy`/`default_branch` unvalidated; `add` and the git layer both validate them, so the failure defers to materialize time | S |
+| P11-SWEEP-01 | P3 | The staging-orphan sweep rides `wip.gc_interval` (documented as the WIP sweep's key) and its caller discards the error entirely | S |
+| P11-PROMOTE-02 | P3 | `promoteInitRepo` arms its rollback only after `InitRepo` returns; a partial `.git` then blocks every retry path with no message naming the fix | S |
+| P11-PROMOTE-03 | P3 | `git add -A` records a nested repo as an unscreened gitlink; the pushed commit points at an object the remote never gets, so the recovered clone is empty there | S |
+
+**Two P2s, no P1.** Neither P2 is a data-loss path: the user's files survive every branch of `promote`'s rollback, and a bad pin fails loudly at `vcs import` rather than silently. Both are correctness-of-promise defects on **recovery surfaces**, which is why they lead: a remedy that cannot run and a pin that is not a pin both fail at the moment they are relied on.
 
 ### Pass 9 (2026-07-31) — 1 open of 8 · Pass 10 (2026-07-31) — clean
 
