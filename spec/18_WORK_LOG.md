@@ -41,6 +41,39 @@ Follow-ups:
 - <remaining work, or "None">
 ```
 
+## 2026-08-05 — the obvious way to emit `plain_folder` deletes the managed tree from the scan (NOVCS-02)
+
+Changed:
+- `internal/scan/scan.go`: `Walk` emits `plain_folder`. `Options.IncludePlainFolders` is renamed `IncludeNonGit` and now gates both non-git classifications (it only ever gated `draft_project`, which the name got backwards); new `plainFolders`/`pathAncestors`/`hasAncestorIn`, and `HasSkeletonMarker` exported for the one caller that must not duplicate it.
+- `internal/cli/scan.go`: adoption drops a `plain_folder` finding overlapping a tracked path (`trackedPaths`/`overlapsTrackedPath`), and `Adopted %d projects` now reports what was adopted rather than what was found.
+- `internal/cli/hydrate.go`: `isSkeleton` reads the marker through `scan.HasSkeletonMarker` instead of a second copy of the path.
+- `internal/scan/scan_test.go`, `internal/cli/run_loop_scan_test.go`, `cmd/devstrap/testdata/script/scan_plain_folder_promote.txtar`.
+- `spec/07` status claim and policy (`last_reviewed` bumped); `spec/14` NOVCS-02 bullets.
+
+`TypePlainFolder` has been defined and never assigned since the type was introduced, so the only way to reach it was to sync from a device that somehow already had one — `promote` could graduate the type out but nothing created it. The round trip is now closed locally.
+
+**The audit's one-line recommendation, implemented literally, silently deletes the product's canonical tree from the scan.** "Record `plain_folder` … instead of silently recursing past it" reads as: classify the directory and `filepath.SkipDir`. But `WalkDir` is **pre-order**, so when the walk first reaches `work/` it cannot yet know that `work/acme/api-server` sits below it. `work` and `work/acme` are bare directories with no manifest — they match every classification test — so the literal implementation emits `work` as a `plain_folder` and never discovers the repo. `~/Code/work/acme/api-server` is the tree the README, the product promise, and `00_START_HERE` all use as *the* example. The audit's own parenthetical says the narrower thing ("a managed grouping dir **containing no nested repo/project**"), and that qualifier is the entire feature: it requires lookahead a pre-order walk does not have.
+
+So the decision is **deferred**. The walk records candidates and keeps recursing exactly as before; after it finishes, with every real finding known, the candidates that group nothing become findings, topmost-only. Not skipping also keeps secret-file and symlink-escape detection alive inside local-only folders, which a `SkipDir` would have quietly switched off — the directories most likely to hold a stray `.env` are precisely the unmanaged ones. Mutation-checked: the literal SkipDir form fails `TestWalkNeverClassifiesAGroupingDirectoryAsPlainFolder` with `git repos = []`.
+
+**The scanner is state-free, and `plain_folder` is the weakest claim it can make — that combination is the feature's real hazard.** "A directory is here and nothing in it identified itself" is indistinguishable, on disk, from a `git_repo` whose checkout the user deleted. Adopting it re-stamps the row and discards the remote URL: the one thing local state holds that the filesystem does not, and unrecoverable from the tree. Two guards, because there are two shapes:
+
+- The walk skips a directory carrying the materialization placeholder. A project `add`ed but not yet hydrated is an empty skeleton, and — worse than the demotion — leaving it unclaimed makes its grouping parent look like empty ground, so `work` would be emitted and swallow the whole subtree. **The existing `run_loop_once` testscript caught this**, which is the only reason it was found before review: it asserts `scan adopted 1 new project`, and the count moved.
+- Adoption drops a `plain_folder` finding for any path the namespace already tracks **at or beneath it**. The at-path case is the demotion; the beneath case is the same mistake one level up, where the topmost rule emits the grouping directory instead and adds a spurious second project that then syncs to the fleet. Mutation-checking the guard shows both: the row comes back `Type:plain_folder`, and the parent appears as a new project beside the real one.
+
+Nothing downstream needed changing, which was worth verifying rather than assuming: `adoptFindings` was already type-agnostic, `materialize` already has a `plain_folder` arm, `promote` already accepts the type, and run-loop's per-tick filter is scoped to duplicate *remotes*, which a plain folder has none of.
+
+**Review (deepseek) found the resolution running over a partially-walked tree.** On `context.Canceled` the walk deliberately does not early-return — it reports what it found — but "this directory groups nothing" is an inference the partial result cannot support: a candidate whose subtree was never reached looks exactly like empty ground. No caller can observe it today (all three check the error), which is precisely why it was worth fixing rather than leaving as a landmine for the next one. Resolution is now gated on a completed walk.
+
+**And the first test written for that guard was vacuous.** A pre-cancelled context aborts on the very first callback, before any candidate exists, so the assertion held with the guard removed. The cancellation has to land *mid*-walk to prove anything, which needs `Err()` to start failing at a chosen directory rather than at the start — a counting `context.Context` in the test. Caught by mutation-checking the test itself, not by reading it.
+
+Validated:
+- **Mutation-checked, five times.** (1) Literal `SkipDir` classification → `git repos = []` (the repo is gone from the scan) plus the skeleton test. (2) Skeleton claim removed → `findings = [{Path:work Type:plain_folder}]`, the parent swallowing a tracked project. (3) Overlap guard removed → the tracked row returns as `Type:plain_folder`, and in the ancestor case a second `work` project appears. (4) Emission disabled → the new testscript fails on `work/acme/notes\s+plain_folder`, so it is not vacuous. (5) Completed-walk gate removed → `plain folders = [aaa]` from an interrupted walk.
+- `gofmt -w cmd internal`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `go test -race ./...`.
+
+Follow-ups:
+- `plain_folder` still carries no content (structure only, by design). `promote --draft` remains the way to opt one into the encrypted-bundle plane.
+- `NOVCS-02` is used in three different senses across the corpus — this item in `spec/14`, the draft-bundle content path in the 2026-06-27 audit, and recipient enrollment at `spec/07:805`. Left alone here rather than renumbered mid-change.
 ## 2026-08-05 — the eleventh pass: two guarantees that were fixed once, at the one call site a review looked at (Pass 11)
 
 Changed:

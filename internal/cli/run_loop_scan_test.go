@@ -203,3 +203,70 @@ func TestRunLoopScanWarnsSecretWithoutAdopting(t *testing.T) {
 		t.Fatalf("projects = %d, want 0", got)
 	}
 }
+
+// TestAdoptFindingsNeverAdoptsAPlainFolderOverATrackedProject covers the
+// NOVCS-02 hazard that scan-side `plain_folder` emission introduces. The
+// scanner is state-free, so on disk a git_repo whose checkout the user deleted
+// is a bare empty directory — indistinguishable from genuine empty ground.
+//
+// Both shapes are asserted because the fix has to cover both. At the project's
+// own path, re-stamping would discard the remote URL, the one thing local state
+// holds that the filesystem does not. One level up, the topmost rule emits the
+// grouping directory instead, which would adopt a spurious second project and
+// sync it to the whole fleet.
+func TestAdoptFindingsNeverAdoptsAPlainFolderOverATrackedProject(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		nsPath string // the tracked project
+		plain  string // the plain_folder the scan then emits for it
+	}{
+		{name: "at the project's own path", nsPath: "emptied", plain: "emptied"},
+		{name: "at a grouping ancestor", nsPath: "work/emptied", plain: "work"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, root := newScanLoopEnv(t)
+			ctx := context.Background()
+
+			store, err := opts.openState(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.UpsertProject(ctx, state.UpsertProjectParams{
+				Path:          tc.nsPath,
+				Type:          "git_repo",
+				RemoteURL:     "https://github.com/acme/emptied.git",
+				RemoteKey:     "github.com/acme/emptied",
+				DefaultBranch: "main",
+				LocalPath:     filepath.Join(root, filepath.FromSlash(tc.nsPath)),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			closeStore(store)
+
+			// The user deleted the checkout's contents; the directory remains.
+			if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(tc.nsPath)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			var stderr bytes.Buffer
+			if err := runLoopScanAdopt(ctx, &stderr, opts); err != nil {
+				t.Fatalf("scan+adopt: %v", err)
+			}
+
+			store, err = opts.openState(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer closeStore(store)
+			projects, err := store.ListProjects(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(projects) != 1 {
+				t.Fatalf("projects = %+v, want only the tracked one — a plain_folder finding for %q must be dropped", projects, tc.plain)
+			}
+			if projects[0].Type != "git_repo" || projects[0].RemoteKey != "github.com/acme/emptied" {
+				t.Fatalf("project = %+v, want git_repo with its remote preserved", projects[0])
+			}
+		})
+	}
+}

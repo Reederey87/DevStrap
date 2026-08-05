@@ -53,8 +53,11 @@ type Duplicate struct {
 }
 
 type Options struct {
-	IncludePlainFolders bool
-	Git                 dsgit.Runner
+	// IncludeNonGit classifies directories that are not git repositories —
+	// draft_project and plain_folder. Every production call site passes true;
+	// false yields a git-only scan.
+	IncludeNonGit bool
+	Git           dsgit.Runner
 	// Ignore overrides the compiled ignore policy used to prune directories.
 	// When nil, Walk compiles the root's .devstrapignore itself (falling back
 	// to defaults with a warning on a compile error). Tests inject a Matcher
@@ -90,6 +93,7 @@ func Walk(ctx context.Context, root string, opts Options) (Result, error) {
 	prunedDirs := 0
 	seenKeys := map[string]string{}
 	remotePaths := map[string][]string{}
+	var plainCandidates, claimed []string
 	err = filepath.WalkDir(cleanRoot, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("%s: %v", relOrBase(cleanRoot, path), walkErr))
@@ -185,14 +189,35 @@ func Walk(ctx context.Context, root string, opts Options) (Result, error) {
 			result.Findings = append(result.Findings, f)
 			return filepath.SkipDir
 		}
-		if opts.IncludePlainFolders && looksLikeProject(path) {
+		if opts.IncludeNonGit && HasSkeletonMarker(path) {
+			// An un-materialized project waiting for content, already in the
+			// namespace with a richer type. Emitting nothing keeps the walk's
+			// existing behavior, but it must still be claimed: left unclaimed
+			// it looks like empty ground, and a grouping ancestor would be
+			// classified plain_folder and swallow the whole subtree.
+			claimed = append(claimed, pk.Display)
+			return filepath.SkipDir
+		}
+		if opts.IncludeNonGit && looksLikeProject(path) {
 			result.Findings = append(result.Findings, Finding{Path: pk.Display, Type: TypeDraftFolder})
 			return filepath.SkipDir
+		}
+		if opts.IncludeNonGit {
+			plainCandidates = append(plainCandidates, pk.Display)
 		}
 		return nil
 	})
 	if err != nil && !errors.Is(err, context.Canceled) {
 		return Result{}, err
+	}
+	// Only a walk that ran to completion can establish that a directory groups
+	// nothing. A cancelled walk still returns the findings it did make, but a
+	// candidate whose subtree it never reached would look like empty ground.
+	if opts.IncludeNonGit && err == nil {
+		for _, f := range result.Findings {
+			claimed = append(claimed, f.Path)
+		}
+		result.Findings = append(result.Findings, plainFolders(plainCandidates, claimed)...)
 	}
 	result.PrunedDirs = prunedDirs
 	for key, paths := range remotePaths {
@@ -209,6 +234,80 @@ func Walk(ctx context.Context, root string, opts Options) (Result, error) {
 	sort.Slice(result.Findings, func(i, j int) bool { return result.Findings[i].Path < result.Findings[j].Path })
 	sort.Slice(result.Duplicates, func(i, j int) bool { return result.Duplicates[i].RemoteKey < result.Duplicates[j].RemoteKey })
 	return result, err
+}
+
+// plainFolders turns candidate directories — those that are neither a git
+// repository nor a recognized project — into plain_folder findings (NOVCS-02),
+// so the namespace can carry "this path exists" for grouping folders,
+// documentation buckets, and local-only areas.
+//
+// The decision is deferred to here, after the walk, rather than taken inline
+// with a SkipDir. filepath.WalkDir is pre-order: when the walk first reaches
+// `work/` it cannot yet know that `work/acme/api-server` below it is a git
+// repo. Classifying a bare grouping directory on sight and skipping it would
+// hide every project underneath — the canonical managed tree is exactly that
+// shape — so the walk records candidates and keeps recursing (which also keeps
+// secret-file and symlink-escape detection alive inside them). Only now, with
+// every real finding known, do the directories that group nothing become
+// findings of their own, and only the topmost of a nested run: recording
+// `notes/` says everything that also recording `notes/2026/` would.
+//
+// claimed holds every path the walk accounted for — the real findings plus
+// materialization skeletons, which are emitted as nothing but are emphatically
+// not empty ground.
+func plainFolders(candidates, claimed []string) []Finding {
+	groups := make(map[string]bool)
+	for _, path := range claimed {
+		for _, ancestor := range pathAncestors(path) {
+			groups[ancestor] = true
+		}
+	}
+	leaves := make(map[string]bool, len(candidates))
+	for _, candidate := range candidates {
+		if !groups[candidate] {
+			leaves[candidate] = true
+		}
+	}
+	plain := make([]Finding, 0, len(leaves))
+	for _, candidate := range candidates {
+		if !leaves[candidate] || hasAncestorIn(leaves, candidate) {
+			continue
+		}
+		plain = append(plain, Finding{Path: candidate, Type: TypePlainFolder})
+	}
+	return plain
+}
+
+// pathAncestors returns every proper ancestor of a root-relative slash path:
+// "a/b/c" yields "a" and "a/b". Splitting on the separator keeps the test at
+// segment boundaries, so "a/bc" is never an ancestor of "a/bcd".
+func pathAncestors(path string) []string {
+	var ancestors []string
+	for i := 0; i < len(path); i++ {
+		if path[i] == '/' {
+			ancestors = append(ancestors, path[:i])
+		}
+	}
+	return ancestors
+}
+
+func hasAncestorIn(set map[string]bool, path string) bool {
+	for _, ancestor := range pathAncestors(path) {
+		if set[ancestor] {
+			return true
+		}
+	}
+	return false
+}
+
+// HasSkeletonMarker reports whether a directory carries DevStrap's
+// materialization placeholder — the marker `hydrate` writes for a project whose
+// content has not arrived yet. It is the marker test only; a caller deciding
+// whether the directory is safe to overwrite must additionally check that
+// nothing else lives there.
+func HasSkeletonMarker(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, ".devstrap", "placeholder.json"))
+	return err == nil
 }
 
 func looksLikeProject(path string) bool {

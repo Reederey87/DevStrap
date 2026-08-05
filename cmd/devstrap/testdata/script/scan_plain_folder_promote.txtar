@@ -1,0 +1,72 @@
+# NOVCS-02: `scan --adopt` now EMITS plain_folder, closing the round trip that
+# `promote` (NOVCS-03) already had the far half of. Before this, `plain_folder`
+# was defined but never assigned, so the only way to reach the type was to sync
+# from a device that somehow already had one — nothing created it locally.
+#
+# The script asserts the classification policy as well as the round trip,
+# because the policy is what makes the feature safe. A directory becomes a
+# plain_folder only when it groups nothing: `work` and `work/acme` are bare
+# directories with no manifest, and classifying either of them on sight would
+# hide the api-server repo underneath. That is the canonical managed tree, so
+# the grouping assertions below are the regression guard for the whole feature.
+
+env DEVSTRAP_NO_KEYCHAIN=1
+env GIT_AUTHOR_NAME=devstrap-test
+env GIT_AUTHOR_EMAIL=test@example.com
+env GIT_COMMITTER_NAME=devstrap-test
+env GIT_COMMITTER_EMAIL=test@example.com
+
+# The promotion target: an EMPTY bare remote (promote refuses one holding refs).
+exec git init --bare -b main $WORK/notes.git
+
+exec devstrap --home=$WORK/home --root=$WORK/Code init
+
+# A real repo two grouping levels down, so `work` and `work/acme` are bare
+# directories that the walk must descend through rather than classify.
+exec git init --bare -b main $WORK/api.git
+exec git clone $WORK/api.git $WORK/Code/work/acme/api-server
+exec sh -c 'echo api > $WORK/Code/work/acme/api-server/README.md'
+exec sh -c 'cd $WORK/Code/work/acme/api-server && git add README.md && git commit -m init'
+
+# A local-only folder beside it: no git, no recognized manifest. THE new case.
+mkdir $WORK/Code/work/acme/notes
+exec sh -c 'echo meeting > $WORK/Code/work/acme/notes/2026-08-05.md'
+
+# A nested local-only tree: only the TOPMOST directory is recorded, because
+# `inbox` already says the path exists and `inbox/2026/jan` adds nothing.
+mkdir $WORK/Code/inbox/2026/jan
+exec sh -c 'echo draft > $WORK/Code/inbox/2026/jan/note.md'
+
+exec devstrap --home=$WORK/home --root=$WORK/Code scan --adopt
+
+# The repo is still discovered: the grouping directories above it were walked
+# through, not classified and skipped.
+exec devstrap --home=$WORK/home --root=$WORK/Code status
+stdout 'work/acme/api-server\s+git_repo'
+! stdout '^work\s'
+! stdout '^work/acme\s'
+
+# The new emissions: the leaf area, and the topmost of the nested run only.
+stdout 'work/acme/notes\s+plain_folder'
+stdout 'inbox\s+plain_folder'
+! stdout 'inbox/2026'
+
+# Round trip: the type scan now produces is the type promote consumes. Nothing
+# but scan created this row, so this is the full local lifecycle.
+exec devstrap --home=$WORK/home --root=$WORK/Code promote work/acme/notes --git-remote=$WORK/notes.git
+stdout 'plain_folder -> git_repo'
+
+exec devstrap --home=$WORK/home --root=$WORK/Code status
+stdout 'work/acme/notes\s+git_repo'
+
+# The promotion really pushed the folder's content, it did not just retype a row.
+exec sh -c 'test "$(git -C $WORK/notes.git rev-list --count main)" = 1'
+exec sh -c 'git -C $WORK/notes.git show --name-only --format= main'
+stdout '2026-08-05.md'
+
+# A second scan is idempotent: the promoted project is a git_repo now, and the
+# still-plain `inbox` is not re-adopted as a duplicate.
+exec devstrap --home=$WORK/home --root=$WORK/Code scan --adopt
+exec devstrap --home=$WORK/home --root=$WORK/Code status
+stdout 'work/acme/notes\s+git_repo'
+stdout 'inbox\s+plain_folder'

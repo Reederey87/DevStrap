@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -44,17 +45,19 @@ func newScanCommand(stdout io.Writer, opts *options) *cobra.Command {
 				// local_paths never carry a symlink-alias prefix.
 				rootAbs = wsRoot
 			}
-			result, err := scan.Walk(cmd.Context(), rootAbs, scan.Options{IncludePlainFolders: true})
+			result, err := scan.Walk(cmd.Context(), rootAbs, scan.Options{IncludeNonGit: true})
 			if err != nil {
 				return err
 			}
+			adopted := 0
 			if adopt && !dryRun {
 				store, err := opts.openState(cmd.Context())
 				if err != nil {
 					return err
 				}
 				defer closeStore(store)
-				if _, err := adoptFindings(cmd.Context(), store, rootAbs, result); err != nil {
+				adopted, err = adoptFindings(cmd.Context(), store, rootAbs, result)
+				if err != nil {
 					return err
 				}
 				for _, warning := range result.Warnings {
@@ -101,7 +104,7 @@ func newScanCommand(stdout io.Writer, opts *options) *cobra.Command {
 					opts.progressf(w, "Pruned %d directories per ignore rules (defaults + root .devstrapignore)\n", result.PrunedDirs)
 				}
 				if adopt && !dryRun {
-					opts.progressf(w, "Adopted %d projects\n", len(result.Findings))
+					opts.progressf(w, "Adopted %d projects\n", adopted)
 				}
 				return nil
 			}, result)
@@ -122,8 +125,15 @@ func isConflictWarning(warning string) bool {
 // `devstrap scan --adopt` and `devstrap init --scan` so the first-run epiphany
 // (the user's existing tree appearing) is one command.
 func adoptFindings(ctx context.Context, store *state.Store, rootAbs string, result scan.Result) (int, error) {
+	tracked, err := trackedPaths(ctx, store, result)
+	if err != nil {
+		return 0, err
+	}
 	adopted := 0
 	for _, finding := range result.Findings {
+		if finding.Type == scan.TypePlainFolder && overlapsTrackedPath(tracked, finding.Path) {
+			continue
+		}
 		localPath := filepath.Join(rootAbs, filepath.FromSlash(finding.Path))
 		materialization := "available"
 		dirty := "unknown"
@@ -163,6 +173,50 @@ func adoptFindings(ctx context.Context, store *state.Store, rootAbs string, resu
 		adopted++
 	}
 	return adopted, nil
+}
+
+// trackedPaths lists the namespace paths of projects already in local state,
+// but only when the scan actually produced a plain_folder finding — every other
+// adoption is unaffected by it, and the common scan has none.
+func trackedPaths(ctx context.Context, store *state.Store, result scan.Result) ([]string, error) {
+	if !slices.ContainsFunc(result.Findings, func(f scan.Finding) bool { return f.Type == scan.TypePlainFolder }) {
+		return nil, nil
+	}
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(projects))
+	for _, p := range projects {
+		paths = append(paths, p.Path)
+	}
+	return paths, nil
+}
+
+// overlapsTrackedPath reports whether the namespace already tracks a project at
+// this path or beneath it, in which case a `plain_folder` finding for it must
+// be dropped (NOVCS-02).
+//
+// `plain_folder` is the weakest claim the scanner can make — "a directory is
+// here and nothing in it identified itself" — and the scanner is deliberately
+// state-free, so it cannot tell empty ground from a project whose content is
+// missing. A git_repo whose checkout the user deleted looks exactly like a
+// plain folder, and re-stamping it would discard the remote URL, the one thing
+// local state holds that the filesystem does not. The path-beneath case is the
+// same mistake one level up: a grouping directory whose only project has an
+// empty directory would otherwise be adopted as a plain folder in its own
+// right, and that spurious entry would sync to the whole fleet.
+//
+// This never blocks a promotion in the other direction — a plain folder that
+// became a repo is a git_repo finding, not a plain_folder one — and `promote`
+// remains the deliberate way to change a type.
+func overlapsTrackedPath(tracked []string, path string) bool {
+	for _, t := range tracked {
+		if t == path || strings.HasPrefix(t, path+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // adoptNewFindings adopts only findings that are not already present in local

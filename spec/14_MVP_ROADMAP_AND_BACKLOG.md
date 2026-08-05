@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-05
 tracks_code: [cmd/**, internal/**, .github/**, docs/audits/AUDIT_RECOMMENDATIONS.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # MVP Roadmap and Backlog
@@ -587,7 +587,7 @@ Workstreams added by the second-pass design & implementation audit (`docs/audits
 - **Secret hydration unsafe writer** (`SECR-01/02/05`) is shipped: safe quoting, generated header, `0600` atomic write, and ignore-before-write are implemented. Remaining work is routing ignore updates through the planned `.devstrapignore` compiler.
 - **Key custody silent downgrade** (`SECR-04`/`SECU-01`) is shipped for present-but-failing keychains; Linux Secret Service/headless integration coverage remains under `XP-03`.
 - **Forge-aware `agent pr`** (`FORGE-01/02/03`) is shipped for GitHub/GitLab/Gitea/Azure key folding and graceful fallback. Remaining work is `doctor` probes, self-hosted overrides, native Bitbucket/Azure clients where useful, and broader fake-CLI tests (`FORGE-04/05`).
-- **No-remote repo corruption** (`NOVCS-01`) is shipped: scanner classifies no-remote/unvalidated remotes as `local_git`; `promote` (`NOVCS-03`) is shipped (2026-08-01); remaining non-git work is scan-side `plain_folder` emission and draft bundle materialization (`NOVCS-02`/`NOVCS-04`/`NOVCS-05`, `DRAFT-*`).
+- **No-remote repo corruption** (`NOVCS-01`) is shipped: scanner classifies no-remote/unvalidated remotes as `local_git`; `promote` (`NOVCS-03`) is shipped (2026-08-01); scan-side `plain_folder` emission (`NOVCS-02`) is shipped (2026-08-05), closing the local scan → promote round trip. Remaining non-git work is remote preflight and draft bundle materialization (`NOVCS-04`/`NOVCS-05`, `DRAFT-*`).
 - **CI fragility** (`CI-01`) is shipped: `govulncheck` is pinned/split.
 
 ### Cross-machine working-state sync (the "forgot to push" feature)
@@ -596,7 +596,7 @@ Workstreams added by the second-pass design & implementation audit (`docs/audits
 - **Layer C — encrypted bundles** (Phase 3): build out `draft.snapshot.created` for non-git/draft folders.
 
 ### Non-VCS / forge support
-- Non-VCS/remote-less/multi-remote handling (`NOVCS-02`/`NOVCS-04`/`NOVCS-05`): `plain_folder` emission and remote preflight. The `promote` command (`NOVCS-03`) shipped 2026-08-01.
+- Non-VCS/remote-less/multi-remote handling (`NOVCS-04`/`NOVCS-05`): remote preflight. The `promote` command (`NOVCS-03`) shipped 2026-08-01 and scan-side `plain_folder` emission (`NOVCS-02`) shipped 2026-08-05.
 - Forge-agnostic PR via a `Forge` interface (`FORGE-02..05`): `gh`/`glab`/`tea`, token allowlist, Azure key folding, `doctor` probe.
 
 ### Sync hub (Phase 2)

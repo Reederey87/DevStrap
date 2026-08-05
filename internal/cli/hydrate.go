@@ -16,6 +16,7 @@ import (
 	"github.com/Reederey87/DevStrap/internal/logging"
 	"github.com/Reederey87/DevStrap/internal/pathkey"
 	"github.com/Reederey87/DevStrap/internal/redact"
+	"github.com/Reederey87/DevStrap/internal/scan"
 	"github.com/Reederey87/DevStrap/internal/state"
 	"github.com/spf13/cobra"
 )
@@ -374,7 +375,7 @@ func writeSkeleton(path, nsPath, remote string) error {
 }
 
 func isSkeleton(path string) bool {
-	if _, err := os.Stat(filepath.Join(path, ".devstrap", "placeholder.json")); err != nil {
+	if !scan.HasSkeletonMarker(path) {
 		return false
 	}
 	entries, err := os.ReadDir(path)
