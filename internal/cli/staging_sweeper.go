@@ -20,6 +20,18 @@ import (
 const stagingOrphanMinAge = time.Hour
 const stagingSweepLastSuccessKey = "staging_sweep_last_success"
 
+const (
+	// P11-SWEEP-01: the sweep has its OWN cadence key. It used to read
+	// wip.gc_interval, so turning off WIP-ref GC — a recovery-plane decision —
+	// silently restored the unbounded disk growth this sweep exists to prevent.
+	stagingSweepIntervalKey     = "staging.sweep_interval"
+	defaultStagingSweepInterval = 24 * time.Hour
+)
+
+func stagingSweepInterval(opts *options) (time.Duration, error) {
+	return parseMaintenanceDuration(opts, stagingSweepIntervalKey, defaultStagingSweepInterval)
+}
+
 type stagingSweepAction struct {
 	Path    string
 	Removed bool
@@ -178,7 +190,7 @@ func sweepStagingOrphans(ctx context.Context, store *state.Store, opts *options,
 }
 
 func maybeSweepStagingOrphansAfterSync(ctx context.Context, stderr io.Writer, opts *options, store *state.Store, now time.Time) (int, error) {
-	interval, err := wipGCInterval(opts)
+	interval, err := stagingSweepInterval(opts)
 	if err != nil {
 		return 0, err
 	}

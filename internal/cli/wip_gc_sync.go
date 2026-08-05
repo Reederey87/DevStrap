@@ -21,14 +21,14 @@ const (
 )
 
 func wipGCInterval(opts *options) (time.Duration, error) {
-	return parseWipDuration(opts, wipGCIntervalKey, defaultWipGCInterval)
+	return parseMaintenanceDuration(opts, wipGCIntervalKey, defaultWipGCInterval)
 }
 
 func wipTTL(opts *options) (time.Duration, error) {
-	return parseWipDuration(opts, wipTTLConfigKey, defaultWipGCTTL)
+	return parseMaintenanceDuration(opts, wipTTLConfigKey, defaultWipGCTTL)
 }
 
-func parseWipDuration(opts *options, key string, defaultValue time.Duration) (time.Duration, error) {
+func parseMaintenanceDuration(opts *options, key string, defaultValue time.Duration) (time.Duration, error) {
 	raw := strings.TrimSpace(opts.v.GetString(key))
 	if raw == "" {
 		return defaultValue, nil
@@ -38,7 +38,7 @@ func parseWipDuration(opts *options, key string, defaultValue time.Duration) (ti
 		return 0, appError{code: exitInvalidConfig, err: fmt.Errorf("invalid %s %q: %w", key, raw, err)}
 	}
 	if d < 0 {
-		return 0, appError{code: exitInvalidConfig, err: fmt.Errorf("invalid %s %q: must be >= 0 (0 disables WIP GC)", key, raw)}
+		return 0, appError{code: exitInvalidConfig, err: fmt.Errorf("invalid %s %q: must be >= 0 (0 disables)", key, raw)}
 	}
 	return d, nil
 }

@@ -41,6 +41,37 @@ Follow-ups:
 - <remaining work, or "None">
 ```
 
+## 2026-08-05 — the disk-growth sweep rode the recovery plane's config key (P11-SWEEP-01)
+
+Changed:
+- `internal/cli/staging_sweeper.go`: new `staging.sweep_interval` key (default 24h; `0` disables) replaces the borrowed `wipGCInterval(opts)` read.
+- `internal/cli/wip_gc_sync.go`: `parseWipDuration` → `parseMaintenanceDuration`, now shared by both subsystems; its negative-value message no longer says "0 disables WIP GC" when the key is not a WIP key.
+- `internal/cli/sync.go`: the call site stops discarding the sweep's error and warns in the sweep's own voice.
+- `internal/cli/root.go`: the new key's default.
+- `spec/11` (`W13-05` section), `spec/13` (`W13-05` section + config reference); both `last_reviewed` bumped.
+- `docs/audits/README.md`: `P11-SWEEP-01` moved from the Pass-11 open table to *Recently shipped*; header and index counts 5→4 open.
+
+**The third appearance of one shape, in code written after the fix for the second.** `P9-WIP-05` recorded that two unrelated subsystems shared a failure mode because one ran first. `W13-05` then attached a *third* subsystem — the clone-staging orphan sweep — to `wip.gc_interval`, a key `spec/13` and `spec/07` both document as scoped to WIP GC. So `wip.gc_interval: 0`, a recovery-plane decision, silently restored the unbounded disk growth the sweep exists to prevent, and an invalid value (`"30d"`, the same typo as `P9-WIP-05`, since Go's `ParseDuration` has no day unit) stopped the sweep forever while the only visible error came from `maybeGCWipRefsAfterSync` and named WIP GC. An operator debugging that message had no reason to suspect a second sweep had also stopped.
+
+A shared *default* (24h) is fine; a shared *key* is the defect, because a key is where a user expresses intent about one subsystem. Both halves are mutation-checked: restoring `wipGCInterval(opts)` fails `TestStagingSweepIgnoresWipGCInterval` with `removed 0 orphan(s) with wip.gc_interval=0, want 1`, and restoring the `_, _ =` discard fails `TestInvalidStagingSweepIntervalWarnsNamingTheSweep` with an empty stderr. That second test drives the real binary through `executeForTest` and sets the value via `DEVSTRAP_STAGING_SWEEP_INTERVAL`, so it proves the viper env/default wiring too, not just the parse helper.
+
+**Review caught a vacuous assertion inside the fix for a vacuum.** The "`0` still disables" case was originally the second half of `TestStagingSweepIgnoresWipGCInterval`, reusing that test's fixture — but the sweep in its first half had already written `staging_sweep_last_success`, so a build that ignored `staging.sweep_interval: 0` entirely and fell back to the 24h default would have returned `0` anyway via `maintenanceDue`'s "not due" branch. The assertion could not fail for the reason it named. It is now `TestStagingSweepIntervalZeroDisablesTheSweep` on a **fresh** fixture with no success marker, and it asserts the candidate still exists rather than only that the count is zero; deleting the `if interval == 0` gate now fails it with `removed 1, err <nil>`.
+
+Validated:
+- `gofmt -w cmd internal`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `go test -race ./...`.
+- Three mutation checks, each failing with the quoted output above.
+- Independent review pass (Codex), which is what found the vacuous assertion.
+
+Follow-ups:
+- None. The Pass-11 audit (#288) merged first, so this PR owes the ledger reconciliation under convention 3a and carries it: the open row removed and the *Recently shipped* row added in the same commit, never one without the other.
+- **Process note for the rest of this wave.** Four sibling PRs raced the same open table; this one rebased three times, and each rebase conflicted on `spec/18` *and* eventually on the ledger. The count was re-derived by counting the surviving rows after every resolution, never carried forward as arithmetic — the header would otherwise have read `6 open` against a four-row table, and convention 3a's own note says the header-equals-rows check cannot catch a stale count reached by deletion. Merging this batch serially is the fix.
+
+
+
+
+
+
+
 ## 2026-08-05 — logic that lives in a RunE closure has exactly one possible caller (AD5-07 PR A)
 
 Changed:

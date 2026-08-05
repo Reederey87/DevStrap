@@ -267,7 +267,13 @@ func runSyncCycle(ctx context.Context, stdout, stderr io.Writer, opts *options, 
 	}
 	// sync always materializes with a blobless/partial clone (EAGER-01).
 	results := materializePass(ctx, store, opts, projects, true)
-	_, _ = maybeSweepStagingOrphansAfterSync(ctx, stderr, opts, store, time.Now())
+	// P11-SWEEP-01: disk hygiene is never a correctness gate, so a bad
+	// staging.sweep_interval warns and lets convergence finish — but it warns
+	// HERE, naming this sweep. Discarding it left WIP GC's error the only
+	// visible one, pointing an operator at the wrong subsystem.
+	if _, sweepErr := maybeSweepStagingOrphansAfterSync(ctx, stderr, opts, store, time.Now()); sweepErr != nil {
+		_, _ = fmt.Fprintf(stderr, "warning: staging-orphan sweep failed; sweep will retry: %s\n", scrubbed(sweepErr))
+	}
 	// HUB-05: reclaim locally-cached blobs no longer referenced.
 	if removed, gcErr := gcUnreferencedBlobs(ctx, store, opts.paths()); gcErr == nil && removed > 0 {
 		result.BlobsGCd = removed
