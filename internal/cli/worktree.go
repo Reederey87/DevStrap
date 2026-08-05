@@ -305,11 +305,15 @@ func resolveWorktreeDefaultBranch(ctx context.Context, warn io.Writer, r dsgit.R
 // a state.Worktree with fields not on that store type (project_path, the
 // idempotency markers, and any adoption warnings), so it is a named struct at
 // file scope per spec/13's rule (the worktreeStatusOutput pattern). It
-// deliberately has no schema_version field: that is a Pass-6 audit-doc
-// recommendation (docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md) that
-// was never adopted anywhere in the shipped --json contract — no sibling
-// result struct (worktreeStatusOutput, worktreeFinalizeResult, agentPRResult,
-// ...) carries one, so this does not invent a one-off convention here.
+// deliberately has no schema_version field, and the reason is scope, not a
+// claim about what siblings do: `worktree adopt` is not one of the
+// machine-contract surfaces spec/13 § Machine contract surfaces enumerates,
+// so adding one here would extend that list unreviewed rather than tidy up an
+// inconsistency. Note the field is NOT a proxy for membership in either
+// direction — several enumerated surfaces (`agent list`, `agent show`,
+// `status`, and `worktree list`, whose bare array has no object to carry one)
+// still have none, while agentAdoptResult carries one without being
+// enumerated. Only the enumeration decides.
 type worktreeAdoptResult struct {
 	state.Worktree
 	ProjectPath       string   `json:"project_path"`
@@ -696,15 +700,59 @@ func validLFSPolicy(policy string) bool {
 }
 
 type worktreeStatusOutput struct {
-	ID         string `json:"id"`
-	Path       string `json:"path"`
-	Branch     string `json:"branch"`
-	BaseRef    string `json:"base_ref"`
-	BaseSHA    string `json:"base_sha"`
-	CurrentSHA string `json:"current_sha"`
-	Fresh      bool   `json:"fresh"`
-	Behind     int    `json:"behind"`
-	DirtyState string `json:"dirty_state"`
+	SchemaVersion int    `json:"schema_version"`
+	ID            string `json:"id"`
+	Path          string `json:"path"`
+	Branch        string `json:"branch"`
+	BaseRef       string `json:"base_ref"`
+	BaseSHA       string `json:"base_sha"`
+	CurrentSHA    string `json:"current_sha"`
+	Fresh         bool   `json:"fresh"`
+	Behind        int    `json:"behind"`
+	DirtyState    string `json:"dirty_state"`
+}
+
+// worktreeStatusSchemaVersion is the contract version for
+// worktreeStatusOutput. Bump ONLY for an additive change; a field rename or
+// removal is a breaking change that needs a deliberate decision, not a bump
+// (spec/13 § Machine contract surfaces).
+const worktreeStatusSchemaVersion = 1
+
+// statusWorktree resolves a worktree row and grades it against its recorded
+// upstream base. It is the whole of `worktree status`'s domain logic, split
+// out of the cobra RunE so a non-CLI caller (the AD5-07 MCP server) invokes
+// the SAME function rather than a reimplementation — the RunE below keeps
+// only store lifecycle and rendering.
+//
+// A DirtyState probe failure is deliberately NOT an error: a worktree whose
+// dirtiness cannot be determined still has a meaningful freshness verdict, so
+// the state degrades to "unknown" exactly as it did inline.
+func statusWorktree(ctx context.Context, opts *options, store *state.Store, worktreeID string) (worktreeStatusOutput, error) {
+	wt, err := store.WorktreeByID(ctx, worktreeID)
+	if err != nil {
+		return worktreeStatusOutput{}, err
+	}
+	r := gitRunner(opts)
+	drift, err := r.BaseDrift(ctx, wt.Path, wt.BaseRef, wt.BaseSHA)
+	if err != nil {
+		return worktreeStatusOutput{}, appError{code: exitGit, err: err}
+	}
+	dirty, err := r.DirtyState(ctx, wt.Path)
+	if err != nil {
+		dirty = dsgit.DirtyUnknown
+	}
+	return worktreeStatusOutput{
+		SchemaVersion: worktreeStatusSchemaVersion,
+		ID:            wt.ID,
+		Path:          wt.Path,
+		Branch:        wt.Branch,
+		BaseRef:       wt.BaseRef,
+		BaseSHA:       wt.BaseSHA,
+		CurrentSHA:    drift.CurrentSHA,
+		Fresh:         drift.Fresh,
+		Behind:        drift.Behind,
+		DirtyState:    string(dirty),
+	}, nil
 }
 
 func newWorktreeStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
@@ -718,36 +766,16 @@ func newWorktreeStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			defer closeStore(store)
-			wt, err := store.WorktreeByID(cmd.Context(), args[0])
+			out, err := statusWorktree(cmd.Context(), opts, store, args[0])
 			if err != nil {
 				return err
 			}
-			r := gitRunner(opts)
-			drift, err := r.BaseDrift(cmd.Context(), wt.Path, wt.BaseRef, wt.BaseSHA)
-			if err != nil {
-				return appError{code: exitGit, err: err}
-			}
-			dirty, err := r.DirtyState(cmd.Context(), wt.Path)
-			if err != nil {
-				dirty = dsgit.DirtyUnknown
-			}
-			out := worktreeStatusOutput{
-				ID:         wt.ID,
-				Path:       wt.Path,
-				Branch:     wt.Branch,
-				BaseRef:    wt.BaseRef,
-				BaseSHA:    wt.BaseSHA,
-				CurrentSHA: drift.CurrentSHA,
-				Fresh:      drift.Fresh,
-				Behind:     drift.Behind,
-				DirtyState: string(dirty),
-			}
 			return opts.render(stdout, func(w io.Writer) error {
 				status := "fresh"
-				if !drift.Fresh {
-					status = fmt.Sprintf("stale (behind %d)", drift.Behind)
+				if !out.Fresh {
+					status = fmt.Sprintf("stale (behind %d)", out.Behind)
 				}
-				_, err = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", wt.ID, status, wt.BaseRef, drift.CurrentSHA, dirty)
+				_, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", out.ID, status, out.BaseRef, out.CurrentSHA, out.DirtyState)
 				return err
 			}, out)
 		},
@@ -817,6 +845,22 @@ func finalizationBaseDrift(ctx context.Context, opts *options, wt state.Worktree
 	return drift, nil
 }
 
+// listWorktrees returns every active worktree row. It is a thin pass-through
+// today, and exists as a named function only so the AD5-07 MCP server calls
+// the same entry point the CLI does instead of reaching into the store on its
+// own — the "no second execution path" rule holds even where the path is one
+// line long, because that is precisely where a divergent reimplementation is
+// cheapest to write.
+//
+// The return type is []state.Worktree, NOT a versioned envelope: `worktree
+// list --json` has always emitted a bare JSON array, and wrapping it in an
+// object would be a breaking shape change rather than the additive evolution
+// spec/13 § Machine contract surfaces permits. An MCP tool that wants an
+// envelope wraps this result itself, for its own separate consumer.
+func listWorktrees(ctx context.Context, store *state.Store) ([]state.Worktree, error) {
+	return store.ListWorktrees(ctx)
+}
+
 func newWorktreeListCommand(stdout io.Writer, opts *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
@@ -827,7 +871,7 @@ func newWorktreeListCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			defer closeStore(store)
-			worktrees, err := store.ListWorktrees(cmd.Context())
+			worktrees, err := listWorktrees(cmd.Context(), store)
 			if err != nil {
 				return err
 			}
