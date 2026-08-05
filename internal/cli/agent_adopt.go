@@ -38,6 +38,22 @@ type agentFinishResult struct {
 // agentFinishSchemaVersion is the contract version for agentFinishResult.
 const agentFinishSchemaVersion = 1
 
+// requiredAgentAdoptField trims a required `agent adopt` identity field and
+// returns the trimmed value, or the usage error naming the flag. It is the
+// single definition of that rule: both the cobra RunE (which must keep its
+// checks where they are, so their order relative to the flag-combination
+// checks stays observable) and adoptAgentRun (which must not trust a non-CLI
+// caller) call it, so the two cannot drift apart. The error text names a flag
+// because that is the pre-existing message and the CLI is the path that
+// reaches it.
+func requiredAgentAdoptField(flag, value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", appError{code: exitUsage, err: fmt.Errorf("--%s is required", flag)}
+	}
+	return trimmed, nil
+}
+
 func newAgentAdoptCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var engine string
 	var task string
@@ -52,9 +68,9 @@ func newAgentAdoptCommand(stdout io.Writer, opts *options) *cobra.Command {
 		Short: "Register an agent run against a worktree a real harness (Claude Code/Cursor/Codex) already created and ran in",
 		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			engine = strings.TrimSpace(engine)
-			if engine == "" {
-				return appError{code: exitUsage, err: fmt.Errorf("--engine is required")}
+			var err error
+			if engine, err = requiredAgentAdoptField("engine", engine); err != nil {
+				return err
 			}
 			// --allow-shallow only reaches worktree adoption, so passing it
 			// without --adopt-worktree cannot do anything. Refuse rather than
@@ -63,9 +79,8 @@ func newAgentAdoptCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if cmd.Flags().Changed("allow-shallow") && !adoptWorktree {
 				return appError{code: exitUsage, err: fmt.Errorf("--allow-shallow only applies when --adopt-worktree registers the worktree; the worktree named here is already registered, so its base was recorded when it was adopted")}
 			}
-			task = strings.TrimSpace(task)
-			if task == "" {
-				return appError{code: exitUsage, err: fmt.Errorf("--task is required")}
+			if task, err = requiredAgentAdoptField("task", task); err != nil {
+				return err
 			}
 			if cmd.Flags().Changed("pid") && pid <= 0 {
 				return appError{code: exitUsage, err: fmt.Errorf("--pid must be a positive process id")}
@@ -75,73 +90,12 @@ func newAgentAdoptCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			defer closeStore(store)
-
-			wt, lookupErr := resolveAgentAdoptWorktree(cmd.Context(), opts, store, args[0], projectFlag)
-			var warnings []string
-			if lookupErr != nil {
-				if !adoptWorktree {
-					return appError{code: exitUsage, err: fmt.Errorf("%s is not a registered worktree (%w); pass --adopt-worktree to register it first", args[0], lookupErr)}
-				}
-				var outcome adoptOutcome
-				var adoptErr error
-				wt, _, outcome, adoptErr = adoptWorktreeAt(cmd.Context(), cmd.ErrOrStderr(), opts, store, args[0], projectFlag, baseRefFlag, allowShallow)
-				if adoptErr != nil {
-					return adoptErr
-				}
-				warnings = outcome.Warnings
-			}
-
-			runID, err := id.New("arun")
+			out, err := adoptAgentRun(cmd.Context(), cmd.ErrOrStderr(), opts, store, args[0], engine, task, logPath, projectFlag, baseRefFlag, pid, adoptWorktree, allowShallow)
 			if err != nil {
 				return err
 			}
-			run := state.AgentRun{
-				ID:          runID,
-				NamespaceID: wt.NamespaceID,
-				WorktreeID:  wt.ID,
-				Engine:      engine,
-				Task:        task,
-				Status:      "running",
-				BaseRef:     wt.BaseRef,
-				BaseSHA:     wt.BaseSHA,
-				Branch:      wt.Branch,
-				LogPath:     logPath,
-			}
-			// --pid has NO default: a harness that shells out to invoke this
-			// command has a PPID that is a transient shell about to exit, so
-			// guessing os.Getppid()/os.Getpid() here would flip a healthy run
-			// to "interrupted" on the very next sweep. Only record an
-			// identity when the caller explicitly names the harness's own
-			// pid; processStartTime failing is not fatal — the PID is still
-			// recorded, just with PID-only staleness semantics (startedAt==0,
-			// see processIdentityAlive).
-			if cmd.Flags().Changed("pid") {
-				run.RunnerPID = pid
-				startedAt, _ := processStartTime(pid)
-				run.RunnerStartedAt = startedAt
-			}
-			// P8-ADOPT-04: hold the project's repo lock across the insert, the
-			// same P7-GIT-01/02 discipline `agent run` observes by holding it
-			// from worktree creation through InsertAgentRun. Without it there is
-			// a window in which `worktree cleanup --merged` can reap the very
-			// worktree this run is about to bind to — a freshly-provisioned
-			// worktree has tip == base_sha, so `git branch --merged` reports it
-			// merged (it IS an ancestor) and it is reap-eligible from creation
-			// until a run row exists. The harness's workspace would vanish
-			// mid-session, and a `running` run would be left bound to a removed
-			// worktree.
-			unlockRun, lockErr := acquireRepoLock(opts.paths().Home, wt.NamespaceID)
-			if lockErr != nil {
-				return lockErr
-			}
-			run, err = store.InsertAgentRun(cmd.Context(), run)
-			unlockRun()
-			if err != nil {
-				return err
-			}
-			out := agentAdoptResult{AgentRun: run, SchemaVersion: agentAdoptSchemaVersion, WorktreePath: wt.Path, Warnings: warnings}
 			return opts.render(stdout, func(w io.Writer) error {
-				_, err := fmt.Fprintf(w, "Adopted agent run %s (engine=%s) on worktree %s\n", run.ID, run.Engine, wt.Path)
+				_, err := fmt.Fprintf(w, "Adopted agent run %s (engine=%s) on worktree %s\n", out.ID, out.Engine, out.WorktreePath)
 				return err
 			}, out)
 		},
@@ -155,6 +109,117 @@ func newAgentAdoptCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&baseRefFlag, "base-ref", "", "explicit base ref passed through to worktree adoption when --adopt-worktree registers a new row")
 	cmd.Flags().BoolVar(&allowShallow, "allow-shallow", false, "with --adopt-worktree, adopt even though the repository is a shallow clone (recorded base_sha may be inaccurate); requires --adopt-worktree")
 	return cmd
+}
+
+// adoptAgentRun registers a `running` agent_runs row against the worktree
+// named by arg, optionally adopting that worktree first. It is the whole of
+// `agent adopt`'s domain logic, split out of the cobra RunE (AD5-07) so the
+// MCP server calls the SAME function the CLI does — a reimplementation would
+// be free to drift on the repo-lock discipline below, which is the part that
+// keeps a freshly-adopted worktree from being reaped out from under a live
+// harness.
+//
+// engine and task are re-validated here rather than trusted from the caller.
+// The CLI checks them in RunE too, and that duplication is deliberate: their
+// firing ORDER relative to the flag-combination checks is observable behavior
+// (an invocation with both an empty --engine and a stray --allow-shallow
+// reports the engine error today), so the RunE checks cannot MOVE — but they
+// can be backstopped. Both paths call requiredAgentAdoptField, so the rule has
+// one definition and cannot drift, and on the CLI path these calls are
+// unreachable because RunE returns before the store is even opened. Without
+// the backstop, an `engine TEXT NOT NULL` column that happily accepts "" would
+// let a non-CLI caller write a blank-engine `running` row into the provenance
+// registry — precisely the second, divergent execution path this extraction
+// exists to prevent.
+//
+// The `--allow-shallow` requires `--adopt-worktree` check is NOT duplicated:
+// it reads Flags().Changed(), and allowShallow without adoptWorktree is inert
+// here (it only reaches adoptWorktreeAt), so it is genuinely flag semantics.
+//
+// pid carries "unset" as 0 rather than a separate bool. That is not a shortcut
+// around cobra's Changed(): `--pid` has NO default precisely because a harness
+// that shells out has a PPID belonging to a transient wrapper shell about to
+// exit, so guessing one would flip a healthy run to "interrupted" on the very
+// next sweep — and RunE rejects an explicitly-passed `--pid <= 0` outright, so
+// on the CLI path "not positive" and "not passed" select the same invocations.
+// A negative pid is refused here rather than silently ignored, which narrows
+// the silent branch to exactly 0 == "caller does not know it".
+//
+// Errors are appError values carrying CLI exit codes. A non-CLI caller should
+// unwrap deliberately rather than surface an exit code as its own error type.
+func adoptAgentRun(ctx context.Context, stderr io.Writer, opts *options, store *state.Store, arg, engine, task, logPath, projectFlag, baseRefFlag string, pid int, adoptWorktree, allowShallow bool) (agentAdoptResult, error) {
+	engine, err := requiredAgentAdoptField("engine", engine)
+	if err != nil {
+		return agentAdoptResult{}, err
+	}
+	task, err = requiredAgentAdoptField("task", task)
+	if err != nil {
+		return agentAdoptResult{}, err
+	}
+	if pid < 0 {
+		return agentAdoptResult{}, appError{code: exitUsage, err: fmt.Errorf("pid must be a positive process id, or 0 when the caller does not know it; got %d", pid)}
+	}
+	wt, lookupErr := resolveAgentAdoptWorktree(ctx, opts, store, arg, projectFlag)
+	var warnings []string
+	if lookupErr != nil {
+		if !adoptWorktree {
+			return agentAdoptResult{}, appError{code: exitUsage, err: fmt.Errorf("%s is not a registered worktree (%w); pass --adopt-worktree to register it first", arg, lookupErr)}
+		}
+		var outcome adoptOutcome
+		var adoptErr error
+		wt, _, outcome, adoptErr = adoptWorktreeAt(ctx, stderr, opts, store, arg, projectFlag, baseRefFlag, allowShallow)
+		if adoptErr != nil {
+			return agentAdoptResult{}, adoptErr
+		}
+		warnings = outcome.Warnings
+	}
+
+	runID, err := id.New("arun")
+	if err != nil {
+		return agentAdoptResult{}, err
+	}
+	run := state.AgentRun{
+		ID:          runID,
+		NamespaceID: wt.NamespaceID,
+		WorktreeID:  wt.ID,
+		Engine:      engine,
+		Task:        task,
+		Status:      "running",
+		BaseRef:     wt.BaseRef,
+		BaseSHA:     wt.BaseSHA,
+		Branch:      wt.Branch,
+		LogPath:     logPath,
+	}
+	// Only record a runner identity when the caller explicitly named the
+	// harness's own pid (see the doc comment above on why there is no
+	// default). processStartTime failing is not fatal — the PID is still
+	// recorded, just with PID-only staleness semantics (startedAt==0, see
+	// processIdentityAlive).
+	if pid > 0 {
+		run.RunnerPID = pid
+		startedAt, _ := processStartTime(pid)
+		run.RunnerStartedAt = startedAt
+	}
+	// P8-ADOPT-04: hold the project's repo lock across the insert, the
+	// same P7-GIT-01/02 discipline `agent run` observes by holding it
+	// from worktree creation through InsertAgentRun. Without it there is
+	// a window in which `worktree cleanup --merged` can reap the very
+	// worktree this run is about to bind to — a freshly-provisioned
+	// worktree has tip == base_sha, so `git branch --merged` reports it
+	// merged (it IS an ancestor) and it is reap-eligible from creation
+	// until a run row exists. The harness's workspace would vanish
+	// mid-session, and a `running` run would be left bound to a removed
+	// worktree.
+	unlockRun, lockErr := acquireRepoLock(opts.paths().Home, wt.NamespaceID)
+	if lockErr != nil {
+		return agentAdoptResult{}, lockErr
+	}
+	run, err = store.InsertAgentRun(ctx, run)
+	unlockRun()
+	if err != nil {
+		return agentAdoptResult{}, err
+	}
+	return agentAdoptResult{AgentRun: run, SchemaVersion: agentAdoptSchemaVersion, WorktreePath: wt.Path, Warnings: warnings}, nil
 }
 
 // resolveAgentAdoptWorktree maps the `agent adopt` argument to an already
