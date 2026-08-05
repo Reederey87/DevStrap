@@ -50,6 +50,7 @@ func TestDraftSnapshotCreateRecordsOriginSnapshotRow(t *testing.T) {
 	}
 	if latest == nil {
 		t.Fatal("LatestDraftSnapshot is nil immediately after draft snapshot create")
+		return
 	}
 	refs, err := store.RetainedBlobRefs(ctx, 1)
 	if err != nil {

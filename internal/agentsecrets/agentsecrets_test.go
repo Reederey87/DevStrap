@@ -33,6 +33,7 @@ agent_secrets:
 	}
 	if policy == nil {
 		t.Fatal("policy = nil, want a loaded Policy")
+		return
 	}
 	wantAllow := []string{"GITHUB_TOKEN_READONLY", "API_BASE_URL"}
 	if !equalSlices(policy.Allow, wantAllow) {

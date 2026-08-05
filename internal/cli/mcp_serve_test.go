@@ -64,6 +64,7 @@ func TestMCPDestructiveHintPointersAreNotAliased(t *testing.T) {
 		p := notDestructiveHint()
 		if p == nil {
 			t.Fatal("notDestructiveHint returned nil")
+			return
 		}
 		if *p {
 			t.Fatal("notDestructiveHint returned true, want false")

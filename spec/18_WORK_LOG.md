@@ -41,6 +41,20 @@ Follow-ups:
 - <remaining work, or "None">
 ```
 
+## 2026-08-05 — CI-only staticcheck SA5011 on unrelated files, chased to a platform-nondeterminism false positive (AD5-07 PR B, addendum)
+
+Changed:
+- `internal/cli/mcp_serve_test.go`, `internal/cli/materialize_failure_test.go`, `internal/cli/draft_test.go`, `internal/cli/blob_gc_test.go`, `internal/agentsecrets/agentsecrets_test.go`: an explicit `return` added immediately after five pre-existing `t.Fatal`/`t.Fatalf` nil-guards, no other change.
+- `spec/15` (new tooling-note paragraph, not substantive — no `last_reviewed` bump).
+
+**CI's Go lint job failed 2/2 (including a manual retry) with staticcheck SA5011 in four files this PR never touched**, plus the same pattern in this PR's own new `mcp_serve_test.go`. `golangci-lint run` reported 0 issues locally on macOS/arm64 across two tool versions (v2.12.0, v2.12.2) with the cache cleared each time; a `GOOS=linux GOARCH=amd64` cross-build of the linter itself fails immediately (`exec format error` — a foreign-architecture binary cannot execute), and a `podman run --platform linux/amd64 golang:1.26.5` attempt to get a genuine native reproduction was OOM-killed mid-dependency-download before producing a verdict. The deciding evidence instead came from `gh pr checks`/`gh run list` on this PR's own branch: the immediately prior commit's CI run passed lint; the next commit — which touched only `mcp_serve.go`/`mcp_serve_test.go` — failed it, and every flagged line outside this PR's diff shared the exact same shape as the one inside it: `if x == nil { t.Fatal(...) }` with no explicit `return`, followed by a dereference of `x` in a later statement. This is the documented staticcheck SA5011 false-positive class (its interprocedural noreturn-inference for `t.Fatal` is not guaranteed, so the CFG edge from "after the Fatal call" to the next statement is sometimes not pruned) — not a real nil-dereference bug in any of the five sites (every guarded value is either freshly returned by a function proven non-nil or immediately followed by `t.Fatal`, same as before). An explicit `return` removes the ambiguous edge structurally, independent of analyzer version or platform. Root cause of *why this is CI-only* is not fully pinned down (most consistent with known map-iteration-order/analysis-budget nondeterminism in whole-package interprocedural checks, which can differ by architecture or container image) — recorded as a tooling note in `spec/15` rather than left silent, since the pattern (guard-then-dereference with no explicit return) recurs across this codebase's test suite and the next occurrence would hit the same trap.
+
+Validated:
+- `go build ./...`; `gofmt -l cmd internal` (clean); targeted `go test`/`go test -race` on every touched package (all pass, no assertion changed); `go run ./cmd/spec-drift --base origin/main --head HEAD` (passes after the `spec/15` touch, required because `internal/agentsecrets/**` maps there); local `golangci-lint run` (0 issues, as before — this fix cannot be locally verified against the actual failure, only pushed and re-checked on CI).
+
+Follow-ups:
+- If CI still fails after this push, the platform-nondeterminism hypothesis is wrong and needs revisiting from scratch rather than patched further blind.
+
 ## 2026-08-05 — `devstrap mcp serve`: five tools, the same functions the CLI calls (AD5-07 PR B)
 
 Changed:

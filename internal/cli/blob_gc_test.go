@@ -239,6 +239,7 @@ func TestRewrapDraftBlobRecordsOriginSupersedingSnapshot(t *testing.T) {
 	}
 	if latest == nil {
 		t.Fatal("LatestDraftSnapshot is nil after rewrap")
+		return
 	}
 	if latest.SourceEventID == "evt_old" || latest.SourceEventHLC == 0 {
 		t.Fatalf("latest snapshot = %+v, want superseding event row", latest)

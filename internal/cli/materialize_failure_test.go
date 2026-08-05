@@ -104,6 +104,7 @@ func TestMaterializeFailurePersistsLastError(t *testing.T) {
 	}
 	if statusProject == nil {
 		t.Fatalf("status --json missing project %q", nsPath)
+		return
 	}
 	if statusProject.LastError == "" {
 		t.Fatal("status --json last_error empty")
@@ -131,6 +132,7 @@ func TestMaterializeFailurePersistsLastError(t *testing.T) {
 	}
 	if matCheck == nil {
 		t.Fatalf("doctor --json missing check %q among %d results", wantName, len(checks))
+		return
 	}
 	if matCheck.Status != checkWarn {
 		t.Fatalf("doctor check status = %q, want %q", matCheck.Status, checkWarn)
