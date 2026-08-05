@@ -2,6 +2,7 @@ package scan
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -232,6 +233,119 @@ func TestScanReportsSecretsThroughCanonicalPredicate(t *testing.T) {
 	}
 }
 
+// TestWalkEmitsTopmostPlainFolderAndNeverItsChildren covers NOVCS-02: a
+// directory that is neither a git repo nor a recognized project becomes a
+// `plain_folder`, and only the topmost one of a nested run does — recording
+// `notes/` already says the path exists, so `notes/2026/jan` adds nothing.
+func TestWalkEmitsTopmostPlainFolderAndNeverItsChildren(t *testing.T) {
+	root := t.TempDir()
+	mustMkdir(t, filepath.Join(root, "notes", "2026", "jan"))
+	writeFile(t, filepath.Join(root, "notes", "2026", "jan", "standup.md"), "notes")
+	mustMkdir(t, filepath.Join(root, "inbox"))
+
+	result, err := Walk(context.Background(), root, Options{IncludeNonGit: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findingPaths(result, TypePlainFolder); !slices.Equal(got, []string{"inbox", "notes"}) {
+		t.Fatalf("plain folders = %v, want [inbox notes] — only the topmost of a nested run", got)
+	}
+	for _, f := range result.Findings {
+		if strings.HasPrefix(f.Path, "notes/") {
+			t.Fatalf("child of a plain folder reported as its own finding: %+v", result.Findings)
+		}
+	}
+}
+
+// TestWalkNeverClassifiesAGroupingDirectoryAsPlainFolder is the regression this
+// feature is one wrong line away from causing. `~/Code/work/acme/api-server` is
+// the canonical managed tree: `work` and `work/acme` are bare directories with
+// no manifest, so classifying a candidate on sight and skipping it would emit
+// `work` as a plain_folder and never discover the repo underneath. Only a leaf
+// area that groups nothing may be classified.
+func TestWalkNeverClassifiesAGroupingDirectoryAsPlainFolder(t *testing.T) {
+	root := t.TempDir()
+	initRepo(t, filepath.Join(root, "work", "acme", "api-server"), "git@github.com:acme/api-server.git")
+	mustMkdir(t, filepath.Join(root, "work", "acme", "scratch"))
+
+	result, err := Walk(context.Background(), root, Options{IncludeNonGit: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findingPaths(result, TypeGitRepo); !slices.Equal(got, []string{"work/acme/api-server"}) {
+		t.Fatalf("git repos = %v, want the nested repo to still be discovered", got)
+	}
+	if got := findingPaths(result, TypePlainFolder); !slices.Equal(got, []string{"work/acme/scratch"}) {
+		t.Fatalf("plain folders = %v, want only the leaf area; a grouping dir must never be classified", got)
+	}
+}
+
+// TestWalkNeverClassifiesAMaterializationSkeletonAsPlainFolder covers the other
+// half of the same hazard. A project added but not yet hydrated is an empty
+// skeleton on disk: indistinguishable from empty ground, so without the marker
+// check its grouping parent would be emitted as a plain_folder and swallow a
+// path the namespace already tracks as a git_repo.
+func TestWalkNeverClassifiesAMaterializationSkeletonAsPlainFolder(t *testing.T) {
+	root := t.TempDir()
+	skeleton := filepath.Join(root, "work", "proj")
+	mustMkdir(t, filepath.Join(skeleton, ".devstrap"))
+	writeFile(t, filepath.Join(skeleton, ".devstrap", "placeholder.json"), `{"state":"skeleton"}`)
+	writeFile(t, filepath.Join(skeleton, "README.devstrap.md"), "# DevStrap skeleton")
+
+	result, err := Walk(context.Background(), root, Options{IncludeNonGit: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Findings) != 0 {
+		t.Fatalf("findings = %+v, want none: a skeleton is an already-tracked project, and `work` above it is not empty ground", result.Findings)
+	}
+}
+
+// TestWalkIncludeNonGitFalseClassifiesOnlyGitRepos pins the renamed option: one
+// flag now gates both non-git classifications, so a git-only scan emits neither
+// a draft_project nor a plain_folder.
+func TestWalkIncludeNonGitFalseClassifiesOnlyGitRepos(t *testing.T) {
+	root := t.TempDir()
+	initRepo(t, filepath.Join(root, "repo"), "git@github.com:acme/api.git")
+	mustMkdir(t, filepath.Join(root, "bare"))
+	mustMkdir(t, filepath.Join(root, "manifested"))
+	writeFile(t, filepath.Join(root, "manifested", "go.mod"), "module example.com/m\n")
+
+	result, err := Walk(context.Background(), root, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := findingPaths(result, TypeGitRepo); !slices.Equal(got, []string{"repo"}) {
+		t.Fatalf("findings = %+v, want only the git repo", result.Findings)
+	}
+	if len(result.Findings) != 1 {
+		t.Fatalf("findings = %+v, want no non-git classifications", result.Findings)
+	}
+}
+
+func TestPathAncestorsSplitsOnSegmentBoundaries(t *testing.T) {
+	if got := pathAncestors("a/bc/d"); !slices.Equal(got, []string{"a", "a/bc"}) {
+		t.Fatalf("pathAncestors = %v, want [a a/bc]", got)
+	}
+	if got := pathAncestors("solo"); len(got) != 0 {
+		t.Fatalf("pathAncestors(solo) = %v, want none", got)
+	}
+	// "a/b" must not be read as an ancestor of "a/bc" by a bare prefix test.
+	if hasAncestorIn(map[string]bool{"a/b": true}, "a/bc") {
+		t.Fatal("a/b treated as an ancestor of a/bc — prefix test is not at a segment boundary")
+	}
+}
+
+func findingPaths(result Result, want Type) []string {
+	var paths []string
+	for _, f := range result.Findings {
+		if f.Type == want {
+			paths = append(paths, f.Path)
+		}
+	}
+	return paths
+}
+
 func TestShouldPruneDir(t *testing.T) {
 	cases := []struct {
 		name, rel string
@@ -300,4 +414,46 @@ func hasWarning(warnings []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// TestWalkCancelledMidWalkEmitsNoPlainFolder: only a completed walk can
+// establish that a directory groups nothing. A cancelled walk still returns the
+// findings it did make, and a candidate whose subtree it never reached would
+// look like empty ground.
+//
+// The cancellation has to land MID-walk to prove anything. A pre-cancelled
+// context aborts on the very first callback, before any candidate is recorded,
+// so it would pass with the guard removed.
+func TestWalkCancelledMidWalkEmitsNoPlainFolder(t *testing.T) {
+	root := t.TempDir()
+	mustMkdir(t, filepath.Join(root, "aaa"))
+	mustMkdir(t, filepath.Join(root, "bbb"))
+
+	// Calls 1 (the root) and 2 (aaa, recorded as a candidate) report healthy;
+	// the walk is then interrupted at bbb.
+	ctx := &cancelAfterNthCheck{Context: context.Background(), after: 2}
+	result, err := Walk(ctx, root, Options{IncludeNonGit: true})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if got := findingPaths(result, TypePlainFolder); len(got) != 0 {
+		t.Fatalf("plain folders = %v, want none: a partial walk cannot prove a directory groups nothing", got)
+	}
+}
+
+// cancelAfterNthCheck reports Canceled once Err has been consulted more than
+// `after` times, which is how the walk gets interrupted at a chosen directory
+// rather than before it starts.
+type cancelAfterNthCheck struct {
+	context.Context
+	after int
+	calls int
+}
+
+func (c *cancelAfterNthCheck) Err() error {
+	c.calls++
+	if c.calls > c.after {
+		return context.Canceled
+	}
+	return nil
 }

@@ -340,7 +340,7 @@ func runInit(cmd *cobra.Command, args []string, stdout io.Writer, opts *options,
 	// the existing scan/adopt path inline.
 	adopted := 0
 	if p.scanAdopt {
-		result, err := scan.Walk(cmd.Context(), paths.Root, scan.Options{IncludePlainFolders: true})
+		result, err := scan.Walk(cmd.Context(), paths.Root, scan.Options{IncludeNonGit: true})
 		if err != nil {
 			return fmt.Errorf("scan on init: %w", err)
 		}

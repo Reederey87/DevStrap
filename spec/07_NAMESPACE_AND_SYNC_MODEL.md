@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-05
 tracks_code: [internal/pathkey/**, internal/scan/**, internal/state/**, internal/sync/**, internal/fold/**, internal/workspacekeys/**, internal/devicekeys/**, internal/id/**, internal/pairing/**]
 ---
 # Namespace and Sync Model
@@ -223,7 +223,12 @@ Use for:
 - documentation buckets;
 - local-only areas.
 
-**Status:** `scan` still does not EMIT `plain_folder` — local-only folders without a recognized manifest are descended into and dropped. The type is reachable in a fleet through sync, and `devstrap promote --draft`/`--git-remote` graduates it out again (`NOVCS-03`, see *Promotion*); scan-side emission remains open.
+**Status:** shipped 2026-08-05 (`NOVCS-02`). `scan` emits `plain_folder`, so the local round trip is closed: scan creates the type and `devstrap promote --draft`/`--git-remote` graduates it out again (`NOVCS-03`, see *Promotion*).
+
+A directory is classified `plain_folder` only when it **groups nothing** — no git repo, recognized project, or materialization skeleton anywhere beneath it — and only the **topmost** directory of a nested run is recorded, since `notes/` already says the path exists and `notes/2026/jan` adds nothing. Both rules are load-bearing rather than tidiness:
+
+- The decision is deferred until the walk finishes. `filepath.WalkDir` is pre-order, so on first reaching `work/` the scanner cannot yet know that `work/acme/api-server` lies below it. Classifying a bare grouping directory on sight and skipping it would hide every project underneath — and that is the shape of the canonical managed tree. The walk therefore records candidates and keeps recursing, which also keeps secret-file and symlink-escape detection alive inside local-only folders.
+- `plain_folder` is the weakest claim the scanner can make, and the scanner is deliberately state-free. A `git_repo` whose checkout the user deleted is a bare empty directory, indistinguishable from empty ground. Two guards keep that from costing anything: the walk skips a directory carrying the materialization placeholder (an added-but-unhydrated project), and adoption drops a `plain_folder` finding for any path the namespace already tracks at or beneath it. Without the second, an emptied repo would be re-stamped `plain_folder` and lose its remote URL — the one thing local state holds that the filesystem does not.
 
 ### Content-sync status (type ↔ content)
 

@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-05
 tracks_code: [cmd/**, internal/cli/**, internal/daemon/**, internal/manifest/**, internal/platform/**]
 ---
 # CLI and Daemon API
@@ -240,7 +240,8 @@ Current implementation:
 - normalizes SSH, HTTPS, `ssh://`, absolute, and `file://` remotes;
 - `--adopt` writes namespace, git repo, draft project, and device project state rows, and is gated on the scanned root matching the workspace root (`P6-CLI-02`, shipped): `scan <other-dir> --adopt` refuses with `exitUsage` ("--adopt only adopts from the workspace root ..."), because adoption emits signed fleet-wide `project.added` events; the comparison resolves symlinks (a symlink alias of the real root is accepted, and adoption then uses the canonical root spelling) but deliberately does not case-fold — over-refusal is the safe direction; read-only scans of arbitrary directories keep working, and `devstrap add` remains the single-repo path;
 - escaping symlinks are hard-excluded (never adopted) and surfaced as conflict rows; dangling/IO symlink errors are advisory warnings only;
-- `--quarantine` moves secret-looking files out of the managed tree into a dated `~/.devstrap/quarantine/<YYYYMMDD>/` directory (mode `0600`) instead of leaving them in place.
+- `--quarantine` moves secret-looking files out of the managed tree into a dated `~/.devstrap/quarantine/<YYYYMMDD>/` directory (mode `0600`) instead of leaving them in place;
+- emits `plain_folder` for local-only directories (`NOVCS-02`, shipped 2026-08-05), closing the local round trip with `promote`. A directory is classified only when it **groups nothing** — no git repo, recognized project, or materialization skeleton beneath it — and only the topmost of a nested run is recorded. The classification is therefore resolved *after* the walk, not inline: `WalkDir` is pre-order, so skipping a bare grouping directory such as `work/` on sight would hide `work/acme/api-server` underneath it. See `07_NAMESPACE_AND_SYNC_MODEL.md` for the policy and the two guards that keep a `plain_folder` finding from overwriting a tracked project's remote. `Adopted N projects` counts what was adopted, which is now less than the finding count whenever such a finding is dropped.
 
 ### status
 

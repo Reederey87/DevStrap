@@ -150,7 +150,7 @@ func runLoopScanAdopt(ctx context.Context, stderr io.Writer, opts *options) erro
 	if err != nil {
 		return appError{code: exitInvalidConfig, err: err}
 	}
-	result, err := scan.Walk(ctx, rootAbs, scan.Options{IncludePlainFolders: true})
+	result, err := scan.Walk(ctx, rootAbs, scan.Options{IncludeNonGit: true})
 	if err != nil {
 		return err
 	}
