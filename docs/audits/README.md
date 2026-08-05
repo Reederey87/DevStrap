@@ -17,7 +17,7 @@ This directory holds DevStrap's chronological design & implementation audits. **
 | 7 | 2026-07-10 | [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md`](AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md) | Seventh pass: adversarial audit of the post-Pass-6 waves (git/folder hub carriers, OS sandbox, device-trust + env-sync propagation, distribution/service install) + commercial readiness | 47 (P1=1, P2=25, P3=21) | Open — see below |
 | 8 | 2026-07-31 | [`AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md`](AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md) | Eighth pass: the post-Pass-7 waves — AD-5 agent substrate, Milestone 5 daemon, working-state plane, plus security/data across all of it | 8 (P1=1, P2=5, P3=2) | Open — 7 of 8 open (`P8-ADOPT-01` shipped PR #258); **coverage is partial by declaration**, see below |
 | 9–10 | 2026-07-31 | [`AUDIT_RECOMMENDATIONS_2026-07-31_PASS9-10.md`](AUDIT_RECOMMENDATIONS_2026-07-31_PASS9-10.md) | Ninth: the working-state and daemon planes Pass 8 commissioned and never reported on. Tenth: hub carriers, blob plane, snapshot exchange — the largest surface no pass had reached | 8 (P1=0, P2=6, P3=2) + 0 | 1 open (`P9-WIP-03`, P3); Pass 10 clean, nothing above P3 |
-| 11 | 2026-08-05 | [`AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md`](AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md) | Eleventh: the three `W13` surfaces that shipped 2026-08-01 with zero adversarial review — `devstrap promote`, `workspace.yaml` export/import, and the clone-staging sweeper | 7 (P1=0, P2=2, P3=5) | Open — 3 of 7 open (`P11-MANIFEST-01`/`-02`/`-03`, `P11-SWEEP-01` shipped) |
+| 11 | 2026-08-05 | [`AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md`](AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md) | Eleventh: the three `W13` surfaces that shipped 2026-08-01 with zero adversarial review — `devstrap promote`, `workspace.yaml` export/import, and the clone-staging sweeper | 7 (P1=0, P2=2, P3=5) | Closed — 7/7 shipped (`P11-MANIFEST-01` PR #292; `P11-MANIFEST-02`/`-03` PR #293; `P11-SWEEP-01` PR #290; `P11-PROMOTE-01`/`-02`/`-03` PR #294) |
 
 ## Conventions (going forward)
 
@@ -30,7 +30,7 @@ This directory holds DevStrap's chronological design & implementation audits. **
 
 ## Open backlog — single source of truth for "what's left"
 
-Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely implemented or superseded (see `spec/18_WORK_LOG.md` for the shipped history); Passes 5, 6 and 8 are fully closed; the open backlog is concentrated in passes 4, 7 and 11.
+Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely implemented or superseded (see `spec/18_WORK_LOG.md` for the shipped history); Passes 5, 6, 8 and 11 are fully closed; the open backlog is concentrated in passes 4 and 7.
 
 > **2026-08-05 — Pass 11 landed.** The eleventh pass
 > ([`AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md`](AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md))
@@ -62,6 +62,17 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 > `git init` reusing a pre-existing `.git`'s hooks): `dsgit.IsRepo` is a bare
 > `.git`-exists check, so the guard it feeds already covers it. Every claim was
 > verified by the coordinator against the code before it counted.
+>
+> **2026-08-05 update — that refutation's reasoning was incomplete, found while
+> fixing `P11-PROMOTE-02` (PR #294).** `IsRepo`'s existence checks are
+> `os.Stat`-based and therefore FOLLOW symlinks, so it is not the bare
+> `.git`-exists check the refutation relied on: a **dangling** `.git` symlink
+> reads as "no repository here" and passes the guard, and `git init` then
+> follows the link and initializes the repository at its target — outside
+> everything `pathkey.VerifyWithinRoot` validated. The companion's conclusion
+> (the guard is inadequate) was closer to right than the refutation; only its
+> stated mechanism (hook reuse) was wrong. Closed by an `Lstat` gate in the same
+> PR.
 
 > **2026-07-31 — Pass 8 landed.** The eighth pass
 > ([`AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md`](AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md))
@@ -156,6 +167,7 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 
 | ID | Sev | Shipped | Note |
 |---|---|---|---|
+| P11-PROMOTE-01 / -02 / -03 | P2/P3/P3 | PR #294 (`fix/p11-promote-01-02-03`, 2026-08-05) | Two `promote` refusals named `devstrap add`, which `ensureHydratableTarget` refuses for any non-empty, non-skeleton directory — and every state those refusals are reachable from has a populated one, including the state a **failed** promotion leaves behind, where the retry lands. Both now name `devstrap scan --adopt`. The test that should have caught it stated the general property in its NAME while asserting it against one 400-byte window; it now walks every user-facing string in the file, folding `+` concatenations so a wrapped message cannot split the phrase in half. Also: the `.git` rollback moved ahead of `InitRepo` (a partial `.git` from a half-completed init wedged every retry), which exposed that `IsRepo` resolves symlinks — a **dangling `.git` symlink** passes the guard and `git init` follows it, initializing OUTSIDE the managed root; closed by an `Lstat` gate, which is also what makes the earlier-armed rollback safe. And `StagedFiles` reads `ls-files --stage` so the promotion refuses mode `160000`, instead of pushing a gitlink whose objects the remote never receives. Five mutation checks, including the split-literal evasion the review predicted. |
 | P11-SWEEP-01 | P3 | `fix/p11-sweep-01-own-interval` (2026-08-05, PR #290) | The clone-staging orphan sweep read `wip.gc_interval`, a key `spec/07` and `spec/13` both document as the **WIP recovery plane's** GC cadence — so `0` there, a recovery-plane decision, silently restored the unbounded disk growth `W13-05` exists to prevent, and an invalid value (`"30d"`; Go's `ParseDuration` has no day unit) stopped the sweep forever while the only visible error came from `maybeGCWipRefsAfterSync` and named WIP GC. **The third appearance of the `P9-WIP-05` shape, attached in code written after that fix shipped.** The sweep now owns `staging.sweep_interval` (default 24h; `0` disables) — a shared *default* is fine, a shared *key* is not, because a key is where a user expresses intent about one subsystem — and `sync.go` stops discarding the error, warning in the sweep's own voice. Three mutation checks. The Codex review pass caught a **vacuous assertion inside the fix for a vacuum**: the "`0` still disables" case reused a fixture whose earlier sweep had already written `staging_sweep_last_success`, so a build ignoring the new key entirely would have returned `0` anyway via `maintenanceDue`'s not-due branch; it is now its own test on a fresh fixture, asserting the candidate survives rather than only that the count is zero. |
 | P11-MANIFEST-02 / -03 | P3/P3 | PR #293 (`fix/p11-manifest-02-03-import-hardening`, 2026-08-05) | `import`'s clobber refusal read via `store.ProjectByPath` — the separate reader pool — before opening the `WithTx` whose `UpsertProject` then overwrote `remote_url`/`remote_key`; the lookup now runs on the `Tx`, so the `_txlock=immediate` write lock covers check and upsert as one step. `W13-02`'s own review had closed the *error* leg of this same refusal; the concurrency leg is the identical bug with the read simply somewhere the write could not see it. Same PR: `import` validated nothing it persisted, so `lfs_policy: alwyas` imported "successfully" and failed later at materialize time on whichever project first triggered an LFS operation — both fields now reuse the existing validators and a bad value skips the entry through `ErrPartialImport`. **The concurrency test passed against the broken code five runs in a row** before being rewritten to hold the writer connection open as a real barrier; it now fails 8-winners-to-1 pre-fix, deterministically. |
 | P11-MANIFEST-01 | P2 | PR #292 (`fix/p11-manifest-01-pin-scope`, 2026-08-05) | `--pinned` gated on `git branch -r --contains`, which lists remote-tracking branches for **every** remote, while the manifest entry pairs that SHA with **one** url. A fork workflow (`origin` an empty fork, `upstream` holding HEAD) passed the gate and pinned the SHA against the fork, so `vcs import` fails its checkout during the recovery the pin exists for. The check is now scoped to the remotes actually serving the exported url. Codex review caught two evasions of the scoping itself, both confirmed against real git and both fixed: a remote *named* `origin/vendor` writes refs that `origin/*` matches (git's wildmatch runs without `WM_PATHNAME`, so `*` spans slashes), and a multi-url remote was read by its **last** url while git fetches from the first. Also corrects the shipped claim that remote-tracking staleness only answers "no" — after a force-push with no intervening fetch it answers "yes" for an object the remote no longer serves. |
@@ -302,17 +314,9 @@ Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely i
 
 <!-- MD028 separator between adjacent dated blockquotes -->
 
-### Pass 11 (2026-08-05) — 3 open of 7
+### Pass 11 (2026-08-05) — CLOSED, 0 open of 7
 
-Full detail, `file:line` evidence, and the five hypothesis verdicts in [`AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md`](AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md). The header count equals the rows below (P1=0, P2=1, P3=2 = 3). `P11-MANIFEST-01` (PR #292), `P11-MANIFEST-02`/`-03` (PR #293), and `P11-SWEEP-01` (PR #290) shipped 2026-08-05 and are listed in *Recently shipped*; the pass's own total stays 7.
-
-| ID | Sev | Finding | Effort |
-|---|---|---|---|
-| P11-PROMOTE-01 | P2 | Two `promote` refusals name `devstrap add`, which refuses the non-empty directory they always leave behind — the corrected sibling message's own defect, twice over | S |
-| P11-PROMOTE-02 | P3 | `promoteInitRepo` arms its rollback only after `InitRepo` returns; a partial `.git` then blocks every retry path with no message naming the fix | S |
-| P11-PROMOTE-03 | P3 | `git add -A` records a nested repo as an unscreened gitlink; the pushed commit points at an object the remote never gets, so the recovered clone is empty there | S |
-
-**Two P2s, no P1** as filed; `P11-MANIFEST-01` has since shipped, leaving `P11-PROMOTE-01`. Neither P2 is a data-loss path: the user's files survive every branch of `promote`'s rollback, and a bad pin fails loudly at `vcs import` rather than silently. Both are correctness-of-promise defects on **recovery surfaces**, which is why they lead: a remedy that cannot run and a pin that is not a pin both fail at the moment they are relied on.
+Full detail, `file:line` evidence, and the five hypothesis verdicts in [`AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md`](AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md). All seven findings are shipped and listed in *Recently shipped*: `P11-MANIFEST-01` (PR #292), `P11-MANIFEST-02`/`-03` (PR #293), `P11-SWEEP-01` (PR #290), and `P11-PROMOTE-01`/`-02`/`-03` (PR #294, the last to land). Two P2s, no P1, both correctness-of-promise defects on recovery surfaces: a remedy that could not run in the state it was offered, and a pin that was not a pin.
 
 ### Pass 9 (2026-07-31) — 1 open of 8 · Pass 10 (2026-07-31) — clean
 

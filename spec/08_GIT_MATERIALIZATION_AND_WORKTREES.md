@@ -469,7 +469,37 @@ clonable repo" `00_START_HERE.md` promises never to create — the next device
 would blobless-clone it and get nothing. So the type is recorded and the
 namespace event emitted **only after the push succeeds**; a failed push leaves
 the project at its original type, and `promoteInitRepo`'s rollback removes an
-`init`/`remote add` the promotion itself created.
+`init`/`remote add` the promotion itself created. **That rollback is armed
+before `InitRepo`, not after** (`P11-PROMOTE-02`): `git init` creates and
+populates `.git` incrementally, so a failure partway through returns non-zero
+with a partial `.git` on disk, and leaving it there wedges every later attempt —
+`IsRepo`/`HasCommits` all refuse once a `.git` exists — with no message naming
+the fix. Arming it earlier is safe only because of the `Lstat` gate below,
+which is what makes "the only `.git` this can remove is one this call created"
+true. A rollback that itself fails is reported to stderr rather than swallowed —
+the same reasoning as the `local_git` arm's `origin` removal: telling the user
+the folder is back at its pre-command state while a partial `.git` still sits in
+it is worse than the failure it follows.
+
+**`IsRepo` resolves symlinks, so `promoteInitRepo` re-checks with `Lstat`.**
+`IsRepo`'s existence checks are `os.Stat`-based, so a **dangling** `.git`
+symlink reads as "not a repository" and reaches the init. That is not merely an
+odd input: `git init` FOLLOWS the link and initializes the repository at its
+target, so the managed namespace would gain a project whose `.git` lives at an
+arbitrary path `pathkey.VerifyWithinRoot` never validated — and the rollback
+would then delete a symlink the user created rather than anything this command
+made. Any existing `.git` node (`Lstat` succeeding, including a dangling link)
+is refused with a message naming the path; a stat error other than
+`os.ErrNotExist` is refused too rather than assumed absent.
+
+**`StagedFiles` reads `git ls-files -z --stage`, not `--cached`, because the
+mode is load-bearing.** `StageAll`'s `git add -A` records a nested repository as
+a gitlink (mode `160000`) instead of descending into it, and git's
+"adding embedded git repository" warning goes to stderr where `Runner.Run` drops
+it. Returning `(mode, path)` pairs is what lets the caller refuse rather than
+push a commit referencing objects the remote will never receive
+(`P11-PROMOTE-03`). Records are split on `\x00` first, then on the FIRST `\t` —
+a path may contain tabs, the metadata prefix before the first one never does.
 
 **`local_git` never goes through `InitRepo`.** It is a real repository whose
 remote is absent *or failed validation* (`NOVCS-01`), so the promotion pushes its
@@ -480,7 +510,8 @@ fact: a `local_git` that already has an `origin` is refused rather than rewritte
 repository with no commits is refused rather than given an invented one.
 
 `RemoteIsEmpty` gates `--git-remote` on the target being empty; a non-empty
-remote means the user wants `add`, and the error says so.
+remote means the user wants `scan --adopt` (not `add`, which refuses a populated
+directory — `P11-PROMOTE-01`), and the error says so.
 
 
 ## Git operation locks

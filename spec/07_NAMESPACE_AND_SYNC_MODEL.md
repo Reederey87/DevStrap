@@ -259,6 +259,35 @@ not, recorded rather than left to inference (`W13-03` review):**
   unrelated histories" property should be read as holding against a remote
   nobody else is writing to.
 
+**The index screen refuses two classes, and covers the non-git source only.**
+`promoteInitRepo` screens the staged index — what would actually be committed,
+so `.gitignore` is already honored — for secret-looking filenames and for
+**gitlinks**. `git add -A` does not descend into a nested git repository; it
+records it as mode `160000`, a commit hash whose objects the remote never
+receives and no `.gitmodules` resolves, so the nested content silently vanishes
+when the project materializes on another device. Git warns about exactly this on
+stderr, which `Runner.Run` does not surface, so the refusal has to be the
+caller's (`P11-PROMOTE-03`). Both screens cover only the commit `promote` itself
+creates — a `local_git` promotion pushes the user's existing history unscreened,
+per the caveat above.
+
+**A `.git` that is not a repository is refused, not initialized through.**
+`IsRepo` resolves symlinks, so a dangling `.git` symlink classifies as "no
+repository here"; `git init` then follows it and initializes at the link's
+target, outside everything `VerifyWithinRoot` checked. `promoteInitRepo`
+re-checks with `Lstat` and refuses any existing `.git` node, which is also what
+makes the pre-`init` rollback safe to arm — it can then only remove a `.git`
+this call created.
+
+**Every refusal names `devstrap scan --adopt`, never `devstrap add`**
+(`P11-PROMOTE-01`). `add` routes through `ensureHydratableTarget`, which refuses
+any directory that is neither empty nor a skeleton, and every state a promote
+refusal is reachable from has a populated directory by construction — including
+the state a *failed* promotion leaves behind, where the push updated the remote
+but the report-status never arrived, the local rollback ran, and the retry then
+lands on the non-empty-remote refusal. `scan --adopt` upserts by path from the
+checkout's own origin, so it is the remedy that actually runs there.
+
 `devstrap promote <path>` is the only path by which an entry changes type. It is
 one-directional: **demotion is out of scope**, because a `git_repo` whose
 content already lives in a remote has no bundle to fall back to.
@@ -268,7 +297,7 @@ content already lives in a remote has no bundle to fall back to.
 | `plain_folder` | -> `draft_project` | `git init` + one initial commit, then push -> `git_repo` |
 | `draft_project` | no-op (already that type) | `git init` + one initial commit, then push -> `git_repo` |
 | `local_git` | refused (it is a git repo; bundling it would sync a `.git`) | **push existing history** -> `git_repo` |
-| `git_repo` | refused, naming `add` | refused, naming `add` |
+| `git_repo` | refused, naming `scan --adopt` | refused, naming `scan --adopt` |
 
 **`local_git` is the primary case, and the one an implementation gets wrong.**
 It is a real git repository the user simply never pushed — the "forgot to push"
@@ -282,8 +311,9 @@ primitive that could initialize over an existing repository.
 record.** The remote URL goes through the same `git.CanonicalRemoteKey` helper
 `scan` and `add` use (one protocol allowlist, one userinfo-stripping rule, not
 two), the remote must advertise **no refs at all** (a remote that already holds
-refs means the user wants `devstrap add`, and pushing an unrelated history into
-it is the mirror of the "never adopted as broken clonable git repos" promise),
+refs means the user wants `devstrap scan --adopt`, and pushing an unrelated
+history into it is the mirror of the "never adopted as broken clonable git
+repos" promise),
 and the `git_repo` row plus its event are written only after the push succeeds.
 Recording first would publish a `git_repo` pointing at a remote with no commits,
 which every other device would then try to clone. A failed push rolls the
