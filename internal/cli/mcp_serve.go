@@ -54,44 +54,50 @@ func runMCPServe(ctx context.Context, opts *options) error {
 	return server.Run(ctx, &mcp.StdioTransport{})
 }
 
-// notDestructive is shared by every tool below: none of the five deletes or
-// overwrites what a caller did not just ask to create/adopt.
-var notDestructive = new(bool)
+// notDestructiveHint returns a fresh pointer for each call. Every tool below
+// is DestructiveHint: false, but each mcp.ToolAnnotations gets its OWN *bool
+// rather than one shared cell — a single shared pointer would let a mutation
+// through any alias (SDK internals, a future edit, reflection) flip the hint
+// for all five tools, including the two ReadOnlyHint: true ones, at once.
+func notDestructiveHint() *bool {
+	v := false
+	return &v
+}
 
 func registerMCPTools(server *mcp.Server, opts *options) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "devstrap_worktree_new",
 		Title:       "Create a fresh worktree",
 		Description: "Create a fresh git worktree for an already-registered project, based on a freshly fetched origin/<default_branch> with a recorded base SHA. Fails if the project path is not already registered — adopt it first with devstrap_worktree_adopt, or via the CLI's `scan --adopt`.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: notDestructive},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: notDestructiveHint()},
 	}, mcpWorktreeNew(opts))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "devstrap_worktree_adopt",
 		Title:       "Adopt an externally-created worktree",
 		Description: "Register a linked git worktree that a harness (Claude Code, Cursor, Codex, Devin) already created itself — e.g. via a plain `git worktree add` — so DevStrap's stale-base gate and provenance registry apply to it. Records what the worktree was ACTUALLY based on; never rewrites, repairs, or blesses that base. Detached HEAD is adopted as the common case, not refused.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: notDestructive},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: notDestructiveHint()},
 	}, mcpWorktreeAdopt(opts))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "devstrap_worktree_status",
 		Title:       "Check worktree freshness",
 		Description: "Report whether a registered worktree is fresh or stale against its recorded base ref, how many commits behind, and its current dirty state.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: notDestructive},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: notDestructiveHint()},
 	}, mcpWorktreeStatus(opts))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "devstrap_worktree_list",
 		Title:       "List registered worktrees",
 		Description: "List every worktree DevStrap has registered for this workspace, including ones adopted from an externally-created checkout (created_by=\"adopted\") alongside ones DevStrap itself provisioned.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: notDestructive},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true, DestructiveHint: notDestructiveHint()},
 	}, mcpWorktreeList(opts))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "devstrap_agent_adopt",
 		Title:       "Register an agent run",
 		Description: "Register an agent run against a worktree a real harness already created and ran in, optionally adopting that worktree first (adopt_worktree=true). Required to later call the CLI's `agent pr` under the same stale-base gate as a DevStrap-provisioned run.",
-		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: notDestructive},
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: false, DestructiveHint: notDestructiveHint()},
 	}, mcpAgentAdopt(opts))
 }
 

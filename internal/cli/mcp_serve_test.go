@@ -50,6 +50,31 @@ func mcpTestServer(t *testing.T, opts *options) *mcp.ClientSession {
 	return session
 }
 
+// TestMCPDestructiveHintPointersAreNotAliased proves notDestructiveHint
+// returns a distinct pointer on every call. A round trip through the wire
+// protocol cannot observe this — the client decodes each tool's JSON
+// independently into its own fresh *bool regardless of what the server held
+// — so this checks the actual registration-time value directly: five
+// mcp.ToolAnnotations sharing one *bool would let any mutation through any
+// alias flip DestructiveHint for all five tools at once, including the two
+// ReadOnlyHint:true ones.
+func TestMCPDestructiveHintPointersAreNotAliased(t *testing.T) {
+	seen := make(map[*bool]bool)
+	for range 5 {
+		p := notDestructiveHint()
+		if p == nil {
+			t.Fatal("notDestructiveHint returned nil")
+		}
+		if *p {
+			t.Fatal("notDestructiveHint returned true, want false")
+		}
+		if seen[p] {
+			t.Fatalf("notDestructiveHint returned the same pointer twice: %p", p)
+		}
+		seen[p] = true
+	}
+}
+
 // TestMCPToolsListMatchesDocumentedNames pins the exact five tool names and
 // their annotations (AD5-07's design contract) against the real tools/list
 // response, not a hand-maintained list — a renamed or dropped tool fails this
@@ -177,6 +202,107 @@ func TestMCPWorktreeStatusUnknownIDReturnsToolError(t *testing.T) {
 	if len(result.Content) == 0 {
 		t.Fatal("error result carries no content for the calling agent to read")
 	}
+}
+
+// TestMCPRequiredFieldsAreEnforcedAtTheSchemaLayer proves the OTHER half of
+// required-field enforcement: because every required input field lacks
+// `omitempty`, jsonschema-go infers it as a JSON Schema "required" property
+// (internal/scan-style inference, confirmed by reading
+// google/jsonschema-go's infer.go), so a request that OMITS the key entirely
+// never reaches the Go handler at all — the SDK rejects it during argument
+// validation with its own message. This is a stronger guarantee than a
+// hand-written check (it fails before ANY handler code runs), and it is why
+// TestMCPToolsRejectInvalidInputAsToolError below sends an explicit empty
+// string rather than omitting the key: that is the only way to reach the
+// handler's OWN "X is required" checks, which exist as the second layer for
+// exactly that case (a key present but empty).
+func TestMCPRequiredFieldsAreEnforcedAtTheSchemaLayer(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+	opts := mcpTestOptions(t, home, root)
+	session := mcpTestServer(t, opts)
+
+	result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: "devstrap_worktree_new", Arguments: map[string]any{"task_name": "t"}})
+	if err != nil {
+		t.Fatalf("CallTool returned a protocol-level error, want a tool-level one: %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("result.IsError = false, want true when a required key is omitted entirely")
+	}
+	text := toolResultText(t, result)
+	if !strings.Contains(text, "project_path") {
+		t.Fatalf("error text = %q, want it to name the missing property", text)
+	}
+}
+
+// TestMCPToolsRejectInvalidInputAsToolError table-drives every input
+// validation branch mcp_serve.go's HANDLERS actually contain — required
+// fields present but empty per tool, agent_adopt's
+// allow_shallow-requires-adopt_worktree check, and its non-negative pid
+// check — so each is proven to fail closed as a TOOL-level error (an agent
+// can read why and retry) rather than either silently succeeding or
+// reaching a shared function with a value that function was never asked to
+// validate. Every string field is sent as "" rather than omitted: an
+// omitted key is caught one layer earlier, at JSON Schema validation (see
+// TestMCPRequiredFieldsAreEnforcedAtTheSchemaLayer), and never reaches this
+// code at all.
+func TestMCPToolsRejectInvalidInputAsToolError(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+	opts := mcpTestOptions(t, home, root)
+
+	cases := []struct {
+		name      string
+		tool      string
+		args      map[string]any
+		wantError string
+	}{
+		{"worktree_new empty project_path", "devstrap_worktree_new", map[string]any{"project_path": "", "task_name": "t"}, "project_path is required"},
+		{"worktree_new empty task_name", "devstrap_worktree_new", map[string]any{"project_path": "work/x", "task_name": ""}, "task_name is required"},
+		{"worktree_adopt empty path", "devstrap_worktree_adopt", map[string]any{"path": ""}, "path is required"},
+		{"worktree_status empty worktree_id", "devstrap_worktree_status", map[string]any{"worktree_id": ""}, "worktree_id is required"},
+		{"agent_adopt empty arg", "devstrap_agent_adopt", map[string]any{"arg": "", "engine": "e", "task": "t"}, "arg is required"},
+		{"agent_adopt empty engine", "devstrap_agent_adopt", map[string]any{"arg": "a", "engine": "", "task": "t"}, "engine is required"},
+		{"agent_adopt empty task", "devstrap_agent_adopt", map[string]any{"arg": "a", "engine": "e", "task": ""}, "task is required"},
+		{"agent_adopt negative pid", "devstrap_agent_adopt", map[string]any{"arg": "a", "engine": "e", "task": "t", "pid": -1}, "pid must be a positive process id"},
+		{"agent_adopt allow_shallow without adopt_worktree", "devstrap_agent_adopt", map[string]any{"arg": "a", "engine": "e", "task": "t", "allow_shallow": true}, "allow_shallow only applies when adopt_worktree"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// A fresh in-memory transport pair per case keeps failures isolated;
+			// registerMCPTools carries no per-call state, so this is cheap.
+			session := mcpTestServer(t, opts)
+			result, err := session.CallTool(context.Background(), &mcp.CallToolParams{Name: tc.tool, Arguments: tc.args})
+			if err != nil {
+				t.Fatalf("CallTool returned a protocol-level error, want a tool-level one: %v", err)
+			}
+			if !result.IsError {
+				t.Fatalf("result.IsError = false, want true for invalid input %+v", tc.args)
+			}
+			text := toolResultText(t, result)
+			if !strings.Contains(text, tc.wantError) {
+				t.Fatalf("error text = %q, want it to contain %q", text, tc.wantError)
+			}
+		})
+	}
+}
+
+func toolResultText(t *testing.T, result *mcp.CallToolResult) string {
+	t.Helper()
+	var b strings.Builder
+	for _, c := range result.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			b.WriteString(tc.Text)
+		}
+	}
+	return b.String()
 }
 
 // TestMCPServerNeverWritesToStdout is the concrete stdio-hygiene risk this
