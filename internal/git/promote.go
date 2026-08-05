@@ -58,22 +58,53 @@ func (r Runner) StageAll(ctx context.Context, dir string) error {
 	return err
 }
 
+// GitlinkMode is the index mode `git add -A` records for a nested git
+// repository: a commit hash with no objects behind it in THIS repository.
+const GitlinkMode = "160000"
+
+// StagedFile is one index entry: its mode and its path.
+type StagedFile struct {
+	Mode string
+	Path string
+}
+
 // StagedFiles lists the index contents of dir.
 //
-// It reads `git ls-files --cached`, not `git diff --cached`, because the
-// caller's repository has an UNBORN HEAD (nothing has been committed yet) and
-// a diff against a HEAD that does not exist is not a stable contract. `-z`
-// keeps filenames holding newlines intact.
-func (r Runner) StagedFiles(ctx context.Context, dir string) ([]string, error) {
-	out, err := r.Run(ctx, dir, "ls-files", "-z", "--cached")
+// It reads `git ls-files`, not `git diff --cached`, because the caller's
+// repository has an UNBORN HEAD (nothing has been committed yet) and a diff
+// against a HEAD that does not exist is not a stable contract. `-z` keeps
+// filenames holding newlines intact.
+//
+// `--stage` rather than `--cached` because the MODE is load-bearing, not
+// decoration: `git add -A` records a nested repository as a gitlink
+// (GitlinkMode) instead of descending into it, git's own
+// "warning: adding embedded git repository" goes to stderr where Run drops it,
+// and the caller must be able to refuse rather than push a commit referencing
+// objects the remote will never receive.
+//
+// The output is `<mode> <sha> <stage>\t<path>` per record. Split on \x00 first
+// (that is the record separator `-z` gives, and it is the only byte a path
+// cannot contain), then on the FIRST \t — a path may itself contain tabs, but
+// the metadata prefix before the first one never does.
+func (r Runner) StagedFiles(ctx context.Context, dir string) ([]StagedFile, error) {
+	out, err := r.Run(ctx, dir, "ls-files", "-z", "--stage")
 	if err != nil {
 		return nil, err
 	}
-	var files []string
-	for _, name := range strings.Split(out, "\x00") {
-		if name != "" {
-			files = append(files, name)
+	var files []StagedFile
+	for _, record := range strings.Split(out, "\x00") {
+		if record == "" {
+			continue
 		}
+		meta, path, ok := strings.Cut(record, "\t")
+		if !ok {
+			return nil, fmt.Errorf("unparsable `git ls-files --stage` record %q", record)
+		}
+		fields := strings.Fields(meta)
+		if len(fields) != 3 {
+			return nil, fmt.Errorf("unparsable `git ls-files --stage` record %q", record)
+		}
+		files = append(files, StagedFile{Mode: fields[0], Path: path})
 	}
 	return files, nil
 }

@@ -421,16 +421,22 @@ contract is:
   a `plain_folder`/`draft_project` is `git init`-ed and given one initial commit
   first. `git init` is never run over an existing repository.
 - The remote must be reachable and **empty**. A remote already holding refs
-  exits `exitInvalidConfig` (2) naming `devstrap add`; an unreadable remote exits
+  exits `exitInvalidConfig` (2) naming `devstrap scan --adopt`; an unreadable remote exits
   `exitGit` (7) and says to create the empty repository first.
 - The row and its `project.updated` event are written only **after** a
   successful push, and a failed push rolls the working tree back to its exact
   pre-command state, so retrying after fixing the remote is unobstructed.
-- Refusals: a project that already has a remote (naming `add`; demotion is out
-  of scope), `--draft` on a `local_git`, an empty folder, a folder whose staged
-  index would carry secret-looking files, a `local_git` that already has an
-  `origin` or a detached HEAD or no commits, and any remote URL the shared
-  `git.CanonicalRemoteKey` validator rejects.
+- Refusals: a project that already has a remote (demotion is out of scope),
+  `--draft` on a `local_git`, an empty folder, a folder whose staged index would
+  carry secret-looking files or a **nested git repository** (staged as a gitlink
+  whose objects the remote never receives — `P11-PROMOTE-03`), a folder holding
+  an unusable `.git` node such as a dangling symlink (which `git init` would
+  otherwise follow OUT of the managed root), a `local_git`
+  that already has an `origin` or a detached HEAD or no commits, and any remote
+  URL the shared `git.CanonicalRemoteKey` validator rejects. Every one of them
+  names `devstrap scan --adopt` rather than `devstrap add`: `add` refuses a
+  non-empty, non-skeleton directory, and each of these states has one
+  (`P11-PROMOTE-01`).
 - `--json` renders `{path, from_type, to_type, remote, branch, pushed, changed}`.
 
 Only the CURRENT branch is pushed; other local branches stay local and are the

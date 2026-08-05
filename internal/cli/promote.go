@@ -23,6 +23,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -68,7 +69,7 @@ func newPromoteCommand(stdout io.Writer, opts *options) *cobra.Command {
 			"  --git-remote <url>   local_git -> git_repo (pushes the EXISTING history), or\n" +
 			"                       plain_folder/draft_project -> git_repo (git init, initial commit, push)\n\n" +
 			"The remote must exist and be empty; a remote that already holds refs is a\n" +
-			"`devstrap add` case, not a promotion. Demotion is not supported.",
+			"`devstrap scan --adopt` case, not a promotion. Demotion is not supported.",
 		Args: usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			switch {
@@ -126,9 +127,16 @@ func refuseAlreadyRemote(project state.ProjectStatus) error {
 	if remote := redact.StripURLUserinfo(project.RemoteURL); remote != "" {
 		detail += fmt.Sprintf(" tracking %s", remote)
 	}
+	// The remedy is `scan --adopt`, NOT `add` — for the same reason as the
+	// push-succeeded/record-failed message below. Every project that reaches
+	// this refusal has a populated directory (a git_repo is a materialized
+	// checkout), and `add` -> ensureHydratableTarget refuses any directory that
+	// is neither empty nor a skeleton. `scan --adopt` upserts by path from the
+	// checkout's own origin, so repointing that origin and re-scanning is the
+	// route that actually runs here (P11-PROMOTE-01).
 	return appError{code: exitInvalidConfig, err: fmt.Errorf(
-		"%s; promote only graduates remote-less projects — use `devstrap add --path %s <remote>` to track a different remote (demotion is out of scope)",
-		detail, project.Path)}
+		"%s; promote only graduates remote-less projects — to track a different remote, repoint the checkout's own origin and re-run `devstrap scan --adopt` (demotion is out of scope)",
+		detail)}
 }
 
 // promoteLocalPath resolves and re-validates the on-disk directory backing a
@@ -234,9 +242,16 @@ func promoteToGitRepo(ctx context.Context, stdout, stderr io.Writer, store *stat
 			"could not read %s (create the empty remote repository first): %w", safeRemote, err)}
 	}
 	if !empty {
+		// `scan --adopt`, not `add`. This refusal is also where a FAILED
+		// promotion lands on retry — the push updated the remote but the
+		// report-status never arrived, so promoteToGitRepo rolled back and left
+		// the project unpromoted against a remote that now holds refs. In that
+		// state (and in every other state reachable here) the directory is
+		// populated, which `add` -> ensureHydratableTarget refuses outright
+		// (P11-PROMOTE-01).
 		return appError{code: exitInvalidConfig, err: fmt.Errorf(
-			"%s already has refs; promote pushes into an EMPTY remote only — use `devstrap add --path %s %s` to track an existing repository",
-			safeRemote, project.Path, safeRemote)}
+			"%s already has refs; promote pushes into an EMPTY remote only — an existing repository is adopted, not promoted: give the checkout at %s that origin and re-run `devstrap scan --adopt`",
+			safeRemote, localPath)}
 	}
 
 	// rollback restores the working tree to its exact pre-command state. It is
@@ -280,7 +295,7 @@ func promoteToGitRepo(ctx context.Context, stdout, stderr io.Writer, store *stat
 		if branch == "" || !dsgit.SafeBranchName(branch) {
 			branch = "main"
 		}
-		created, err := promoteInitRepo(ctx, r, project, localPath, branch)
+		created, err := promoteInitRepo(ctx, r, stderr, project, localPath, branch)
 		if err != nil {
 			return err
 		}
@@ -357,7 +372,7 @@ func promoteToGitRepo(ctx context.Context, stdout, stderr io.Writer, store *stat
 // commit and returns the rollback that removes it again. It refuses an empty
 // folder rather than inventing an empty commit, and refuses to commit
 // secret-looking files rather than pushing them to a remote.
-func promoteInitRepo(ctx context.Context, r dsgit.Runner, project state.ProjectStatus, localPath, branch string) (func(), error) {
+func promoteInitRepo(ctx context.Context, r dsgit.Runner, stderr io.Writer, project state.ProjectStatus, localPath, branch string) (func(), error) {
 	entries, err := os.ReadDir(localPath)
 	if err != nil {
 		return nil, err
@@ -366,12 +381,46 @@ func promoteInitRepo(ctx context.Context, r dsgit.Runner, project state.ProjectS
 		return nil, appError{code: exitInvalidConfig, err: fmt.Errorf(
 			"%s is empty; put something in it before promoting (promote will not create an empty initial commit)", project.Path)}
 	}
-	if err := r.InitRepo(ctx, localPath, branch); err != nil {
-		return nil, appError{code: exitGit, err: err}
+	gitDir := filepath.Join(localPath, ".git")
+	// The caller's dsgit.IsRepo gate resolves symlinks (os.Stat), so a DANGLING
+	// .git symlink reads as "not a repository" and arrives here. That is not
+	// merely an odd input: `git init` FOLLOWS the link and initializes the
+	// repository at its target, which VerifyWithinRoot never validated — the
+	// managed namespace would gain a project whose .git lives anywhere on the
+	// disk. And the rollback below would then delete a node this command did
+	// not create. Lstat is the check that sees the link itself; any existing
+	// .git entry is refused rather than worked around.
+	if _, err := os.Lstat(gitDir); err == nil {
+		return nil, appError{code: exitInvalidConfig, err: fmt.Errorf(
+			"%s has a .git entry at %s that is not a usable repository (a dangling symlink, or a leftover from an interrupted promotion); remove or repair it before promoting",
+			project.Path, gitDir)}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, appError{code: exitInvalidConfig, err: fmt.Errorf("could not inspect %s: %w", gitDir, err)}
 	}
 	// Everything below created .git, so removing it restores the folder exactly
-	// — the user's files are never touched by any of it.
-	rollback := func() { _ = os.RemoveAll(filepath.Join(localPath, ".git")) }
+	// — the user's files are never touched by any of it. The Lstat above is what
+	// makes that true: this rollback can only ever remove a .git this call
+	// created.
+	//
+	// A silent rollback failure is worse than the failure it follows (the same
+	// reasoning as the local_git arm in promoteToGitRepo): the user is told the
+	// folder is back at its pre-command state when a partial .git is still
+	// sitting in it, wedging every retry.
+	rollback := func() {
+		if err := os.RemoveAll(gitDir); err != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: could not remove the .git this attempt created at %s; remove it manually before retrying (rm -rf %s): %s\n",
+				gitDir, gitDir, redact.Scrub(err.Error()))
+		}
+	}
+	// Armed BEFORE the init, not after: `git init` creates and populates .git
+	// incrementally, so a failure partway through (ENOSPC, a permission fault,
+	// an interrupt) returns non-zero with a partial .git on disk. Leaving that
+	// behind wedges every later attempt — IsRepo/HasCommits all refuse once a
+	// .git exists — with no message naming the only fix (P11-PROMOTE-02).
+	if err := r.InitRepo(ctx, localPath, branch); err != nil {
+		rollback()
+		return nil, appError{code: exitGit, err: err}
+	}
 	if err := r.StageAll(ctx, localPath); err != nil {
 		rollback()
 		return nil, appError{code: exitGit, err: err}
@@ -385,6 +434,19 @@ func promoteInitRepo(ctx context.Context, r dsgit.Runner, project state.ProjectS
 		rollback()
 		return nil, appError{code: exitInvalidConfig, err: fmt.Errorf(
 			"%s has nothing to commit (every file is git-ignored); promote will not create an empty initial commit", project.Path)}
+	}
+	// A nested git repository is staged by `git add -A` as a GITLINK — a commit
+	// hash with no objects behind it — not as its files. Committing one would
+	// push a tree referencing an object the remote never receives, with no
+	// .gitmodules to resolve it, so the content silently vanishes when the
+	// project is materialized on another device. Git warns about exactly this
+	// on stderr, which Runner.Run does not surface, so the refusal has to live
+	// here (P11-PROMOTE-03).
+	if nested := nestedRepoStagedFiles(staged); len(nested) > 0 {
+		rollback()
+		return nil, appError{code: exitInvalidConfig, err: fmt.Errorf(
+			"%s contains nested git repositor(y|ies) that would be committed as gitlinks, whose content the remote would never receive: %s; move them out of the folder, .gitignore them, or promote them separately",
+			project.Path, strings.Join(nested, ", "))}
 	}
 	// Screen what would actually be COMMITTED (the index, so .gitignore is
 	// already honored) rather than what is merely on disk. A promotion push is
@@ -403,21 +465,35 @@ func promoteInitRepo(ctx context.Context, r dsgit.Runner, project state.ProjectS
 	return rollback, nil
 }
 
-// secretLookingStagedFilesLimit bounds how many names the refusal lists; the
-// count is what matters once it is long.
-const secretLookingStagedFilesLimit = 5
+// stagedRefusalListLimit bounds how many names a staged-index refusal lists;
+// the count is what matters once it is long.
+const stagedRefusalListLimit = 5
 
-func secretLookingStagedFiles(staged []string) []string {
+func secretLookingStagedFiles(staged []dsgit.StagedFile) []string {
 	var found []string
-	for _, name := range staged {
-		if ignore.IsSecretPath(filepath.ToSlash(name)) {
-			found = append(found, name)
+	for _, entry := range staged {
+		if ignore.IsSecretPath(filepath.ToSlash(entry.Path)) {
+			found = append(found, entry.Path)
 		}
 	}
+	return sortedAndCapped(found)
+}
+
+func nestedRepoStagedFiles(staged []dsgit.StagedFile) []string {
+	var found []string
+	for _, entry := range staged {
+		if entry.Mode == dsgit.GitlinkMode {
+			found = append(found, entry.Path)
+		}
+	}
+	return sortedAndCapped(found)
+}
+
+func sortedAndCapped(found []string) []string {
 	sort.Strings(found)
-	if len(found) > secretLookingStagedFilesLimit {
-		extra := len(found) - secretLookingStagedFilesLimit
-		found = append(found[:secretLookingStagedFilesLimit:secretLookingStagedFilesLimit],
+	if len(found) > stagedRefusalListLimit {
+		extra := len(found) - stagedRefusalListLimit
+		found = append(found[:stagedRefusalListLimit:stagedRefusalListLimit],
 			fmt.Sprintf("and %d more", extra))
 	}
 	return found
