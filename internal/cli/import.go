@@ -201,6 +201,19 @@ func resolveManifestEntry(m manifest.Manifest, p string, warn func(string, ...an
 		warn("%s: unknown project type %q", p, typ)
 		return manifestEntry{}, false
 	}
+	// A manifest is hand-editable plain text and, after a total local loss, may
+	// be the only input left. Validate what has a validator here rather than
+	// registering a row whose typo only surfaces at materialize time, on the one
+	// project that happens to trigger an LFS or fetch operation. Empty stays
+	// legitimate in both cases: the field was simply omitted.
+	if project.LFSPolicy != "" && !validLFSPolicy(project.LFSPolicy) {
+		warn("%s: unsupported lfs_policy %q", p, project.LFSPolicy)
+		return manifestEntry{}, false
+	}
+	if project.DefaultBranch != "" && !dsgit.SafeBranchName(project.DefaultBranch) {
+		warn("%s: unusable default_branch %q", p, project.DefaultBranch)
+		return manifestEntry{}, false
+	}
 	entry := manifestEntry{
 		Type:                  typ,
 		DefaultBranch:         project.DefaultBranch,
@@ -229,11 +242,14 @@ func resolveManifestEntry(m manifest.Manifest, p string, warn func(string, ...an
 		return manifestEntry{}, false
 	}
 	entry.RemoteURL, entry.RemoteKey = repo.URL, remoteKey
-	if entry.DefaultBranch == "" && !m.DevStrap.Pinned && !fullSHA.MatchString(repo.Version) {
+	if entry.DefaultBranch == "" && !m.DevStrap.Pinned && !fullSHA.MatchString(repo.Version) && dsgit.SafeBranchName(repo.Version) {
 		// A third-party .repos file carries the branch only in `version`. Adopt
 		// it as the default branch — but never when the manifest says it is
 		// pinned, or when the value is plainly a resolved SHA, because a commit
-		// id recorded as a branch name would break every later fetch.
+		// id recorded as a branch name would break every later fetch. An unusable
+		// `version` declines the heuristic rather than skipping the entry, as a
+		// pin and a SHA already do: the row still registers, and materialize
+		// resolves its default branch from the remote.
 		entry.DefaultBranch = repo.Version
 	}
 	return entry, true
@@ -261,25 +277,32 @@ const (
 // treats empty and "skeleton" identically, which is why the distinction is a
 // statement of intent here rather than a behavioural difference today.)
 func registerManifestEntry(ctx context.Context, store *state.Store, root, nsPath string, entry manifestEntry) (manifestEntryStatus, string, error) {
-	existing, lookupErr := store.ProjectByPath(ctx, nsPath)
-	if lookupErr != nil && !errors.Is(lookupErr, state.ErrProjectNotFound) {
-		// Do NOT fall through to the upsert. UpsertProject's ON CONFLICT DO
-		// UPDATE overwrites remote_url/remote_key, so treating a transient read
-		// failure as "absent" would bypass the very clobber refusal below.
-		return manifestEntryConflict, "", fmt.Errorf("look up %s: %w", nsPath, lookupErr)
-	}
-	if lookupErr == nil {
-		switch {
-		case existing.Type != entry.Type:
-			return manifestEntryConflict, existing.Type, nil
-		case entry.Type == "git_repo" && existing.RemoteKey != entry.RemoteKey:
-			return manifestEntryConflict, existing.RemoteKey, nil
-		default:
-			return manifestEntryPresent, "", nil
-		}
-	}
 	localPath := filepath.Join(root, filepath.FromSlash(nsPath))
+	status, registered := manifestEntryRegistered, ""
+	// The clobber refusal reads inside the transaction it writes in. The writer
+	// DSN is _txlock=immediate over a one-connection pool, so WithTx holds
+	// SQLite's write lock from BEGIN and no other writer — another process, or a
+	// daemon converging a peer's project.added in the background — can create the
+	// row between the check and UpsertProject's ON CONFLICT DO UPDATE.
 	err := store.WithTx(ctx, func(tx *state.Tx) error {
+		existing, lookupErr := tx.ProjectByPath(ctx, nsPath)
+		if lookupErr != nil && !errors.Is(lookupErr, state.ErrProjectNotFound) {
+			// Do NOT fall through to the upsert. UpsertProject's ON CONFLICT DO
+			// UPDATE overwrites remote_url/remote_key, so treating a transient read
+			// failure as "absent" would bypass the very clobber refusal below.
+			return fmt.Errorf("look up %s: %w", nsPath, lookupErr)
+		}
+		if lookupErr == nil {
+			switch {
+			case existing.Type != entry.Type:
+				status, registered = manifestEntryConflict, existing.Type
+			case entry.Type == "git_repo" && existing.RemoteKey != entry.RemoteKey:
+				status, registered = manifestEntryConflict, existing.RemoteKey
+			default:
+				status = manifestEntryPresent
+			}
+			return nil
+		}
 		event, err := dssync.CreateProjectEventTx(ctx, store, tx, dssync.EventProjectAdded, dssync.ProjectPayload{
 			Path:          nsPath,
 			Type:          entry.Type,
@@ -311,7 +334,7 @@ func registerManifestEntry(ctx context.Context, store *state.Store, root, nsPath
 	if err != nil {
 		return manifestEntryRegistered, "", err
 	}
-	return manifestEntryRegistered, "", nil
+	return status, registered, nil
 }
 
 // manifestPaths returns the sorted union of both halves of the document, so a

@@ -41,6 +41,29 @@ Follow-ups:
 - <remaining work, or "None">
 ```
 
+## 2026-08-05 — a refusal that reads outside the transaction it writes in (P11-MANIFEST-02/03)
+
+Changed:
+- `internal/cli/import.go`: the clobber-refusal lookup moved from `store.ProjectByPath` (reader pool, before `WithTx`) to `tx.ProjectByPath` **inside** the transaction; `resolveManifestEntry` now validates `lfs_policy` and `default_branch` before it builds an entry.
+- `internal/cli/import_test.go`: four tests, each mutation-checked against the pre-fix code.
+- `spec/13` § *Workspace manifest commands (AD-7)*: the skip-class inventory and the `version` heuristic were both incomplete; `last_reviewed` bumped.
+
+Two P3s from the pass-11 audit (`docs/audits/AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md`, PR #288), bundled because they touch adjacent lines of one file and share its fixtures.
+
+**The first is a fix that had already been half-made.** `W13-02`'s own review closed the *error* leg of this refusal — a transient read failure no longer reads as "absent" and falls through to an upsert that overwrites `remote_url`/`remote_key` — via the `state.ErrProjectNotFound` sentinel. The *concurrency* leg stayed open, and it is the same bug: the read simply ran somewhere the write could not see. `store.ProjectByPath` goes to the separate reader pool (`P4-SYNC-07`), so between check and `WithTx` any writer could create the row — `service install --daemon` converging a peer's `project.added` while the user runs `import` is the realistic shape — and `UpsertProject`'s `ON CONFLICT DO UPDATE` then silently rewrote it. Moving the lookup onto the `Tx` closes it structurally rather than by narrowing a window: the writer DSN is `_txlock=immediate` over a one-connection pool, so the lock is held from `BEGIN` and check and upsert are one atomic step for every other writer, in-process and cross-process alike.
+
+**The test for it passed against the broken code five runs in a row.** Eight goroutines released from a closed channel, all registering one path with different remotes: exactly one won, every time, so the assertion proved nothing. A throwaway probe with a log line between the wake and the call showed two winners immediately — the race is real and easy to hit; my barrier just was not one. Goroutine wake-up ordering is not a barrier. The test now opens the window deliberately: it holds the single writer connection open in a transaction of its own, spins until all eight racers are provably inside `registerManifestEntry`, and only then releases. Under the pre-fix shape every racer's reader-pool lookup returns "absent" **deterministically**, and the test fails 8-winners-to-1 on every run; under the fix they all block at `BEGIN` and the sleep changes nothing. Both directions now reproduce 3/3. This is the `vacuous green` class again — a check that is green because it never ran the scenario it names — and a scheduler-dependent concurrency test is one of its most convincing disguises.
+
+**The second finding is about *when* an error is allowed to surface.** `import` persisted `lfs_policy` and `default_branch` verbatim with no validation, though both have validators the rest of the binary already uses and neither column has a `CHECK`. A manifest carrying `lfs_policy: alwyas` imported "successfully" and failed much later in `applyMaterializeLFSPolicy` — and only on a project that happened to trigger an LFS operation, so the typo could sit dormant indefinitely. Import is a recovery-path boundary: the manifest is hand-editable text that after a total local loss may be the only input left, which makes deferred validation a failure delivered at the worst possible moment. Both now reuse the existing checks (`validLFSPolicy`, `git.SafeBranchName`) and a bad value skips the entry through the file's existing `ErrPartialImport` semantics — the batch completes, the rest of the namespace recovers, the exit code says it was partial. `default_branch` is **not** an injection hole (`ResolveDefaultBranch` gates it through the same check before any git invocation); the value is in the deferred-failure class only.
+
+One deliberate asymmetry: an unusable `version` in a third-party `.repos` file *declines the heuristic* instead of skipping the entry. That path is already best-effort — it declines a pinned manifest and a resolved SHA the same way — and declining leaves a registerable row whose default branch materialize resolves from the remote, where skipping would cost the whole repo to punish a field that was never authoritative.
+
+Validated:
+- `gofmt -w cmd internal`; `golangci-lint run` (0 issues); `go run ./cmd/spec-drift --base origin/main --head HEAD`; `go test -race ./...`.
+- Mutation-checked: with `internal/cli/import.go` reverted to trunk, all four new tests fail (`8 racers registered the same path`; the two validation tests; the decline test).
+
+Follow-ups:
+- None. The `docs/audits/README.md` reconciliation was owed once the pass-11 audit (PR #288) merged and this branch rebased onto it: both rows moved to *Recently shipped* as one entry, Pass 11 drops 7→5 open (header count equals row count), and the index row says so. The three sibling P11 fix PRs are still in flight, so the next of them to rebase inherits a 5, not a 7.
 ## 2026-08-05 — the obvious way to emit `plain_folder` deletes the managed tree from the scan (NOVCS-02)
 
 Changed:
