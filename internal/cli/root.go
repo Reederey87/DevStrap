@@ -194,6 +194,7 @@ func initConfig(opts *options) error {
 	opts.v.SetDefault(durabilityExportConfigKey, defaultDurabilityExportInterval.String())
 	opts.v.SetDefault(wipGCIntervalKey, defaultWipGCInterval.String())
 	opts.v.SetDefault(wipTTLConfigKey, defaultWipGCTTL.String())
+	opts.v.SetDefault(stagingSweepIntervalKey, defaultStagingSweepInterval.String())
 
 	if opts.cfgFile != "" {
 		opts.v.SetConfigFile(opts.cfgFile)

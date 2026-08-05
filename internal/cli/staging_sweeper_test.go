@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,6 +27,78 @@ func stagingSweepFixture(t *testing.T) (*options, *state.Store, string) {
 	}
 	t.Cleanup(func() { closeStore(store) })
 	return opts, store, root
+}
+
+// P11-SWEEP-01: the sweep bounds disk growth, so disabling the WIP recovery
+// plane must not disable it. It used to read wip.gc_interval, and `0` there
+// returned before the sweep ever ran.
+func TestStagingSweepIgnoresWipGCInterval(t *testing.T) {
+	opts, store, root := stagingSweepFixture(t)
+	opts.v.Set(wipGCIntervalKey, "0")
+	cand := filepath.Join(root, "work", ".ghost.devstrap-tmp-1")
+	if err := os.MkdirAll(cand, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(cand, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := maybeSweepStagingOrphansAfterSync(t.Context(), io.Discard, opts, store, time.Now())
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed %d orphan(s) with wip.gc_interval=0, want 1 — the staging sweep is riding the WIP-GC key again", removed)
+	}
+	if _, statErr := os.Stat(cand); !os.IsNotExist(statErr) {
+		t.Fatalf("orphan survived with wip.gc_interval=0: %v", statErr)
+	}
+}
+
+// The sweep's own key still disables it. This needs a FRESH fixture: reusing
+// the one above would assert nothing, because the sweep it just ran wrote
+// staging_sweep_last_success, so a broken `0` handling would be masked by
+// maintenanceDue reporting "not due" under the 24h default.
+func TestStagingSweepIntervalZeroDisablesTheSweep(t *testing.T) {
+	opts, store, root := stagingSweepFixture(t)
+	opts.v.Set(stagingSweepIntervalKey, "0")
+	cand := filepath.Join(root, "work", ".ghost.devstrap-tmp-1")
+	if err := os.MkdirAll(cand, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(cand, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := maybeSweepStagingOrphansAfterSync(t.Context(), io.Discard, opts, store, time.Now())
+	if err != nil || removed != 0 {
+		t.Fatalf("removed %d, err %v with staging.sweep_interval=0; want 0, nil", removed, err)
+	}
+	if _, statErr := os.Stat(cand); statErr != nil {
+		t.Fatalf("orphan was swept despite staging.sweep_interval=0: %v", statErr)
+	}
+}
+
+// P11-SWEEP-01: an invalid interval used to be swallowed by the call site's
+// `_, _ =`, so the sweep stopped forever with the only visible error naming WIP
+// GC — a different subsystem.
+func TestInvalidStagingSweepIntervalWarnsNamingTheSweep(t *testing.T) {
+	t.Setenv(platform.NoKeychainEnv, "1")
+	// "30d" is the natural typo: Go's ParseDuration has no day unit (P9-WIP-05).
+	t.Setenv("DEVSTRAP_STAGING_SWEEP_INTERVAL", "30d")
+	home := filepath.Join(t.TempDir(), "home")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init: %v (%s)", err, stderr)
+	}
+	hubPath := filepath.Join(t.TempDir(), "hub.json")
+	_, stderr, err := executeForTest("--home", home, "--root", root, "sync", "--hub-file", hubPath)
+	if err != nil {
+		t.Fatalf("sync: %v (%s)", err, stderr)
+	}
+	if !strings.Contains(stderr, "staging-orphan sweep failed") || !strings.Contains(stderr, stagingSweepIntervalKey) {
+		t.Fatalf("stderr = %q, want a warning naming the staging-orphan sweep and %s", stderr, stagingSweepIntervalKey)
+	}
 }
 
 func TestStagingProjectNameRightAnchored(t *testing.T) {
