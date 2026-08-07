@@ -417,6 +417,38 @@ func TestParseSparseFlagValidatesAndDedupes(t *testing.T) {
 	}
 }
 
+// TestParseSparseFlagNormalizesOverlappingPaths pins the review follow-up
+// fix directly at the CLI layer: an ancestor/descendant pair like
+// "backend,backend/deep" must be collapsed to just ["backend"] before it's
+// ever stored, mirroring what git's own cone mode would report — storing
+// the un-collapsed pair would permanently defeat
+// ApplyConvergedSparseCheckout's no-op check for this project on every
+// future sync/hydrate.
+func TestParseSparseFlagNormalizesOverlappingPaths(t *testing.T) {
+	paths, err := parseSparseFlag("backend,backend/deep,docs")
+	if err != nil {
+		t.Fatalf("parseSparseFlag: %v", err)
+	}
+	if len(paths) != 2 || paths[0] != "backend" || paths[1] != "docs" {
+		t.Fatalf("paths = %v, want [backend docs] (backend/deep collapsed into its ancestor backend)", paths)
+	}
+}
+
+// TestCleanSparseArgsNormalizesOverlappingPaths mirrors
+// TestParseSparseFlagNormalizesOverlappingPaths for `project sparse set`'s
+// positional-argument parser (review follow-up, W12-02): the two parsers
+// share the same normalization requirement and must not regress
+// independently.
+func TestCleanSparseArgsNormalizesOverlappingPaths(t *testing.T) {
+	paths, err := cleanSparseArgs([]string{"backend", "backend/deep", "docs"})
+	if err != nil {
+		t.Fatalf("cleanSparseArgs: %v", err)
+	}
+	if len(paths) != 2 || paths[0] != "backend" || paths[1] != "docs" {
+		t.Fatalf("paths = %v, want [backend docs] (backend/deep collapsed into its ancestor backend)", paths)
+	}
+}
+
 // TestApplyProjectSparseProfileBestEffortOnLookupFailure exercises the
 // warn-not-fail contract directly: a project with no configured profile is a
 // pure no-op (no store/runner interaction beyond the lookup).

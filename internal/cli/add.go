@@ -61,6 +61,12 @@ func newAddCommand(stdout io.Writer, opts *options) *cobra.Command {
 // parseSparseFlag splits a comma-separated --sparse value into cleaned,
 // validated, de-duplicated cone-mode directory paths (W12-02). An empty raw
 // value returns a nil slice — "no sparse profile configured", the default.
+// The result is also normalized (dsgit.NormalizeSparsePaths, review
+// follow-up): an overlapping entry like "backend,backend/deep" is reduced
+// to just ["backend"] before it's ever stored, so what `project sparse
+// list` shows always matches what git's own cone-mode set will actually
+// converge to — storing the un-collapsed pair would otherwise permanently
+// defeat ApplyConvergedSparseCheckout's no-op check for this project.
 func parseSparseFlag(raw string) ([]string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -82,7 +88,7 @@ func parseSparseFlag(raw string) ([]string, error) {
 		seen[p] = true
 		paths = append(paths, p)
 	}
-	return paths, nil
+	return dsgit.NormalizeSparsePaths(paths), nil
 }
 
 // addProject validates the remote, creates a project.added event, upserts the

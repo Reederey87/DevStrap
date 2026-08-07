@@ -299,6 +299,16 @@ func applyProjectSparseProfile(ctx context.Context, store *state.Store, r dsgit.
 		return
 	}
 	if len(paths) == 0 {
+		// Cheap local filesystem check BEFORE the git subprocess (review
+		// follow-up, W12-02): the vast majority of projects have never
+		// configured a sparse profile, and unconditionally shelling out to
+		// `git sparse-checkout list` for every one of them on every
+		// sync/hydrate broke this feature's opt-in/zero-cost-when-unused
+		// design goal for every existing user. Only pay the subprocess cost
+		// when there is actually something to converge.
+		if !dsgit.SparseCheckoutEverEnabled(localPath) {
+			return
+		}
 		current, lerr := r.SparseCheckoutList(ctx, localPath)
 		if lerr != nil || len(current) == 0 {
 			return

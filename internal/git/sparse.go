@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -127,6 +129,16 @@ func (r Runner) ApplyConvergedSparseCheckout(ctx context.Context, dir string, pa
 			return err
 		}
 	}
+	// Normalize BEFORE comparing/setting (review follow-up, W12-02): git's
+	// own cone-mode collapses an overlapping set (e.g. ["backend",
+	// "backend/deep"]) down to just its ancestors when reporting the active
+	// set (SparseCheckoutList), so comparing the un-collapsed input against
+	// that collapsed report never matches — every hydrate/sync would re-run
+	// init+set forever for any project with overlapping configured paths.
+	// Callers (parseSparseFlag/cleanSparseArgs) also normalize at write time
+	// so what's stored matches what actually gets applied, but normalizing
+	// again here makes convergence correct regardless of how paths arrived.
+	paths = NormalizeSparsePaths(paths)
 	current, err := r.SparseCheckoutList(ctx, dir)
 	if err != nil {
 		return fmt.Errorf("read current sparse-checkout state: %w", err)
@@ -148,6 +160,91 @@ func (r Runner) ApplyConvergedSparseCheckout(ctx context.Context, dir string, pa
 		return fmt.Errorf("sparse-checkout set: %w", err)
 	}
 	return nil
+}
+
+// NormalizeSparsePaths removes any path made redundant by an ancestor
+// directory already present in the set (review follow-up, W12-02): git's
+// cone-mode `sparse-checkout set` collapses ["backend", "backend/deep"] down
+// to just ["backend"] when reporting the active set, since including a
+// directory already implies everything beneath it. Comparing an
+// un-collapsed desired set against SparseCheckoutList's always-collapsed
+// report permanently defeats ApplyConvergedSparseCheckout's no-op check for
+// any project with overlapping configured paths. Input paths are assumed
+// already cleaned (CleanSparsePath); exact duplicates and proper descendants
+// of another entry are dropped, preserving each surviving path's original
+// relative order.
+func NormalizeSparsePaths(paths []string) []string {
+	sorted := append([]string(nil), paths...)
+	sort.Strings(sorted)
+	survives := make(map[string]bool, len(sorted))
+	var kept []string
+	for _, p := range sorted {
+		redundant := false
+		for _, k := range kept {
+			if p == k || strings.HasPrefix(p, k+"/") {
+				redundant = true
+				break
+			}
+		}
+		if !redundant {
+			kept = append(kept, p)
+			survives[p] = true
+		}
+	}
+	result := make([]string, 0, len(kept))
+	seen := make(map[string]bool, len(kept))
+	for _, p := range paths {
+		if survives[p] && !seen[p] {
+			result = append(result, p)
+			seen[p] = true
+		}
+	}
+	return result
+}
+
+// SparseCheckoutEverEnabled reports, via a cheap local filesystem check (no
+// git subprocess), whether dir's git-dir has ever had sparse-checkout
+// enabled. Used to gate the hot-path convergence probe in callers like
+// applyProjectSparseProfile (review follow-up, W12-02): calling
+// SparseCheckoutList unconditionally on EVERY sync/hydrate for EVERY
+// project — even the vast majority that have never touched the sparse
+// feature at all — measured a real subprocess cost per project, breaking
+// the feature's opt-in/zero-cost-when-unused design goal for every existing
+// user. A dir whose sparse-checkout state can't be determined this way (an
+// unusual .git layout) reports true, the safe direction: it costs one extra
+// subprocess call rather than silently skipping a real leftover-cone
+// convergence (see the bidirectional-convergence doc on
+// applyProjectSparseProfile).
+func SparseCheckoutEverEnabled(dir string) bool {
+	gitDir := filepath.Join(dir, ".git")
+	info, err := os.Stat(gitDir)
+	if err != nil {
+		return true
+	}
+	if !info.IsDir() {
+		// A linked worktree's ".git" is a file containing "gitdir: <path>".
+		// dir is always a project's own already-materialized local path
+		// (never raw user/network input reaching this function directly),
+		// same trust boundary as every other local filesystem call in this
+		// package.
+		//nolint:gosec // dir is a caller-controlled local repo path, not user/network input; see comment above.
+		data, rerr := os.ReadFile(gitDir)
+		if rerr != nil {
+			return true
+		}
+		line := strings.TrimSpace(string(data))
+		const prefix = "gitdir:"
+		if !strings.HasPrefix(line, prefix) {
+			return true
+		}
+		gitDir = strings.TrimSpace(strings.TrimPrefix(line, prefix))
+		if !filepath.IsAbs(gitDir) {
+			gitDir = filepath.Join(dir, gitDir)
+		}
+	}
+	//nolint:gosec // gitDir is resolved from a caller-controlled local repo path (a real ".git" dir or its own "gitdir:" pointer target), not user/network input.
+	_, err = os.Stat(filepath.Join(gitDir, "info", "sparse-checkout"))
+	return err == nil
 }
 
 func sparsePathSetsEqual(a, b []string) bool {

@@ -236,7 +236,11 @@ func newProjectSparseClearCommand(stdout io.Writer, opts *options) *cobra.Comman
 
 // cleanSparseArgs cleans and validates a list of positional directory
 // arguments the same way parseSparseFlag does for the comma-separated `add
-// --sparse` flag, de-duplicating while preserving order.
+// --sparse` flag, de-duplicating while preserving order. The result is also
+// normalized (dsgit.NormalizeSparsePaths, review follow-up) so an
+// overlapping `project sparse set p src src/lib` stores just ["src"] rather
+// than a pair that would permanently defeat convergence's no-op check — see
+// parseSparseFlag's doc comment for the full rationale.
 func cleanSparseArgs(raw []string) ([]string, error) {
 	seen := make(map[string]bool, len(raw))
 	paths := make([]string, 0, len(raw))
@@ -254,5 +258,5 @@ func cleanSparseArgs(raw []string) ([]string, error) {
 		seen[p] = true
 		paths = append(paths, p)
 	}
-	return paths, nil
+	return dsgit.NormalizeSparsePaths(paths), nil
 }

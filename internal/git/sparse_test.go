@@ -6,8 +6,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/Reederey87/DevStrap/internal/platform"
 )
 
 func TestValidSparsePathAcceptsPlainDirectories(t *testing.T) {
@@ -204,24 +207,68 @@ func TestApplyConvergedSparseCheckoutValidatesBeforeMutating(t *testing.T) {
 // validation-passing path git itself rejects) after a working profile was
 // already active, the caller's PRIOR cone is restored rather than the tree
 // being blown open to a full checkout — falling back to full would be a
-// worse outcome than the state the caller started with. This is exercised
-// directly against the internal Set/Init/Disable primitives (real git
-// accepts almost any syntactically valid cone path, so provoking a genuine
-// post-validation `set` failure isn't reproducible through the public
-// ApplyConvergedSparseCheckout entrypoint with real git); the assertion is
-// that a manually-simulated restore leaves the original cone intact.
+// worse outcome than the state the caller started with.
+//
+// Review follow-up (W12-02): the original version of this test called
+// SparseCheckoutSet directly and never entered ApplyConvergedSparseCheckout
+// at all, so it could not have caught a regression in the restore branch
+// itself. Real git is permissive about syntactically valid cone paths — it
+// doesn't require the directory to actually exist — so a genuine
+// post-validation `set` failure isn't reproducible through real args alone.
+// This version routes through the real ApplyConvergedSparseCheckout
+// entrypoint using a thin fake `git` wrapper that delegates every
+// subcommand to the real binary except a `sparse-checkout set` call
+// targeting the new (failing) profile — a real failure the production code
+// path actually has to handle, not a reimplementation of what it's supposed
+// to do on one.
+//
+// A first draft of this test only asserted the END state matched the prior
+// profile — which passed even when a mutation deleted the restore call
+// entirely, because SparseCheckoutInit alone (which still runs, and
+// succeeds) doesn't clear an already-active cone, so "nothing else touched
+// it" looks identical to "the restore explicitly re-applied it". Caught via
+// a deliberate mutation (stubbing out the restore call) that this version
+// still failed to catch on the first attempt; fixed by also asserting the
+// wrapper's call log shows the restore's `sparse-checkout set` invocation
+// actually happened, not just that its target directory remained on disk.
 func TestApplyConvergedSparseCheckoutRestoresPriorProfileOnSetFailure(t *testing.T) {
-	repo, r := sparseFixtureRepo(t)
+	repo, realRunner := sparseFixtureRepo(t)
 	ctx := context.Background()
-	if err := r.ApplyConvergedSparseCheckout(ctx, repo, []string{"backend"}); err != nil {
+	if err := realRunner.ApplyConvergedSparseCheckout(ctx, repo, []string{"backend"}); err != nil {
 		t.Fatalf("establish initial profile: %v", err)
 	}
-	// Simulate the restore branch ApplyConvergedSparseCheckout takes on a
-	// Set failure: re-apply the ORIGINAL set directly, proving that
-	// operation converges the tree back to the prior profile rather than a
-	// full checkout.
-	if err := r.SparseCheckoutSet(ctx, repo, []string{"backend"}); err != nil {
-		t.Fatalf("restore original profile: %v", err)
+
+	// Fail ONLY a `sparse-checkout set` call that targets "docs" — the new
+	// profile this test attempts — never one targeting "backend", so the
+	// restore branch's own re-application of the PRIOR profile (also a
+	// `sparse-checkout set` call, just with different arguments) is allowed
+	// to actually succeed. Every `sparse-checkout set` invocation's target is
+	// logged to callLog, whether blocked or allowed through, so the test can
+	// prove the restore call was genuinely attempted (not just that its
+	// effect happened to already be in place).
+	callLog := filepath.Join(t.TempDir(), "set-calls.log")
+	fakeGit := writeFailingSparseCheckoutSetGitWrapper(t, realRunner.Bin, "docs", callLog)
+	failingRunner := Runner{Bin: fakeGit, Timeout: realRunner.Timeout}
+
+	if err := failingRunner.ApplyConvergedSparseCheckout(ctx, repo, []string{"docs"}); err == nil {
+		t.Fatal("ApplyConvergedSparseCheckout with a failing sparse-checkout set = nil error, want the simulated failure surfaced")
+	}
+
+	logged, err := os.ReadFile(callLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantLog := "docs\nbackend\n"
+	if string(logged) != wantLog {
+		t.Fatalf("sparse-checkout set call log = %q, want %q (the failed attempt at \"docs\" followed by a genuine restore attempt at \"backend\" — a missing second line means the restore call itself never fired)", string(logged), wantLog)
+	}
+
+	current, err := realRunner.SparseCheckoutList(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sparsePathSetsEqual(current, []string{"backend"}) {
+		t.Fatalf("SparseCheckoutList after a failed set = %v, want the PRIOR profile [backend] restored, not left on the failed target or blown open to full", current)
 	}
 	if _, err := os.Stat(filepath.Join(repo, "backend", "main.go")); err != nil {
 		t.Fatalf("backend/main.go missing after restore: %v", err)
@@ -229,6 +276,55 @@ func TestApplyConvergedSparseCheckoutRestoresPriorProfileOnSetFailure(t *testing
 	if _, err := os.Stat(filepath.Join(repo, "frontend")); !os.IsNotExist(err) {
 		t.Fatalf("frontend present after restore (want the prior narrow profile, not a full tree): %v", err)
 	}
+}
+
+// writeFailingSparseCheckoutSetGitWrapper writes a shell script that
+// delegates every git invocation to realGitBin except a `sparse-checkout
+// set` call whose argument list contains failTarget, which it fails with a
+// nonzero exit — letting a test provoke exactly one targeted, real
+// subprocess failure (the call attempting to apply failTarget) while any
+// OTHER `sparse-checkout set` call (e.g. ApplyConvergedSparseCheckout's own
+// restore-the-prior-profile call, which targets a different path) still
+// succeeds for real. EVERY `sparse-checkout set` invocation — blocked or
+// allowed — appends its last argument (the target path) as its own line to
+// callLog, so a test can assert a later call genuinely happened rather than
+// inferring it from a final state that could look identical either way. It
+// scans the WHOLE argument list for the "sparse-checkout set" pair rather
+// than checking $1/$2 directly, because Runner.Run's secureArgs prepends
+// several `-c key=value` pairs ahead of the actual subcommand.
+func writeFailingSparseCheckoutSetGitWrapper(t *testing.T, realGitBin, failTarget, callLog string) string {
+	t.Helper()
+	if platform.Detect().OS == "windows" {
+		t.Skip("shell wrapper script not supported on windows")
+	}
+	path := filepath.Join(t.TempDir(), "git-fake-failing-sparse-set")
+	script := "#!/bin/sh\n" +
+		"prev=\"\"\n" +
+		"match=0\n" +
+		"hastarget=0\n" +
+		"last=\"\"\n" +
+		"for arg in \"$@\"; do\n" +
+		"  if [ \"$prev\" = \"sparse-checkout\" ] && [ \"$arg\" = \"set\" ]; then\n" +
+		"    match=1\n" +
+		"  fi\n" +
+		"  if [ \"$arg\" = \"" + failTarget + "\" ]; then\n" +
+		"    hastarget=1\n" +
+		"  fi\n" +
+		"  last=\"$arg\"\n" +
+		"  prev=\"$arg\"\n" +
+		"done\n" +
+		"if [ \"$match\" = \"1\" ]; then\n" +
+		"  echo \"$last\" >> \"" + callLog + "\"\n" +
+		"fi\n" +
+		"if [ \"$match\" = \"1\" ] && [ \"$hastarget\" = \"1\" ]; then\n" +
+		"  echo \"simulated sparse-checkout set failure\" >&2\n" +
+		"  exit 1\n" +
+		"fi\n" +
+		"exec \"" + realGitBin + "\" \"$@\"\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func TestApplyConvergedSparseCheckoutNoOpWhenAlreadyConverged(t *testing.T) {
@@ -255,6 +351,136 @@ func TestApplyConvergedSparseCheckoutNoOpWhenAlreadyConverged(t *testing.T) {
 	}
 }
 
+// TestNormalizeSparsePaths pins the ancestor-collapsing contract directly:
+// a path that is a proper descendant of another path already in the set is
+// dropped (mirroring git's own cone-mode collapsing behavior), exact
+// duplicates are dropped, unrelated paths all survive, and the surviving
+// paths keep their original relative order rather than the internal sorted
+// working order leaking out.
+func TestNormalizeSparsePaths(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"no overlap", []string{"docs", "backend"}, []string{"docs", "backend"}},
+		{"direct child dropped", []string{"backend", "backend/deep"}, []string{"backend"}},
+		{"child listed first still dropped", []string{"backend/deep", "backend"}, []string{"backend"}},
+		{"multi-level descendant dropped", []string{"a", "a/b/c/d"}, []string{"a"}},
+		{"exact duplicate dropped", []string{"backend", "backend"}, []string{"backend"}},
+		{"sibling-prefix NOT collapsed", []string{"back", "backend"}, []string{"back", "backend"}},
+		{"mixed", []string{"docs", "backend", "backend/deep", "backend/deep/deeper", "frontend"}, []string{"docs", "backend", "frontend"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := NormalizeSparsePaths(c.in)
+			if len(got) != len(c.want) {
+				t.Fatalf("NormalizeSparsePaths(%v) = %v, want %v", c.in, got, c.want)
+			}
+			for i := range c.want {
+				if got[i] != c.want[i] {
+					t.Fatalf("NormalizeSparsePaths(%v) = %v, want %v", c.in, got, c.want)
+				}
+			}
+		})
+	}
+}
+
+// TestApplyConvergedSparseCheckoutConvergesWithOverlappingPaths is the
+// direct regression guard for the review-reported bug: git's cone mode
+// collapses an overlapping set (a directory plus one of its own
+// subdirectories) down to just the ancestor when reporting the active set,
+// so comparing an un-normalized desired set against that always-collapsed
+// report never matched — every hydrate/sync would re-run init+set forever
+// for a project with overlapping configured paths. This proves BOTH that
+// the first apply converges to the collapsed set AND that a second apply
+// with the same overlapping input performs NO further git mutation at all
+// (via a call-counting fake git wrapper) — not just that it happens not to
+// error, which a naive fix could still satisfy while re-doing pointless work
+// every time.
+func TestApplyConvergedSparseCheckoutConvergesWithOverlappingPaths(t *testing.T) {
+	repo, realRunner := sparseFixtureRepo(t)
+	ctx := context.Background()
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	if err := os.MkdirAll(filepath.Join(repo, "backend", "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "backend", "nested", "x.go"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runRealGit(t, gitBin, repo, "add", "backend/nested/x.go")
+	runRealGit(t, gitBin, repo, "commit", "-m", "nest a subdirectory of backend")
+
+	setCallLog := filepath.Join(t.TempDir(), "set-calls.log")
+	fakeGit := writeCountingSparseCheckoutSetGitWrapper(t, realRunner.Bin, setCallLog)
+	r := Runner{Bin: fakeGit, Timeout: realRunner.Timeout}
+
+	if err := r.ApplyConvergedSparseCheckout(ctx, repo, []string{"backend", "backend/nested"}); err != nil {
+		t.Fatalf("first (overlapping) apply: %v", err)
+	}
+	current, err := realRunner.SparseCheckoutList(ctx, repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sparsePathSetsEqual(current, []string{"backend"}) {
+		t.Fatalf("SparseCheckoutList after overlapping apply = %v, want the collapsed [backend]", current)
+	}
+
+	// Same overlapping input, different order — must be a true no-op: no
+	// `sparse-checkout set` call at all, not merely a non-erroring one.
+	if err := r.ApplyConvergedSparseCheckout(ctx, repo, []string{"backend/nested", "backend"}); err != nil {
+		t.Fatalf("second (overlapping) apply: %v", err)
+	}
+
+	data, err := os.ReadFile(setCallLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	if trimmed := strings.TrimSpace(string(data)); trimmed != "" {
+		calls = len(strings.Split(trimmed, "\n"))
+	}
+	if calls != 1 {
+		t.Fatalf("sparse-checkout set invoked %d times across two overlapping-but-equivalent applies, want exactly 1 (the second must be a genuine no-op, not a perpetual re-apply)", calls)
+	}
+}
+
+// writeCountingSparseCheckoutSetGitWrapper writes a shell script that
+// delegates every git invocation to realGitBin, appending one line to
+// callLog each time it's invoked as `sparse-checkout set` — letting a test
+// assert exactly how many times a real mutation was attempted, not just
+// whether the overall call succeeded. It scans the WHOLE argument list for
+// the "sparse-checkout set" pair rather than checking $1/$2 directly,
+// because Runner.Run's secureArgs prepends several `-c key=value` pairs
+// ahead of the actual subcommand.
+func writeCountingSparseCheckoutSetGitWrapper(t *testing.T, realGitBin, callLog string) string {
+	t.Helper()
+	if platform.Detect().OS == "windows" {
+		t.Skip("shell wrapper script not supported on windows")
+	}
+	path := filepath.Join(t.TempDir(), "git-fake-counting-sparse-set")
+	script := "#!/bin/sh\n" +
+		"prev=\"\"\n" +
+		"match=0\n" +
+		"for arg in \"$@\"; do\n" +
+		"  if [ \"$prev\" = \"sparse-checkout\" ] && [ \"$arg\" = \"set\" ]; then\n" +
+		"    match=1\n" +
+		"  fi\n" +
+		"  prev=\"$arg\"\n" +
+		"done\n" +
+		"if [ \"$match\" = \"1\" ]; then\n" +
+		"  echo call >> \"" + callLog + "\"\n" +
+		"fi\n" +
+		"exec \"" + realGitBin + "\" \"$@\"\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestSparseCheckoutDisableRestoresFullTree(t *testing.T) {
 	repo, r := sparseFixtureRepo(t)
 	ctx := context.Background()
@@ -272,6 +498,29 @@ func TestSparseCheckoutDisableRestoresFullTree(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(repo, "docs", "index.md")); err != nil {
 		t.Fatalf("docs/index.md missing after disable (want a full tree): %v", err)
+	}
+}
+
+// TestSparseCheckoutEverEnabled pins the cheap local filesystem check that
+// gates the hot-path convergence probe in applyProjectSparseProfile (review
+// follow-up, W12-02): it must report false for a repo that has never
+// touched sparse-checkout (so callers skip the git subprocess entirely for
+// the vast majority of projects), true once sparse-checkout has genuinely
+// been enabled, and true (the safe fallback) for a path whose .git state
+// can't be determined at all.
+func TestSparseCheckoutEverEnabled(t *testing.T) {
+	repo, r := sparseFixtureRepo(t)
+	if SparseCheckoutEverEnabled(repo) {
+		t.Fatal("SparseCheckoutEverEnabled on a never-sparse repo = true, want false")
+	}
+	if err := r.ApplyConvergedSparseCheckout(context.Background(), repo, []string{"backend"}); err != nil {
+		t.Fatalf("ApplyConvergedSparseCheckout: %v", err)
+	}
+	if !SparseCheckoutEverEnabled(repo) {
+		t.Fatal("SparseCheckoutEverEnabled after enabling sparse-checkout = false, want true")
+	}
+	if !SparseCheckoutEverEnabled(filepath.Join(t.TempDir(), "does-not-exist")) {
+		t.Fatal("SparseCheckoutEverEnabled on an undeterminable path = false, want the safe fallback true")
 	}
 }
 
