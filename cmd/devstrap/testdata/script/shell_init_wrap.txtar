@@ -1,0 +1,103 @@
+# Regression guard for `devstrap shell-init` (W12-01): a hook installer that
+# REPLACES an existing precmd/PROMPT_COMMAND/fish_prompt handler instead of
+# WRAPPING it is a well-documented breakage class — it broke the Starship
+# prompt when direnv's tcsh hook overwrote `precmd`; Starship's fix was to
+# wrap via USER_PRECMD/USER_POSTCMD instead of replacing. This script proves
+# devstrap's emitted hook follows the same wrap-don't-replace discipline: a
+# hook registered BEFORE sourcing devstrap's snippet still fires AFTER
+# sourcing it, for every shell available on this runner. [exec:bash] /
+# [exec:zsh] / [exec:fish] skip a shell's block gracefully when that binary
+# is absent rather than failing — bash and zsh are always present in CI, and
+# fish is installed explicitly by the workflow for this test (see
+# .github/workflows/ci.yml) so this guard isn't silently skipped there.
+#
+# The real `devstrap` binary is not on PATH inside the bash/zsh/fish
+# subprocesses this script spawns, so each driver below stubs a `devstrap`
+# shell function before sourcing the captured snippet — enough for the
+# snippet's internal `devstrap status --prompt` call to resolve and prove the
+# hook itself ran, without needing a real workspace.
+
+env DEVSTRAP_HOME=$WORK/home
+env DEVSTRAP_ROOT=$WORK/Code
+env DEVSTRAP_NO_KEYCHAIN=1
+
+# Capture each shell's emitted snippet to a real file so a real shell binary
+# can source it.
+exec devstrap shell-init bash
+cp stdout bash_hook.sh
+
+exec devstrap shell-init zsh
+cp stdout zsh_hook.sh
+
+exec devstrap shell-init fish
+cp stdout fish_hook.fish
+
+# bash: PROMPT_COMMAND must remain an array holding BOTH the pre-existing
+# entry and devstrap's own entry — never overwritten down to just devstrap's.
+[exec:bash] exec bash driver_bash.sh
+[exec:bash] grep EXISTING_FIRED marker_bash.txt
+
+# zsh: precmd_functions must remain an array holding BOTH entries.
+[exec:zsh] exec zsh driver_zsh.sh
+[exec:zsh] grep EXISTING_FIRED marker_zsh.txt
+
+# fish: a second function bound via --on-event fish_prompt must coexist with
+# the first, since fish natively supports multiple handlers per event.
+[exec:fish] exec fish driver_fish.fish
+[exec:fish] grep EXISTING_FIRED marker_fish.txt
+
+-- driver_bash.sh --
+# Simulate a shell that already has a precmd hook registered as an array
+# (the way Bash represents PROMPT_COMMAND once anything appends to it) before
+# devstrap installs its own — then fire the array manually, the way bash's
+# real prompt machinery would on every prompt render, and require BOTH hooks
+# to have run.
+existing_precmd() { echo EXISTING_FIRED >> marker_bash.txt; }
+PROMPT_COMMAND=(existing_precmd)
+devstrap() { echo STUBBED; }
+# Source it three times, simulating a re-run of `eval "$(devstrap shell-init
+# bash)"` (or a duplicated rc-file line): devstrap's own entry must appear
+# exactly once, never re-appended on every source.
+source bash_hook.sh
+source bash_hook.sh
+source bash_hook.sh
+own=0
+for cmd in "${PROMPT_COMMAND[@]}"; do
+  [ "$cmd" = "_devstrap_prompt_precmd" ] && own=$((own + 1))
+done
+[ "$own" -eq 1 ] || { echo "expected exactly 1 devstrap PROMPT_COMMAND entry after 3 sources, got $own" >&2; exit 1; }
+for cmd in "${PROMPT_COMMAND[@]}"; do "$cmd"; done
+grep -q EXISTING_FIRED marker_bash.txt || { echo "pre-existing PROMPT_COMMAND entry did not fire -- devstrap shell-init clobbered it" >&2; exit 1; }
+[ "$DEVSTRAP_PROMPT" = "STUBBED" ] || { echo "devstrap's own hook did not fire (DEVSTRAP_PROMPT=$DEVSTRAP_PROMPT)" >&2; exit 1; }
+-- driver_zsh.sh --
+existing_precmd() { echo EXISTING_FIRED >> marker_zsh.txt; }
+precmd_functions=(existing_precmd)
+devstrap() { echo STUBBED; }
+source zsh_hook.sh
+source zsh_hook.sh
+source zsh_hook.sh
+own=0
+for cmd in $precmd_functions; do
+  [ "$cmd" = "_devstrap_prompt_precmd" ] && own=$((own + 1))
+done
+[ "$own" -eq 1 ] || { echo "expected exactly 1 devstrap precmd_functions entry after 3 sources, got $own" >&2; exit 1; }
+for cmd in $precmd_functions; do "$cmd"; done
+grep -q EXISTING_FIRED marker_zsh.txt || { echo "pre-existing precmd_functions entry did not fire -- devstrap shell-init clobbered it" >&2; exit 1; }
+[ "$DEVSTRAP_PROMPT" = "STUBBED" ] || { echo "devstrap's own hook did not fire (DEVSTRAP_PROMPT=$DEVSTRAP_PROMPT)" >&2; exit 1; }
+-- driver_fish.fish --
+function existing_precmd --on-event fish_prompt
+    echo EXISTING_FIRED >> marker_fish.txt
+end
+function devstrap
+    echo STUBBED
+end
+source fish_hook.fish
+emit fish_prompt
+if not grep -q EXISTING_FIRED marker_fish.txt
+    echo "pre-existing fish_prompt handler did not fire -- devstrap shell-init clobbered it" >&2
+    exit 1
+end
+if test "$DEVSTRAP_PROMPT" != STUBBED
+    echo "devstrap's own hook did not fire (DEVSTRAP_PROMPT=$DEVSTRAP_PROMPT)" >&2
+    exit 1
+end

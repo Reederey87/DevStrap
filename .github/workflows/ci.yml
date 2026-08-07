@@ -146,6 +146,20 @@ jobs:
         run: go vet ./...
       - name: Build
         run: go build ./...
+      - name: Install fish (shell-init wrap regression test)
+        # cmd/devstrap/testdata/script/shell_init_wrap.txtar's [exec:fish]
+        # block would otherwise silently skip on every CI runner (fish isn't
+        # preinstalled on ubuntu-latest or macos-latest) — install it here so
+        # the fish wrap-not-replace guard actually runs there too, not just
+        # bash/zsh's: a silently-skipping test reads exactly like a passing
+        # one, which is the state this step exists to end.
+        run: |
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            sudo apt-get update && sudo apt-get install -y fish
+          else
+            brew install fish
+          fi
+          fish --version
       - name: Install vcstool (manifest interop test)
         if: matrix.os == 'ubuntu-latest'
         # W13-02's headline claim is that `vcs import` can rebuild the git

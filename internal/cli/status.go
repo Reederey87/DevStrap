@@ -13,10 +13,17 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// statusPromptTimeout bounds `status --prompt`'s local SQLite reads (W12-01):
+// generous relative to the local-only <50ms design target, but still a hard
+// ceiling so a wedged store degrades a shell prompt segment rather than
+// hanging the interactive terminal it's embedded in.
+const statusPromptTimeout = 2 * time.Second
+
 func newStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var watch bool
 	var interval time.Duration
 	var allDevices bool
+	var prompt bool
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show local workspace status",
@@ -26,6 +33,12 @@ func newStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 			// sqlite "unable to open database file" error.
 			if _, err := os.Stat(opts.paths().StateDB()); errors.Is(err, os.ErrNotExist) {
 				return appError{code: exitInvalidConfig, err: state.ErrNotInitialized}
+			}
+			// W12-01: --prompt is a distinct, terse renderer meant to be
+			// embedded in a shell prompt (via `devstrap shell-init`) —
+			// local-only, no network I/O, one line, never JSON-wrapped.
+			if prompt {
+				return renderStatusPrompt(cmd.Context(), stdout, opts)
 			}
 			// P7-GITSTATE-01 CLI surfacing: --all-devices renders the
 			// working-state validation plane Layer A mirror instead of the
@@ -66,7 +79,88 @@ func newStatusCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().BoolVar(&watch, "watch", false, "re-render status on an interval until interrupted (live convergence view)")
 	cmd.Flags().DurationVar(&interval, "interval", 2*time.Second, "refresh interval for --watch")
 	cmd.Flags().BoolVar(&allDevices, "all-devices", false, "show every device's last-observed git working-state per project (working-state validation plane Layer A)")
+	cmd.Flags().BoolVar(&prompt, "prompt", false, "print a single-line, machine-parseable summary for embedding in a shell prompt (local-only, no network I/O; see `devstrap shell-init`)")
+	cmd.MarkFlagsMutuallyExclusive("prompt", "watch")
+	cmd.MarkFlagsMutuallyExclusive("prompt", "all-devices")
 	return cmd
+}
+
+// renderStatusPrompt implements `status --prompt` (W12-01): a fast,
+// local-only, single-line summary meant to sit inside a shell prompt segment.
+// It reads only already-synced local mirror state (never shells out to git,
+// never touches the network, never triggers a sync) so it stays safely under
+// a prompt's latency budget. The format is the terse "key:count" contract
+// documented on the --prompt flag and in docs/quickstart.md, not prose.
+//
+// Failure contract: every early return below happens before the single
+// Fprintln at the end, so on ANY error stdout stays completely empty (only
+// the returned error carries detail, printed to stderr by the normal CLI
+// error path) — never a partial line or a multi-line error dump. This is
+// what makes `"$(devstrap status --prompt 2>/dev/null)"` in the emitted
+// shell-init hooks safe to embed directly: a failure degrades to an empty
+// $DEVSTRAP_PROMPT, never garbage in the prompt.
+func renderStatusPrompt(ctx context.Context, stdout io.Writer, opts *options) error {
+	// A shell prompt hook fires before every prompt render, so an unbounded
+	// wait here (a wedged file lock, a slow/degraded disk) would hang the
+	// interactive terminal itself, not just this one command. Bound it well
+	// above the local-only <50ms target so ordinary contention never trips
+	// it, but low enough that a truly stuck store still fails fast.
+	ctx, cancel := context.WithTimeout(ctx, statusPromptTimeout)
+	defer cancel()
+
+	store, err := opts.openState(ctx)
+	if err != nil {
+		return err
+	}
+	defer closeStore(store)
+
+	projects, err := store.ListProjects(ctx)
+	if err != nil {
+		return err
+	}
+	var dirty int
+	for _, p := range projects {
+		if p.DirtyState == "dirty" || p.DirtyState == "diverged" {
+			dirty++
+		}
+	}
+	// Workspace-wide pending WIP (working-state validation plane Layer B),
+	// not filtered to the local device: a WIP ref pending from ANY device is
+	// exactly the "something needs reconciling" signal a prompt should flag,
+	// mirroring what `wip status` itself surfaces.
+	wip, err := store.DeviceWipAll(ctx)
+	if err != nil {
+		return err
+	}
+	conflicts, err := store.CountOpenConflicts(ctx)
+	if err != nil {
+		return err
+	}
+
+	_, err = fmt.Fprintln(stdout, formatPromptLine(dirty, len(wip), conflicts))
+	return err
+}
+
+// formatPromptLine renders the `status --prompt` one-liner: "clean" when
+// nothing needs attention, or space-joined "key:count" segments — dirty, wip,
+// conflicts, in that priority order — for whichever are nonzero. A pure
+// function (no store, no I/O) so the segment-selection logic is directly
+// unit-testable.
+func formatPromptLine(dirty, wip, conflicts int) string {
+	var parts []string
+	if dirty > 0 {
+		parts = append(parts, fmt.Sprintf("dirty:%d", dirty))
+	}
+	if wip > 0 {
+		parts = append(parts, fmt.Sprintf("wip:%d", wip))
+	}
+	if conflicts > 0 {
+		parts = append(parts, fmt.Sprintf("conflicts:%d", conflicts))
+	}
+	if len(parts) == 0 {
+		return "clean"
+	}
+	return strings.Join(parts, " ")
 }
 
 // renderStatus renders a single status snapshot (PROD-01/02), honoring --json.

@@ -1,6 +1,6 @@
 ---
 last_reviewed: 2026-08-07
-tracks_code: [cmd/**, internal/cli/**, internal/daemon/**, internal/manifest/**, internal/platform/**, internal/secrets/**]
+tracks_code: [cmd/**, internal/cli/**, internal/daemon/**, internal/manifest/**, internal/platform/**, internal/secrets/**, internal/shellhook/**]
 ---
 # CLI and Daemon API
 
@@ -254,11 +254,14 @@ devstrap status
 devstrap status --json
 devstrap status --watch [--interval 2s]
 devstrap status --all-devices
+devstrap status --prompt
 ```
 
 `status --watch` re-renders the snapshot on an interval until interrupted.
 
 `status --all-devices` (P7-GITSTATE-01 CLI surfacing) renders the working-state validation plane Layer A mirror instead of the regular snapshot: for every local project it reads `Store.DeviceGitstateForProject` and prints one row per device that has reported that project's git working-state (branch, dirty/untracked/unmerged/ahead/behind/stash counts, and an `Observed` column giving `last seen <duration> ago`, derived from the stored HLC), newest observation first. A project with zero rows in `device_gitstate` always gets one explicit `never synced` row instead of being left out of the output — spec/07's Layer A requirement is that this view **never** presents a silent all-clear. `--json` emits `[]projectGitstateStatus` (`{path, devices: [{device_id, branch, dirty_count, untracked_count, unmerged_count, ahead_count, behind_count, stash_count, observed}]}`). The flag does not compose with `--watch`. The producer is wired: every `devstrap sync` cycle captures each already-materialized `git_repo` project (see `### sync`), so a project reads `never synced` here only until its first post-materialization sync.
+
+`status --prompt` (W12-01) is a distinct, terse renderer meant to sit inside a shell prompt segment: ONE line, purely from already-local mirror state (`ListProjects`' cached `dirty_state`, the workspace-wide `DeviceWipAll` pending-WIP count, and `CountOpenConflicts`) — no git shell-out, no network I/O, no `sync` trigger, so it stays comfortably under a prompt's latency budget. The contract is `"clean"` when nothing needs attention, or space-joined `key:count` segments in priority order — `dirty:N` (projects with a cached `dirty`/`diverged` state), `wip:N` (pending WIP refs across the workspace, from any device), `conflicts:N` (open conflicts) — omitting any segment that is zero. It never routes through `opts.render`/`--json`: the one-line text itself is the machine-parseable contract (in the spirit of `git status --porcelain`), and it does not compose with `--watch` or `--all-devices` (`cmd.MarkFlagsMutuallyExclusive`). `devstrap shell-init` (below) is the documented way to wire it into an interactive prompt.
 
 Current Phase-0 status shows workspace name, workspace ID (`Workspace ID:` row / JSON `workspace_id` — the value a founder copies into `init --join --workspace-id <id>` on a joining device, P4-SEC-07 pairing), root path, project count, local device ID, and adopted project rows. Future daemon-backed status adds:
 
@@ -275,6 +278,26 @@ work/acme/web                   this       dirty      ready    ready    local ch
 experiments/fs2                 this       draft      ready    n/a      synced
 work/acme/data                  this       skeleton   mapped   unknown  not hydrated
 ```
+
+### shell-init
+
+```bash
+devstrap shell-init bash
+devstrap shell-init zsh
+devstrap shell-init fish
+```
+
+`shell-init` (W12-01, `internal/shellhook`) prints eval-able shell code that wires `devstrap status --prompt` into an interactive prompt:
+
+```bash
+eval "$(devstrap shell-init zsh)"    # ~/.zshrc
+eval "$(devstrap shell-init bash)"   # ~/.bashrc
+devstrap shell-init fish | source    # ~/.config/fish/config.fish
+```
+
+Every emitted snippet WRAPS the shell's existing prompt-hook mechanism instead of replacing it — a hook installer that replaces an existing `precmd`/`PROMPT_COMMAND`/`fish_prompt` handler instead of appending to it is a well-documented breakage class (it broke Starship when direnv's tcsh hook overwrote `precmd`; Starship's fix was `USER_PRECMD`/`USER_POSTCMD` wrapping). Concretely: bash appends a function call to the `PROMPT_COMMAND` array (`PROMPT_COMMAND+=(...)`, relying on Bash ≥5.1 treating `PROMPT_COMMAND` as array-typed natively); zsh appends to `precmd_functions`; fish defines a new function bound via `--on-event fish_prompt` rather than redefining `fish_prompt` itself. Each installed hook sets `$DEVSTRAP_PROMPT` to the current `devstrap status --prompt` line on every prompt render, for the user's own `PS1`/`PROMPT`/`fish_prompt` to embed. This regression is guarded end-to-end by `cmd/devstrap/testdata/script/shell_init_wrap.txtar`, which seeds a pre-existing hook in each shell before sourcing the emitted snippet and asserts the pre-existing hook still fires afterward.
+
+Starship users should keep Starship owning the prompt and add a [custom module](https://starship.rs/config/#custom-commands) pointed at `devstrap status --prompt` directly, rather than installing devstrap's own hook — see `docs/quickstart.md`'s "Shell integration" section for the recipe.
 
 ### keys
 

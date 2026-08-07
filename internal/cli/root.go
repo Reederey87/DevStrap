@@ -103,6 +103,7 @@ func NewRootCommand(stdout, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newJoinCommand(stdout, opts))
 	cmd.AddCommand(newPairCommand(stdout, opts))
 	cmd.AddCommand(newStatusCommand(stdout, opts))
+	cmd.AddCommand(newShellInitCommand(stdout, opts))
 	cmd.AddCommand(newDoctorCommand(stdout, opts))
 	cmd.AddCommand(newDBCommand(stdout, opts))
 	cmd.AddCommand(newScanCommand(stdout, opts))
