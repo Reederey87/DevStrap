@@ -44,6 +44,15 @@ var ErrNotInitialized = errors.New("workspace is not initialized; run devstrap i
 // clobber an existing row on a transient failure; the manifest import's
 // clobber refusal is exactly such a caller (W13-02 review).
 var ErrProjectNotFound = errors.New("project not found")
+
+// ErrEnvProfileNotFound distinguishes "this project has no env profile yet"
+// from a real read failure, for the identical reason ErrProjectNotFound
+// exists (W12-03 review): a caller that treats every EnvProfileForProject
+// error as "no profile" and then WRITES a fresh profile on that basis (as
+// `env op set`'s merge does) would silently replace an existing profile's
+// full ref set with just the one key it is setting, on nothing worse than a
+// transient read failure.
+var ErrEnvProfileNotFound = errors.New("env profile not found")
 var ErrDivergentEvent = errors.New("event id already exists with different immutable content")
 var ErrEventHashChain = errors.New("event prev_event_hash chain break")
 var ErrEventVerification = errors.New("event verification failed")
@@ -2116,7 +2125,7 @@ WHERE n.id = ? AND n.workspace_id = ? AND n.status = 'active';
 `, namespaceID, workspaceID).Scan(&profile.ID, &profile.WorkspaceID, &profile.Name, &profile.Provider, &profile.Mode)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return EnvProfile{}, nil, fmt.Errorf("env profile not found for namespace id %q", namespaceID)
+			return EnvProfile{}, nil, fmt.Errorf("env profile not found for namespace id %q: %w", namespaceID, ErrEnvProfileNotFound)
 		}
 		return EnvProfile{}, nil, fmt.Errorf("read env profile: %w", err)
 	}

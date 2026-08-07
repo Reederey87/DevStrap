@@ -29,6 +29,7 @@ func newEnvCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.AddCommand(newEnvHydrateCommand(stdout, opts))
 	cmd.AddCommand(newEnvBindCommand(stdout, opts))
 	cmd.AddCommand(newEnvRotateCommand(stdout, opts))
+	cmd.AddCommand(newEnvOpCommand(stdout, opts))
 	return cmd
 }
 
@@ -444,30 +445,7 @@ func newEnvBindCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if profileName == "" {
 				profileName = "default"
 			}
-			payloadJSON, err := json.Marshal(dssync.EnvProfilePayload{
-				Path:     project.Path,
-				Profile:  profileName,
-				Provider: provider,
-				Mode:     "runtime_only",
-				Refs:     refs,
-			})
-			if err != nil {
-				return err
-			}
-			params := state.EnvProfileParams{
-				Name:     profileName,
-				Provider: provider,
-				Mode:     "runtime_only",
-				Refs:     refs,
-			}
-			if err := store.WithTx(cmd.Context(), func(tx *state.Tx) error {
-				ev, err := store.InsertLocalEventTx(cmd.Context(), tx, dssync.NewEnvProfileEvent(string(payloadJSON)))
-				if err != nil {
-					return err
-				}
-				_, err = tx.UpsertEnvProfileTx(cmd.Context(), project.ID, params, ev)
-				return err
-			}); err != nil {
+			if err := bindProviderRefs(cmd.Context(), store, project, profileName, provider, refs); err != nil {
 				return err
 			}
 			if err := ensureIgnored(localPath, refsPath); err != nil {
@@ -487,6 +465,41 @@ func newEnvBindCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&profileName, "profile", "default", "env profile name")
 	cmd.Flags().StringVar(&provider, "provider", "1password", "secret provider for refs-file")
 	return cmd
+}
+
+// bindProviderRefs persists provider secret references (never values) for a
+// project's env profile via a signed namespace event — the single write path
+// shared by `env bind` (a full refs-file replace) and `env op set` (a
+// single-key merge), so there is exactly one way this state gets written, not
+// two that could drift apart (P5 review pattern, cf. captureEnvProfile).
+func bindProviderRefs(ctx context.Context, store *state.Store, project state.ProjectStatus, profileName, provider string, refs map[string]string) error {
+	if profileName == "" {
+		profileName = "default"
+	}
+	payloadJSON, err := json.Marshal(dssync.EnvProfilePayload{
+		Path:     project.Path,
+		Profile:  profileName,
+		Provider: provider,
+		Mode:     "runtime_only",
+		Refs:     refs,
+	})
+	if err != nil {
+		return err
+	}
+	params := state.EnvProfileParams{
+		Name:     profileName,
+		Provider: provider,
+		Mode:     "runtime_only",
+		Refs:     refs,
+	}
+	return store.WithTx(ctx, func(tx *state.Tx) error {
+		ev, err := store.InsertLocalEventTx(ctx, tx, dssync.NewEnvProfileEvent(string(payloadJSON)))
+		if err != nil {
+			return err
+		}
+		_, err = tx.UpsertEnvProfileTx(ctx, project.ID, params, ev)
+		return err
+	})
 }
 
 func readEnvFile(path string) ([]byte, error) {

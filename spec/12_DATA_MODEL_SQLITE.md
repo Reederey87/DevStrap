@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-07
 tracks_code: [internal/state/**, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # SQLite Data Model
@@ -16,6 +16,12 @@ exact refusal it exists to enforce, on a transient failure.
 
 `state.ErrProjectNotFound` now wraps the not-found case. Callers that only check
 `err != nil` are unaffected; callers that write on absence must distinguish.
+
+## `ErrEnvProfileNotFound` — the identical pattern for env profiles (`W12-03`, 2026-08-07)
+
+The same class of bug, caught in post-review before it shipped rather than after: `Store.EnvProfileForProject`'s not-found case was a bare `fmt.Errorf`, and `devstrap env op set`'s merge helper (`providerRefsForUpdate`, `internal/cli/env_op.go`) treated ANY error from it as "no profile yet, start from an empty ref map" — matching `export.go`'s pre-existing `hasEnvProfile`, which is safe only because it never follows up with a write. `env op set` does follow up with a write (`bindProviderRefs`, which always replaces a project's whole provider-ref map — there is no incremental-update path), so a transient read failure misread as "absent" would have silently replaced an existing profile's full binding set with just the one key being set.
+
+`state.ErrEnvProfileNotFound` now wraps the not-found case (same shape as `ErrProjectNotFound`); `providerRefsForUpdate` distinguishes it via `errors.Is` and propagates every other error instead of merging into an empty map. See `09_SECRETS_AND_ENVIRONMENT.md` § *Browsing and writing 1Password directly*.
 
 ## WIP GC reads and local advisory state (`P7-WIP-07`/`P7-WIP-08`)
 

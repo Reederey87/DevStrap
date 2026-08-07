@@ -1,6 +1,6 @@
 ---
-last_reviewed: 2026-07-30
-tracks_code: [internal/childenv/**, internal/cli/devices.go, internal/cli/env.go, internal/cli/run.go, internal/devicekeys/**, internal/envbundle/**, internal/envfile/**, internal/platform/**, internal/workspacekeys/**]
+last_reviewed: 2026-08-07
+tracks_code: [internal/childenv/**, internal/cli/devices.go, internal/cli/env.go, internal/cli/env_op.go, internal/cli/run.go, internal/devicekeys/**, internal/envbundle/**, internal/envfile/**, internal/platform/**, internal/secrets/**, internal/workspacekeys/**]
 ---
 # Secrets and Environment Design
 
@@ -50,6 +50,31 @@ Behavior:
 - provider CLI resolves values at runtime;
 - logs redact values;
 - no plaintext files written unless explicit.
+
+### Browsing and writing 1Password directly (`W12-03`)
+
+`env bind` requires a hand-typed `op://vault/item/field` reference per variable. `devstrap env op list` and `devstrap env op set` (`internal/secrets/onepassword`, `internal/cli/env_op.go`) round out the adapter: discovering existing references instead of hand-typing them, and writing a new/changed value into 1Password from DevStrap while keeping the same "never keep plaintext at rest" discipline `env capture` already enforces for the encrypted-personal path.
+
+```bash
+devstrap env op list                                   # discover copyable op:// refs
+devstrap env op list --vault Engineering                # scope to one vault
+devstrap env op set work/acme/api STRIPE_KEY op://Engineering/Stripe/api_key   # bind an existing ref
+devstrap env op set work/acme/api STRIPE_KEY sk_live_...  --vault Engineering --item Stripe --field api_key  # write a new value, then bind the resulting ref
+devstrap env op set work/acme/api STRIPE_KEY -            # same, but read the value from stdin instead of argv
+```
+
+Both subcommands are gated on the `op` binary being present on PATH (`requireOpCLI`); when it is missing the command fails immediately with an actionable error naming the CLI and the install/sign-in steps, rather than the exit-0 print-a-workaround shape `agent pr` uses for a missing forge CLI (FORGE-01) — there is no manual fallback for browsing or writing 1Password items, so degrading gracefully is not possible here.
+
+**`env op list`** runs `op item list --format=json`, then `op item get <id> --format=json` per item, and prints every field as `op://<vault>/<item>/<field>`. It never passes `--reveal`, and the `Field` type it decodes each item's JSON into has no value member at all — a field's secret value has nowhere to land in the Go process even if the CLI's own JSON output happens to include one, so it cannot reach stdout, an error message, or a log line by construction, not just by care not to print it.
+
+**`env op set <path> <key> <value-or-op-ref>`** branches on its third argument:
+
+- an argument starting with `op://` is bound as-is, through the exact same write path `env bind` uses (`bindProviderRefs`, shared by both commands so there is one way this state gets written, not two that could drift apart) — no 1Password write happens, no `op` subprocess runs at all;
+- anything else is treated as a plaintext value to write into 1Password first. Per 1Password's own CLI best-practices guidance, an inline `op item edit field=value` assignment is visible in shell history and to other local processes inspecting argv, so DevStrap never constructs that command shape. Instead it writes a private, mode-`0600` JSON template file (in its own freshly created mode-`0700` temp directory) containing only the one field being changed — never a full fetch-modify-write of the item, which would pull every sibling field's plaintext value into the process just to write one field back out — and invokes `op item edit <item> --vault <vault> --template=<file>`. The template directory is removed (`defer os.RemoveAll`) before the call returns, on every path, success or error. Passing `-` as the value reads it from stdin instead, so the plaintext need not appear in DevStrap's own shell history either.
+
+A brand-new key's plaintext value needs `--vault` and `--item` (and optionally `--field`, defaulting to the key name) to know where to write it; rotating an already-bound key's value needs none of them — they default to the vault/item/field parsed out of the key's existing `op://` binding. Because the store's `UpsertEnvProfileTx` always replaces a project's *entire* provider-ref map (there is no incremental-update path — `env bind` has the identical constraint), `env op set` first reads the project's current bindings and merges the one key it is setting into them, so setting a second key never clobbers a first one bound by `env bind` or an earlier `env op set`. An existing profile using a different provider (e.g. `devstrap_encrypted` from `env capture`) refuses rather than silently overwriting that profile's single pointer slot.
+
+Every `env op` subprocess call runs under the shared sanitized child environment (`internal/childenv`, `BasicAllowlist` + `OP_*`) with a bounded timeout, mirroring the existing `op read`/`op inject`/`op run` call sites (`internal/cli/hub.go`'s `resolveOpRef`, `internal/cli/run.go`).
 
 ## Env-bundle exchange over the Hub (`ENV-SYNC-01`, `HUB-*`)
 
