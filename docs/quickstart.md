@@ -170,6 +170,55 @@ user namespaces are restricted. The wrapper's command/file policy is guardrails 
 that sandbox, not a full sandbox itself — see
 [`../spec/10_AGENT_WORKSPACES_AND_POLICIES.md`](../spec/10_AGENT_WORKSPACES_AND_POLICIES.md).
 
+## Shell integration
+
+`devstrap status --prompt` is a fast, local-only, single-line summary meant to live inside your
+shell prompt — no git shell-out, no network I/O, no `sync` trigger: `clean`, or space-joined
+`dirty:N wip:N conflicts:N` segments (only the nonzero ones) for projects with local changes,
+pending WIP refs from any device, and open sync conflicts. `devstrap shell-init` prints the glue
+code that wires it into an interactive prompt:
+
+```bash
+echo 'eval "$(devstrap shell-init zsh)"'  >> ~/.zshrc
+echo 'eval "$(devstrap shell-init bash)"' >> ~/.bashrc
+echo 'devstrap shell-init fish | source'  >> ~/.config/fish/config.fish
+```
+
+Each installed hook sets `$DEVSTRAP_PROMPT` on every prompt render, for your own `PS1` / `PROMPT`
+/ `fish_prompt` to embed. Crucially, it **wraps** whatever prompt hook you already have instead of
+replacing it — bash appends to the `PROMPT_COMMAND` array, zsh appends to `precmd_functions`, and
+fish adds a new function bound to the `fish_prompt` event — so it composes with Starship, oh-my-zsh,
+direnv, and friends regardless of install order. (Overwriting an existing hook outright is a
+well-documented breakage class: it once broke the Starship prompt when direnv's tcsh integration
+clobbered `precmd` — Starship's own fix was to wrap via `USER_PRECMD`/`USER_POSTCMD` rather than
+replace.)
+
+The bash integration needs **Bash ≥5.1** to actually populate `$DEVSTRAP_PROMPT` on every prompt —
+macOS ships `/bin/bash` 3.2 by default (Apple has frozen it there for licensing reasons), which
+still runs an existing hook fine but won't auto-run a *second* array entry. `brew install bash` (or
+just use zsh, macOS's own default shell since Catalina) if `$DEVSTRAP_PROMPT` stays empty.
+
+### Starship users
+
+If you already run [Starship](https://starship.rs), skip `devstrap shell-init` — let Starship keep
+owning your prompt and add a [custom module](https://starship.rs/config/#custom-commands) that
+calls `devstrap status --prompt` directly:
+
+```toml
+# ~/.config/starship.toml
+[custom.devstrap]
+command = "devstrap status --prompt"
+when = true
+detect_files = [".git"]   # only run inside a git checkout, not on every prompt everywhere
+shell = ["sh", "-c"]
+style = "bold yellow"
+format = "[$output]($style) "
+```
+
+`detect_files` keeps the module from shelling out on every prompt render in directories that
+aren't inside a project at all (Starship checks the current directory, not the DevStrap DB, so
+tune the list to whatever marker best matches your own workspace layout).
+
 ## Where to next
 
 - Full command list: `devstrap <command> --help`, or the command reference in the

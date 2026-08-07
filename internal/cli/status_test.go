@@ -203,3 +203,100 @@ func TestStatusAllDevicesPendingWip(t *testing.T) {
 		t.Fatalf("clean project wip = %+v, want no WIP rows, not an empty/placeholder entry", clean)
 	}
 }
+
+// TestFormatPromptLine pins the `status --prompt` (W12-01) one-line
+// contract: "clean" when nothing needs attention, otherwise space-joined
+// "key:count" segments in dirty/wip/conflicts priority order with any-zero
+// segment omitted. Pure function, no store required.
+func TestFormatPromptLine(t *testing.T) {
+	cases := []struct {
+		dirty, wip, conflicts int
+		want                  string
+	}{
+		{0, 0, 0, "clean"},
+		{3, 0, 0, "dirty:3"},
+		{0, 1, 0, "wip:1"},
+		{0, 0, 2, "conflicts:2"},
+		{3, 1, 0, "dirty:3 wip:1"},
+		{3, 1, 2, "dirty:3 wip:1 conflicts:2"},
+		{0, 1, 2, "wip:1 conflicts:2"},
+	}
+	for _, c := range cases {
+		if got := formatPromptLine(c.dirty, c.wip, c.conflicts); got != c.want {
+			t.Errorf("formatPromptLine(%d,%d,%d) = %q, want %q", c.dirty, c.wip, c.conflicts, got, c.want)
+		}
+	}
+}
+
+// TestStatusPrompt exercises `status --prompt` end to end: a clean workspace
+// prints "clean", and a workspace with a dirty project, one pending WIP ref,
+// and one open conflict prints all three segments — proving the flag reads
+// real local mirror state (cached project dirty_state, the device_wip
+// mirror, the conflicts table) rather than just the pure formatter.
+func TestStatusPrompt(t *testing.T) {
+	ctx := context.Background()
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init", "--workspace-name", "personal"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "status", "--prompt")
+	if err != nil {
+		t.Fatalf("status --prompt stderr = %q err = %v", stderr, err)
+	}
+	if strings.TrimSpace(stdout) != "clean" {
+		t.Fatalf("status --prompt on an empty workspace = %q, want \"clean\"", stdout)
+	}
+
+	store, err := state.Open(ctx, filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertProject(ctx, state.UpsertProjectParams{
+		Path: "work/acme/api", Type: "git_repo", LocalPath: "work/acme/api",
+		MaterializationState: "available", DirtyState: "dirty",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.WithTx(ctx, func(tx *state.Tx) error {
+		return tx.UpsertDeviceWipTx(ctx, "dev_peer", "work/acme/api", "work/acme/api", state.WipParams{
+			Ref: "refs/devstrap/wip/dev_peer/work/acme/api", SHA: "deadbeef", BaseSHA: "cafef00d",
+		}, state.Event{ID: "evt_wip_prompt", HLC: state.HLCFromPhysicalTime(time.Now())})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.InsertConflict(ctx, "", "same-path/different-remote", `{"path":"work/acme/other"}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, err = executeForTest("--home", home, "--root", root, "status", "--prompt")
+	if err != nil {
+		t.Fatalf("status --prompt stderr = %q err = %v", stderr, err)
+	}
+	if strings.TrimSpace(stdout) != "dirty:1 wip:1 conflicts:1" {
+		t.Fatalf("status --prompt = %q, want \"dirty:1 wip:1 conflicts:1\"", stdout)
+	}
+}
+
+// TestStatusPromptMutuallyExclusiveWithWatchAndAllDevices pins that --prompt
+// refuses to combine with the other two status renderers rather than
+// silently picking one — a shell prompt embedding `status --prompt` should
+// never accidentally get the multi-line --watch/--all-devices output.
+func TestStatusPromptMutuallyExclusiveWithWatchAndAllDevices(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init", "--workspace-name", "personal"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+	for _, other := range []string{"--watch", "--all-devices"} {
+		if _, stderr, err := executeForTest("--home", home, "--root", root, "status", "--prompt", other); err == nil {
+			t.Fatalf("status --prompt %s unexpectedly succeeded, want a mutually-exclusive-flags error", other)
+		} else if !strings.Contains(stderr, "none of the others can be") {
+			t.Fatalf("status --prompt %s stderr = %q, want a mutually-exclusive-flags error", other, stderr)
+		}
+	}
+}
