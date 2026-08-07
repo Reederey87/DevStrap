@@ -54,7 +54,7 @@ func newCloneCommand(stdout io.Writer, opts *options) *cobra.Command {
 				return err
 			}
 			defer closeStore(store)
-			project, err := addProject(cmd.Context(), store, opts, remote, nsPath, defaultBranch, lfsPolicy)
+			project, err := addProject(cmd.Context(), store, opts, remote, nsPath, defaultBranch, lfsPolicy, nil)
 			if err != nil {
 				return appError{code: exitInvalidConfig, err: err}
 			}

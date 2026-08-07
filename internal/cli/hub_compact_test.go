@@ -26,7 +26,7 @@ func setupCompact(t *testing.T) (*recoveryEnv, *state.Store, string) {
 		{"git@github.com:acme/api.git", "work/api"},
 		{"git@github.com:acme/web.git", "work/web"},
 	} {
-		if _, err := addProject(env.ctx, store, env.opts, p.remote, p.path, "", ""); err != nil {
+		if _, err := addProject(env.ctx, store, env.opts, p.remote, p.path, "", "", nil); err != nil {
 			t.Fatalf("addProject %s: %v", p.path, err)
 		}
 	}
@@ -235,7 +235,7 @@ func TestHubCompactKeylessJoinerRefuses(t *testing.T) {
 	env, store, _ := setupRecovery(t, false) // B holds no WCK
 	defer closeStore(store)
 	env.opts.v.Set("role", "joiner") // never self-founds a key
-	if _, err := addProject(env.ctx, store, env.opts, "git@github.com:acme/api.git", "work/api", "", ""); err != nil {
+	if _, err := addProject(env.ctx, store, env.opts, "git@github.com:acme/api.git", "work/api", "", "", nil); err != nil {
 		t.Fatalf("addProject: %v", err)
 	}
 	err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 2, 0, true, false)
@@ -431,7 +431,7 @@ func TestHubCompactPrunesOldSnapshots(t *testing.T) {
 		t.Fatalf("first hubCompact: %v", err)
 	}
 	// A new local project gives the second compaction something to advance.
-	if _, err := addProject(env.ctx, store, env.opts, "git@github.com:acme/cli.git", "work/cli", "", ""); err != nil {
+	if _, err := addProject(env.ctx, store, env.opts, "git@github.com:acme/cli.git", "work/cli", "", "", nil); err != nil {
 		t.Fatalf("addProject: %v", err)
 	}
 	if err := hubCompact(env.ctx, io.Discard, io.Discard, env.opts, store, env.hub(t, store), env.hubID, env.paths, 1, 0, true, false); err != nil {

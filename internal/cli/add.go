@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strings"
 
 	dsgit "github.com/Reederey87/DevStrap/internal/git"
 	"github.com/Reederey87/DevStrap/internal/state"
@@ -22,6 +23,7 @@ func newAddCommand(stdout io.Writer, opts *options) *cobra.Command {
 	var nsPath string
 	var defaultBranch string
 	var lfsPolicy string
+	var sparse string
 	cmd := &cobra.Command{
 		Use:   "add <remote>",
 		Short: "Add a Git repository to the namespace",
@@ -30,12 +32,16 @@ func newAddCommand(stdout io.Writer, opts *options) *cobra.Command {
 			if nsPath == "" {
 				return appError{code: exitInvalidConfig, err: fmt.Errorf("--path is required")}
 			}
+			sparseDirs, err := parseSparseFlag(sparse)
+			if err != nil {
+				return appError{code: exitInvalidConfig, err: err}
+			}
 			store, err := opts.openState(cmd.Context())
 			if err != nil {
 				return err
 			}
 			defer closeStore(store)
-			project, err := addProject(cmd.Context(), store, opts, args[0], nsPath, defaultBranch, lfsPolicy)
+			project, err := addProject(cmd.Context(), store, opts, args[0], nsPath, defaultBranch, lfsPolicy, sparseDirs)
 			if err != nil {
 				return appError{code: exitInvalidConfig, err: err}
 			}
@@ -48,14 +54,46 @@ func newAddCommand(stdout io.Writer, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&nsPath, "path", "", "namespace path")
 	cmd.Flags().StringVar(&defaultBranch, "default-branch", "", "default branch fallback")
 	cmd.Flags().StringVar(&lfsPolicy, "lfs-policy", "auto", "Git LFS policy for agent worktrees: auto, never, agent, or always")
+	cmd.Flags().StringVar(&sparse, "sparse", "", "comma-separated cone-mode sparse-checkout directories (local-only; narrows the working tree on this device)")
 	return cmd
+}
+
+// parseSparseFlag splits a comma-separated --sparse value into cleaned,
+// validated, de-duplicated cone-mode directory paths (W12-02). An empty raw
+// value returns a nil slice — "no sparse profile configured", the default.
+func parseSparseFlag(raw string) ([]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	seen := make(map[string]bool)
+	var paths []string
+	for _, part := range strings.Split(raw, ",") {
+		p := dsgit.CleanSparsePath(part)
+		if p == "" {
+			return nil, fmt.Errorf("--sparse contains an empty directory entry")
+		}
+		if err := dsgit.ValidSparsePath(p); err != nil {
+			return nil, err
+		}
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		paths = append(paths, p)
+	}
+	return paths, nil
 }
 
 // addProject validates the remote, creates a project.added event, upserts the
 // namespace entry, and writes the skeleton directory. Shared by `devstrap add`
 // and `devstrap clone` (PROD-01) so clone is a thin orchestrator over the
-// existing add path rather than new core logic.
-func addProject(ctx context.Context, store *state.Store, opts *options, remote, nsPath, defaultBranch, lfsPolicy string) (state.NamespaceEntry, error) {
+// existing add path rather than new core logic. sparseDirs (W12-02) is an
+// already-cleaned/validated list of cone-mode sparse-checkout directories
+// (nil/empty = no profile, the default); when non-empty it is persisted in
+// the SAME transaction as the project.added event and namespace_entries/
+// git_repos upsert.
+func addProject(ctx context.Context, store *state.Store, opts *options, remote, nsPath, defaultBranch, lfsPolicy string, sparseDirs []string) (state.NamespaceEntry, error) {
 	remoteKey, err := dsgit.CanonicalRemoteKey(remote)
 	if err != nil {
 		return state.NamespaceEntry{}, err
@@ -100,7 +138,13 @@ func addProject(ctx context.Context, store *state.Store, opts *options, remote, 
 			SourceEventDeviceID:   event.DeviceID,
 			SourceEventID:         event.ID,
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		if len(sparseDirs) > 0 {
+			return tx.SetSparsePathsTx(ctx, project.ID, sparseDirs)
+		}
+		return nil
 	}); err != nil {
 		return state.NamespaceEntry{}, err
 	}
