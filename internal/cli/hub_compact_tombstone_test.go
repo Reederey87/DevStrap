@@ -198,7 +198,7 @@ func TestHubCompactTombstoneResurrectionRegression(t *testing.T) {
 	}
 	// A legitimately newer add (minted now, HLC far above the old delete)
 	// re-creates the path — a restore, not a resurrection.
-	if _, err := addProject(env.ctx, store, env.opts, "git@github.com:acme/web.git", "work/web", "", ""); err != nil {
+	if _, err := addProject(env.ctx, store, env.opts, "git@github.com:acme/web.git", "work/web", "", "", nil); err != nil {
 		t.Fatalf("restore add: %v", err)
 	}
 	p, err := store.ProjectByPath(env.ctx, "work/web")

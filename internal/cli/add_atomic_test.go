@@ -36,7 +36,7 @@ func TestAddProjectEventAndEntryAtomic(t *testing.T) {
 	v.Set("root", root)
 	opts := &options{v: v}
 
-	project, err := addProject(ctx, store, opts, "git@github.com:acme/api.git", "work/acme/api", "main", "auto")
+	project, err := addProject(ctx, store, opts, "git@github.com:acme/api.git", "work/acme/api", "main", "auto", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

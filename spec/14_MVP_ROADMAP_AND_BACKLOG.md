@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-08-05
+last_reviewed: 2026-08-07
 tracks_code: [cmd/**, internal/**, .github/**, docs/audits/AUDIT_RECOMMENDATIONS.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # MVP Roadmap and Backlog
@@ -496,7 +496,7 @@ Status shows both devices.
 [ ] Coder adapter
 [ ] GitHub App integration
 [x] Git LFS policy support
-[ ] sparse checkout profiles
+[x] sparse checkout profiles (`W12-02`, shipped 2026-08-07 — local-only cone-mode profiles, see spec/08)
 [x] draft project encrypted sync (DRAFT-*, shipped 2026-06-29)
 [ ] conflict resolution UI
 [~] shell cd hydration hook — WITHDRAWN 2026-07-31, not pending (see note below)

@@ -152,6 +152,7 @@ func hydrateProjectUnlocked(ctx context.Context, store *state.Store, opts *optio
 		r := gitRunner(opts)
 		dirty, _ := r.DirtyState(ctx, localPath)
 		_ = store.UpdateProjectLocalState(ctx, project.ID, localPath, "available", string(dirty), "")
+		applyProjectSparseProfile(ctx, store, r, project, localPath)
 		return localPath, nil
 	}
 	if err := ensureHydratableTarget(localPath); err != nil {
@@ -205,6 +206,11 @@ func hydrateProjectUnlocked(ctx context.Context, store *state.Store, opts *optio
 		if d, derr := r.DirtyState(ctx, localPath); derr == nil {
 			dirty = string(d)
 		}
+		// W12-02: apply the project's configured cone-mode sparse-checkout
+		// profile immediately after a normal clone/checkout, before this
+		// materialization is considered complete. Only reached for a usable
+		// checkout (headResolvable) — never for an empty/broken clone below.
+		applyProjectSparseProfile(ctx, store, r, project, localPath)
 	case repoHasCommits(ctx, r, localPath):
 		// Commits exist but HEAD cannot resolve even after self-heal: the
 		// remote HEAD is broken. Record an honest state, not available/clean.
@@ -265,6 +271,61 @@ func applyMaterializeLFSPolicy(ctx context.Context, r dsgit.Runner, project stat
 		return appError{code: exitInvalidConfig, err: fmt.Errorf("unsupported lfs_policy %q for %s", project.LFSPolicy, project.Path)}
 	}
 	return nil
+}
+
+// applyProjectSparseProfile applies a project's configured cone-mode
+// sparse-checkout profile (W12-02) to an already-checked-out repo at
+// localPath. It is a no-op when the project has no configured profile
+// (state.Store.SparsePathsForProject returns empty — the default, full
+// checkout). Failure is best-effort, mirroring this codebase's existing
+// pattern for env hydrate and an auto/never LFS policy: narrowing the
+// working tree is a disk/index-cost optimization, not a correctness
+// requirement, so a git error here must never fail materialization and
+// leave the project stuck at a "failed" state over what is still a usable
+// checkout. Callers on both the "already materialized" and the
+// "freshly cloned" paths call this so re-running sync/hydrate after a
+// sparse profile is configured or changed converges the tree.
+//
+// Convergence is bidirectional (Codex review, W12-02): an EMPTY configured
+// set does not just no-op — it also disables an on-disk cone left over from
+// a `project sparse clear` whose own immediate git.SparseCheckoutDisable
+// call failed (e.g. a lock conflict). Without this, a project that failed
+// to clear would stay narrowed forever, since nothing else ever calls
+// Disable for it again.
+func applyProjectSparseProfile(ctx context.Context, store *state.Store, r dsgit.Runner, project state.ProjectStatus, localPath string) {
+	paths, err := store.SparsePathsForProject(ctx, project.ID)
+	if err != nil {
+		logging.Logger(ctx).Warn("sparse-checkout profile lookup failed", "path", project.Path, "err", err.Error())
+		return
+	}
+	if len(paths) == 0 {
+		// Cheap local filesystem check BEFORE the git subprocess (review
+		// follow-up, W12-02): the vast majority of projects have never
+		// configured a sparse profile, and unconditionally shelling out to
+		// `git sparse-checkout list` for every one of them on every
+		// sync/hydrate broke this feature's opt-in/zero-cost-when-unused
+		// design goal for every existing user. Only pay the subprocess cost
+		// when there is actually something to converge.
+		if !dsgit.SparseCheckoutEverEnabled(localPath) {
+			return
+		}
+		current, lerr := r.SparseCheckoutList(ctx, localPath)
+		if lerr != nil || len(current) == 0 {
+			return
+		}
+		if err := r.SparseCheckoutDisable(ctx, localPath); err != nil {
+			logging.Logger(ctx).Warn("sparse-checkout disable (converge to full) failed", "path", project.Path, "err", err.Error())
+			_ = store.RecordProjectWarning(ctx, project.ID, redact.Scrub(fmt.Sprintf("sparse-checkout disable: %v", err)))
+		}
+		return
+	}
+	if err := r.ApplyConvergedSparseCheckout(ctx, localPath, paths); err != nil {
+		// ApplyConvergedSparseCheckout best-effort restores any prior active
+		// cone on failure rather than always leaving the tree full, so this
+		// message does not claim a specific end state.
+		logging.Logger(ctx).Warn("sparse-checkout apply failed", "path", project.Path, "err", err.Error())
+		_ = store.RecordProjectWarning(ctx, project.ID, redact.Scrub(fmt.Sprintf("sparse-checkout: %v", err)))
+	}
 }
 
 // headResolvable reports whether the repo at localPath has a resolvable HEAD

@@ -239,8 +239,8 @@ func TestMigrateEnsureSummaryAndVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 32 {
-		t.Fatalf("schema version = %d, want 32", version)
+	if version != 33 {
+		t.Fatalf("schema version = %d, want 33", version)
 	}
 
 	var tableCount int
@@ -462,8 +462,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 31 {
-		t.Fatalf("schema version after down = %d, want 31", version)
+	if version != 32 {
+		t.Fatalf("schema version after down = %d, want 32", version)
 	}
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
@@ -472,8 +472,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 32 {
-		t.Fatalf("schema version after re-migrate = %d, want 32", version)
+	if version != 33 {
+		t.Fatalf("schema version after re-migrate = %d, want 33", version)
 	}
 }
 
@@ -505,6 +505,9 @@ func TestMigration00029RoundTripsDeviceGitstateTable(t *testing.T) {
 		t.Fatalf("upsert device gitstate before down: %v", err)
 	}
 
+	if err := st.Down(); err != nil { // 33 -> 32 (drops project_sparse_paths, unrelated here)
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 32 -> 31 (drops the active-path unique index, unrelated here)
 		t.Fatal(err)
 	}
@@ -579,6 +582,9 @@ func TestMigration00030RoundTripsDeviceWipTable(t *testing.T) {
 		t.Fatalf("upsert device wip before down: %v", err)
 	}
 
+	if err := st.Down(); err != nil { // 33 -> 32 (drops project_sparse_paths, unrelated here)
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 32 -> 31 (drops the active-path unique index, unrelated here)
 		t.Fatal(err)
 	}
@@ -652,6 +658,9 @@ func TestMigration00031RoundTripsDroppedAtColumn(t *testing.T) {
 		return tx.TombstoneDeviceWipTx(ctx, "dev_peer", "work/acme/api", "work/acme/api",
 			"abc123", Event{ID: "evt_drop", HLC: 2000})
 	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Down(); err != nil { // 33 -> 32 (drops project_sparse_paths, unrelated here)
 		t.Fatal(err)
 	}
 	if err := st.Down(); err != nil { // 32 -> 31 (drops the active-path unique index, unrelated here)
@@ -759,7 +768,10 @@ func TestMigration00032RoundTripsActivePathIndex(t *testing.T) {
 		t.Fatalf("re-registering a removed worktree's path should succeed: %v", err)
 	}
 
-	if err := st.Down(); err != nil {
+	if err := st.Down(); err != nil { // 33 -> 32 (drops project_sparse_paths, unrelated here)
+		t.Fatal(err)
+	}
+	if err := st.Down(); err != nil { // 32 -> 31 (drops idx_worktrees_active_path, the index under test)
 		t.Fatal(err)
 	}
 	if indexExists(t, st, "idx_worktrees_active_path") {
@@ -801,7 +813,10 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
-	// Steps from 32 down to 23 are unrelated and must remain unaffected.
+	// Steps from 33 down to 23 are unrelated and must remain unaffected.
+	if err := st.Down(); err != nil { // 33 -> 32
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 32 -> 31
 		t.Fatal(err)
 	}
@@ -885,6 +900,9 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
+	if err := st.Down(); err != nil { // 33 -> 32
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 32 -> 31
 		t.Fatal(err)
 	}
