@@ -364,6 +364,11 @@ func TestNormalizeSparsePaths(t *testing.T) {
 		want []string
 	}{
 		{"no overlap", []string{"docs", "backend"}, []string{"docs", "backend"}},
+		// Second review follow-up: an un-cleaned trailing slash must still
+		// collapse against its already-clean ancestor, not silently
+		// reintroduce the overlap bug via a different string representation
+		// of the same directory.
+		{"uncleaned trailing slash still collapses", []string{"backend/", "backend/deep"}, []string{"backend"}},
 		{"direct child dropped", []string{"backend", "backend/deep"}, []string{"backend"}},
 		{"child listed first still dropped", []string{"backend/deep", "backend"}, []string{"backend"}},
 		{"multi-level descendant dropped", []string{"a", "a/b/c/d"}, []string{"a"}},

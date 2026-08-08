@@ -169,12 +169,22 @@ func (r Runner) ApplyConvergedSparseCheckout(ctx context.Context, dir string, pa
 // directory already implies everything beneath it. Comparing an
 // un-collapsed desired set against SparseCheckoutList's always-collapsed
 // report permanently defeats ApplyConvergedSparseCheckout's no-op check for
-// any project with overlapping configured paths. Input paths are assumed
-// already cleaned (CleanSparsePath); exact duplicates and proper descendants
-// of another entry are dropped, preserving each surviving path's original
-// relative order.
+// any project with overlapping configured paths.
+//
+// Each path is cleaned (CleanSparsePath) internally rather than assuming the
+// caller already did so (second review follow-up): an un-cleaned trailing
+// slash — e.g. "backend/" alongside "backend/deep" — would otherwise never
+// string-equal its own already-cleaned ancestor, reintroducing the exact
+// forever-loop bug this function exists to close via a different string
+// representation of the same overlap. Exact duplicates and proper
+// descendants of another entry are dropped, preserving each surviving
+// (cleaned) path's original relative order.
 func NormalizeSparsePaths(paths []string) []string {
-	sorted := append([]string(nil), paths...)
+	cleaned := make([]string, len(paths))
+	for i, p := range paths {
+		cleaned[i] = CleanSparsePath(p)
+	}
+	sorted := append([]string(nil), cleaned...)
 	sort.Strings(sorted)
 	survives := make(map[string]bool, len(sorted))
 	var kept []string
@@ -193,7 +203,7 @@ func NormalizeSparsePaths(paths []string) []string {
 	}
 	result := make([]string, 0, len(kept))
 	seen := make(map[string]bool, len(kept))
-	for _, p := range paths {
+	for _, p := range cleaned {
 		if survives[p] && !seen[p] {
 			result = append(result, p)
 			seen[p] = true
