@@ -99,6 +99,7 @@ func newProjectSparseSetCommand(stdout io.Writer, opts *options) *cobra.Command 
 
 			applied := false
 			var applyErr error
+			var typoWarnings []string
 			if materialized {
 				r := gitRunner(opts)
 				if err := r.ApplyConvergedSparseCheckout(cmd.Context(), project.LocalPath, paths); err != nil {
@@ -106,12 +107,18 @@ func newProjectSparseSetCommand(stdout io.Writer, opts *options) *cobra.Command 
 				} else {
 					applied = true
 				}
+				// W14-02: a typo'd/renamed directory applies (or fails to
+				// apply, above) with no other signal anywhere, so warn the
+				// user immediately rather than waiting for the next
+				// sync/hydrate to notice via applyProjectSparseProfile.
+				typoWarnings = probeSparseTypos(cmd.Context(), store, r, project, project.LocalPath, paths)
 			}
 			var warnings []string
 			if applyErr != nil {
 				warnings = append(warnings, fmt.Sprintf("apply to the current checkout failed: %v; will retry on the next sync/hydrate", applyErr))
 				_ = store.RecordProjectWarning(cmd.Context(), project.ID, redact.Scrub(fmt.Sprintf("sparse-checkout set: %v", applyErr)))
 			}
+			warnings = append(warnings, typoWarnings...)
 			return opts.render(stdout, func(w io.Writer) error {
 				switch {
 				case applied:

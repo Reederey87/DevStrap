@@ -194,6 +194,59 @@ func (r Runner) ApplyConvergedSparseCheckout(ctx context.Context, dir string, pa
 	return nil
 }
 
+// MissingSparseDirs reports which of paths do not exist as DIRECTORIES in the
+// tree at ref. It runs a single `git ls-tree -d --name-only <ref> -- <paths...>`
+// invocation rather than one subprocess per path, since this is called on the
+// materialization hot path.
+//
+// Empty ls-tree output for a given path is the "not a directory here" signal
+// — it is what both a missing path AND an existing plain file produce, so
+// neither is mistaken for a valid cone-mode directory. A nonzero exit is a
+// genuine failure (bad ref, not a repo, git broken) and is returned as an
+// error, never silently folded into "missing": absence and failure are
+// different answers (the ErrProjectNotFound / ErrEnvProfileNotFound
+// precedent, spec/12). Callers must not treat an error here as "all paths are
+// missing" and must not turn "missing" into a refusal — see
+// applyProjectSparseProfile's doc comment for why this stays warn-only.
+//
+// paths are normalized here (NormalizeSparsePaths) rather than assumed
+// normalized, for the same reason ApplyConvergedSparseCheckout normalizes
+// defensively: git's ls-tree collapses an ancestor/descendant pair passed
+// together in one pathspec list down to just the descendant — the same
+// collapsing behavior SparseCheckoutList's cone-mode reporting has — so an
+// overlapping set would report the *ancestor* as missing and produce a false
+// warning about a perfectly valid profile, which is precisely the outcome
+// this probe's callers are written to avoid. Every call site normalizes
+// already; doing it here too means correctness does not depend on every
+// future caller remembering the precondition.
+func (r Runner) MissingSparseDirs(ctx context.Context, dir, ref string, paths []string) ([]string, error) {
+	paths = NormalizeSparsePaths(paths)
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	args := make([]string, 0, len(paths)+4)
+	args = append(args, "ls-tree", "-d", "--name-only", ref, "--")
+	args = append(args, paths...)
+	out, err := r.Run(ctx, dir, args...)
+	if err != nil {
+		return nil, err
+	}
+	present := make(map[string]bool, len(paths))
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			present[line] = true
+		}
+	}
+	var missing []string
+	for _, p := range paths {
+		if !present[p] {
+			missing = append(missing, p)
+		}
+	}
+	return missing, nil
+}
+
 // NormalizeSparsePaths removes any path made redundant by an ancestor
 // directory already present in the set (review follow-up, W12-02): git's
 // cone-mode `sparse-checkout set` collapses ["backend", "backend/deep"] down

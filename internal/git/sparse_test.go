@@ -576,3 +576,95 @@ func TestSparseCheckoutListReportsNotSparseAsEmpty(t *testing.T) {
 		t.Fatalf("SparseCheckoutList = %v, want empty for a never-sparse repo", paths)
 	}
 }
+
+// TestMissingSparseDirsReportsExistingDirectoryAsPresent is the "no false
+// positive" half of the W14-02 typo probe: a directory that genuinely exists
+// at ref must not be reported as missing.
+func TestMissingSparseDirsReportsExistingDirectoryAsPresent(t *testing.T) {
+	repo, r := sparseFixtureRepo(t)
+	missing, err := r.MissingSparseDirs(context.Background(), repo, "HEAD", []string{"backend"})
+	if err != nil {
+		t.Fatalf("MissingSparseDirs: %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("MissingSparseDirs(backend) = %v, want empty (backend exists)", missing)
+	}
+}
+
+// TestMissingSparseDirsReportsNonexistentDirectory pins the core typo-catch
+// case: a path that resolves to nothing at ref (e.g. "bakend" for
+// "backend") must come back in the missing set.
+func TestMissingSparseDirsReportsNonexistentDirectory(t *testing.T) {
+	repo, r := sparseFixtureRepo(t)
+	missing, err := r.MissingSparseDirs(context.Background(), repo, "HEAD", []string{"bakend"})
+	if err != nil {
+		t.Fatalf("MissingSparseDirs: %v", err)
+	}
+	if len(missing) != 1 || missing[0] != "bakend" {
+		t.Fatalf("MissingSparseDirs(bakend) = %v, want [bakend]", missing)
+	}
+}
+
+// TestMissingSparseDirsReportsPlainFileAsMissing pins the exact case a naive
+// `git cat-file -e` probe gets wrong (spec/W14-02): a plain file exists as an
+// object at ref, so cat-file -e exits 0 for it, but it is not a valid
+// cone-mode directory. This must be pinned so nobody "simplifies" the probe
+// back to cat-file later.
+func TestMissingSparseDirsReportsPlainFileAsMissing(t *testing.T) {
+	repo, r := sparseFixtureRepo(t)
+	missing, err := r.MissingSparseDirs(context.Background(), repo, "HEAD", []string{"README.md"})
+	if err != nil {
+		t.Fatalf("MissingSparseDirs: %v", err)
+	}
+	if len(missing) != 1 || missing[0] != "README.md" {
+		t.Fatalf("MissingSparseDirs(README.md) = %v, want [README.md] (a plain file is not a directory)", missing)
+	}
+}
+
+// TestMissingSparseDirsMixedSetNamesEveryMissingPath proves the probe
+// evaluates a whole set in one invocation and names every path that does not
+// resolve to a directory, not just the first.
+func TestMissingSparseDirsMixedSetNamesEveryMissingPath(t *testing.T) {
+	repo, r := sparseFixtureRepo(t)
+	missing, err := r.MissingSparseDirs(context.Background(), repo, "HEAD", []string{"backend", "bakend", "docs", "fronted"})
+	if err != nil {
+		t.Fatalf("MissingSparseDirs: %v", err)
+	}
+	sort.Strings(missing)
+	want := []string{"bakend", "fronted"}
+	if len(missing) != len(want) || missing[0] != want[0] || missing[1] != want[1] {
+		t.Fatalf("MissingSparseDirs mixed set = %v, want %v", missing, want)
+	}
+}
+
+// TestMissingSparseDirsReturnsErrorOnBogusRef proves a genuine probe failure
+// (a ref that does not resolve) is surfaced as an error, never silently
+// folded into "every path is missing" — absence and failure must stay
+// distinguishable so a broken probe cannot masquerade as a typo warning.
+func TestMissingSparseDirsReturnsErrorOnBogusRef(t *testing.T) {
+	repo, r := sparseFixtureRepo(t)
+	_, err := r.MissingSparseDirs(context.Background(), repo, "not-a-real-ref", []string{"backend"})
+	if err == nil {
+		t.Fatal("MissingSparseDirs with a bogus ref = nil error, want a failure")
+	}
+}
+
+// TestMissingSparseDirsNormalizesOverlappingPaths pins the defensive
+// normalization inside MissingSparseDirs. git's ls-tree collapses an
+// ancestor/descendant pathspec pair down to just the descendant, so probing
+// ["backend", "backend/deep"] un-normalized reports "backend" — a real,
+// existing directory — as MISSING, producing a false warning about a valid
+// profile. Mirrors the same defensive normalization ApplyConvergedSparseCheckout
+// carries for the same git behavior (W12-02 review).
+func TestMissingSparseDirsNormalizesOverlappingPaths(t *testing.T) {
+	repo, r := sparseFixtureRepo(t)
+	writeAndCommitAll(t, r.Bin, repo, map[string]string{"backend/deep/d.txt": "d\n"})
+
+	missing, err := r.MissingSparseDirs(context.Background(), repo, "HEAD", []string{"backend", "backend/deep"})
+	if err != nil {
+		t.Fatalf("MissingSparseDirs err = %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("MissingSparseDirs(overlapping, both real) = %v, want none missing", missing)
+	}
+}

@@ -41,6 +41,30 @@ Follow-ups:
 - <remaining work, or "None">
 ```
 
+## 2026-08-09 — a typo'd sparse directory narrowed the tree to nothing, silently (W14-02)
+
+Changed:
+- `internal/git/sparse.go`: `Runner.MissingSparseDirs(ctx, dir, ref, paths)` — one `git ls-tree -d --name-only <ref> -- <paths...>` for the whole set, diffed against the requested paths.
+- `internal/cli/hydrate.go`: `probeSparseTypos` + `sparseTypoWarning`, called from `applyProjectSparseProfile`'s `len(paths) > 0` branch so it covers both the already-materialized and post-clone call sites without touching the zero-cost no-profile path.
+- `internal/cli/project.go`: `project sparse set` runs the same probe after its immediate apply and appends the result to the command's `warnings`, so a typo is reported the moment it is typed rather than on the next sync.
+- `internal/git/sparse_test.go`, `internal/cli/sparse_test.go`: six + four tests, including the plain-file case, the every-missing-path case, the bogus-ref error case, the unborn-repo skip, and a direct unit test of the `applyProjectSparseProfile` call site.
+
+**Why `ls-tree`, and not the obvious `cat-file -e`.** The first design for this probe specified `git cat-file -e HEAD:<path>` with "absent = exit 1". Measured against real git, that is wrong twice: a missing path exits **128**, not 1 (so an exit-1 rule would classify every typo as a hard failure), and a plain **file** exits **0** (so a file — not a valid cone-mode directory — would pass as present). `git ls-tree -d --name-only` prints the path for a directory and prints nothing for both a missing path and a file, exit 0 throughout, which separates "not a directory here" (empty output) from "genuine failure" (nonzero exit) cleanly. Recorded because `cat-file -e` is the intuitive choice and someone will reach for it again.
+
+**Warn, never refuse — and never on a broken probe.** A directory can legitimately be absent at HEAD and present on another branch, so a missing path is a warning naming every unmatched path plus both remedies. A probe *error* is logged and swallowed rather than reported as missing paths: a broken probe must not start warning about valid profiles on every sync. The probe is skipped entirely when HEAD does not resolve (unborn/empty repo), where every path would otherwise read as missing.
+
+**Checked at apply time, not at `add` time.** This is the scoping decision the row turns on: at `devstrap add --sparse ...` there is usually no checkout yet, so an add-time probe would silently never run — voiding the acceptance criterion while looking like it was met.
+
+**Review found the probe could produce the exact false warning it exists to avoid.** `MissingSparseDirs` documented that its input "is expected to already be normalized" but did not normalize it, while `ApplyConvergedSparseCheckout` directly above normalizes defensively for the same git behavior. `ls-tree` collapses an ancestor/descendant pathspec pair down to just the descendant, so probing `["backend", "backend/deep"]` reported `backend` — a real directory — as MISSING. Every current call site happens to normalize first, so this was latent rather than live, which is precisely the condition under which the W12-02 review already ruled that correctness must not depend on future callers remembering a precondition. Fixed inside `MissingSparseDirs`; pinned by `TestMissingSparseDirsNormalizesOverlappingPaths`, mutation-checked (removing the normalization yields `= [backend], want none missing`).
+
+Validated:
+- `gofmt -l cmd internal`; `go build ./...`; `golangci-lint run` (cache cleared first); `go run ./cmd/spec-drift --base origin/main --head HEAD`; `go test -race ./...`.
+- **Mutation-checked**, each restored after confirming the expected failure: stubbing `missing` to always-empty fails the four positive probe tests while leaving the error test passing; inverting the presence test fails all four; swallowing the `ls-tree` error fails only the bogus-ref test; deleting the `project.go` call site fails the `project sparse set` warning test; deleting the `hydrate.go` call site fails the `applyProjectSparseProfile` test; removing the defensive normalization fails the overlap test. The last was run by the coordinator on its own fix.
+
+Follow-ups:
+- The probe adds two subprocesses (`rev-parse` for `headResolvable`, then `ls-tree`) per sync **for projects that have a sparse profile only** — the opt-in minority, on a path that is already about to run a network fetch, so the cost is proportionate. It is nonetheless re-derived every cycle to answer a question that changes only when the profile or HEAD changes; a cheaper design would gate it on either having moved.
+- A profile referencing a directory that exists only on a non-default branch warns on every sync. Correct per the warn-never-refuse rule, but noisy for that legitimate workflow; suppressing a repeated identical warning is the obvious refinement.
+
 ## 2026-08-09 — the sparse profile's headline benefit did not exist on first clone (W14-01)
 
 Changed:

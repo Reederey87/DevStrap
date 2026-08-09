@@ -395,6 +395,9 @@ func applyProjectSparseProfile(ctx context.Context, store *state.Store, r dsgit.
 		}
 		return
 	}
+	// W14-02: warn (never refuse) when a configured path is a typo/rename
+	// that no longer resolves to a directory at HEAD — see probeSparseTypos.
+	probeSparseTypos(ctx, store, r, project, localPath, paths)
 	if err := r.ApplyConvergedSparseCheckout(ctx, localPath, paths); err != nil {
 		// ApplyConvergedSparseCheckout best-effort restores any prior active
 		// cone on failure rather than always leaving the tree full, so this
@@ -402,6 +405,50 @@ func applyProjectSparseProfile(ctx context.Context, store *state.Store, r dsgit.
 		logging.Logger(ctx).Warn("sparse-checkout apply failed", "path", project.Path, "err", err.Error())
 		_ = store.RecordProjectWarning(ctx, project.ID, redact.Scrub(fmt.Sprintf("sparse-checkout: %v", err)))
 	}
+}
+
+// sparseTypoWarning formats the user-facing message for a sparse-checkout
+// profile that references one or more directories absent from the tree at
+// HEAD (W14-02): a typo'd/renamed directory (`devstrap add --sparse bakend`)
+// otherwise succeeds silently and narrows cone mode to nothing under it,
+// since neither ValidSparsePath (purely syntactic) nor `git sparse-checkout
+// set` itself (no-ops on a nonexistent cone) ever signal it. Every unmatched
+// path is named, not just the first, alongside both remedies.
+func sparseTypoWarning(nsPath string, missing []string) string {
+	return fmt.Sprintf("sparse-checkout profile references path(s) not found at HEAD: %s (run `devstrap project sparse set %s <dirs...>` to correct, or `devstrap project sparse clear %s` to restore the full tree)", strings.Join(missing, ", "), nsPath, nsPath)
+}
+
+// probeSparseTypos checks paths against the tree at HEAD in localPath
+// (Runner.MissingSparseDirs) and, for every path that does not resolve to a
+// directory there, logs and records a project warning (never an error, never
+// a refusal — W14-02). It returns the formatted warning message as a
+// single-element slice (or nil) so callers that report their own warnings
+// list, like `project sparse set`, can surface it immediately instead of
+// only on the next sync/hydrate.
+//
+// Skipped entirely when the repo has no resolvable HEAD (an unborn/empty
+// repo, headResolvable): there is no tree to probe and every path would read
+// as "missing", which would be a false positive for a profile configured
+// ahead of the first commit. A probe error (nonzero git exit — bad ref,
+// broken repo) is logged and swallowed, never turned into a warning about
+// the user's paths: a broken probe must not start warning about valid
+// profiles on every sync.
+func probeSparseTypos(ctx context.Context, store *state.Store, r dsgit.Runner, project state.ProjectStatus, localPath string, paths []string) []string {
+	if !headResolvable(ctx, r, localPath) {
+		return nil
+	}
+	missing, err := r.MissingSparseDirs(ctx, localPath, "HEAD", paths)
+	if err != nil {
+		logging.Logger(ctx).Warn("sparse-checkout typo probe failed", "path", project.Path, "err", err.Error())
+		return nil
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	msg := sparseTypoWarning(project.Path, missing)
+	logging.Logger(ctx).Warn("sparse-checkout profile references missing directories", "path", project.Path, "missing", strings.Join(missing, ","))
+	_ = store.RecordProjectWarning(ctx, project.ID, redact.Scrub(msg))
+	return []string{msg}
 }
 
 // headResolvable reports whether the repo at localPath has a resolvable HEAD
