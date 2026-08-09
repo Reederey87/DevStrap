@@ -260,11 +260,15 @@ func hydrateProjectUnlocked(ctx context.Context, store *state.Store, opts *optio
 }
 
 // checkoutSparseClone configures and populates a no-checkout clone while it
-// is still in staging. Sparse narrowing is best-effort: init/set failures are
-// warned and recorded, sparse-checkout is disabled as rollback when possible,
-// and the full HEAD is checked out. Checkout or submodule failures are fatal
-// because promoting an empty or structurally incomplete tree would violate
-// the materialization contract.
+// is still in staging. Sparse narrowing itself is best-effort: an init/set
+// failure is warned and recorded, sparse-checkout is disabled as rollback,
+// and the full HEAD is checked out instead — degrading to exactly the
+// pre-W14-01 outcome rather than failing materialization.
+//
+// Three things ARE fatal, because each would promote a structurally
+// incomplete tree that nothing downstream can detect: a failed checkout, a
+// failed submodule init, and a failed ROLLBACK (see the long comment below —
+// a still-active cone survives into a tree that DirtyState reports clean).
 func checkoutSparseClone(ctx context.Context, store *state.Store, r dsgit.Runner, project state.ProjectStatus, tmpPath string, paths []string, submodules bool) error {
 	var sparseErr error
 	if err := r.SparseCheckoutInit(ctx, tmpPath, true); err != nil {
@@ -275,8 +279,31 @@ func checkoutSparseClone(ctx context.Context, store *state.Store, r dsgit.Runner
 	if sparseErr != nil {
 		logging.Logger(ctx).Warn("sparse-checkout before first checkout failed; falling back to full checkout", "path", project.Path, "err", sparseErr.Error())
 		_ = store.RecordProjectWarning(ctx, project.ID, redact.Scrub(fmt.Sprintf("sparse-checkout: %v", sparseErr)))
+		// A FAILED rollback is fatal, unlike the sparse failure that triggered
+		// it (review finding, W14-01). SparseCheckoutInit narrows a never-sparse
+		// repo to cone mode's top-level-only files as a side effect of merely
+		// enabling it, so if Set failed and Disable then also failed, the cone
+		// is still active and the subsequent CheckoutHead populates almost
+		// nothing — for a repo whose root has no top-level tracked files, quite
+		// literally nothing.
+		//
+		// Nothing downstream can catch that. Measured: in this state
+		// `git checkout` exits 0, `headResolvable` passes (HEAD resolves fine),
+		// and `git status --porcelain=v2` — exactly what DirtyState parses —
+		// emits only branch headers, so the tree is recorded available/CLEAN.
+		// Git reports "0% of tracked files present" solely in its human output,
+		// which DevStrap never reads. An empty tree promoted as healthy breaks
+		// the product's central promise that the tree is really present on disk.
+		//
+		// So this deliberately trades an invisible-incomplete-tree class for a
+		// visible failed-materialization class: staging is abandoned by the
+		// caller's cleanup, the project records "failed" with this message, and
+		// the next sync retries. Loud and recoverable beats silent and wrong.
 		if err := r.SparseCheckoutDisable(ctx, tmpPath); err != nil {
-			logging.Logger(ctx).Warn("sparse-checkout rollback before full checkout failed", "path", project.Path, "err", err.Error())
+			// Both causes are wrapped: the triggering sparse failure and the
+			// rollback failure are independently useful when diagnosing this,
+			// and errors.Is/As must reach either one.
+			return fmt.Errorf("sparse-checkout failed (%w) and disabling it to fall back to a full checkout also failed; refusing to promote a possibly-empty working tree: %w", sparseErr, err)
 		}
 	}
 	if err := r.CheckoutHead(ctx, tmpPath); err != nil {

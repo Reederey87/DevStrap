@@ -681,3 +681,67 @@ func TestApplyProjectSparseProfileNoopWithoutProfile(t *testing.T) {
 	// legitimate "no profile configured" no-op path.
 	applyProjectSparseProfile(context.Background(), store, gitRunner(opts), project, t.TempDir())
 }
+
+// failGitCommandsContaining is failGitCommandContaining for more than one
+// fragment, needed to simulate a sparse failure whose rollback ALSO fails.
+func failGitCommandsContaining(t *testing.T, fragments ...string) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "git")
+	var cases strings.Builder
+	for _, f := range fragments {
+		fmt.Fprintf(&cases, "  *%q*) exit 97 ;;\n", f)
+	}
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$*\" in\n%sesac\nexec %q \"$@\"\n", cases.String(), realGit)
+	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestSparseFirstCloneRefusesToPromoteWhenRollbackAlsoFails pins the
+// fail-closed behavior for the one sparse-failure shape that is NOT safe to
+// degrade past (review finding, W14-01).
+//
+// `sparse-checkout init --cone` narrows a never-sparse repo to top-level-only
+// files as a side effect of merely enabling it. So if `set` fails and the
+// `disable` rollback ALSO fails, the cone is still active and the following
+// checkout populates almost nothing — for this fixture, whose root has no
+// top-level tracked files, literally nothing.
+//
+// Nothing downstream can detect that: `git checkout` exits 0, HEAD resolves,
+// and `git status --porcelain=v2` (what DirtyState parses) emits only branch
+// headers, so the tree would be recorded available/CLEAN. Git reports
+// "0% of tracked files present" only in human output, which DevStrap never
+// reads. Hydrate must therefore FAIL rather than promote.
+func TestSparseFirstCloneRefusesToPromoteWhenRollbackAlsoFails(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	remote := createSparseFixtureRemote(t)
+
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "add", "file://"+remote, "--path", "work/acme/mono", "--default-branch", "main", "--sparse", "backend"); err != nil {
+		t.Fatalf("add stderr = %q err = %v", stderr, err)
+	}
+	failGitCommandsContaining(t, "sparse-checkout set -- backend", "sparse-checkout disable")
+
+	_, stderr, err := executeForTest("--home", home, "--root", root, "hydrate", "work/acme/mono")
+	if err == nil {
+		t.Fatalf("hydrate succeeded; it must refuse to promote a possibly-empty tree. stderr = %q", stderr)
+	}
+	if !strings.Contains(stderr, "refusing to promote") {
+		t.Errorf("stderr = %q, want it to explain the refusal", stderr)
+	}
+	// The staging directory is cleaned up and nothing is promoted, so the
+	// managed path must not exist as a repo at all — an empty-but-present
+	// checkout is exactly the outcome being prevented.
+	if _, statErr := os.Stat(filepath.Join(root, "work", "acme", "mono", ".git")); statErr == nil {
+		t.Errorf("a repo was promoted at the managed path despite the refusal")
+	}
+}
