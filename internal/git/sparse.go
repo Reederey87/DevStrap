@@ -100,6 +100,38 @@ func (r Runner) SparseCheckoutDisable(ctx context.Context, dir string) error {
 	return err
 }
 
+// CheckoutHead populates dir's working tree from its already-resolved HEAD
+// (`git checkout`). It is used after a no-checkout clone once any desired
+// sparse-checkout cone has been configured.
+//
+// This runs in the LONG TRANSFER class, not the default 2m one (P6-GIT-01).
+// On a blobless/partial clone (--filter=blob:none) the checkout IS the network
+// transfer: git lazily fetches a blob for every file it writes into the working
+// tree. Without --no-checkout that fetch happens inside `git clone`, which
+// already runs under LongTimeout; splitting the checkout into its own command
+// would otherwise move that same transfer under the 2m cap and time out
+// materialization of exactly the large monorepos this sparse path exists to
+// make cheaper — and here a checkout failure is fatal, so the repo would fail
+// to materialize at all where it previously succeeded.
+func (r Runner) CheckoutHead(ctx context.Context, dir string) error {
+	attemptCtx, cancel := r.longTransferContext(ctx)
+	defer cancel()
+	_, err := r.Run(attemptCtx, dir, "checkout")
+	return err
+}
+
+// SubmoduleUpdateInit materializes every configured submodule recursively.
+// A clone with both --no-checkout and --recurse-submodules exits successfully
+// without populating submodule working trees, so callers that explicitly
+// check out later must run this after CheckoutHead. Submodules may require
+// network transfers, so this uses the same long timeout class as clone.
+func (r Runner) SubmoduleUpdateInit(ctx context.Context, dir string) error {
+	attemptCtx, cancel := r.longTransferContext(ctx)
+	defer cancel()
+	_, err := r.Run(attemptCtx, dir, "submodule", "update", "--init", "--recursive")
+	return err
+}
+
 // ApplyConvergedSparseCheckout enables cone-mode sparse-checkout on dir and
 // sets it to exactly paths, first checking SparseCheckoutList so an
 // already-converged tree is left untouched (no subprocess churn on an idle

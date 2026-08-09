@@ -3,11 +3,14 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Reederey87/DevStrap/internal/ignore"
 	"github.com/Reederey87/DevStrap/internal/state"
 )
 
@@ -64,6 +67,72 @@ func assertDirAbsent(t *testing.T, root, rel string) {
 	}
 }
 
+// traceGitCommands installs a transparent PATH shim after fixture setup and
+// returns its command log. Each line is "<cwd>\t<argv>" and delegates to the
+// real git binary, so assertions can distinguish clone-time behavior from an
+// equivalent-looking tree narrowed only after clone.
+func traceGitCommands(t *testing.T) string {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "git-commands.log")
+	shim := filepath.Join(dir, "git")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\t' "$PWD" >> %q
+printf '%%s ' "$@" >> %q
+printf '\n' >> %q
+exec %q "$@"
+`, logPath, logPath, logPath, realGit)
+	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
+func readGitTrace(t *testing.T, logPath string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read git command trace: %v", err)
+	}
+	return strings.Split(strings.TrimSpace(string(raw)), "\n")
+}
+
+func gitTraceIndex(t *testing.T, lines []string, needle string) int {
+	t.Helper()
+	for i, line := range lines {
+		if strings.Contains(line, needle) {
+			return i
+		}
+	}
+	t.Fatalf("git command trace has no %q command:\n%s", needle, strings.Join(lines, "\n"))
+	return -1
+}
+
+func failGitCommandContaining(t *testing.T, fragment string) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+	shim := filepath.Join(dir, "git")
+	script := fmt.Sprintf(`#!/bin/sh
+case "$*" in
+  *%q*) exit 97 ;;
+esac
+exec %q "$@"
+`, fragment, realGit)
+	if err := os.WriteFile(shim, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
 // TestAddSparseFlagAppliesOnMaterialize proves the full documented flow: `add
 // --sparse` persists the profile at adopt time, and the first `hydrate` after
 // that materializes ONLY the configured directories — never a full checkout
@@ -79,6 +148,7 @@ func TestAddSparseFlagAppliesOnMaterialize(t *testing.T) {
 	if _, stderr, err := executeForTest("--home", home, "--root", root, "add", "file://"+remote, "--path", "work/acme/mono", "--default-branch", "main", "--sparse", "backend, docs"); err != nil {
 		t.Fatalf("add stderr = %q err = %v", stderr, err)
 	}
+	tracePath := traceGitCommands(t)
 	if _, stderr, err := executeForTest("--home", home, "--root", root, "hydrate", "work/acme/mono"); err != nil {
 		t.Fatalf("hydrate stderr = %q err = %v", stderr, err)
 	}
@@ -88,6 +158,147 @@ func TestAddSparseFlagAppliesOnMaterialize(t *testing.T) {
 	assertDirPresent(t, local, "backend/main.go")
 	assertDirPresent(t, local, "docs/index.md")
 	assertDirAbsent(t, local, "frontend")
+
+	trace := readGitTrace(t, tracePath)
+	cloneAt := gitTraceIndex(t, trace, " clone ")
+	initAt := gitTraceIndex(t, trace, " sparse-checkout init --cone ")
+	setAt := gitTraceIndex(t, trace, " sparse-checkout set -- backend docs ")
+	checkoutAt := gitTraceIndex(t, trace, " checkout ")
+	submoduleAt := gitTraceIndex(t, trace, " submodule update --init --recursive ")
+	if !strings.Contains(trace[cloneAt], " --no-checkout ") {
+		t.Fatalf("sparse clone argv lacks --no-checkout: %s", trace[cloneAt])
+	}
+	// Assert the sequence is strictly increasing, naming the first pair that
+	// is out of order — a single negated conjunction reports only "wrong"
+	// and leaves the reader to diff five integers by hand.
+	ordered := []struct {
+		name string
+		at   int
+	}{
+		{"clone", cloneAt},
+		{"sparse-checkout init", initAt},
+		{"sparse-checkout set", setAt},
+		{"checkout", checkoutAt},
+		{"submodule update", submoduleAt},
+	}
+	for i := 1; i < len(ordered); i++ {
+		if ordered[i-1].at >= ordered[i].at {
+			t.Fatalf("first-checkout command order is wrong: %q (at %d) must precede %q (at %d)\n%s",
+				ordered[i-1].name, ordered[i-1].at, ordered[i].name, ordered[i].at, strings.Join(trace, "\n"))
+		}
+	}
+	for _, at := range []int{initAt, setAt, checkoutAt, submoduleAt} {
+		cwd := strings.SplitN(trace[at], "\t", 2)[0]
+		if !strings.Contains(filepath.Base(cwd), ignore.StagingDirMarker) {
+			t.Fatalf("pre-promotion command ran outside staging: %s", trace[at])
+		}
+	}
+}
+
+// TestHydrateWithoutSparseProfileKeepsCloneArgv pins the zero-cost majority
+// path: a project without a configured profile receives the same clone argv,
+// without --no-checkout.
+func TestHydrateWithoutSparseProfileKeepsCloneArgv(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	remote := createSparseFixtureRemote(t)
+
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "add", "file://"+remote, "--path", "work/acme/mono", "--default-branch", "main"); err != nil {
+		t.Fatalf("add stderr = %q err = %v", stderr, err)
+	}
+	tracePath := traceGitCommands(t)
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "hydrate", "work/acme/mono"); err != nil {
+		t.Fatalf("hydrate stderr = %q err = %v", stderr, err)
+	}
+	trace := readGitTrace(t, tracePath)
+	clone := trace[gitTraceIndex(t, trace, " clone ")]
+	if strings.Contains(clone, "--no-checkout") {
+		t.Fatalf("no-profile clone argv unexpectedly contains --no-checkout: %s", clone)
+	}
+}
+
+// TestSparseFirstCloneFallsBackToFullCheckout pins sparse narrowing's
+// best-effort contract for both mutation points. Either failure must still
+// promote a usable full tree; only CheckoutHead itself may fail hydrate.
+func TestSparseFirstCloneFallsBackToFullCheckout(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fragment string
+	}{
+		{name: "init failure", fragment: "sparse-checkout init --cone"},
+		{name: "set failure", fragment: "sparse-checkout set -- backend"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := filepath.Join(t.TempDir(), ".devstrap")
+			root := filepath.Join(t.TempDir(), "Code")
+			remote := createSparseFixtureRemote(t)
+
+			if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+				t.Fatalf("init stderr = %q err = %v", stderr, err)
+			}
+			if _, stderr, err := executeForTest("--home", home, "--root", root, "add", "file://"+remote, "--path", "work/acme/mono", "--default-branch", "main", "--sparse", "backend"); err != nil {
+				t.Fatalf("add stderr = %q err = %v", stderr, err)
+			}
+			failGitCommandContaining(t, tc.fragment)
+			if _, stderr, err := executeForTest("--home", home, "--root", root, "hydrate", "work/acme/mono"); err != nil {
+				t.Fatalf("hydrate must degrade to a full checkout: stderr = %q err = %v", stderr, err)
+			}
+			local := filepath.Join(root, "work", "acme", "mono")
+			assertDirPresent(t, local, "frontend/app.js")
+			assertDirPresent(t, local, "backend/main.go")
+			assertDirPresent(t, local, "docs/index.md")
+		})
+	}
+}
+
+// TestSparseFirstClonePopulatesSubmodule is the GIT-06 regression trap: Git
+// exits zero but leaves submodule directories empty after a no-checkout clone
+// plus checkout unless an explicit recursive update follows CheckoutHead.
+func TestSparseFirstClonePopulatesSubmodule(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	tmp := t.TempDir()
+
+	sub := filepath.Join(tmp, "sub")
+	runGit(t, sub, "init")
+	runGit(t, sub, "config", "user.email", "devstrap@example.test")
+	runGit(t, sub, "config", "user.name", "DevStrap Test")
+	if err := os.WriteFile(filepath.Join(sub, "README.md"), []byte("submodule\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, sub, "add", "README.md")
+	runGit(t, sub, "commit", "-m", "submodule fixture")
+
+	remote := filepath.Join(tmp, "super.git")
+	seed := filepath.Join(tmp, "super-seed")
+	runGit(t, tmp, "init", "--bare", remote)
+	runGit(t, seed, "init")
+	runGit(t, seed, "config", "user.email", "devstrap@example.test")
+	runGit(t, seed, "config", "user.name", "DevStrap Test")
+	runGit(t, seed, "checkout", "-b", "main")
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("superproject\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, seed, "add", "README.md")
+	runGit(t, seed, "-c", "protocol.file.allow=always", "submodule", "add", "file://"+sub, "vendor/sub")
+	runGit(t, seed, "commit", "-m", "superproject fixture")
+	runGit(t, seed, "remote", "add", "origin", remote)
+	runGit(t, seed, "push", "origin", "main")
+	runGit(t, tmp, "--git-dir", remote, "symbolic-ref", "HEAD", "refs/heads/main")
+
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "add", "file://"+remote, "--path", "work/acme/super", "--default-branch", "main", "--sparse", "vendor"); err != nil {
+		t.Fatalf("add stderr = %q err = %v", stderr, err)
+	}
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "hydrate", "work/acme/super"); err != nil {
+		t.Fatalf("hydrate stderr = %q err = %v", stderr, err)
+	}
+	assertDirPresent(t, filepath.Join(root, "work", "acme", "super"), "vendor/sub/README.md")
 }
 
 // TestHydrateConvergesAfterProfileConfiguredLater proves the OTHER documented

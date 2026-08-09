@@ -173,13 +173,31 @@ func hydrateProjectUnlocked(ctx context.Context, store *state.Store, opts *optio
 	// working tree is structurally complete; with a blobless clone, keep the
 	// submodules blobless too (--also-filter-submodules).
 	submodules := submodulePolicy(opts) != "never"
+	// W14-01: only sparse-configured projects take the no-checkout path. Keep
+	// this lookup immediately before clone so the no-profile majority receives
+	// byte-identical clone argv and no additional git subprocess or probe.
+	sparsePaths, sparseErr := store.SparsePathsForProject(ctx, project.ID)
+	if sparseErr != nil {
+		logging.Logger(ctx).Warn("sparse-checkout profile lookup failed before clone", "path", project.Path, "err", sparseErr.Error())
+		_ = store.RecordProjectWarning(ctx, project.ID, redact.Scrub(fmt.Sprintf("sparse-checkout profile lookup: %v", sparseErr)))
+		sparsePaths = nil
+	} else {
+		sparsePaths = dsgit.NormalizeSparsePaths(sparsePaths)
+	}
 	if err := r.CloneWithOptions(ctx, project.RemoteURL, tmpPath, dsgit.CloneOptions{
 		Partial:              partial,
 		Submodules:           submodules,
 		AlsoFilterSubmodules: partial && submodules,
+		NoCheckout:           len(sparsePaths) > 0,
 	}); err != nil {
 		_ = store.UpdateProjectLocalState(ctx, project.ID, localPath, "failed", "unknown", redact.Scrub(fmt.Sprintf("clone: %v", err)))
 		return "", err
+	}
+	if len(sparsePaths) > 0 {
+		if err := checkoutSparseClone(ctx, store, r, project, tmpPath, sparsePaths, submodules); err != nil {
+			_ = store.UpdateProjectLocalState(ctx, project.ID, localPath, "failed", "unknown", redact.Scrub(fmt.Sprintf("checkout clone: %v", err)))
+			return "", err
+		}
 	}
 	if err := promoteClonedRepo(tmpPath, localPath, project.Path, project.RemoteURL); err != nil {
 		_ = store.UpdateProjectLocalState(ctx, project.ID, localPath, "failed", "unknown", redact.Scrub(fmt.Sprintf("promote clone: %v", err)))
@@ -239,6 +257,37 @@ func hydrateProjectUnlocked(ctx context.Context, store *state.Store, opts *optio
 		_ = r.MaintenanceRun(ctx, localPath)
 	}
 	return localPath, nil
+}
+
+// checkoutSparseClone configures and populates a no-checkout clone while it
+// is still in staging. Sparse narrowing is best-effort: init/set failures are
+// warned and recorded, sparse-checkout is disabled as rollback when possible,
+// and the full HEAD is checked out. Checkout or submodule failures are fatal
+// because promoting an empty or structurally incomplete tree would violate
+// the materialization contract.
+func checkoutSparseClone(ctx context.Context, store *state.Store, r dsgit.Runner, project state.ProjectStatus, tmpPath string, paths []string, submodules bool) error {
+	var sparseErr error
+	if err := r.SparseCheckoutInit(ctx, tmpPath, true); err != nil {
+		sparseErr = fmt.Errorf("sparse-checkout init: %w", err)
+	} else if err := r.SparseCheckoutSet(ctx, tmpPath, paths); err != nil {
+		sparseErr = fmt.Errorf("sparse-checkout set: %w", err)
+	}
+	if sparseErr != nil {
+		logging.Logger(ctx).Warn("sparse-checkout before first checkout failed; falling back to full checkout", "path", project.Path, "err", sparseErr.Error())
+		_ = store.RecordProjectWarning(ctx, project.ID, redact.Scrub(fmt.Sprintf("sparse-checkout: %v", sparseErr)))
+		if err := r.SparseCheckoutDisable(ctx, tmpPath); err != nil {
+			logging.Logger(ctx).Warn("sparse-checkout rollback before full checkout failed", "path", project.Path, "err", err.Error())
+		}
+	}
+	if err := r.CheckoutHead(ctx, tmpPath); err != nil {
+		return fmt.Errorf("checkout HEAD: %w", err)
+	}
+	if submodules {
+		if err := r.SubmoduleUpdateInit(ctx, tmpPath); err != nil {
+			return fmt.Errorf("initialize submodules: %w", err)
+		}
+	}
+	return nil
 }
 
 // applyMaterializeLFSPolicy mirrors applyWorktreeLFSPolicy for the primary
