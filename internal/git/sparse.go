@@ -224,18 +224,25 @@ func (r Runner) MissingSparseDirs(ctx context.Context, dir, ref string, paths []
 	if len(paths) == 0 {
 		return nil, nil
 	}
-	args := make([]string, 0, len(paths)+4)
-	args = append(args, "ls-tree", "-d", "--name-only", ref, "--")
+	args := make([]string, 0, len(paths)+6)
+	// -z is load-bearing, not a style choice (review finding, W14-02). Without
+	// it, ls-tree applies core.quotepath — ON by default — and prints a
+	// non-ASCII name in C-quoted, octal-escaped form: a directory named "café"
+	// comes back as the 13 bytes `"caf\303\251"`, which can never string-match
+	// the stored path, so a directory that plainly EXISTS would be reported
+	// missing and produce a false "not found at HEAD" warning. -z emits raw,
+	// NUL-terminated names with no quoting at all. It also removes the need to
+	// trim line endings, which is why nothing here re-trims the entries.
+	args = append(args, "ls-tree", "-d", "--name-only", "-z", ref, "--")
 	args = append(args, paths...)
 	out, err := r.Run(ctx, dir, args...)
 	if err != nil {
 		return nil, err
 	}
 	present := make(map[string]bool, len(paths))
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			present[line] = true
+	for _, name := range strings.Split(out, "\x00") {
+		if name != "" {
+			present[name] = true
 		}
 	}
 	var missing []string

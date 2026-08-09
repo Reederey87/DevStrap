@@ -57,6 +57,7 @@ Four properties of that probe are deliberate:
 
 - **`git ls-tree -d --name-only <ref> -- <paths...>`, not `git cat-file -e`.** Measured: `cat-file -e HEAD:<missing>` exits **128** (not 1), and `cat-file -e HEAD:<a-plain-file>` exits **0** — so it classifies neither "missing" nor "is a directory". `ls-tree -d` prints the path for a directory and prints *nothing* for both a missing path and a plain file, so empty output is the signal and a nonzero exit stays a genuine failure.
 - **One subprocess for the whole set**, not one per path; this runs on the materialization path.
+- **`-z` (NUL-terminated output)**, because git's `core.quotepath` defaults to ON and would otherwise print a non-ASCII directory name in C-quoted, octal-escaped form — `café` comes back as `"caf\303\251"`, which never string-matches the stored path, so an existing directory would be reported missing.
 - **Warn, never refuse, never fail materialization.** A directory can legitimately be absent at `HEAD` and present on another branch. A probe *error* is logged and swallowed rather than reported as missing paths — a broken probe must not start warning about valid profiles on every sync.
 - **Skipped when `HEAD` does not resolve** (an unborn/empty repo), where every path would otherwise read as missing.
 

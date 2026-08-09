@@ -668,3 +668,22 @@ func TestMissingSparseDirsNormalizesOverlappingPaths(t *testing.T) {
 		t.Fatalf("MissingSparseDirs(overlapping, both real) = %v, want none missing", missing)
 	}
 }
+
+// TestMissingSparseDirsHandlesNonASCIIDirectoryNames pins the -z flag.
+// git's core.quotepath defaults to ON, so a plain `ls-tree --name-only` prints
+// a directory named "café" as the C-quoted, octal-escaped 13-byte string
+// `"caf\303\251"` — which never string-matches the stored path, so a directory
+// that EXISTS is reported missing and the user gets a false "not found at
+// HEAD" warning for a perfectly valid profile.
+func TestMissingSparseDirsHandlesNonASCIIDirectoryNames(t *testing.T) {
+	repo, r := sparseFixtureRepo(t)
+	writeAndCommitAll(t, r.Bin, repo, map[string]string{"café/x.txt": "x\n"})
+
+	missing, err := r.MissingSparseDirs(context.Background(), repo, "HEAD", []string{"café"})
+	if err != nil {
+		t.Fatalf("MissingSparseDirs err = %v", err)
+	}
+	if len(missing) != 0 {
+		t.Fatalf("MissingSparseDirs([café]) = %v, want none missing — the directory exists", missing)
+	}
+}
