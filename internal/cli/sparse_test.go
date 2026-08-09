@@ -584,14 +584,35 @@ func TestWorktreeAdoptWarnsAboutUnappliedSparseProfile(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
 		t.Fatalf("unmarshal worktree adopt --json %q: %v", stdout, err)
 	}
-	found := false
+	// W14-06: assert what the warning CLAIMS, not merely that a warning
+	// mentioning sparse-checkout exists. A bare `Contains("sparse-checkout
+	// profile")` passed against the superseded wording too, so it pinned
+	// nothing about the fix and would not have failed if the misleading
+	// phrasing were restored.
+	found := ""
 	for _, w := range out.Warnings {
 		if strings.Contains(w, "sparse-checkout profile") {
-			found = true
+			found = w
 		}
 	}
-	if !found {
-		t.Fatalf("worktree adopt warnings = %v, want a sparse-checkout-profile-not-applied warning", out.Warnings)
+	if found == "" {
+		t.Fatalf("worktree adopt warnings = %v, want a sparse-checkout-profile warning", out.Warnings)
+	}
+	// The warning must describe DEVSTRAP's action, which is knowable...
+	if !strings.Contains(found, "issued no sparse-checkout command") {
+		t.Errorf("warning %q does not state what devstrap did (expected \"issued no sparse-checkout command\")", found)
+	}
+	// ...and must NOT assert the resulting tree shape, which is not: a real
+	// `git worktree add` against an already-narrowed repo inherits the active
+	// cone from shared repo-level config even though devstrap ran no
+	// sparse-checkout command (empirically observed, W12-02 work log).
+	if strings.Contains(found, "was NOT applied") {
+		t.Errorf("warning %q asserts a working-tree shape adopt cannot know; it must describe devstrap's own action instead", found)
+	}
+	// The manual remedy must survive the rewording — it is the only thing
+	// that makes the warning actionable.
+	if !strings.Contains(found, "git sparse-checkout init --cone") {
+		t.Errorf("warning %q dropped the manual narrowing remedy", found)
 	}
 	// Note: this test does not assert the adopted checkout's tree shape.
 	// git's own sparse-checkout state can be inherited by a brand-new linked
