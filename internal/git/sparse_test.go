@@ -157,6 +157,43 @@ func writeAndCommitAll(t *testing.T, gitBin, repo string, files map[string]strin
 	runRealGit(t, gitBin, repo, "commit", "-m", "fixture")
 }
 
+// TestNoCheckoutSparseRoundTrip proves the first-checkout sequence itself,
+// independently of the CLI: clone leaves the working tree empty, the cone is
+// configured before checkout, and CheckoutHead populates only that cone.
+func TestNoCheckoutSparseRoundTrip(t *testing.T) {
+	remote, r := sparseFixtureRepo(t)
+	dest := filepath.Join(t.TempDir(), "clone")
+	ctx := context.Background()
+
+	if err := r.CloneWithOptions(ctx, remote, dest, CloneOptions{Partial: true, NoCheckout: true}); err != nil {
+		t.Fatalf("CloneWithOptions --no-checkout: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "README.md")); !os.IsNotExist(err) {
+		t.Fatalf("README.md present before CheckoutHead (want empty working tree), stat err = %v", err)
+	}
+	if err := r.SparseCheckoutInit(ctx, dest, true); err != nil {
+		t.Fatalf("SparseCheckoutInit: %v", err)
+	}
+	if err := r.SparseCheckoutSet(ctx, dest, []string{"backend"}); err != nil {
+		t.Fatalf("SparseCheckoutSet: %v", err)
+	}
+	if err := r.CheckoutHead(ctx, dest); err != nil {
+		t.Fatalf("CheckoutHead: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dest, "README.md")); err != nil {
+		t.Fatalf("README.md (cone-mode root file) missing after CheckoutHead: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "backend", "main.go")); err != nil {
+		t.Fatalf("backend/main.go missing after CheckoutHead: %v", err)
+	}
+	for _, absent := range []string{"frontend", "docs"} {
+		if _, err := os.Stat(filepath.Join(dest, absent)); !os.IsNotExist(err) {
+			t.Fatalf("%s present after first checkout narrowed to backend, stat err = %v", absent, err)
+		}
+	}
+}
+
 func TestApplyConvergedSparseCheckoutNarrowsWorkingTree(t *testing.T) {
 	repo, r := sparseFixtureRepo(t)
 	ctx := context.Background()

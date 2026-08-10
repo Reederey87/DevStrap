@@ -1111,6 +1111,8 @@ func TestCloneArgsSubmodules(t *testing.T) {
 		{name: "partial", opts: CloneOptions{Partial: true}, want: []string{"clone", "--filter=blob:none", "--", "r", "d"}},
 		{name: "submodules", opts: CloneOptions{Submodules: true}, want: []string{"clone", "--recurse-submodules", "--", "r", "d"}},
 		{name: "partial+submodules", opts: CloneOptions{Partial: true, Submodules: true, AlsoFilterSubmodules: true}, want: []string{"clone", "--filter=blob:none", "--also-filter-submodules", "--recurse-submodules", "--", "r", "d"}},
+		{name: "no-checkout", opts: CloneOptions{NoCheckout: true}, want: []string{"clone", "--no-checkout", "--", "r", "d"}},
+		{name: "partial+submodules+no-checkout", opts: CloneOptions{Partial: true, Submodules: true, AlsoFilterSubmodules: true, NoCheckout: true}, want: []string{"clone", "--filter=blob:none", "--also-filter-submodules", "--recurse-submodules", "--no-checkout", "--", "r", "d"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1808,5 +1810,47 @@ func mustGit(t *testing.T, dir string, args ...string) {
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// TestCheckoutHeadUsesLongTimeoutInsteadOfShortTimeout pins CheckoutHead into
+// the network-transfer timeout class (P6-GIT-01, re-established by W14-01).
+// On a blobless clone `git checkout` IS the transfer — it lazily fetches a blob
+// for every file it writes — so running it under the short 2m cap would time
+// out materialization of exactly the large monorepos the sparse first-clone
+// path exists to make cheaper. Mirrors TestCloneUsesLongTimeoutInsteadOfShortTimeout:
+// the child sleeps well past the short Timeout and well inside LongTimeout, so
+// this test fails iff CheckoutHead stops wrapping longTransferContext.
+func TestCheckoutHeadUsesLongTimeoutInsteadOfShortTimeout(t *testing.T) {
+	countPath := filepath.Join(t.TempDir(), "count")
+	script := writeFakeGit(t, fmt.Sprintf(`#!/bin/sh
+echo attempt >> %[1]q
+sleep 0.2
+exit 0
+`, countPath))
+	r := Runner{Bin: script, Timeout: 50 * time.Millisecond, LongTimeout: 30 * time.Second, RetryAttempts: 1}
+	if err := r.CheckoutHead(context.Background(), t.TempDir()); err != nil {
+		t.Fatalf("CheckoutHead err = %v, want success under LongTimeout", err)
+	}
+	if got := attemptCount(t, countPath); got != 1 {
+		t.Fatalf("attempt count = %d, want 1", got)
+	}
+}
+
+// TestSubmoduleUpdateInitUsesLongTimeoutInsteadOfShortTimeout pins the same
+// class for the submodule step, which is unambiguously a network transfer.
+func TestSubmoduleUpdateInitUsesLongTimeoutInsteadOfShortTimeout(t *testing.T) {
+	countPath := filepath.Join(t.TempDir(), "count")
+	script := writeFakeGit(t, fmt.Sprintf(`#!/bin/sh
+echo attempt >> %[1]q
+sleep 0.2
+exit 0
+`, countPath))
+	r := Runner{Bin: script, Timeout: 50 * time.Millisecond, LongTimeout: 30 * time.Second, RetryAttempts: 1}
+	if err := r.SubmoduleUpdateInit(context.Background(), t.TempDir()); err != nil {
+		t.Fatalf("SubmoduleUpdateInit err = %v, want success under LongTimeout", err)
+	}
+	if got := attemptCount(t, countPath); got != 1 {
+		t.Fatalf("attempt count = %d, want 1", got)
 	}
 }

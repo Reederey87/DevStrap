@@ -178,6 +178,7 @@ type CloneOptions struct {
 	Partial              bool // --filter=blob:none (blobless clone)
 	Submodules           bool // --recurse-submodules so the tree is fully present
 	AlsoFilterSubmodules bool // --also-filter-submodules (keep submodules blobless too; only meaningful with Partial)
+	NoCheckout           bool // --no-checkout (caller will populate the working tree explicitly)
 }
 
 func (r Runner) Clone(ctx context.Context, remote, dest string, partial bool) error {
@@ -257,6 +258,9 @@ func cloneArgs(remote, dest string, opts CloneOptions) []string {
 	}
 	if opts.Submodules {
 		args = append(args, "--recurse-submodules")
+	}
+	if opts.NoCheckout {
+		args = append(args, "--no-checkout")
 	}
 	args = append(args, "--", remote, dest)
 	return args
