@@ -1,5 +1,5 @@
 ---
-last_reviewed: 2026-08-07
+last_reviewed: 2026-08-09
 tracks_code: [cmd/**, internal/**, .github/**, docs/audits/AUDIT_RECOMMENDATIONS.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-27.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-06-28.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md, docs/audits/AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md]
 ---
 # MVP Roadmap and Backlog
@@ -489,7 +489,7 @@ Status shows both devices.
 
 ```text
 [ ] TUI dashboard
-[ ] 1Password adapter beyond op run/op inject provider refs (item browsing, write-back)
+[x] 1Password adapter beyond op run/op inject provider refs (`W12-03`, shipped 2026-08-07 — item browsing + write-back, see spec/09)
 [ ] Doppler adapter
 [ ] Infisical adapter
 [ ] DevPod adapter
@@ -500,8 +500,8 @@ Status shows both devices.
 [x] draft project encrypted sync (DRAFT-*, shipped 2026-06-29)
 [ ] conflict resolution UI
 [~] shell cd hydration hook — WITHDRAWN 2026-07-31, not pending (see note below)
-[ ] zsh/fish/bash integrations (completions shipped v0.1.0; the `cd` hook is withdrawn, so what
-    remains here is prompt/status integration only)
+[x] zsh/fish/bash integrations (`W12-01`, shipped 2026-08-07 — `status --prompt` + `shell-init`;
+    completions shipped v0.1.0; the `cd` hook is withdrawn, see note below)
 [x] Homebrew tap + curl|sh installer + completions (v0.1.0 SHIPPED 2026-07-05 — `brew install Reederey87/devstrap/devstrap` live)
 [~] code signing/notarization (cosign keyless signing + SBOMs + SLSA provenance SHIPPED and LIVE-VERIFIED on v0.1.1, 2026-07-05 — `P4-QUAL-05` closed; remaining: Apple Developer ID + notarization, dormant config ready per `RELEASING.md`, Homebrew Gatekeeper deadline 2026-09-01 — now ENFORCED by `cmd/release-gate`, which refuses a post-cutoff stable release while notarization is dormant)
 ```

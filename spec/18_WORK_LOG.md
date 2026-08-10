@@ -41,6 +41,20 @@ Follow-ups:
 - <remaining work, or "None">
 ```
 
+## 2026-08-09 — two shipped rows never ticked, and a warning that asserts a tree shape it cannot know (W14-06)
+
+Changed:
+- `spec/14_MVP_ROADMAP_AND_BACKLOG.md`: ticked two Backlog: V1 rows that were left `[ ]` after shipping — the 1Password item-browsing/write-back adapter (`W12-03`, PR #297, 2026-08-07) and the zsh/fish/bash prompt/status integration (`W12-01`, PR #298, 2026-08-07) — annotated in the same `(\`TICKET\`, shipped DATE — description)` form the sibling sparse-checkout-profiles row already used. `last_reviewed` bumped (status-claim change).
+- `internal/cli/worktree.go` (`adoptWorktreeAt`): the sparse-profile warning fired on `worktree adopt` claimed the profile "was NOT applied to this adopted worktree" — true of DevStrap's own actions, but phrased as if it described the resulting tree shape, which W12-02's own work-log entry (2026-08-07, "An empirical git behavior changed the adopt test's assertion, not the design") already documented is not knowable: a real `git worktree add` against an already-narrowed repo inherits the active cone via git's shared repo-level `core.sparseCheckout` config, even though DevStrap issued no sparse-checkout command of its own. Reworded to state only what DevStrap did (issued no sparse-checkout command for this adopted worktree) and that whether the checkout ended up narrowed depends on git's own worktree-config inheritance, keeping the manual `git sparse-checkout init --cone && git sparse-checkout set -- <paths>` remedy unchanged. The comment immediately above the gate also claimed the warning "is unconditional on the project having a configured profile," contradicting the very next line's `len(sparsePaths) > 0` gate; fixed the comment to describe the actual gate (fires only when a profile is configured) rather than contradict the code.
+
+- `internal/cli/sparse_test.go`: `TestWorktreeAdoptWarnsAboutUnappliedSparseProfile` asserted only `strings.Contains(w, "sparse-checkout profile")`, a substring both the old and the new wording satisfy — so the test named for this warning pinned **nothing** about the claim the warning makes, and restoring the misleading phrasing would not have failed it. This is the repo's recurring vacuous-assertion class (`W13-06`, `P11-PROMOTE-01`, `P11-SWEEP-01`), and the wording change was the entire substance of the fix, so leaving the assertion as-is would have shipped an unguarded correctness-of-promise edit. Now asserts the warning states what DevStrap DID (`issued no sparse-checkout command`), does NOT assert a tree shape it cannot know (`was NOT applied`), and still carries the manual remedy — the last because a rewording that silently dropped the actionable half would otherwise pass.
+
+Validated:
+- `gofmt -l cmd internal` (clean); `go build ./...`; `golangci-lint run`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `go test -race ./...` (full suite).
+- **Mutation-checked**, per this file's own standing requirement: restoring the superseded warning string makes `TestWorktreeAdoptWarnsAboutUnappliedSparseProfile` fail on both new assertions (`does not state what devstrap did`, `asserts a working-tree shape adopt cannot know`); reverting the mutation returns it to green. The pre-existing assertion passed under that same mutation, which is what motivated strengthening it.
+
+Follow-ups:
+- None.
 ## 2026-08-09 — a typo'd sparse directory narrowed the tree to nothing, silently (W14-02)
 
 Changed:

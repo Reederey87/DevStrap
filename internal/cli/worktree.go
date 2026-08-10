@@ -402,11 +402,11 @@ func adoptWorktreeAt(ctx context.Context, stderr io.Writer, opts *options, store
 	// narrowed depends on git's own worktree-config inheritance (empirically,
 	// a new linked worktree can inherit the primary checkout's active cone
 	// from shared repo config even though DevStrap issued no sparse-checkout
-	// command of its own), so this warning is unconditional on the project
-	// having a configured profile — it does not claim to know which way the
-	// adopted checkout actually landed.
+	// command of its own), so this warning fires only when the project has a
+	// configured sparse profile (gated on `len(sparsePaths) > 0` below) — it
+	// does not claim to know which way the adopted checkout actually landed.
 	if sparsePaths, sperr := store.SparsePathsForProject(ctx, project.ID); sperr == nil && len(sparsePaths) > 0 {
-		warnings = append(warnings, fmt.Sprintf("%s has a configured sparse-checkout profile that was NOT applied to this adopted worktree (adopt never mutates a checkout it did not create); to narrow it manually run 'git sparse-checkout init --cone && git sparse-checkout set -- %s' inside %s", project.Path, strings.Join(sparsePaths, " "), resolvedPath))
+		warnings = append(warnings, fmt.Sprintf("%s has a configured sparse-checkout profile; devstrap issued no sparse-checkout command for this adopted worktree (adopt never mutates a checkout it did not create) — whether the checkout ended up narrowed depends on git's own worktree-config inheritance; to narrow it manually run 'git sparse-checkout init --cone && git sparse-checkout set -- %s' inside %s", project.Path, strings.Join(sparsePaths, " "), resolvedPath))
 	}
 	shallow, err := r.IsShallow(ctx, resolvedPath)
 	if err != nil {
