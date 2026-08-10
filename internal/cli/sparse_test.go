@@ -745,3 +745,166 @@ func TestSparseFirstCloneRefusesToPromoteWhenRollbackAlsoFails(t *testing.T) {
 		t.Errorf("a repo was promoted at the managed path despite the refusal")
 	}
 }
+
+// createEmptyBareRemote builds a bare remote with NO commits (unborn HEAD) —
+// used to prove the W14-02 typo probe skips entirely when there is no
+// resolvable HEAD to check paths against, since every configured path would
+// otherwise read as "missing" for a project that simply hasn't been pushed
+// to yet.
+func createEmptyBareRemote(t *testing.T) string {
+	t.Helper()
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "repo.git")
+	runGit(t, tmp, "init", "--bare", remote)
+	return remote
+}
+
+// TestProjectSparseSetWarnsAboutMissingDirectory pins the W14-02 fix's core
+// case: `project sparse set <p> bakend` (a typo for the fixture's real
+// "backend" directory) against an already-materialized checkout must warn
+// and name "bakend" — visible both on stdout and in the --json warnings
+// array — rather than succeeding silently the way `git sparse-checkout set`
+// itself does for a nonexistent cone.
+func TestProjectSparseSetWarnsAboutMissingDirectory(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	remote := createSparseFixtureRemote(t)
+
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "add", "file://"+remote, "--path", "work/acme/mono", "--default-branch", "main"); err != nil {
+		t.Fatalf("add stderr = %q err = %v", stderr, err)
+	}
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "hydrate", "work/acme/mono"); err != nil {
+		t.Fatalf("hydrate stderr = %q err = %v", stderr, err)
+	}
+
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "project", "sparse", "set", "work/acme/mono", "bakend", "--json")
+	if err != nil {
+		t.Fatalf("project sparse set stderr = %q err = %v", stderr, err)
+	}
+	var out struct {
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("unmarshal --json output %q: %v", stdout, err)
+	}
+	if len(out.Warnings) != 1 || !strings.Contains(out.Warnings[0], "bakend") {
+		t.Fatalf("warnings = %v, want exactly one warning naming %q", out.Warnings, "bakend")
+	}
+}
+
+// TestProjectSparseSetNoWarningWhenDirsExist guards against the fix
+// warning on every set/sync (which would be worse than the bug it fixes): a
+// profile whose directories genuinely exist at HEAD must produce zero
+// warnings.
+func TestProjectSparseSetNoWarningWhenDirsExist(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	remote := createSparseFixtureRemote(t)
+
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "add", "file://"+remote, "--path", "work/acme/mono", "--default-branch", "main"); err != nil {
+		t.Fatalf("add stderr = %q err = %v", stderr, err)
+	}
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "hydrate", "work/acme/mono"); err != nil {
+		t.Fatalf("hydrate stderr = %q err = %v", stderr, err)
+	}
+
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "project", "sparse", "set", "work/acme/mono", "backend", "--json")
+	if err != nil {
+		t.Fatalf("project sparse set stderr = %q err = %v", stderr, err)
+	}
+	var out struct {
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("unmarshal --json output %q: %v", stdout, err)
+	}
+	if len(out.Warnings) != 0 {
+		t.Fatalf("warnings = %v, want none for a profile whose directories exist", out.Warnings)
+	}
+}
+
+// TestProjectSparseSetSkipsTypoWarningOnUnbornRepo pins the deliberate
+// exception: a materialized-but-unborn checkout (a fresh remote with no
+// commits yet) has no tree to probe against, so every configured path would
+// otherwise false-positive as "missing". No warning must be produced.
+func TestProjectSparseSetSkipsTypoWarningOnUnbornRepo(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	remote := createEmptyBareRemote(t)
+
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "add", "file://"+remote, "--path", "work/acme/empty", "--default-branch", "main"); err != nil {
+		t.Fatalf("add stderr = %q err = %v", stderr, err)
+	}
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "hydrate", "work/acme/empty"); err != nil {
+		t.Fatalf("hydrate stderr = %q err = %v", stderr, err)
+	}
+
+	stdout, stderr, err := executeForTest("--home", home, "--root", root, "project", "sparse", "set", "work/acme/empty", "bakend", "--json")
+	if err != nil {
+		t.Fatalf("project sparse set stderr = %q err = %v", stderr, err)
+	}
+	var out struct {
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("unmarshal --json output %q: %v", stdout, err)
+	}
+	if len(out.Warnings) != 0 {
+		t.Fatalf("warnings = %v, want none for an unborn repo (nothing to probe against)", out.Warnings)
+	}
+}
+
+// TestApplyProjectSparseProfileWarnsAboutMissingDirectory pins the hydrate.go
+// call site of the W14-02 fix directly: applyProjectSparseProfile is called
+// from BOTH the already-materialized early return and the fresh-clone path in
+// hydrateProjectUnlocked, so it — not just `project sparse set` — must record
+// a project warning naming a configured directory that does not exist at
+// HEAD.
+func TestApplyProjectSparseProfileWarnsAboutMissingDirectory(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	remote := createSparseFixtureRemote(t)
+
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "add", "file://"+remote, "--path", "work/acme/mono", "--default-branch", "main"); err != nil {
+		t.Fatalf("add stderr = %q err = %v", stderr, err)
+	}
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "hydrate", "work/acme/mono"); err != nil {
+		t.Fatalf("hydrate stderr = %q err = %v", stderr, err)
+	}
+
+	opts := testOptions(home, root)
+	store, err := opts.openState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(store)
+	project, err := store.ProjectByPath(context.Background(), "work/acme/mono")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSparsePathsForProject(context.Background(), project.ID, []string{"bakend"}); err != nil {
+		t.Fatal(err)
+	}
+
+	applyProjectSparseProfile(context.Background(), store, gitRunner(opts), project, project.LocalPath)
+
+	after, err := store.ProjectByPath(context.Background(), "work/acme/mono")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(after.LastError, "bakend") {
+		t.Fatalf("project last_error = %q, want it to name %q", after.LastError, "bakend")
+	}
+}
