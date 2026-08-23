@@ -2,8 +2,22 @@ package state
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 )
+
+// SparseProbeCache is the last directory-existence result for a project's
+// local sparse profile. HeadSHA pins the exact commit tree that was probed;
+// ProfileHash pins the normalized requested cone. A matching cache row
+// suppresses identical warnings on unattended convergence cycles until either
+// input changes. This is local cache state, never synced.
+type SparseProbeCache struct {
+	HeadSHA      string
+	ProfileHash  string
+	MissingPaths []string
+}
 
 // SparsePathsForProject reads a project's configured cone-mode
 // sparse-checkout directories, ordered for stable output. An empty result
@@ -66,6 +80,54 @@ INSERT INTO project_sparse_paths (namespace_id, path, created_at) VALUES (?, ?, 
 `, namespaceID, p, now); err != nil {
 			return fmt.Errorf("insert project sparse path %q: %w", p, err)
 		}
+	}
+	return nil
+}
+
+// SparseProbeCacheForProject reads the last sparse directory-existence probe
+// for namespaceID. found is false when the project has never been probed.
+// Invalid JSON is returned as an error so callers re-probe instead of trusting
+// a corrupt cache row and suppressing a real warning.
+func (s *Store) SparseProbeCacheForProject(ctx context.Context, namespaceID string) (cache SparseProbeCache, found bool, err error) {
+	var missingJSON string
+	err = s.reader().QueryRowContext(ctx, `
+SELECT head_sha, profile_hash, missing_paths_json
+FROM project_sparse_probe_cache
+WHERE namespace_id = ?;
+`, namespaceID).Scan(&cache.HeadSHA, &cache.ProfileHash, &missingJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SparseProbeCache{}, false, nil
+	}
+	if err != nil {
+		return SparseProbeCache{}, false, fmt.Errorf("read sparse probe cache: %w", err)
+	}
+	if err := json.Unmarshal([]byte(missingJSON), &cache.MissingPaths); err != nil {
+		return SparseProbeCache{}, false, fmt.Errorf("decode sparse probe cache: %w", err)
+	}
+	return cache, true, nil
+}
+
+// RecordSparseProbeCache replaces the one local probe result for namespaceID.
+// INSERT ... ON CONFLICT DO UPDATE is deliberate instead of INSERT OR
+// REPLACE: REPLACE deletes and reinserts the row, while this is an in-place
+// cache refresh with stable FK identity.
+func (s *Store) RecordSparseProbeCache(ctx context.Context, namespaceID string, cache SparseProbeCache) error {
+	missingJSON, err := json.Marshal(cache.MissingPaths)
+	if err != nil {
+		return fmt.Errorf("encode sparse probe cache: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO project_sparse_probe_cache (
+  namespace_id, head_sha, profile_hash, missing_paths_json, updated_at
+) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(namespace_id) DO UPDATE SET
+  head_sha = excluded.head_sha,
+  profile_hash = excluded.profile_hash,
+  missing_paths_json = excluded.missing_paths_json,
+  updated_at = excluded.updated_at;
+`, namespaceID, cache.HeadSHA, cache.ProfileHash, string(missingJSON), timestampNow())
+	if err != nil {
+		return fmt.Errorf("record sparse probe cache: %w", err)
 	}
 	return nil
 }

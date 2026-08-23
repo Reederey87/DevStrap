@@ -15,7 +15,7 @@ This directory holds DevStrap's chronological design & implementation audits. **
 | 5 | 2026-06-29 | [`AUDIT_RECOMMENDATIONS_2026-06-29_PASS5.md`](AUDIT_RECOMMENDATIONS_2026-06-29_PASS5.md) | Fifth pass: adversarial review of the PASS4 batch + under-examined dimensions + new features | 36 (P1=1, P2=12, P3=23) | 36 shipped (`P5-CLI-01` 2026-07-16) — **PASS CLOSED**, see below |
 | 6 | 2026-07-01 | [`AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md`](AUDIT_RECOMMENDATIONS_2026-07-01_PASS6.md) | Sixth pass: adversarial audit of the PR #24/#25 batch (live R2 hub + envelope-encryption foundation) + under-examined dimensions | 43 (P1=5, P2=25, P3=13) | Closed — 43/43 shipped |
 | 7 | 2026-07-10 | [`AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md`](AUDIT_RECOMMENDATIONS_2026-07-10_PASS7.md) | Seventh pass: adversarial audit of the post-Pass-6 waves (git/folder hub carriers, OS sandbox, device-trust + env-sync propagation, distribution/service install) + commercial readiness | 47 (P1=1, P2=25, P3=21) | Open — see below |
-| 8 | 2026-07-31 | [`AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md`](AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md) | Eighth pass: the post-Pass-7 waves — AD-5 agent substrate, Milestone 5 daemon, working-state plane, plus security/data across all of it | 8 (P1=1, P2=5, P3=2) | Open — 7 of 8 open (`P8-ADOPT-01` shipped PR #258); **coverage is partial by declaration**, see below |
+| 8 | 2026-07-31 | [`AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md`](AUDIT_RECOMMENDATIONS_2026-07-31_PASS8.md) | Eighth pass: the post-Pass-7 waves — AD-5 agent substrate, Milestone 5 daemon, working-state plane, plus security/data across all of it | 8 (P1=1, P2=5, P3=2) | Closed — 8/8 shipped; **coverage was partial by declaration** and the missing planes moved to Pass 9, see below |
 | 9–10 | 2026-07-31 | [`AUDIT_RECOMMENDATIONS_2026-07-31_PASS9-10.md`](AUDIT_RECOMMENDATIONS_2026-07-31_PASS9-10.md) | Ninth: the working-state and daemon planes Pass 8 commissioned and never reported on. Tenth: hub carriers, blob plane, snapshot exchange — the largest surface no pass had reached | 8 (P1=0, P2=6, P3=2) + 0 | 1 open (`P9-WIP-03`, P3); Pass 10 clean, nothing above P3 |
 | 11 | 2026-08-05 | [`AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md`](AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md) | Eleventh: the three `W13` surfaces that shipped 2026-08-01 with zero adversarial review — `devstrap promote`, `workspace.yaml` export/import, and the clone-staging sweeper | 7 (P1=0, P2=2, P3=5) | Closed — 7/7 shipped (`P11-MANIFEST-01` PR #292; `P11-MANIFEST-02`/`-03` PR #293; `P11-SWEEP-01` PR #290; `P11-PROMOTE-01`/`-02`/`-03` PR #294) |
 
@@ -31,6 +31,22 @@ This directory holds DevStrap's chronological design & implementation audits. **
 ## Open backlog — single source of truth for "what's left"
 
 Currently-actionable findings, pass-scoped. Earlier passes (1–3) are largely implemented or superseded (see `spec/18_WORK_LOG.md` for the shipped history); Passes 5, 6, 8 and 11 are fully closed; the open backlog is concentrated in passes 4 and 7.
+
+> **2026-08-23 — `W15-01` sparse-profile refinement does not move an audit row.**
+> The wave was selected from the explicit follow-ups in recent PRs #300/#301:
+> cache the W14 missing-directory probe on `(resolved HEAD, normalized profile)`,
+> suppress identical unattended warnings until either input changes, and reuse
+> first clone's existing profile read. These are spec-space improvements, not
+> findings from an audit pass. No severity or state changed: Pass 9 remains
+> 1 open, Pass 7 remains 4 open, and the Pass 4 table is unchanged. The choice
+> also does not bypass the commercial-tier gate: `CT-01` remains the only
+> actionable commercial row, and no control-plane work starts without its
+> demand measurement.
+> This reconciliation also corrected the index's stale Pass 8 status from
+> “7 of 8 open” to the already-documented “0 open / pass closed”; that is an
+> index truth-up only, with no row or finding-state movement in this wave.
+
+<!-- MD028 separator between adjacent dated blockquotes -->
 
 > **2026-08-05 — Pass 11 landed.** The eleventh pass
 > ([`AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md`](AUDIT_RECOMMENDATIONS_2026-08-05_PASS11.md))

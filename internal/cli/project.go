@@ -111,7 +111,10 @@ func newProjectSparseSetCommand(stdout io.Writer, opts *options) *cobra.Command 
 				// apply, above) with no other signal anywhere, so warn the
 				// user immediately rather than waiting for the next
 				// sync/hydrate to notice via applyProjectSparseProfile.
-				typoWarnings = probeSparseTypos(cmd.Context(), store, r, project, project.LocalPath, paths)
+				// An explicit `project sparse set` always returns the warning to
+				// its caller, even when the identical HEAD/profile result is cached.
+				// Only unattended convergence suppresses a repeated notice.
+				typoWarnings = probeSparseTypos(cmd.Context(), store, r, project, project.LocalPath, paths, true)
 			}
 			var warnings []string
 			if applyErr != nil {

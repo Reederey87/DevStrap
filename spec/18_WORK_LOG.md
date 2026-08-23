@@ -41,6 +41,29 @@ Follow-ups:
 - <remaining work, or "None">
 ```
 
+## 2026-08-23 — cache sparse-directory probes on the tree that was actually checked (`W15-01`)
+
+Changed:
+- Reconciled recent PRs #297–#302 against `docs/audits/README.md` and `spec/14`. The audit remainder is business-gated (`CT-*`/hosted tier), externally blocked (Apple notarization), or a deliberately deferred P3 (`P9-WIP-03`); the coherent ungated engineering remainder was the adjacent `W14-01`/`W14-02` sparse follow-up set. Exa research was restricted to primary Git and SQLite documentation: Git defines cone inputs as directories matching `ls-tree -d --name-only`, `HEAD` resolves to a commit object, and sparse configuration is worktree-specific; SQLite documents `ON CONFLICT ... DO UPDATE` as the in-place one-row UPSERT. That evidence shaped the narrow cache below rather than a cache of Git's applied worktree state.
+- `internal/state/migrations/00034_sparse_probe_cache.sql` + `internal/state/project_sparse_paths.go`: one local-only `project_sparse_probe_cache` row per project stores resolved HEAD SHA, SHA-256 of the normalized order-independent desired cone, and JSON missing paths. Reads reject corrupt JSON toward re-probing; successful probes UPSERT in place; project hard-delete cascades the row. No contents, refs, or secrets are synced or cached.
+- `internal/cli/hydrate.go`: `probeSparseTypos` resolves HEAD once, pins `MissingSparseDirs` to that object ID, reuses a matching result, and suppresses identical unattended warnings. A HEAD/profile change re-probes and re-emits; a failed probe is never cached clean. Explicit `project sparse set` requests still surface a cached warning. First-clone materialization now threads its pre-clone `SparsePathsForProject` result into post-clone convergence; a failed first lookup still retries through the ordinary wrapper.
+- A successful changed-key probe that finds no missing path clears only the prior sparse-typo `last_error` prefix, so correcting `bakend` does not leave status permanently warning and does not erase an unrelated env/materialization warning.
+- Independent Grok 4.6 review (fresh `grok-fast`, verified `cliproxy-grok` + `sandbox: read-only`) found one medium defect and one low test gap. The first full 107,035-character packet reached its five-minute deadline; the runner killed it and used its one permitted fresh retry with a 56,819-character packet, so coverage is explicitly reduced. Both final findings were valid and fixed: a failed warning persist/prefix clear can no longer be followed by a cache write that suppresses all retries, and the real-Git test now proves an unrelated `last_error` survives a clean probe.
+- PR CI then surfaced a trunk-wide toolchain gate failure unrelated to sparse caching: `go.mod` still pinned Go 1.26.5 after Go 1.26.6 shipped on 2026-08-13 with the standard-library security fixes reached by DevStrap (`encoding/xml`, `crypto/tls`, and `net/url`). The patch floor is advanced to 1.26.6 in this already-reconciled cycle rather than hiding the required vulnerability gate failure or mixing a conflict-heavy predecessor bookkeeping PR into the one-PR wave; no module dependency changed.
+- Tests: a transparent real-Git trace proves the first key runs one `ls-tree`, automatic and explicit cache hits run none, profile and HEAD changes each run one, explicit feedback survives, and a later clean result clears the stale warning. Hash normalization, state round-trip/replacement, corrupt JSON, cascade deletion, schema 34, and down/up migration offsets are pinned. Specs 08/12/13/14/16, the audit ledger, and this log were reconciled; substantive specs carry `last_reviewed: 2026-08-23`. The ledger review also corrected its Pass 8 index from stale “7 of 8 open” wording to the already-established 0-open/closed state; no row moved and no finding state changed.
+
+Concrete behavior / actionable examples:
+- `bakend` at one unchanged HEAD warns once during routine convergence; the next idle sync is quiet and skips `ls-tree`.
+- `devstrap project sparse set work/acme/mono bakend --json` still returns that warning on every explicit submission, even from cache, so the remedy remains visible while the operator is editing the profile.
+- Advance HEAD or change the normalized cone and the next convergence probes again. Merely reorder `backend,docs` to `docs,backend` and it does not.
+
+Validated:
+- Targeted during implementation: `go test ./internal/state`; `go test ./internal/cli -run 'Test(ProjectSparse|ApplyProjectSparse|Sparse)'`; cache/migration-focused state+CLI selection; isolated `-race` reruns for the schema-status and daemon-hardening tests after the full suite exposed a stale schema-33 assertion and one non-reproducing load-sensitive daemon timeout.
+- Full gates after review correction: `gofmt -w cmd internal`; pinned `golangci-lint v2.12.0` under Go 1.26.6 (`0 issues`); `GOTOOLCHAIN=go1.26.6 go test -race ./...`; `GOTOOLCHAIN=go1.26.6 go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...`; `go run ./cmd/spec-drift --base origin/main --head HEAD`; `git diff --check`. Native coordinator reconciliation of the independent findings and the required post-code-change spec inventory review found no unresolved defect or stale status claim.
+
+Follow-ups:
+- None. `rev-parse HEAD` deliberately remains the one cheap per-cycle invalidation subprocess; removing it would require a reliable ref-file/packed-ref observer and would be a different feature with a larger correctness surface.
+
 ## 2026-08-09 — two shipped rows never ticked, and a warning that asserts a tree shape it cannot know (W14-06)
 
 Changed:
