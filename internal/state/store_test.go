@@ -239,8 +239,8 @@ func TestMigrateEnsureSummaryAndVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 33 {
-		t.Fatalf("schema version = %d, want 33", version)
+	if version != 34 {
+		t.Fatalf("schema version = %d, want 34", version)
 	}
 
 	var tableCount int
@@ -462,8 +462,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 32 {
-		t.Fatalf("schema version after down = %d, want 32", version)
+	if version != 33 {
+		t.Fatalf("schema version after down = %d, want 33", version)
 	}
 	if err := st.Migrate(); err != nil {
 		t.Fatal(err)
@@ -472,8 +472,8 @@ func TestMigrationDownAndUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if version != 33 {
-		t.Fatalf("schema version after re-migrate = %d, want 33", version)
+	if version != 34 {
+		t.Fatalf("schema version after re-migrate = %d, want 34", version)
 	}
 }
 
@@ -505,6 +505,9 @@ func TestMigration00029RoundTripsDeviceGitstateTable(t *testing.T) {
 		t.Fatalf("upsert device gitstate before down: %v", err)
 	}
 
+	if err := st.Down(); err != nil { // 34 -> 33 (drops sparse-probe cache, unrelated here)
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 33 -> 32 (drops project_sparse_paths, unrelated here)
 		t.Fatal(err)
 	}
@@ -582,6 +585,9 @@ func TestMigration00030RoundTripsDeviceWipTable(t *testing.T) {
 		t.Fatalf("upsert device wip before down: %v", err)
 	}
 
+	if err := st.Down(); err != nil { // 34 -> 33 (drops sparse-probe cache, unrelated here)
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 33 -> 32 (drops project_sparse_paths, unrelated here)
 		t.Fatal(err)
 	}
@@ -658,6 +664,9 @@ func TestMigration00031RoundTripsDroppedAtColumn(t *testing.T) {
 		return tx.TombstoneDeviceWipTx(ctx, "dev_peer", "work/acme/api", "work/acme/api",
 			"abc123", Event{ID: "evt_drop", HLC: 2000})
 	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Down(); err != nil { // 34 -> 33 (drops sparse-probe cache, unrelated here)
 		t.Fatal(err)
 	}
 	if err := st.Down(); err != nil { // 33 -> 32 (drops project_sparse_paths, unrelated here)
@@ -768,6 +777,9 @@ func TestMigration00032RoundTripsActivePathIndex(t *testing.T) {
 		t.Fatalf("re-registering a removed worktree's path should succeed: %v", err)
 	}
 
+	if err := st.Down(); err != nil { // 34 -> 33 (drops sparse-probe cache, unrelated here)
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 33 -> 32 (drops project_sparse_paths, unrelated here)
 		t.Fatal(err)
 	}
@@ -813,7 +825,10 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
-	// Steps from 33 down to 23 are unrelated and must remain unaffected.
+	// Steps from 34 down to 23 are unrelated and must remain unaffected.
+	if err := st.Down(); err != nil { // 34 -> 33
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 33 -> 32
 		t.Fatal(err)
 	}
@@ -900,6 +915,9 @@ FROM workspaces;
 		t.Fatal(err)
 	}
 
+	if err := st.Down(); err != nil { // 34 -> 33
+		t.Fatal(err)
+	}
 	if err := st.Down(); err != nil { // 33 -> 32
 		t.Fatal(err)
 	}

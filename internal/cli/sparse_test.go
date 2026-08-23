@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -927,5 +928,211 @@ func TestApplyProjectSparseProfileWarnsAboutMissingDirectory(t *testing.T) {
 	}
 	if !strings.Contains(after.LastError, "bakend") {
 		t.Fatalf("project last_error = %q, want it to name %q", after.LastError, "bakend")
+	}
+}
+
+func TestSparseProfileHashUsesNormalizedCone(t *testing.T) {
+	first := sparseProfileHash([]string{"docs", "backend/deep", "backend"})
+	second := sparseProfileHash([]string{"backend", "docs"})
+	if first != second {
+		t.Fatalf("equivalent normalized cones hashed differently: %q != %q", first, second)
+	}
+	if first == sparseProfileHash([]string{"frontend", "docs"}) {
+		t.Fatal("different normalized cones produced the same profile hash")
+	}
+}
+
+// TestSparseTypoProbeCachesAndSuppressesUntilInputsChange pins all three
+// W15-01 cache-key rules through the real Git subprocess path:
+//   - a first (HEAD, normalized profile) probes and warns;
+//   - unattended repetition suppresses the identical warning and skips
+//     ls-tree, while an explicit `project sparse set`-style request still
+//     surfaces the cached warning without re-probing;
+//   - changing either the normalized profile or HEAD invalidates the cache.
+func TestSparseTypoProbeCachesAndSuppressesUntilInputsChange(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".devstrap")
+	root := filepath.Join(t.TempDir(), "Code")
+	remote := createSparseFixtureRemote(t)
+
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "init"); err != nil {
+		t.Fatalf("init stderr = %q err = %v", stderr, err)
+	}
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "add", "file://"+remote, "--path", "work/acme/mono", "--default-branch", "main"); err != nil {
+		t.Fatalf("add stderr = %q err = %v", stderr, err)
+	}
+	if _, stderr, err := executeForTest("--home", home, "--root", root, "hydrate", "work/acme/mono"); err != nil {
+		t.Fatalf("hydrate stderr = %q err = %v", stderr, err)
+	}
+
+	opts := testOptions(home, root)
+	store, err := opts.openState(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeStore(store)
+	project, err := store.ProjectByPath(context.Background(), "work/acme/mono")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := gitRunner(opts)
+	tracePath := traceGitCommands(t)
+	countProbes := func() int {
+		t.Helper()
+		count := 0
+		for _, line := range readGitTrace(t, tracePath) {
+			if strings.Contains(line, "ls-tree -d --name-only -z") {
+				count++
+			}
+		}
+		return count
+	}
+
+	first := probeSparseTypos(context.Background(), store, r, project, project.LocalPath, []string{"bakend"}, false)
+	if len(first) != 1 || !strings.Contains(first[0], "bakend") {
+		t.Fatalf("first probe warnings = %v, want one naming bakend", first)
+	}
+	if got := countProbes(); got != 1 {
+		t.Fatalf("ls-tree probes after first call = %d, want 1", got)
+	}
+
+	if repeated := probeSparseTypos(context.Background(), store, r, project, project.LocalPath, []string{"bakend"}, false); len(repeated) != 0 {
+		t.Fatalf("repeated unattended warnings = %v, want suppressed", repeated)
+	}
+	if got := countProbes(); got != 1 {
+		t.Fatalf("ls-tree probes after identical unattended call = %d, want cached 1", got)
+	}
+
+	explicit := probeSparseTypos(context.Background(), store, r, project, project.LocalPath, []string{"bakend"}, true)
+	if len(explicit) != 1 || !strings.Contains(explicit[0], "bakend") {
+		t.Fatalf("explicit cached warnings = %v, want one naming bakend", explicit)
+	}
+	if got := countProbes(); got != 1 {
+		t.Fatalf("ls-tree probes after explicit cached call = %d, want cached 1", got)
+	}
+
+	changedProfile := probeSparseTypos(context.Background(), store, r, project, project.LocalPath, []string{"docz"}, false)
+	if len(changedProfile) != 1 || !strings.Contains(changedProfile[0], "docz") {
+		t.Fatalf("changed-profile warnings = %v, want one naming docz", changedProfile)
+	}
+	if got := countProbes(); got != 2 {
+		t.Fatalf("ls-tree probes after profile change = %d, want 2", got)
+	}
+
+	runGit(t, project.LocalPath, "config", "user.email", "devstrap@example.test")
+	runGit(t, project.LocalPath, "config", "user.name", "DevStrap Test")
+	readme := filepath.Join(project.LocalPath, "README.md")
+	if err := os.WriteFile(readme, []byte("head changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, project.LocalPath, "add", "README.md")
+	runGit(t, project.LocalPath, "commit", "-m", "move head")
+	changedHead := probeSparseTypos(context.Background(), store, r, project, project.LocalPath, []string{"docz"}, false)
+	if len(changedHead) != 1 || !strings.Contains(changedHead[0], "docz") {
+		t.Fatalf("changed-HEAD warnings = %v, want one naming docz", changedHead)
+	}
+	if got := countProbes(); got != 3 {
+		t.Fatalf("ls-tree probes after HEAD change = %d, want 3", got)
+	}
+
+	const unrelatedWarning = "env hydrate: keep this unrelated warning"
+	if err := store.RecordProjectWarning(context.Background(), project.ID, unrelatedWarning); err != nil {
+		t.Fatal(err)
+	}
+	resolved := probeSparseTypos(context.Background(), store, r, project, project.LocalPath, []string{"backend"}, false)
+	if len(resolved) != 0 {
+		t.Fatalf("resolved-profile warnings = %v, want none", resolved)
+	}
+	if got := countProbes(); got != 4 {
+		t.Fatalf("ls-tree probes after resolving the profile = %d, want 4", got)
+	}
+	after, err := store.ProjectByPath(context.Background(), project.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.LastError != unrelatedWarning {
+		t.Fatalf("clean sparse probe changed unrelated project last_error to %q, want %q", after.LastError, unrelatedWarning)
+	}
+
+	// A status-write failure must not make the probe result durable: otherwise
+	// the next unattended cycle would hit the cache and suppress the retry.
+	faultDB, err := sql.Open("sqlite", filepath.Join(home, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer faultDB.Close()
+	if _, err := faultDB.Exec(`
+CREATE TRIGGER fail_sparse_warning_status
+BEFORE UPDATE OF last_error ON device_project_state
+WHEN NEW.last_error LIKE 'sparse-checkout profile references%'
+BEGIN
+  SELECT RAISE(ABORT, 'forced sparse warning write failure');
+END;
+`); err != nil {
+		t.Fatal(err)
+	}
+	failedWarningWrite := probeSparseTypos(context.Background(), store, r, project, project.LocalPath, []string{"ghost"}, false)
+	if len(failedWarningWrite) != 1 || !strings.Contains(failedWarningWrite[0], "ghost") {
+		t.Fatalf("failed-status-write warnings = %v, want one naming ghost", failedWarningWrite)
+	}
+	if got := countProbes(); got != 5 {
+		t.Fatalf("ls-tree probes after failed warning status write = %d, want 5", got)
+	}
+	cache, found, err := store.SparseProbeCacheForProject(context.Background(), project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || cache.ProfileHash != sparseProfileHash([]string{"backend"}) {
+		t.Fatalf("cache after failed warning status write = %+v, found=%v; want prior backend result", cache, found)
+	}
+	if _, err := faultDB.Exec(`DROP TRIGGER fail_sparse_warning_status;`); err != nil {
+		t.Fatal(err)
+	}
+	if retry := probeSparseTypos(context.Background(), store, r, project, project.LocalPath, []string{"ghost"}, false); len(retry) != 1 {
+		t.Fatalf("warning-status retry warnings = %v, want one", retry)
+	}
+	if got := countProbes(); got != 6 {
+		t.Fatalf("ls-tree probes after warning-status retry = %d, want 6", got)
+	}
+
+	// The clean half follows the same rule: a failed prefix clear must leave the
+	// prior missing-profile cache in place so the next cycle re-probes and clears.
+	if _, err := faultDB.Exec(`
+CREATE TRIGGER fail_sparse_warning_clear
+BEFORE UPDATE OF last_error ON device_project_state
+WHEN OLD.last_error LIKE 'sparse-checkout profile references%' AND NEW.last_error = ''
+BEGIN
+  SELECT RAISE(ABORT, 'forced sparse warning clear failure');
+END;
+`); err != nil {
+		t.Fatal(err)
+	}
+	if warnings := probeSparseTypos(context.Background(), store, r, project, project.LocalPath, []string{"backend"}, false); len(warnings) != 0 {
+		t.Fatalf("failed-clear warnings = %v, want none", warnings)
+	}
+	if got := countProbes(); got != 7 {
+		t.Fatalf("ls-tree probes after failed sparse warning clear = %d, want 7", got)
+	}
+	cache, found, err = store.SparseProbeCacheForProject(context.Background(), project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || cache.ProfileHash != sparseProfileHash([]string{"ghost"}) {
+		t.Fatalf("cache after failed sparse warning clear = %+v, found=%v; want prior ghost result", cache, found)
+	}
+	if _, err := faultDB.Exec(`DROP TRIGGER fail_sparse_warning_clear;`); err != nil {
+		t.Fatal(err)
+	}
+	if warnings := probeSparseTypos(context.Background(), store, r, project, project.LocalPath, []string{"backend"}, false); len(warnings) != 0 {
+		t.Fatalf("clear retry warnings = %v, want none", warnings)
+	}
+	if got := countProbes(); got != 8 {
+		t.Fatalf("ls-tree probes after sparse warning clear retry = %d, want 8", got)
+	}
+	after, err = store.ProjectByPath(context.Background(), project.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.LastError != "" {
+		t.Fatalf("sparse warning remained after successful clear retry: %q", after.LastError)
 	}
 }

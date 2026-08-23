@@ -1,8 +1,12 @@
 ---
-last_reviewed: 2026-08-05
+last_reviewed: 2026-08-23
 tracks_code: [cmd/**, internal/**, internal/specdrift/**, .github/**, go.mod, go.sum]
 ---
 # Test Plan
+
+The repository toolchain floor is Go 1.26.6. PR #303's first CI run under the prior 1.26.5 pin reached the W15-unrelated `encoding/xml`, `crypto/tls`, and `net/url` paths identified by the Go vulnerability database after the 2026-08-13 security release. The same cycle advances the patch pin to 1.26.6 and validates with the workflow's exact `go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...` command under that toolchain; this is gate remediation, not a feature dependency change.
+
+Sparse-profile probe caching (`W15-01`): `TestSparseTypoProbeCachesAndSuppressesUntilInputsChange` drives the real Git path through a transparent command-trace shim. It proves the first `(HEAD object ID, normalized cone)` runs one `ls-tree`, an identical unattended repeat returns no warning and runs no second `ls-tree`, an explicit-call repeat still returns the cached warning without re-probing, changing either the cone or HEAD causes exactly one new probe and warning, and a later clean result preserves unrelated status text while clearing a stale sparse-typo status record. SQLite abort triggers fault-inject both the warning persist and clean-prefix-clear paths: neither failed visibility update may advance the cache, and the next cycle must run a new `ls-tree` and retry successfully. `TestSparseProfileHashUsesNormalizedCone` pins order/ancestor normalization. State coverage round-trips and replaces the single cache row, rejects invalid `missing_paths_json` toward an error/re-probe, and proves `ON DELETE CASCADE` removes the row with its namespace entry. The pre-existing missing-directory, existing-directory, non-ASCII, plain-file, overlap, bogus-ref, and unborn-HEAD tests remain the underlying classification coverage; the cache changes when that proven answer is reused, never how it is computed.
 
 `cmd/devstrap/testdata/script/wip_gc.txtar` covers the self-delete and foreign-orphan-retention halves of the GC contract (NOT a revoked/lost owner, `--device`, a reapable-orphan reap, or an owner-pushed-newer refusal — those are unit-level in `TestPlanWipGC`) through
 the real binary: a positively-proven remote WIP ref survives dry-run, is

@@ -2,11 +2,14 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -177,6 +180,7 @@ func hydrateProjectUnlocked(ctx context.Context, store *state.Store, opts *optio
 	// this lookup immediately before clone so the no-profile majority receives
 	// byte-identical clone argv and no additional git subprocess or probe.
 	sparsePaths, sparseErr := store.SparsePathsForProject(ctx, project.ID)
+	sparsePathsKnown := sparseErr == nil
 	if sparseErr != nil {
 		logging.Logger(ctx).Warn("sparse-checkout profile lookup failed before clone", "path", project.Path, "err", sparseErr.Error())
 		_ = store.RecordProjectWarning(ctx, project.ID, redact.Scrub(fmt.Sprintf("sparse-checkout profile lookup: %v", sparseErr)))
@@ -228,7 +232,16 @@ func hydrateProjectUnlocked(ctx context.Context, store *state.Store, opts *optio
 		// profile immediately after a normal clone/checkout, before this
 		// materialization is considered complete. Only reached for a usable
 		// checkout (headResolvable) — never for an empty/broken clone below.
-		applyProjectSparseProfile(ctx, store, r, project, localPath)
+		// W15-01: the pre-clone lookup already read the desired profile. Thread
+		// that result through instead of issuing the same local SQLite SELECT a
+		// second time after clone. On a failed first lookup, retry through the
+		// ordinary wrapper so a transient DB error does not silently disable the
+		// profile for the completed checkout.
+		if sparsePathsKnown {
+			applyProjectSparseProfileWithPaths(ctx, store, r, project, localPath, sparsePaths)
+		} else {
+			applyProjectSparseProfile(ctx, store, r, project, localPath)
+		}
 	case repoHasCommits(ctx, r, localPath):
 		// Commits exist but HEAD cannot resolve even after self-heal: the
 		// remote HEAD is broken. Record an honest state, not available/clean.
@@ -374,6 +387,14 @@ func applyProjectSparseProfile(ctx context.Context, store *state.Store, r dsgit.
 		logging.Logger(ctx).Warn("sparse-checkout profile lookup failed", "path", project.Path, "err", err.Error())
 		return
 	}
+	applyProjectSparseProfileWithPaths(ctx, store, r, project, localPath, paths)
+}
+
+// applyProjectSparseProfileWithPaths is the converger once the desired paths
+// are already known. The split lets first-clone materialization reuse its
+// pre-clone profile lookup instead of reading the same local rows twice.
+func applyProjectSparseProfileWithPaths(ctx context.Context, store *state.Store, r dsgit.Runner, project state.ProjectStatus, localPath string, paths []string) {
+	paths = dsgit.NormalizeSparsePaths(paths)
 	if len(paths) == 0 {
 		// Cheap local filesystem check BEFORE the git subprocess (review
 		// follow-up, W12-02): the vast majority of projects have never
@@ -397,7 +418,7 @@ func applyProjectSparseProfile(ctx context.Context, store *state.Store, r dsgit.
 	}
 	// W14-02: warn (never refuse) when a configured path is a typo/rename
 	// that no longer resolves to a directory at HEAD — see probeSparseTypos.
-	probeSparseTypos(ctx, store, r, project, localPath, paths)
+	probeSparseTypos(ctx, store, r, project, localPath, paths, false)
 	if err := r.ApplyConvergedSparseCheckout(ctx, localPath, paths); err != nil {
 		// ApplyConvergedSparseCheckout best-effort restores any prior active
 		// cone on failure rather than always leaving the tree full, so this
@@ -415,8 +436,10 @@ func applyProjectSparseProfile(ctx context.Context, store *state.Store, r dsgit.
 // set` itself (no-ops on a nonexistent cone) ever signal it. Every unmatched
 // path is named, not just the first, alongside both remedies.
 func sparseTypoWarning(nsPath string, missing []string) string {
-	return fmt.Sprintf("sparse-checkout profile references path(s) not found at HEAD: %s (run `devstrap project sparse set %s <dirs...>` to correct, or `devstrap project sparse clear %s` to restore the full tree)", strings.Join(missing, ", "), nsPath, nsPath)
+	return fmt.Sprintf("%s%s (run `devstrap project sparse set %s <dirs...>` to correct, or `devstrap project sparse clear %s` to restore the full tree)", sparseTypoWarningPrefix, strings.Join(missing, ", "), nsPath, nsPath)
 }
+
+const sparseTypoWarningPrefix = "sparse-checkout profile references path(s) not found at HEAD: "
 
 // probeSparseTypos checks paths against the tree at HEAD in localPath
 // (Runner.MissingSparseDirs) and, for every path that does not resolve to a
@@ -426,29 +449,108 @@ func sparseTypoWarning(nsPath string, missing []string) string {
 // list, like `project sparse set`, can surface it immediately instead of
 // only on the next sync/hydrate.
 //
-// Skipped entirely when the repo has no resolvable HEAD (an unborn/empty
-// repo, headResolvable): there is no tree to probe and every path would read
-// as "missing", which would be a false positive for a profile configured
-// ahead of the first commit. A probe error (nonzero git exit — bad ref,
-// broken repo) is logged and swallowed, never turned into a warning about
-// the user's paths: a broken probe must not start warning about valid
-// profiles on every sync.
-func probeSparseTypos(ctx context.Context, store *state.Store, r dsgit.Runner, project state.ProjectStatus, localPath string, paths []string) []string {
-	if !headResolvable(ctx, r, localPath) {
+// Skipped entirely when HEAD cannot resolve (an unborn/empty repo): there is
+// no tree to probe and every path would read as "missing", which would be a
+// false positive for a profile configured ahead of the first commit. A probe
+// error (nonzero git exit — bad ref, broken repo) is logged and swallowed,
+// never turned into a warning about the user's paths: a broken probe must not
+// start warning about valid profiles on every sync.
+//
+// W15-01 caches a successful result by the resolved HEAD object ID plus the
+// normalized profile hash. A matching unattended call suppresses the repeated
+// warning and skips ls-tree. surfaceCached is true only for an explicit user
+// action such as `project sparse set`, which must retain immediate feedback
+// even when the expensive probe result is reusable.
+func probeSparseTypos(ctx context.Context, store *state.Store, r dsgit.Runner, project state.ProjectStatus, localPath string, paths []string, surfaceCached bool) []string {
+	// Resolve the moving HEAD ref once, then probe the resulting immutable
+	// commit object ID. The cache and the ls-tree query therefore describe the
+	// same tree even if an external Git process moves HEAD between commands.
+	headSHA, err := r.RevParse(ctx, localPath, "HEAD")
+	if err != nil {
 		return nil
 	}
-	missing, err := r.MissingSparseDirs(ctx, localPath, "HEAD", paths)
+	paths = dsgit.NormalizeSparsePaths(paths)
+	profileHash := sparseProfileHash(paths)
+	cache, found, cacheErr := store.SparseProbeCacheForProject(ctx, project.ID)
+	if cacheErr != nil {
+		// Cache failure is never allowed to suppress the safety warning. Re-probe
+		// and log the cache defect separately from the user's profile result.
+		logging.Logger(ctx).Warn("sparse-checkout typo-probe cache lookup failed", "path", project.Path, "err", cacheErr.Error())
+	} else if found && cache.HeadSHA == headSHA && cache.ProfileHash == profileHash {
+		if len(cache.MissingPaths) == 0 || !surfaceCached {
+			return nil
+		}
+		warnings, err := emitSparseTypoWarning(ctx, store, project, cache.MissingPaths)
+		if err != nil {
+			logging.Logger(ctx).Warn("record cached sparse-checkout typo warning failed", "path", project.Path, "err", err.Error())
+		}
+		return warnings
+	}
+
+	missing, err := r.MissingSparseDirs(ctx, localPath, headSHA, paths)
 	if err != nil {
 		logging.Logger(ctx).Warn("sparse-checkout typo probe failed", "path", project.Path, "err", err.Error())
 		return nil
 	}
-	if len(missing) == 0 {
-		return nil
+	var warnings []string
+	var statusErr error
+	if len(missing) > 0 {
+		// Surface before caching. If the process stops between the two, the next
+		// cycle warns again; the opposite order could persist suppression for a
+		// warning nobody actually observed.
+		warnings, statusErr = emitSparseTypoWarning(ctx, store, project, missing)
+	} else if statusErr = store.ClearProjectWarningPrefix(ctx, project.ID, sparseTypoWarningPrefix); statusErr != nil {
+		// Clearing the stale visibility record is best-effort for the same reason
+		// recording it is: the checkout itself is healthy and must not fail over a
+		// status annotation write.
+		logging.Logger(ctx).Warn("clear resolved sparse-checkout typo warning failed", "path", project.Path, "err", statusErr.Error())
 	}
+	if statusErr != nil {
+		// Do not make an annotation failure durable as a successful cache hit. A
+		// later convergence must retry the probe and its status write instead of
+		// suppressing a warning that was never persisted or leaving a resolved
+		// warning stuck until HEAD/profile changes.
+		return warnings
+	}
+	// Persist only successful probes. A broken Git invocation must not create a
+	// clean-looking cache entry that suppresses later checks.
+	if err := store.RecordSparseProbeCache(ctx, project.ID, state.SparseProbeCache{
+		HeadSHA:      headSHA,
+		ProfileHash:  profileHash,
+		MissingPaths: missing,
+	}); err != nil {
+		logging.Logger(ctx).Warn("sparse-checkout typo-probe cache update failed", "path", project.Path, "err", err.Error())
+	}
+	return warnings
+}
+
+// sparseProfileHash fingerprints the normalized desired cone using
+// length-prefixed path bytes, so no path content can alias a separator. The
+// version prefix makes a future probe-semantics change explicitly invalidate
+// results written by this implementation instead of silently trusting them.
+func sparseProfileHash(paths []string) string {
+	normalized := dsgit.NormalizeSparsePaths(paths)
+	// Directory-existence is set semantics. NormalizeSparsePaths preserves the
+	// caller's order for user-facing output, so sort a private copy before
+	// hashing to prevent an order-only `sparse set` from invalidating the cache.
+	sort.Strings(normalized)
+	digest := sha256.New()
+	var size [8]byte
+	for _, part := range append([]string{sparseProbeCacheVersion}, normalized...) {
+		binary.BigEndian.PutUint64(size[:], uint64(len(part)))
+		_, _ = digest.Write(size[:])
+		_, _ = digest.Write([]byte(part))
+	}
+	return fmt.Sprintf("%x", digest.Sum(nil))
+}
+
+const sparseProbeCacheVersion = "sparse-dir-existence-v1"
+
+func emitSparseTypoWarning(ctx context.Context, store *state.Store, project state.ProjectStatus, missing []string) ([]string, error) {
 	msg := sparseTypoWarning(project.Path, missing)
 	logging.Logger(ctx).Warn("sparse-checkout profile references missing directories", "path", project.Path, "missing", strings.Join(missing, ","))
-	_ = store.RecordProjectWarning(ctx, project.ID, redact.Scrub(msg))
-	return []string{msg}
+	err := store.RecordProjectWarning(ctx, project.ID, redact.Scrub(msg))
+	return []string{msg}, err
 }
 
 // headResolvable reports whether the repo at localPath has a resolvable HEAD

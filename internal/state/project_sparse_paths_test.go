@@ -145,3 +145,84 @@ func TestProjectSparsePathsCascadeDeletesWithNamespaceEntry(t *testing.T) {
 		t.Fatalf("project_sparse_paths rows remaining after namespace_entries delete = %d, want 0 (ON DELETE CASCADE)", count)
 	}
 }
+
+func TestSparseProbeCacheRoundTripsAndReplaces(t *testing.T) {
+	st, project := setupSparseTestProject(t)
+	ctx := context.Background()
+
+	cache, found, err := st.SparseProbeCacheForProject(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found {
+		t.Fatalf("unexpected default cache: %+v", cache)
+	}
+
+	first := SparseProbeCache{
+		HeadSHA:      "1111111111111111111111111111111111111111",
+		ProfileHash:  "profile-a",
+		MissingPaths: []string{"bakend", "docz"},
+	}
+	if err := st.RecordSparseProbeCache(ctx, project.ID, first); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := st.SparseProbeCacheForProject(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || got.HeadSHA != first.HeadSHA || got.ProfileHash != first.ProfileHash || len(got.MissingPaths) != 2 || got.MissingPaths[0] != "bakend" || got.MissingPaths[1] != "docz" {
+		t.Fatalf("SparseProbeCacheForProject = %+v, found=%v; want %+v", got, found, first)
+	}
+
+	second := SparseProbeCache{
+		HeadSHA:      "2222222222222222222222222222222222222222",
+		ProfileHash:  "profile-b",
+		MissingPaths: []string{},
+	}
+	if err := st.RecordSparseProbeCache(ctx, project.ID, second); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err = st.SparseProbeCacheForProject(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || got.HeadSHA != second.HeadSHA || got.ProfileHash != second.ProfileHash || len(got.MissingPaths) != 0 {
+		t.Fatalf("replacement cache = %+v, found=%v; want %+v", got, found, second)
+	}
+}
+
+func TestSparseProbeCacheCascadeDeletesWithNamespaceEntry(t *testing.T) {
+	st, project := setupSparseTestProject(t)
+	ctx := context.Background()
+	if err := st.RecordSparseProbeCache(ctx, project.ID, SparseProbeCache{
+		HeadSHA:     "1111111111111111111111111111111111111111",
+		ProfileHash: "profile-a",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.ExecContext(ctx, `DELETE FROM namespace_entries WHERE id = ?;`, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM project_sparse_probe_cache WHERE namespace_id = ?;`, project.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("project_sparse_probe_cache rows remaining after namespace_entries delete = %d, want 0", count)
+	}
+}
+
+func TestSparseProbeCacheRejectsInvalidMissingPathsJSON(t *testing.T) {
+	st, project := setupSparseTestProject(t)
+	ctx := context.Background()
+	if _, err := st.db.ExecContext(ctx, `
+INSERT INTO project_sparse_probe_cache (
+  namespace_id, head_sha, profile_hash, missing_paths_json, updated_at
+) VALUES (?, ?, ?, ?, ?);
+`, project.ID, "1111111111111111111111111111111111111111", "profile-a", "not-json", timestampNow()); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := st.SparseProbeCacheForProject(ctx, project.ID); err == nil || found {
+		t.Fatalf("SparseProbeCacheForProject invalid JSON: found=%v err=%v, want an error and found=false", found, err)
+	}
+}
